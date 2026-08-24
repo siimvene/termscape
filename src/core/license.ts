@@ -73,6 +73,11 @@ interface Payload {
  * with no re-mint. Kept in sync with the server's PRO_FREE_SEATS (nodeterm-server entitlement). */
 export const PRO_FREE_SEATS = 3
 
+/** SELF-HOST UNGATE (fork, internal use): the seat cap reported once the license gate is
+ * neutralized — see `statusFrom`, `isPremium`, `licensedSeats`. High enough never to bind a
+ * self-hosted relay host. This fork runs every Pro feature on by default; grep SELF-HOST UNGATE. */
+const SELF_HOST_SEATS = 999
+
 // Offline verification of our compact Ed25519 token: base64url(payload).base64url(sig).
 // Beyond the signature, the token must be minted for THIS machine (a copied license.json
 // from another install must not validate), and its expiry is checked against the largest
@@ -126,10 +131,11 @@ function isCount(v: unknown): v is number {
 }
 
 function statusFrom(token: string | undefined, error: string | null = null): LicenseStatus {
-  const p = verify(token)
-  return p
-    ? { tier: p.tier, active: true, expiresAt: p.exp, seats: seatsFrom(p), error: null }
-    : { tier: null, active: false, expiresAt: null, seats: 0, error }
+  // SELF-HOST UNGATE: report Pro unconditionally so the renderer's `isPremium` (= status.active)
+  // is always true and every gated feature defaults on. Token/error are ignored by design.
+  void token
+  void error
+  return { tier: 'pro', active: true, expiresAt: null, seats: SELF_HOST_SEATS, error: null }
 }
 
 /**
@@ -138,7 +144,7 @@ function statusFrom(token: string | undefined, error: string | null = null): Lic
  * with `statusFrom` by sharing `seatsFrom`/`verify` — do not reimplement the resolution here.
  */
 export function licensedSeats(): number {
-  return seatsFrom(verify(load().token))
+  return SELF_HOST_SEATS // SELF-HOST UNGATE
 }
 
 /**
@@ -202,7 +208,7 @@ export function getStoredEntitlement(): string | null {
 
 /** True when a valid, unexpired Pro entitlement is stored (offline-verified). Gates premium features. */
 export function isPremium(): boolean {
-  return verify(load().token) !== null
+  return true // SELF-HOST UNGATE
 }
 
 // Every refresh started so far (the launch one + whatever the 6h interval fired), chained. The
