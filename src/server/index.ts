@@ -85,6 +85,7 @@ import { claudeConfigDirFor } from '../core/claude-config-dir'
 import { presenceHub } from '../core/presence/hub'
 import { initCanvasSync } from '../core/canvas-sync'
 import { wireAgentStatus } from './agent-status'
+import { maybeStartPeerStatusBridge } from './peer-status-bridge'
 import { initServerContextLink } from './context-link'
 import { registerTranscriptIpc } from '../core/transcript-ipc'
 import { IPC } from '@shared/ipc'
@@ -406,6 +407,9 @@ export async function startServer(
   const installMeta = readInstallMeta(config.dataDir)
   setMirrorServerProvider(() => installMeta)
   const { contextTail, geminiContextTail } = wireAgentStatus(platform)
+  // Self-host fork: surface a peer instance's (the desktop app's) agent states — see
+  // peer-status-bridge.ts. Inert without NODETERM_PEER_STATUS_MIRROR.
+  maybeStartPeerStatusBridge((channel, payload) => platform.broadcast(channel, payload))
   // The ⌘M chat view + the find-bar's transcript index. Registered HERE rather than with the rest
   // of the handlers because the hook-fed path authority is the tail created just above. No remote
   // leg: the Server Edition runs ON the host whose transcripts it reads, so local resolution is
