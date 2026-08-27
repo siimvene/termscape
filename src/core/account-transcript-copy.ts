@@ -19,7 +19,7 @@ import { writeFileAtomic } from './fs-atomic'
 /** `undefined` accountId = the system `~/.claude` root, exactly like `transcriptRootFor`. */
 export type CopySessionTranscriptResult =
   | { ok: true; copied: number }
-  | { ok: false; reason: 'not-found' | 'invalid' | 'error' }
+  | { ok: false; reason: 'not-found' | 'invalid' | 'error' | 'target-unavailable' }
 
 /** Filesystem roots, injected so the test can point at a temp tree. Mirrors the impure wrapper in
  *  transcript-reader.ts: `homeDir` = `os.homedir()`, `userDataDir` = the CorePlatform data dir. */
@@ -123,9 +123,32 @@ export async function copySessionTranscript(
     return { ok: false, reason: 'invalid' }
 
   try {
-    const sourceRoot = projectsRoot(roots, fromAccountId)
+    let sourceRoot = projectsRoot(roots, fromAccountId)
     const targetRoot = projectsRoot(roots, toAccountId)
-    const projectDir = await findProjectDir(sourceRoot, cwd, sessionId)
+
+    // A managed TARGET dir must already hold a login: the mkdir below would otherwise
+    // MANUFACTURE the config dir, defeating pty-manager's missing-dir → system fallback — the
+    // respawn would launch inside a credential-less dir and hit a login wall (review finding).
+    // The system root (undefined) needs no check; `~/.claude` is not ours to gate.
+    if (toAccountId !== undefined) {
+      const accountDir = path.dirname(targetRoot) // <userData>/claude-accounts/<id>
+      try {
+        await fs.promises.access(path.join(accountDir, '.claude.json'))
+      } catch {
+        return { ok: false, reason: 'target-unavailable' }
+      }
+    }
+
+    let projectDir = await findProjectDir(sourceRoot, cwd, sessionId)
+    // A node whose original spawn FELL BACK to the system account (missing dir at spawn time)
+    // carries accountId=X while its transcript lives under the SYSTEM root — the one node you
+    // most want to move off a broken account. Fall back to the system root before giving up;
+    // still strictly by sessionId, so this can never adopt a stranger's transcript.
+    if (!projectDir && fromAccountId !== undefined) {
+      const systemRoot = projectsRoot(roots, undefined)
+      projectDir = await findProjectDir(systemRoot, cwd, sessionId)
+      if (projectDir) sourceRoot = systemRoot
+    }
     if (!projectDir) return { ok: false, reason: 'not-found' }
 
     const file = `${sessionId}.jsonl`

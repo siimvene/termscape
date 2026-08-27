@@ -20,6 +20,12 @@ describe('copySessionTranscript', () => {
     roots = { homeDir: path.join(tmp, 'home'), userDataDir: path.join(tmp, 'userData') }
     fs.mkdirSync(roots.homeDir, { recursive: true })
     fs.mkdirSync(roots.userDataDir, { recursive: true })
+    // Managed dirs used as COPY TARGETS must look logged-in (see `login` below).
+    for (const id of ['acctA', 'acctB']) {
+      const dir = path.join(roots.userDataDir, 'claude-accounts', id)
+      fs.mkdirSync(dir, { recursive: true })
+      fs.writeFileSync(path.join(dir, '.claude.json'), '{"oauthAccount":{"emailAddress":"t@t"}}')
+    }
   })
   afterEach(() => fs.rmSync(tmp, { recursive: true, force: true }))
 
@@ -127,4 +133,21 @@ describe('copySessionTranscript', () => {
     )
     expect(fs.readFileSync(dst, 'utf8')).toBe('scanned\n')
   })
+  it("refuses 'target-unavailable' when the managed target dir holds no login", async () => {
+    seed('acctA', 'line1')
+    const res = await copySessionTranscript(SID, 'acctA', 'acctFresh', CWD, roots)
+    expect(res).toEqual({ ok: false, reason: 'target-unavailable' })
+    // And nothing was manufactured: the missing-dir → system fallback in pty-manager survives.
+    expect(fs.existsSync(path.join(roots.userDataDir, 'claude-accounts', 'acctFresh'))).toBe(false)
+  })
+
+  it('falls back to the SYSTEM root when the source account root has no transcript (spawn fell back)', async () => {
+    // Node claims accountId=acctA but its transcript lives under ~/.claude (original spawn fell
+    // back to system when the account dir was missing) — the copy must still find it.
+    seed(undefined, 'from-system')
+    const res = await copySessionTranscript(SID, 'acctA', 'acctB', CWD, roots)
+    expect(res).toEqual({ ok: true, copied: 1 })
+    expect(fs.readFileSync(targetFile('acctB'), 'utf8')).toBe('from-system')
+  })
+
 })

@@ -2405,7 +2405,7 @@ export interface CodexApi {
  *  `copied` counts every file written — the transcript plus each subagent file. */
 export type CopySessionTranscriptResult =
   | { ok: true; copied: number }
-  | { ok: false; reason: 'not-found' | 'invalid' | 'error' }
+  | { ok: false; reason: 'not-found' | 'invalid' | 'error' | 'target-unavailable' }
 
 export interface ClaudeApi {
   /** Capabilities of the local Claude CLI (memoized in the shell; safe to call repeatedly).

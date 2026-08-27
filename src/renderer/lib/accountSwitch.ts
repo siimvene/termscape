@@ -27,7 +27,7 @@ const CLAUDE_ACCOUNT_ID_RE = /^[A-Za-z0-9_-]+$/
 /** States in which the pane must be left alone — identical rule to `restartEligibility`'s
  *  `BUSY_STATES` (agent-restart.ts): `blocked` means a permission / question dialog owns the
  *  prompt, so a SIGTERM'd relaunch would race an answer, and `working` means a turn is mid-flight. */
-const BUSY_STATES = new Set(['working', 'blocked'])
+export const BUSY_STATES: ReadonlySet<string> = new Set(['working', 'blocked'])
 
 export type AccountSwitchRefusal =
   | 'not-claude'
@@ -37,6 +37,7 @@ export type AccountSwitchRefusal =
   | 'same-account'
   | 'account-pending'
   | 'account-unavailable'
+  | 'hibernated'
 
 /** The live facts the planner reads off the node + its agent status. `source` is the session's
  *  `SessionSource` ('local' | 'relay' | 'server'); `ssh` marks an SSH-project node (source is
@@ -49,6 +50,9 @@ export interface AccountSwitchState {
   accountId?: string
   state?: string
   cwd?: string
+  /** Eco put this CLI to sleep — the pane holds a bare shell, so the identity-gated SIGTERM can
+   *  never succeed. The remedy is "wake it, then switch", which the refusal notice says. */
+  hibernated?: boolean
 }
 
 export interface AccountSwitchPlan {
@@ -87,10 +91,18 @@ export function planAccountSwitch(
   // A relay tab belongs to another Mac; an SSH-project node's transcripts + managed accounts live
   // on the host. The local copy handler could only read/write THIS machine's account dirs.
   if (node.source !== 'local' || node.ssh) return { ok: false, reason: 'not-local' }
+  if (node.hibernated) return { ok: false, reason: 'hibernated' }
   if (BUSY_STATES.has(node.state ?? '')) return { ok: false, reason: 'busy' }
   const sessionId = node.sessionId?.trim()
-  if (!sessionId || !node.cwd) return { ok: false, reason: 'no-session' }
+  // cwd deliberately NOT required: the copy's scan leg resolves strictly by sessionId, so a
+  // cwd-less (inline-canvas) node is switchable — requiring cwd here refused it with a false
+  // "no resumable conversation" notice (review finding).
+  if (!sessionId) return { ok: false, reason: 'no-session' }
   const source = node.accountId || undefined
+  // The SOURCE id rides the git-shared project.json, i.e. it is forgeable — refuse a malformed
+  // one here too (the handler re-validates; this keeps the defense-in-depth claim true).
+  if (source !== undefined && !CLAUDE_ACCOUNT_ID_RE.test(source))
+    return { ok: false, reason: 'account-unavailable' }
   const chosen = target || undefined
   if (source === chosen) return { ok: false, reason: 'same-account' }
   if (chosen !== undefined) {
@@ -104,19 +116,23 @@ export function planAccountSwitch(
   }
   return {
     ok: true,
-    plan: { sourceAccountId: source, targetAccountId: chosen, sessionId, cwd: node.cwd }
+    plan: { sourceAccountId: source, targetAccountId: chosen, sessionId, cwd: node.cwd ?? '' }
   }
 }
 
 /** Result of the transcript copy (mirrors `ClaudeApi.copySessionTranscript`'s contract). */
 export type CopyOutcome =
   | { ok: true; copied: number }
-  | { ok: false; reason: 'not-found' | 'invalid' | 'error' }
+  | { ok: false; reason: 'not-found' | 'invalid' | 'error' | 'target-unavailable' }
 
 /** The injected effects the ordered driver runs — TerminalNode supplies the real IO. */
 export interface AccountSwitchEffects {
   /** Copy the session transcript from the source account dir into the target. Runs FIRST. */
   copyTranscript: () => Promise<CopyOutcome>
+  /** Re-asked AFTER the copy resolves, BEFORE anything destructive: the copy is an await window
+   *  in which a turn can start or the node can unmount — a plan-time verdict is stale by seconds
+   *  (the repo's Eco fire-time rule). `null` = still eligible. */
+  recheckEligible?: () => AccountSwitchRefusal | null
   /** Identity-gated SIGTERM of the pane's foreground Claude process group. `false` ⇒ abort. */
   terminateForeground: () => Promise<boolean>
   /** Recycle the tmux session so a fresh shell spawns under the new account env. */
@@ -129,6 +145,7 @@ export type AccountSwitchOutcome =
   | { ok: true; copied: number }
   | { ok: false; reason: 'copy-failed'; copy: Extract<CopyOutcome, { ok: false }>['reason'] }
   | { ok: false; reason: 'terminate-failed' }
+  | { ok: false; reason: 'recheck-failed'; refusal: AccountSwitchRefusal }
 
 /**
  * Run the switch effects in the ONE safe order. The invariant the whole feature exists for:
@@ -142,6 +159,8 @@ export async function executeAccountSwitch(
 ): Promise<AccountSwitchOutcome> {
   const copy = await effects.copyTranscript()
   if (!copy.ok) return { ok: false, reason: 'copy-failed', copy: copy.reason }
+  const stale = effects.recheckEligible?.()
+  if (stale) return { ok: false, reason: 'recheck-failed', refusal: stale }
   if (!(await effects.terminateForeground())) return { ok: false, reason: 'terminate-failed' }
   effects.recycle()
   effects.commit()

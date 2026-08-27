@@ -136,6 +136,7 @@ import { liveProjectJumpTarget } from '../lib/projectJump'
 import { renameCommand } from '../lib/sessionRename'
 import {
   planAccountSwitch,
+  BUSY_STATES,
   executeAccountSwitch,
   registerAccountSwitch,
   type AccountSwitchFn
@@ -2743,7 +2744,9 @@ export function TerminalNode({
         sessionPersistent = persistent ?? true
         // Published for the mount-stable observer effect, which cannot see this closure.
         sessionPersistentRef.current = sessionPersistent
-        if (fellBack) setAccountFallback(true)
+        // Unconditional: accountId is mutable now (account switch), so a node that once fell back
+        // and was then switched to a healthy account must DROP the warning chip (review finding).
+        setAccountFallback(!!fellBack)
         // Catch up a size change that landed while the spawn was in flight (applyFit skips the
         // IPC until sessionId is set, and the observer won't re-fire without another change).
         applyFit()
@@ -3302,7 +3305,8 @@ export function TerminalNode({
             sessionId: restartSessionId(st?.sessionId, currentNode?.data.agentSessionId),
             accountId: (currentNode?.data.accountId as string | undefined) || undefined,
             state: st?.state,
-            cwd: currentNode?.data.cwd as string | undefined
+            cwd: currentNode?.data.cwd as string | undefined,
+            hibernated: !!st?.hibernated
           },
           targetAccountId,
           useSettings.getState().settings.claudeAccounts
@@ -3321,6 +3325,16 @@ export function TerminalNode({
               plan.targetAccountId,
               plan.cwd
             ),
+          // Fire-time re-ask (the Eco rule): the copy is an await window in which a turn can start
+          // or the node can unmount — refuse before anything destructive rather than SIGTERM a
+          // turn that began mid-copy.
+          recheckEligible: () => {
+            if (!restartTarget()) return 'no-session'
+            const now = useAgentStatus.getState().byId[id]
+            if (BUSY_STATES.has(now?.state ?? '')) return 'busy'
+            if (now?.hibernated) return 'hibernated'
+            return null
+          },
           // Identity-gated: core SIGTERMs the foreground group ONLY if this node's harness still
           // owns it, so a stale menu can never kill vim or a build in this pane. The fallback is
           // unreachable (the plan refused a node with no agent id) and exists so a missing id can
@@ -3335,7 +3349,11 @@ export function TerminalNode({
               respawnNonce: ((node.data.respawnNonce as number | undefined) ?? 0) + 1
             }))
         })
-        return outcome.ok ? 'switched' : outcome.reason
+        return outcome.ok
+          ? 'switched'
+          : outcome.reason === 'recheck-failed'
+            ? outcome.refusal
+            : outcome.reason
       }
     )
     const unregisterAccountSwitch = registerAccountSwitch(id, accountSwitch)

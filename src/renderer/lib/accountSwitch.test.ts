@@ -92,9 +92,23 @@ describe('planAccountSwitch — refusal matrix', () => {
       ok: false,
       reason: 'no-session'
     })
-    expect(planAccountSwitch({ ...base, cwd: undefined }, 'work', accounts)).toEqual({
+    // cwd is deliberately NOT required (the copy's scan leg resolves strictly by sessionId):
+    // a cwd-less inline-canvas node must plan fine, with '' handed to the copy.
+    const d = planAccountSwitch({ ...base, cwd: undefined }, 'work', accounts)
+    expect(d.ok && d.plan.cwd === '').toBe(true)
+  })
+
+  it('refuses a HIBERNATED (Eco-slept) node — the pane holds a bare shell, terminate can never pass', () => {
+    expect(planAccountSwitch({ ...base, hibernated: true }, 'work', accounts)).toEqual({
       ok: false,
-      reason: 'no-session'
+      reason: 'hibernated'
+    })
+  })
+
+  it('refuses a forged SOURCE account id (rides the git-shared project.json)', () => {
+    expect(planAccountSwitch({ ...base, accountId: '../evil' }, 'work', accounts)).toEqual({
+      ok: false,
+      reason: 'account-unavailable'
     })
   })
 

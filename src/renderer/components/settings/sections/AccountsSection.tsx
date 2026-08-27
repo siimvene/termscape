@@ -443,6 +443,9 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
   }
 
   const confirmRemove = async (account: ClaudeAccount): Promise<void> => {
+    // Drop any stale login-wait row state for the removed id (a heal/Retry poll may still be
+    // draining; its late resolution must not resurrect a row label for a dead account).
+    setLoginWaitFor(account.id, null)
     setPendingRemove(null)
     // Removing a pending account: stop the 5-minute waitLogin poll loop first.
     if (account.pending) await window.nodeTerminal.claudeAccounts.cancelWaitLogin(account.id)

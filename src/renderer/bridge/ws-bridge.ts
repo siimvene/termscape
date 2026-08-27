@@ -813,6 +813,10 @@ export function buildClaudeApi(client: RpcClient, stub: ClaudeApi): ClaudeApi {
       ),
     // Real over the bridge: the account switch runs on the machine the pty runs on, and the
     // Server Edition registers the handler (unlike readTranscript, which stays a host-only graft).
+    // NOTE: buildClaudeApi is SHARED with relay tabs (relay-api.ts), so this member is
+    // host-reachable for approved relay peers — safe under the fully-trusted-peer model (a peer
+    // already holds pty.create), but a future member added here inherits relay reach silently;
+    // graft server-only members the way readTranscript is grafted instead.
     copySessionTranscript: (sessionId, fromAccountId, toAccountId, cwd) =>
       client.request(
         IPC.claudeCopySessionTranscript,
