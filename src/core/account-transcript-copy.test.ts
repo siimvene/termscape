@@ -150,4 +150,13 @@ describe('copySessionTranscript', () => {
     expect(fs.readFileSync(targetFile('acctB'), 'utf8')).toBe('from-system')
   })
 
+  it('sweeps every managed root on a miss: node stamped SYSTEM, transcript under an account dir', async () => {
+    // The measured field case: sessions launched with CLAUDE_CONFIG_DIR in the pane env before
+    // per-node accountId existed — node says system, transcript lives under acctA.
+    seed('acctA', 'from-acctA')
+    const res = await copySessionTranscript(SID, undefined, 'acctB', CWD, roots)
+    expect(res).toEqual({ ok: true, copied: 1 })
+    expect(fs.readFileSync(targetFile('acctB'), 'utf8')).toBe('from-acctA')
+  })
+
 })

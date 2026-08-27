@@ -140,14 +140,31 @@ export async function copySessionTranscript(
     }
 
     let projectDir = await findProjectDir(sourceRoot, cwd, sessionId)
-    // A node whose original spawn FELL BACK to the system account (missing dir at spawn time)
-    // carries accountId=X while its transcript lives under the SYSTEM root — the one node you
-    // most want to move off a broken account. Fall back to the system root before giving up;
-    // still strictly by sessionId, so this can never adopt a stranger's transcript.
-    if (!projectDir && fromAccountId !== undefined) {
-      const systemRoot = projectsRoot(roots, undefined)
-      projectDir = await findProjectDir(systemRoot, cwd, sessionId)
-      if (projectDir) sourceRoot = systemRoot
+    // The node's CLAIMED account and the transcript's real home routinely disagree, in BOTH
+    // directions: a spawn that fell back to system carries accountId=X while the transcript is
+    // under ~/.claude, and (measured in the field, first day) a node stamped SYSTEM can hold a
+    // transcript under an account root — its session was launched with CLAUDE_CONFIG_DIR in the
+    // pane env before per-node accountId existed. So on a miss, search EVERY root on this
+    // machine: system + each managed dir. Still strictly by sessionId (a UUID — it can never
+    // adopt a stranger's transcript), and the TARGET stays exactly what the user picked.
+    if (!projectDir) {
+      const candidates: Array<string | undefined> = [undefined]
+      try {
+        for (const d of await fs.promises.readdir(path.join(roots.userDataDir, 'claude-accounts'))) {
+          if (isSafeAccountId(d)) candidates.push(d)
+        }
+      } catch {
+        /* no managed dirs — system alone */
+      }
+      for (const cand of candidates) {
+        if (cand === fromAccountId) continue // already searched
+        const root = projectsRoot(roots, cand)
+        projectDir = await findProjectDir(root, cwd, sessionId)
+        if (projectDir) {
+          sourceRoot = root
+          break
+        }
+      }
     }
     if (!projectDir) return { ok: false, reason: 'not-found' }
 
