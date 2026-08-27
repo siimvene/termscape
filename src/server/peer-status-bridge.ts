@@ -53,11 +53,16 @@ export function readPeerMirror(file: string): Map<string, PeerNode> {
     if (typeof v !== 'object' || v === null) continue
     const n = v as Record<string, unknown>
     if (typeof n.state !== 'string' || !STATES.has(n.state)) continue
+    // Length clamps: the mirror is a same-user file, but its strings land verbatim in every WS
+    // client's store — bound them rather than trust the writer forever (consort finding).
+    if (nodeId.length > 128) continue
+    const str = (v: unknown, max: number): string | undefined =>
+      typeof v === 'string' && v.length <= max ? v : undefined
     out.set(nodeId, {
       state: n.state as AgentState,
-      agentId: typeof n.agentId === 'string' ? n.agentId : undefined,
-      sessionId: typeof n.sessionId === 'string' ? n.sessionId : undefined,
-      name: typeof n.name === 'string' ? n.name : undefined,
+      agentId: str(n.agentId, 64),
+      sessionId: str(n.sessionId, 128),
+      name: typeof n.name === 'string' ? n.name.slice(0, 200) : undefined,
       updatedAt: typeof n.updatedAt === 'number' ? n.updatedAt : undefined
     })
   }
@@ -81,11 +86,16 @@ export function startPeerStatusBridge(file: string, deps: PeerBridgeDeps): () =>
   const own = deps.ownState ?? nodeState
   const last = new Map<string, string>()
 
-  const sweep = () => {
+  const sweep = (full = false) => {
+    const seen = new Set<string>()
     for (const [nodeId, n] of readPeerMirror(file)) {
       if (own(nodeId) !== undefined) continue
+      seen.add(nodeId)
       const key = `${n.state} ${n.sessionId ?? ''} ${n.name ?? ''} ${n.updatedAt ?? 0}`
-      if (last.get(nodeId) === key) continue
+      // `full` skips the change gate: WS clients that connected after a state was first
+      // broadcast would otherwise read UNKNOWN until the peer changes something — the poll
+      // tick doubles as the late-joiner replay (consort finding).
+      if (!full && last.get(nodeId) === key) continue
       last.set(nodeId, key)
       const ev: NormalizedAgentEvent = {
         nodeId,
@@ -94,6 +104,19 @@ export function startPeerStatusBridge(file: string, deps: PeerBridgeDeps): () =>
         state: n.state,
         sessionId: n.sessionId,
         sessionTitle: n.name
+      }
+      deps.broadcast(IPC.agentStatus, ev)
+    }
+    // A node that VANISHED from the mirror (closed on the peer) must not stay frozen on every
+    // client — a session-end event resets it to unknown (consort finding).
+    for (const nodeId of [...last.keys()]) {
+      if (seen.has(nodeId)) continue
+      last.delete(nodeId)
+      const ev: NormalizedAgentEvent = {
+        nodeId,
+        agentId: 'claude',
+        kind: 'session',
+        sessionPhase: 'end'
       }
       deps.broadcast(IPC.agentStatus, ev)
     }
@@ -110,7 +133,7 @@ export function startPeerStatusBridge(file: string, deps: PeerBridgeDeps): () =>
       /* directory missing: the poll below still covers a later appearance */
     }
   }
-  const timer = setInterval(sweep, POLL_MS)
+  const timer = setInterval(() => sweep(true), POLL_MS)
   timer.unref?.()
   return () => {
     watcher?.close()

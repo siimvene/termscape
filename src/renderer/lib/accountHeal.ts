@@ -45,13 +45,16 @@ export async function healPendingAccounts(
     local.map(async (account) => {
       const captured = await waitLogin(account.id).catch(() => null)
       if (!captured) return
+      // Guarded on !a.host as well as the id: a hand-edited settings file can hold a local and
+      // a remote record sharing one id, and a LOCAL capture must never flip the remote row
+      // (consort finding).
       if (account.pending) {
         applyAccounts((accs) =>
-          accs.map((a) => (a.id === account.id ? healedAccount(a, captured.email) : a))
+          accs.map((a) => (a.id === account.id && !a.host ? healedAccount(a, captured.email) : a))
         )
       } else if (account.email !== captured.email) {
         applyAccounts((accs) =>
-          accs.map((a) => (a.id === account.id ? { ...a, email: captured.email } : a))
+          accs.map((a) => (a.id === account.id && !a.host ? { ...a, email: captured.email } : a))
         )
       }
     })

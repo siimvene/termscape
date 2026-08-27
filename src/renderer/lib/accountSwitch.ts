@@ -29,6 +29,10 @@ const CLAUDE_ACCOUNT_ID_RE = /^[A-Za-z0-9_-]+$/
  *  prompt, so a SIGTERM'd relaunch would race an answer, and `working` means a turn is mid-flight. */
 export const BUSY_STATES: ReadonlySet<string> = new Set(['working', 'blocked'])
 
+/** How long after a node launches a background shell task the switch keeps refusing — there is
+ *  no completion signal for those, so a grace window is the honest bound (consort finding). */
+export const BACKGROUND_TASK_GRACE_MS = 10 * 60 * 1000
+
 export type AccountSwitchRefusal =
   | 'not-claude'
   | 'busy'
@@ -38,6 +42,8 @@ export type AccountSwitchRefusal =
   | 'account-pending'
   | 'account-unavailable'
   | 'hibernated'
+  | 'recurring'
+  | 'background-task'
 
 /** The live facts the planner reads off the node + its agent status. `source` is the session's
  *  `SessionSource` ('local' | 'relay' | 'server'); `ssh` marks an SSH-project node (source is
@@ -53,6 +59,13 @@ export interface AccountSwitchState {
   /** Eco put this CLI to sleep — the pane holds a bare shell, so the identity-gated SIGTERM can
    *  never succeed. The remedy is "wake it, then switch", which the refusal notice says. */
   hibernated?: boolean
+  /** A cron/schedule wakeup LIVES IN this CLI process (Eco's recurring-is-durable rule): the
+   *  switch's SIGTERM+recycle would silently kill it (consort finding). In-session 'loop' dies
+   *  with its turn and does not refuse. */
+  recurringKind?: string
+  /** Unix ms of the node's last launched background shell task — a 'done' node can still own
+   *  live background work the recycle would orphan/kill (consort finding). */
+  backgroundTaskAt?: number
 }
 
 export interface AccountSwitchPlan {
@@ -92,6 +105,10 @@ export function planAccountSwitch(
   // on the host. The local copy handler could only read/write THIS machine's account dirs.
   if (node.source !== 'local' || node.ssh) return { ok: false, reason: 'not-local' }
   if (node.hibernated) return { ok: false, reason: 'hibernated' }
+  if (node.recurringKind === 'cron' || node.recurringKind === 'schedule')
+    return { ok: false, reason: 'recurring' }
+  if (typeof node.backgroundTaskAt === 'number' && Date.now() - node.backgroundTaskAt < BACKGROUND_TASK_GRACE_MS)
+    return { ok: false, reason: 'background-task' }
   if (BUSY_STATES.has(node.state ?? '')) return { ok: false, reason: 'busy' }
   const sessionId = node.sessionId?.trim()
   // cwd deliberately NOT required: the copy's scan leg resolves strictly by sessionId, so a
@@ -162,6 +179,10 @@ export async function executeAccountSwitch(
   const stale = effects.recheckEligible?.()
   if (stale) return { ok: false, reason: 'recheck-failed', refusal: stale }
   if (!(await effects.terminateForeground())) return { ok: false, reason: 'terminate-failed' }
+  // Best-effort SECOND copy: the CLI may flush trailing JSONL records while shutting down, and
+  // the first copy predates them (consort finding). The first copy already guaranteed a
+  // resumable transcript, so a failed re-copy costs only that tail — never the switch.
+  await effects.copyTranscript().catch(() => null)
   effects.recycle()
   effects.commit()
   return { ok: true, copied: copy.copied }

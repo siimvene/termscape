@@ -181,7 +181,9 @@ describe('executeAccountSwitch — ordered action plan', () => {
     const { order, effects } = harness()
     const out = await executeAccountSwitch(effects)
     expect(out).toEqual({ ok: true, copied: 7 })
-    expect(order).toEqual(['copy', 'terminate', 'recycle', 'commit'])
+    // The SECOND copy is the post-terminate flush pickup (consort finding): best-effort, after
+    // the SIGTERM so the CLI's shutdown tail is included, before anything is recycled.
+    expect(order).toEqual(['copy', 'terminate', 'copy', 'recycle', 'commit'])
   })
 
   it('mutates NOTHING when the copy fails (no terminate, no recycle, no commit)', async () => {

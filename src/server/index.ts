@@ -410,7 +410,9 @@ export async function startServer(
   const { contextTail, geminiContextTail } = wireAgentStatus(platform)
   // Self-host fork: surface a peer instance's (the desktop app's) agent states — see
   // peer-status-bridge.ts. Inert without NODETERM_PEER_STATUS_MIRROR.
-  maybeStartPeerStatusBridge((channel, payload) => platform.broadcast(channel, payload))
+  const stopPeerBridge = maybeStartPeerStatusBridge((channel, payload) =>
+    platform.broadcast(channel, payload)
+  )
   // The ⌘M chat view + the find-bar's transcript index. Registered HERE rather than with the rest
   // of the handlers because the hook-fed path authority is the tail created just above. No remote
   // leg: the Server Edition runs ON the host whose transcripts it reads, so local resolution is
@@ -740,6 +742,7 @@ export async function startServer(
       // Kill any in-flight setup/archive run first: it is a detached process group (setsid), so
       // neither the WS teardown nor ptyManager.killAll() below would ever reach it.
       projectSetupService.disposeAll()
+      stopPeerBridge?.()
       // Detach PTY clients — tmux sessions keep running (Phase 1 contract; never kill the server).
       sessionReaper.stop()
       pressure.stop()

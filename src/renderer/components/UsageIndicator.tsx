@@ -5,6 +5,7 @@ import { useSettings } from '../state/settings'
 import { useProjects } from '../state/projects'
 import { useAgentStatus } from '../state/agentStatus'
 import { activeUsageAccountId } from '../lib/activeUsageAccount'
+import { capabilityAgentId, type AgentId } from '@shared/agents/config'
 import { useSshConn } from '../state/sshConn'
 import {
   accountRowAction,
@@ -279,7 +280,9 @@ export function UsageIndicator({
       (p?.nodes ?? []).map((n) => ({
         id: n.id,
         accountId: (n.accountId as string | undefined) || undefined,
-        isAgent: n.kind === 'terminal' && !!n.agentId
+        // Only CLAUDE-capability sessions vote: a busy codex/gemini node spends no Claude quota,
+        // and its recency must not steer which Claude account leads (consort finding).
+        isAgent: n.kind === 'terminal' && capabilityAgentId((n.agentId ?? '') as AgentId) === 'claude'
       })),
       st.byId,
       p?.defaultAccountId
@@ -423,7 +426,11 @@ export function UsageIndicator({
   // (Claude included) has something to say. Both rules are pure and pinned by tests — gating on
   // Claude alone, which is what this did, left a Codex-only user with no pill at all.
   const enabled = enabledProviders(visibleProviders)
-  if (!hasAnyUsage(claudeUsage, visibleProviders, visibleRemote)) return null
+  // Managed-account data keeps the pill alive too: with the system identity logged out but an
+  // active account carrying quota data, returning null would hide the numbers that matter most
+  // (consort finding).
+  const anyAccountUsage = Object.values(acctUsage).some((u) => (u?.limits.length ?? 0) > 0)
+  if (!hasAnyUsage(claudeUsage, visibleProviders, visibleRemote) && !anyAccountUsage) return null
 
   // On an SSH project these are the HOST's limits — same shape, same labels, read somewhere else.
   const limits = scoped.pillLimits

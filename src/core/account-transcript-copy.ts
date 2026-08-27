@@ -12,7 +12,7 @@
 // real `$HOME` — the shells feed `os.homedir()` + the CorePlatform `userDataDir`.
 import fs from 'fs'
 import path from 'path'
-import { isSafeAccountId, transcriptRootFor } from './claude-accounts-core'
+import { isSafeAccountId, parseLoginCapture, transcriptRootFor } from './claude-accounts-core'
 import { SESSION_ID_RE, encodeTranscriptDir } from './transcript-reader'
 import { writeFileAtomic } from './fs-atomic'
 
@@ -133,37 +133,49 @@ export async function copySessionTranscript(
     if (toAccountId !== undefined) {
       const accountDir = path.dirname(targetRoot) // <userData>/claude-accounts/<id>
       try {
-        await fs.promises.access(path.join(accountDir, '.claude.json'))
+        // A COMPLETED login, not merely a file: a logged-out/corrupt .claude.json would pass an
+        // existence check and the switch would relaunch into an unusable dir (consort finding).
+        const raw = await fs.promises.readFile(path.join(accountDir, '.claude.json'), 'utf8')
+        if (!parseLoginCapture(raw)) return { ok: false, reason: 'target-unavailable' }
       } catch {
         return { ok: false, reason: 'target-unavailable' }
       }
     }
 
-    let projectDir = await findProjectDir(sourceRoot, cwd, sessionId)
     // The node's CLAIMED account and the transcript's real home routinely disagree, in BOTH
     // directions: a spawn that fell back to system carries accountId=X while the transcript is
     // under ~/.claude, and (measured in the field, first day) a node stamped SYSTEM can hold a
     // transcript under an account root — its session was launched with CLAUDE_CONFIG_DIR in the
-    // pane env before per-node accountId existed. So on a miss, search EVERY root on this
-    // machine: system + each managed dir. Still strictly by sessionId (a UUID — it can never
-    // adopt a stranger's transcript), and the TARGET stays exactly what the user picked.
-    if (!projectDir) {
-      const candidates: Array<string | undefined> = [undefined]
-      try {
-        for (const d of await fs.promises.readdir(path.join(roots.userDataDir, 'claude-accounts'))) {
-          if (isSafeAccountId(d)) candidates.push(d)
-        }
-      } catch {
-        /* no managed dirs — system alone */
+    // pane env before per-node accountId existed. So search EVERY root on this machine (claimed
+    // source, system, each managed dir), strictly by sessionId (a UUID — it can never adopt a
+    // stranger's transcript), and among the roots that hold a copy take the one with the NEWEST
+    // transcript mtime: prior switches leave copies in several roots, and a stale project.json
+    // claim must not resurrect an older copy over turns written elsewhere (consort finding). The
+    // TARGET stays exactly what the user picked.
+    const candidates: Array<string | undefined> = [fromAccountId, undefined]
+    try {
+      for (const d of await fs.promises.readdir(path.join(roots.userDataDir, 'claude-accounts'))) {
+        if (isSafeAccountId(d) && d !== fromAccountId) candidates.push(d)
       }
-      for (const cand of candidates) {
-        if (cand === fromAccountId) continue // already searched
-        const root = projectsRoot(roots, cand)
-        projectDir = await findProjectDir(root, cwd, sessionId)
-        if (projectDir) {
-          sourceRoot = root
-          break
-        }
+    } catch {
+      /* no managed dirs — claimed + system alone */
+    }
+    let projectDir: string | undefined
+    let newest = -1
+    for (const cand of new Set(candidates)) {
+      const root = projectsRoot(roots, cand)
+      const dir = await findProjectDir(root, cwd, sessionId)
+      if (!dir) continue
+      let mtime = 0
+      try {
+        mtime = (await fs.promises.stat(path.join(root, dir, `${sessionId}.jsonl`))).mtimeMs
+      } catch {
+        continue
+      }
+      if (mtime > newest) {
+        newest = mtime
+        sourceRoot = root
+        projectDir = dir
       }
     }
     if (!projectDir) return { ok: false, reason: 'not-found' }

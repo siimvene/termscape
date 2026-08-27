@@ -3306,7 +3306,9 @@ export function TerminalNode({
             accountId: (currentNode?.data.accountId as string | undefined) || undefined,
             state: st?.state,
             cwd: currentNode?.data.cwd as string | undefined,
-            hibernated: !!st?.hibernated
+            hibernated: !!st?.hibernated,
+            recurringKind: st?.loop?.kind,
+            backgroundTaskAt: st?.backgroundTaskAt
           },
           targetAccountId,
           useSettings.getState().settings.claudeAccounts
@@ -3333,6 +3335,10 @@ export function TerminalNode({
             const now = useAgentStatus.getState().byId[id]
             if (BUSY_STATES.has(now?.state ?? '')) return 'busy'
             if (now?.hibernated) return 'hibernated'
+            // The session RESUMED AS someone else mid-copy (branch, restart, /clear): killing the
+            // pane and resuming the PLANNED id would resurrect a superseded conversation
+            // (consort finding — plan revalidation).
+            if (now?.sessionId && now.sessionId !== plan.sessionId) return 'no-session'
             return null
           },
           // Identity-gated: core SIGTERMs the foreground group ONLY if this node's harness still
