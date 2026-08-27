@@ -3285,9 +3285,14 @@ export function TerminalNode({
       async (targetAccountId: string | undefined) => {
         const st = useAgentStatus.getState().byId[id]
         const currentNode = getNode(id)
+        // The node's own agent id, NOT a hardcoded 'claude': planAccountSwitch admits claude-BASE
+        // custom agents (capabilityAgentId), whose pane runs their own launchCmd binary — the
+        // identity gate must be asked about that binary (binariesFor resolves it in core), exactly
+        // as the model switch above passes `target`.
+        const switchAgentId = createdAgentId(currentNode?.data)
         const decision = planAccountSwitch(
           {
-            agentId: createdAgentId(currentNode?.data),
+            agentId: switchAgentId,
             source: session.source,
             // An SSH-project node is source 'local' but its transcripts + managed accounts live on
             // the host — the local copy handler can't reach them (planAccountSwitch refuses it).
@@ -3314,9 +3319,11 @@ export function TerminalNode({
               plan.targetAccountId,
               plan.cwd
             ),
-          // Identity-gated: core SIGTERMs the foreground group ONLY if claude still owns it, so a
-          // stale menu can never kill vim or a build in this pane.
-          terminateForeground: () => api.pty.terminateForeground(id, 'claude'),
+          // Identity-gated: core SIGTERMs the foreground group ONLY if this node's harness still
+          // owns it, so a stale menu can never kill vim or a build in this pane. The fallback is
+          // unreachable (the plan refused a node with no agent id) and exists so a missing id can
+          // never drop the gate to the legacy shell-only guard.
+          terminateForeground: () => api.pty.terminateForeground(id, switchAgentId ?? 'claude'),
           recycle: () => transport.recycle(id),
           // Stamp the new account + bump the respawn nonce; the cold-restore auto-resume relaunches
           // `claude --resume <sid>` under the target account dir. `undefined` = the system account.
