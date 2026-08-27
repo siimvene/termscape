@@ -511,7 +511,15 @@ const api: NodeTerminalApi = {
   claude: {
     cliCaps: () => ipcRenderer.invoke(IPC.claudeCliCaps),
     readTranscript: (sessionId, cwd, accountId, nodeId) =>
-      ipcRenderer.invoke(IPC.claudeReadTranscript, sessionId, cwd, accountId, nodeId)
+      ipcRenderer.invoke(IPC.claudeReadTranscript, sessionId, cwd, accountId, nodeId),
+    copySessionTranscript: (sessionId, fromAccountId, toAccountId, cwd) =>
+      ipcRenderer.invoke(
+        IPC.claudeCopySessionTranscript,
+        sessionId,
+        fromAccountId,
+        toAccountId,
+        cwd
+      )
   },
   agent: {
     envSnapshot: () => ipcRenderer.invoke(IPC.envSnapshot),

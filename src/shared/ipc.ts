@@ -38,6 +38,7 @@ export const IPC = {
    *  `PtyLimitFixResult`. NEVER invoked on the app's own initiative — see main/ptmx-limit.ts. */
   ptyRaiseDeviceLimit: 'pty:raise-device-limit',
   claudeReadTranscript: 'claude:read-transcript',
+  claudeCopySessionTranscript: 'claude:copy-session-transcript',
   chatReadTranscript: 'chat:read-transcript',
   claudeAccountsAdd: 'claude-accounts:add',
   claudeAccountsWaitLogin: 'claude-accounts:wait-login',

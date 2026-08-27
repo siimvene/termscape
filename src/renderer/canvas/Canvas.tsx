@@ -332,6 +332,7 @@ import {
   canRename,
   canContextLink,
   canSwitchModel,
+  capabilityAgentId,
   createdAgentId,
   resumeCommand,
   AGENT_CONFIG,
@@ -457,6 +458,7 @@ import {
 } from '../state/workspace'
 import { codexAccountSelectable, codexAccountSwitchStillEligible } from './codex-account-switch'
 import { resolveNewCodexNodeAccount, planCodexAccountSwitch } from './codex-account-ops'
+import { accountSwitchFn, type AccountSwitchResult } from '../lib/accountSwitch'
 import type { CodexAccount } from '@shared/codex-account'
 import { useSystemCodexAccount } from '../state/systemCodexAccount'
 import { toKanbanSession } from './toKanbanSession'
@@ -5403,6 +5405,34 @@ export function Canvas() {
     [setNodes, markDirty, connectedProjectIdForHost]
   )
 
+  // Switch a running CLAUDE node onto another managed account. The refusal matrix + the ordered
+  // choreography (copy transcript BEFORE any destructive step; then the model-switch's own
+  // terminateForeground → recycle → respawn-bump sequence) live in the node's registered executor
+  // (`registerAccountSwitch` in TerminalNode) — this only invokes it and turns the flat result code
+  // into a user notice. A missing executor (node unmounted) is a silent no-op, like restart.
+  const switchClaudeAccountNode = useCallback(async (nodeId: string, targetAccountId: string | undefined) => {
+    const fn = accountSwitchFn(nodeId)
+    if (!fn) return
+    const result: AccountSwitchResult = await fn(targetAccountId)
+    if (result === 'switched' || result === 'same-account' || result === 'not-eligible') return
+    const text: string =
+      result === 'busy'
+        ? 'This session is busy — switch its account once its turn (or permission prompt) is done.'
+        : result === 'no-session'
+          ? 'This session has no resumable conversation id yet — nothing to switch.'
+          : result === 'not-local'
+            ? 'Account switching is only available for a local Claude session (not relay/SSH).'
+            : result === 'account-pending'
+              ? 'That account has not finished logging in yet.'
+              : result === 'account-unavailable' || result === 'not-claude'
+                ? 'That account is no longer available. Nothing was changed.'
+                : result === 'copy-failed'
+                  ? 'Could not copy the conversation into that account. Nothing was changed.'
+                  : // terminate-failed: the pane changed under a stale menu — nothing was killed.
+                    'This session changed while the switch was preparing — nothing was changed.'
+    setNotice({ kind: 'error', text })
+  }, [])
+
   // Who the bulk restart would act on, right now: the ACTIVE project's canvas (nodesRef holds
   // exactly that). Read fresh at every call — agent state and session ids arrive asynchronously.
   const bulkRestartPlan = useCallback((): BulkRestartPlan => {
@@ -6614,6 +6644,51 @@ export function Canvas() {
                       }
                     ] as MenuItem[]
                   })()
+                : []),
+              // Switch this running CLAUDE node onto another managed account (or back to the system
+              // ~/.claude). Shown only for a LOCAL Claude node with ≥1 managed local account. The
+              // pick copies the transcript into the target dir, then reuses the model-switch's own
+              // recycle+resume so the conversation continues on the new account. Refusals + the copy
+              // ordering live in the node's registered executor; each row is checked/disabled by the
+              // same `why` gate as the restart rows above.
+              ...(capabilityAgentId((sourceAgentId ?? '') as AgentId) === 'claude' &&
+              !n?.data.ssh &&
+              session.source === 'local'
+                ? (() => {
+                    const localAccounts = useSettings
+                      .getState()
+                      .settings.claudeAccounts.filter((a) => !a.pending && !a.host)
+                    if (localAccounts.length === 0) return []
+                    const currentAccountId = (n?.data.accountId as string | undefined) || undefined
+                    const systemLabel = systemAccountDisplay(
+                      useSettings.getState().settings.systemAccountLabel,
+                      useSystemAccount.getState().email
+                    )
+                    const row = (accId: string | undefined, label: string): MenuItem => {
+                      const isCurrent = (accId || undefined) === currentAccountId
+                      return {
+                        label: `${isCurrent ? '✓ ' : ''}${label}`,
+                        icon: <AgentIcon agentId="claude" />,
+                        disabled: !!why || isCurrent,
+                        hint: isCurrent
+                          ? 'This node already runs on this account.'
+                          : (why ??
+                            'Copies this conversation into the account and resumes it there (same conversation).'),
+                        onClick: () => void switchClaudeAccountNode(ids[0], accId)
+                      }
+                    }
+                    return [
+                      {
+                        type: 'submenu',
+                        label: 'Switch account',
+                        icon: <IconSwitch />,
+                        children: [
+                          row(undefined, systemLabel),
+                          ...localAccounts.map((a) => row(a.id, a.label))
+                        ]
+                      }
+                    ] as MenuItem[]
+                  })()
                 : [])
             ] as MenuItem[]
           })()
@@ -6635,6 +6710,7 @@ export function Canvas() {
     reloadTerminals,
     restartAgentNode,
     switchCodexAccountNode,
+    switchClaudeAccountNode,
     connectedProjectIdForHost,
     deleteNodes,
     gatewayModels,

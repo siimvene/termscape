@@ -1331,6 +1331,26 @@ else, and its context links must keep classifying across restarts).
     correct (their credentials aren't on the host) but read as "multi-account is broken on SSH".
   - **Remote accounts** — selection + login + env injection, plus **usage** (below); no
     per-account transcript readers beyond env.
+  - **Switch account (running node)** — the node context menu's **Switch account** submenu moves an
+    already-running Claude session onto another local account (or back to the system `~/.claude`).
+    Because `data.accountId` is immutable at creation, this is a **copy-then-flip cold restore**,
+    not a mutation of the live dir. The **transcript-copy invariant** is the whole point: the
+    file-level half is the core service `copySessionTranscript` (`core/account-transcript-copy.ts`,
+    IPC `claude:copy-session-transcript`, registered in **BOTH** shells, reached at
+    `window.nodeTerminal.claude.copySessionTranscript`), which mirrors `<sessionId>.jsonl` **and**
+    its subagents sibling tree from the source account's `projects` root into the target's
+    (`transcriptRootFor`), STRICTLY by sessionId (never the newest transcript). The renderer driver
+    `executeAccountSwitch` (`renderer/lib/accountSwitch.ts`) runs the ONE safe order: **copy FIRST**,
+    then identity-gated `terminateForeground` → `transport.recycle(id)` → `updateNodeData(id,
+    {accountId: target|undefined, respawnNonce: +1})` (the model-switch sequence); **a failed copy
+    mutates NOTHING** — a resume that finds no transcript in the target dir is a lost conversation.
+    Refusal matrix (`planAccountSwitch`, fail-closed): not a Claude node, a **remote** session
+    (relay tab / SSH-project node — those account dirs live on another machine), **busy**
+    (`working`/`blocked`), no resumable sessionId, a **same-account** no-op, or a target that is
+    missing / forged / `host`ed / still `pending`. Both `fromAccountId`/`toAccountId` are validated
+    with the same rule as `accountConfigDir` (`isSafeAccountId`) at the handler AND with a
+    defense-in-depth regex in the renderer — a forged id interpolated into a path must never
+    traverse. Server Edition switches accounts too (no remote leg — the server runs ON the host).
 
 - **The usage indicator is scoped to the ACTIVE project** (`renderer/lib/usageScope.ts`, pure +
   unit-tested) — it describes **the machine that project runs on**, and nothing else. A local

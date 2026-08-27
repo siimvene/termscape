@@ -24,6 +24,7 @@ import {
   type ChatTranscriptResult,
   type ClaudeApi,
   type ClaudeCliCaps,
+  type CopySessionTranscriptResult,
   type CodexApi,
   type CodexIdentityCaps,
   UNKNOWN_CODEX_IDENTITY_CAPS,
@@ -809,7 +810,17 @@ export function buildClaudeApi(client: RpcClient, stub: ClaudeApi): ClaudeApi {
     cliCaps: () =>
       (client.request(IPC.claudeCliCaps) as Promise<ClaudeCliCaps>).catch(
         () => UNKNOWN_CLAUDE_CLI_CAPS
-      )
+      ),
+    // Real over the bridge: the account switch runs on the machine the pty runs on, and the
+    // Server Edition registers the handler (unlike readTranscript, which stays a host-only graft).
+    copySessionTranscript: (sessionId, fromAccountId, toAccountId, cwd) =>
+      client.request(
+        IPC.claudeCopySessionTranscript,
+        sessionId,
+        fromAccountId,
+        toAccountId,
+        cwd
+      ) as Promise<CopySessionTranscriptResult>
   }
 }
 

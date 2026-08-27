@@ -2401,6 +2401,12 @@ export interface CodexApi {
   onIdentity(listener: (e: CodexIdentityEvent) => void): () => void
 }
 
+/** Result of moving a session's transcript between managed-account roots (the account switcher).
+ *  `copied` counts every file written — the transcript plus each subagent file. */
+export type CopySessionTranscriptResult =
+  | { ok: true; copied: number }
+  | { ok: false; reason: 'not-found' | 'invalid' | 'error' }
+
 export interface ClaudeApi {
   /** Capabilities of the local Claude CLI (memoized in the shell; safe to call repeatedly).
    *  Never rejects — an unknown version resolves to the fail-open caps. */
@@ -2419,6 +2425,17 @@ export interface ClaudeApi {
     accountId?: string,
     nodeId?: string
   ): Promise<TranscriptLine[]>
+  /**
+   * Copy a session's transcript from `fromAccountId`'s root to `toAccountId`'s (either side
+   * `undefined` = the system `~/.claude` root), mirroring the subagents sibling tree too. Used by
+   * the account switcher before it flips the node's `accountId` and cold-resumes under the target.
+   */
+  copySessionTranscript(
+    sessionId: string,
+    fromAccountId: string | undefined,
+    toAccountId: string | undefined,
+    cwd: string
+  ): Promise<CopySessionTranscriptResult>
 }
 
 export type HandoffResult = { filePath: string } | { error: string }

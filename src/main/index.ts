@@ -196,6 +196,7 @@ import {
   remoteTranscriptRoots
 } from '../core/remote-transcript-locate'
 import { registerTranscriptIpc, resolveTranscript } from '../core/transcript-ipc'
+import { copySessionTranscript } from '../core/account-transcript-copy'
 import { createRemoteContextTail } from './remote-context-tail'
 import { createRemoteSubagentTail } from './remote-subagent-tail'
 import { RemoteFile, type RemoteFileRef } from './remote-ssh/remote-file'
@@ -2267,6 +2268,22 @@ app.whenReady().then(async () => {
       return ref ? await readRemoteTranscript(sessionId!, ref) : null
     }
   })
+  // Account switcher: move a session's transcript between managed-account roots before the node's
+  // accountId is flipped and it cold-resumes under the target. Core service, registered in BOTH
+  // shells (see src/server/index.ts) so the Server Edition switches accounts too.
+  corePlatform.handle(
+    IPC.claudeCopySessionTranscript,
+    (
+      sessionId: string,
+      fromAccountId: string | undefined,
+      toAccountId: string | undefined,
+      cwd: string
+    ) =>
+      copySessionTranscript(sessionId, fromAccountId, toAccountId, cwd, {
+        homeDir: homedir(),
+        userDataDir: app.getPath('userData')
+      })
+  )
 
   initTranscriptIndex(() => settingsStore.get().claudeAccounts ?? [])
   corePlatform.handle(IPC.transcriptSearch, (query: string) => searchTranscripts(query))

@@ -284,7 +284,8 @@ export function buildStubApi(): Omit<
       // Overridden by the real WS-backed namespace in ws-bridge; the stub still answers with the
       // fail-open caps (never rejects) because the permission-mode gate reads it on the boot path.
       cliCaps: () => Promise.resolve(UNKNOWN_CLAUDE_CLI_CAPS),
-      readTranscript: U('claude.readTranscript')
+      readTranscript: U('claude.readTranscript'),
+      copySessionTranscript: U('claude.copySessionTranscript')
     },
     agent: {
       // No env snapshot outside the desktop window: the stub (and ws-bridge, identically) answers

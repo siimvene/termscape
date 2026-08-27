@@ -88,6 +88,7 @@ import { wireAgentStatus } from './agent-status'
 import { maybeStartPeerStatusBridge } from './peer-status-bridge'
 import { initServerContextLink } from './context-link'
 import { registerTranscriptIpc } from '../core/transcript-ipc'
+import { copySessionTranscript } from '../core/account-transcript-copy'
 import { IPC } from '@shared/ipc'
 import { WhisperModelStore } from '../core/speech/whisper-models'
 import { SpeechService } from '../core/speech/speech-service'
@@ -415,6 +416,22 @@ export async function startServer(
   // leg: the Server Edition runs ON the host whose transcripts it reads, so local resolution is
   // the complete answer (an SSH-project node is a desktop-only concept here).
   registerTranscriptIpc({ pathFor: (sessionId) => contextTail.pathFor(sessionId) })
+  // Account switcher's file-level half — registered here too so the Server Edition switches
+  // accounts (the both-shells rule; the desktop leg is in src/main/index.ts). No remote leg: the
+  // server runs ON the host whose transcript roots these are.
+  platform.handle(
+    IPC.claudeCopySessionTranscript,
+    (
+      sessionId: string,
+      fromAccountId: string | undefined,
+      toAccountId: string | undefined,
+      cwd: string
+    ) =>
+      copySessionTranscript(sessionId, fromAccountId, toAccountId, cwd, {
+        homeDir: os.homedir(),
+        userDataDir: config.dataDir
+      })
+  )
   // Deterministic hook-reply approvals (docs/hook-reply-approvals.md): the browser canvas answers a
   // held Claude permission hook here. The Server Edition runs ON the host, so a local project's
   // answer file is written right there (under os.homedir(), which the hook uses as $HOME). SSH
