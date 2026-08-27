@@ -112,9 +112,15 @@ export async function copySessionTranscript(
   cwd: string,
   roots: AccountTranscriptRoots
 ): Promise<CopySessionTranscriptResult> {
-  if (fromAccountId !== undefined && !isSafeAccountId(fromAccountId)) return { ok: false, reason: 'invalid' }
-  if (toAccountId !== undefined && !isSafeAccountId(toAccountId)) return { ok: false, reason: 'invalid' }
-  if (!sessionId || !SESSION_ID_RE.test(sessionId)) return { ok: false, reason: 'invalid' }
+  // Explicit typeof gates BEFORE the regexes: these args arrive off the wire (the Server
+  // Edition exposes this handler to any authenticated client), and RegExp.test coerces —
+  // test(null) tests the string "null", which matches, silently widening "undefined = system
+  // root" to "null = system root" (review finding).
+  const validId = (v: unknown): v is string | undefined =>
+    v === undefined || (typeof v === 'string' && isSafeAccountId(v))
+  if (!validId(fromAccountId) || !validId(toAccountId)) return { ok: false, reason: 'invalid' }
+  if (typeof sessionId !== 'string' || !sessionId || !SESSION_ID_RE.test(sessionId))
+    return { ok: false, reason: 'invalid' }
 
   try {
     const sourceRoot = projectsRoot(roots, fromAccountId)

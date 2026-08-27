@@ -5318,7 +5318,9 @@ export function Canvas() {
           agentId: n?.data.agentId as string | undefined,
           cwd: n?.data.cwd as string | undefined,
           accountId: (n?.data.accountId as string | undefined) || undefined,
-          ssh: !!n?.data.ssh,
+          // Shared predicate, not bare data.ssh: a node carrying only sshRemoteTmux is equally
+          // remote (the worktree gate's documented drift class).
+          ssh: isRemoteSessionNode(n?.data ?? {}),
           sessionId: restartSessionId(st?.sessionId, n?.data.agentSessionId),
           state: st?.state
         }
@@ -6652,7 +6654,7 @@ export function Canvas() {
               // ordering live in the node's registered executor; each row is checked/disabled by the
               // same `why` gate as the restart rows above.
               ...(capabilityAgentId((sourceAgentId ?? '') as AgentId) === 'claude' &&
-              !n?.data.ssh &&
+              !isRemoteSessionNode(n?.data ?? {}) &&
               session.source === 'local'
                 ? (() => {
                     const localAccounts = useSettings

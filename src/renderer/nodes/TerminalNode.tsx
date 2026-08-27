@@ -3296,7 +3296,9 @@ export function TerminalNode({
             source: session.source,
             // An SSH-project node is source 'local' but its transcripts + managed accounts live on
             // the host — the local copy handler can't reach them (planAccountSwitch refuses it).
-            ssh: !!currentNode?.data.ssh,
+            // The SHARED predicate, not a bare data.ssh check: a node carrying only
+            // sshRemoteTmux is equally remote (the worktree gate's documented drift class).
+            ssh: isRemoteSessionNode(currentNode?.data ?? {}),
             sessionId: restartSessionId(st?.sessionId, currentNode?.data.agentSessionId),
             accountId: (currentNode?.data.accountId as string | undefined) || undefined,
             state: st?.state,
