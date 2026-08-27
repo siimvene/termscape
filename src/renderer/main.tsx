@@ -1,3 +1,5 @@
+import { healPendingAccountsOnLaunch } from './lib/accountHeal'
+
 // Bootstrap switch: under Electron the preload has already defined window.nodeTerminal
 // (contextBridge runs before any renderer script), so this is a pure pass-through on
 // desktop. In a browser (Server Edition) we install the WS bridge first, then boot.
@@ -40,5 +42,9 @@ async function bootstrap(): Promise<void> {
     setWebglBudget(isMacPlatform() ? WEBGL_BUDGET_DESKTOP_MAC : WEBGL_BUDGET_DESKTOP)
   }
   await import('./boot')
+  // Reconcile any local pending Claude account against its config dir once settings hydrate:
+  // a dir already logged in flips the record out of "pending" without a human clicking Retry
+  // (idempotent — guarded against a dev-HMR remount). Never awaited; the runner waits internally.
+  healPendingAccountsOnLaunch()
 }
 void bootstrap()

@@ -19,6 +19,7 @@ import {
   strayCodexAccounts
 } from '../../../lib/codexMachineGroups'
 import { presentAccount } from '../../../lib/accountPresentation'
+import { healedAccount, raceLoginCapture } from '../../../lib/accountHeal'
 import { codexAccountSelectable } from '../../../canvas/codex-account-switch'
 import { AccountIdentityPills } from '../../AccountIdentityPills'
 import { ConfirmDialog } from '../../ConfirmDialog'
@@ -137,6 +138,17 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
    */
   const [addingOn, setAddingOn] = useState<string | null>(null)
   const [addError, setAddError] = useState<string | null>(null)
+  // Honest per-row login state so a pending account never just "sits there": 'waiting' while a
+  // capture poll is in flight, 'not-captured' when it timed out (offer Retry). Keyed by account id.
+  const [loginWait, setLoginWait] = useState<Record<string, 'waiting' | 'not-captured'>>({})
+  const setLoginWaitFor = (id: string, state: 'waiting' | 'not-captured' | null): void =>
+    setLoginWait((m) => {
+      if (state === null) {
+        const { [id]: _drop, ...rest } = m
+        return rest
+      }
+      return { ...m, [id]: state }
+    })
 
   const setLabel = (id: string, label: string): void =>
     applyAccounts((accs) => accs.map((a) => (a.id === id ? { ...a, label } : a)))
@@ -344,32 +356,47 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
   // credentials; on success flip the row out of `pending` and adopt the captured email. A remote
   // account (`host` set) logs in on its host: the login node runs in remote tmux and waitLogin polls
   // the remote `.claude.json` over ssh (via the ctx `projectId`).
-  const runLogin = async (account: Pick<ClaudeAccount, 'id' | 'host'>): Promise<void> => {
+  const runLogin = async (
+    account: Pick<ClaudeAccount, 'id' | 'host'>,
+    opts?: { graceMs?: number }
+  ): Promise<void> => {
     const remote = !!account.host
     const projectId = remote ? projectIdForHost(account.host) : undefined
-    // Carry `host` so Canvas resolves the ssh binding BY HOST (among connected projects), not from
-    // whatever project happens to be active when Retry fires.
-    window.dispatchEvent(
-      new CustomEvent('nodeterm:add-account-login', {
-        detail: { accountId: account.id, remote, host: account.host }
-      })
-    )
-    const captured = await window.nodeTerminal.claudeAccounts.waitLogin(
-      account.id,
-      projectId ? { projectId } : undefined
-    )
-    if (!captured) return // timeout / cancel: row stays pending, offers Retry
+    // Retry gets the capture-first grace (defect 3); a FRESH Add passes graceMs 0 — its dir was
+    // just minted, a capture inside the grace is impossible, and 5 silent seconds before the
+    // login node appears read as "clicked Add, nothing happened".
+    const graceMs = opts?.graceMs
+    // Race capture against a short grace: a dir already logged in captures in <2 s, so opening the
+    // `claude /login` node is deferred until the grace elapses — no junk login node when the login
+    // already exists (defect 3). Carry `host` so Canvas resolves the ssh binding BY HOST (among
+    // connected projects), not from whatever project happens to be active when Retry fires.
+    setLoginWaitFor(account.id, 'waiting')
+    const captured = await raceLoginCapture({
+      waitLogin: () =>
+        window.nodeTerminal.claudeAccounts.waitLogin(
+          account.id,
+          projectId ? { projectId } : undefined
+        ),
+      dispatchLoginNode: () =>
+        window.dispatchEvent(
+          new CustomEvent('nodeterm:add-account-login', {
+            detail: { accountId: account.id, remote, host: account.host }
+          })
+        ),
+      setTimer: (fn, ms) => window.setTimeout(fn, ms),
+      clearTimer: (h) => window.clearTimeout(h as number),
+      graceMs
+      // A rejected wait (IPC failure) must land on the honest 'not captured' branch, not leave
+      // the row latched on 'waiting for login…' with Retry disabled.
+    }).catch(() => null)
+    if (!captured) {
+      // timeout / cancel: row stays pending, offers Retry with an honest reason.
+      setLoginWaitFor(account.id, 'not-captured')
+      return
+    }
+    setLoginWaitFor(account.id, null)
     applyAccounts((accs) =>
-      accs.map((a) =>
-        a.id === account.id
-          ? {
-              ...a,
-              label: a.label === 'New account' ? captured.email : a.label,
-              email: captured.email,
-              pending: false
-            }
-          : a
-      )
+      accs.map((a) => (a.id === account.id ? healedAccount(a, captured.email) : a))
     )
   }
 
@@ -410,7 +437,9 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
       ...(host ? { host } : {})
     }
     applyAccounts((accs) => [...accs, account])
-    await runLogin(account)
+    // Fresh Add: the dir was minted milliseconds ago, so a capture inside the grace is impossible
+    // — open the login node immediately instead of sitting 5 silent seconds (review finding).
+    await runLogin(account, { graceMs: 0 })
   }
 
   const confirmRemove = async (account: ClaudeAccount): Promise<void> => {
@@ -515,6 +544,17 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
                         pending
                       </span>
                     ) : null}
+                    {account.pending && loginWait[account.id] === 'waiting' ? (
+                      <span className="inline-flex items-center gap-1.5 text-[12px] text-muted">
+                        <span className="ui-spinner" aria-hidden />
+                        waiting for login…
+                      </span>
+                    ) : null}
+                    {account.pending && loginWait[account.id] === 'not-captured' ? (
+                      <span className="text-[12px] text-[color:var(--warn)]">
+                        login not captured
+                      </span>
+                    ) : null}
                     {account.host ? (
                       <span
                         className="rounded-full bg-[color:var(--accent)]/15 px-2 py-0.5 text-[11px] font-medium text-[color:var(--accent)]"
@@ -535,9 +575,10 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
                         // project; without one, disable Retry (a local spawn would log into the
                         // system account instead of the remote host).
                         const blocked = !!account.host && !connectedProjectIdForHost(account.host)
+                        const waiting = loginWait[account.id] === 'waiting'
                         return (
                           <Button
-                            disabled={blocked}
+                            disabled={blocked || waiting}
                             title={
                               blocked
                                 ? `Connect to ${account.host} to finish logging in`
