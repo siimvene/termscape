@@ -328,10 +328,12 @@ export function UsageIndicator({
     }
   }, [open, scopeHostKey, sshUp])
 
-  // Fetch each account's usage on demand when the popover opens (system row uses `usage`).
-  // Skipped entirely on an SSH project: those identities are not what this project spends.
+  // Fetch each account's usage at mount AND while the popover is open (system row uses `usage`).
+  // Mount-time matters since the pill grew per-account chips (account rotation): a glance must
+  // not require opening the popover first. Skipped entirely on an SSH project: those identities
+  // are not what this project spends.
   useEffect(() => {
-    if (scope.kind !== 'local' || !open || accounts.length === 0) return
+    if (scope.kind !== 'local' || accounts.length === 0) return
     let cancelled = false
     for (const a of accounts) {
       void window.nodeTerminal.usage.fetch(a.id).then((u) => {
@@ -420,6 +422,11 @@ export function UsageIndicator({
         )
       } else {
         setUsage(await window.nodeTerminal.usage.refresh())
+        // The account chips refresh with the same click — a stale "98% left" on the account you
+        // just rotated onto is worse than no chip.
+        for (const a of accounts) {
+          void window.nodeTerminal.usage.fetch(a.id).then((u) => setAcctUsage((m) => ({ ...m, [a.id]: u })))
+        }
       }
     } finally {
       setRefreshing(false)
@@ -453,6 +460,22 @@ export function UsageIndicator({
             </span>
           </span>
         ))}
+        {/* One compact chip per local managed account, carrying only its worst limit — since the
+            account SWITCHER made rotation a first-class flow, "which account has headroom" must
+            be answerable from the pill. Full breakdowns stay in the popover. */}
+        {scope.kind === 'local' &&
+          scoped.accounts.map((a) => {
+            const worst = primaryLimit(acctUsage[a.id]?.limits ?? [])
+            if (!worst) return null
+            return (
+              <span key={a.id} className="usage-pill__provider">
+                <span className="usage-pill__sep">·</span>
+                <span className="usage-pill__num">
+                  {percentNumber(worst.usedPercent, percentMode)}% {a.label.slice(0, 10)}
+                </span>
+              </span>
+            )
+          })}
         {/* One segment per enabled provider, carrying only its worst limit — a provider's full
             breakdown belongs in the popover, not in a pill that has to fit beside the canvas. */}
         {enabled.map((p, i) => {
