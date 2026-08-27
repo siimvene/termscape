@@ -3,6 +3,8 @@ import type { ClaudeUsage, ProviderUsage, RemoteAccountUsage, UsageLimit } from 
 import { AGENT_CONFIG } from '@shared/agents/config'
 import { useSettings } from '../state/settings'
 import { useProjects } from '../state/projects'
+import { useAgentStatus } from '../state/agentStatus'
+import { activeUsageAccountId } from '../lib/activeUsageAccount'
 import { useSshConn } from '../state/sshConn'
 import {
   accountRowAction,
@@ -255,6 +257,35 @@ export function UsageIndicator({
   )
   const scope = useMemo(() => scopeFromKey(scopeHostKey), [scopeHostKey])
 
+  // Which account the pill LEADS with: the project's ACTIVE account — most recently active agent
+  // session's account, else the project default, else system (activeUsageAccountId). The system
+  // account stopped being the story once the account switcher made per-node rotation routine.
+  // Primitive selectors on both stores (the loopSig discipline): re-render only when the ANSWER
+  // or the project's agent-node/account structure changes, never per hook event.
+  const projectNodesSig = useProjects((s) => {
+    const p = s.projects.find((x) => x.id === s.activeProjectId)
+    return (
+      (p?.nodes ?? [])
+        .filter((n) => n.kind === 'terminal' && n.agentId)
+        .map((n) => `${n.id}:${(n.accountId as string | undefined) ?? ''}`)
+        .join(',') + '|' + (p?.defaultAccountId ?? '')
+    )
+  })
+  void projectNodesSig // subscription-only: a structure change must re-run the selector below
+  const activeAccountId = useAgentStatus((st) => {
+    const ps = useProjects.getState()
+    const p = ps.projects.find((x) => x.id === ps.activeProjectId)
+    return activeUsageAccountId(
+      (p?.nodes ?? []).map((n) => ({
+        id: n.id,
+        accountId: (n.accountId as string | undefined) || undefined,
+        isAgent: n.kind === 'terminal' && !!n.agentId
+      })),
+      st.byId,
+      p?.defaultAccountId
+    )
+  })
+
   // Issue #142 — "Use for new sessions" on the account rows. A PRIMITIVE selector on purpose
   // (see scopeHostKey above): selecting the project object would re-render the pill on every
   // canvas edit.
@@ -396,6 +427,15 @@ export function UsageIndicator({
 
   // On an SSH project these are the HOST's limits — same shape, same labels, read somewhere else.
   const limits = scoped.pillLimits
+  // The pill's LEAD block is the active account's numbers (local scope only). Until that
+  // account's usage arrives, fall back to the system numbers rather than an empty pill.
+  const activeAcct =
+    scope.kind === 'local' && activeAccountId
+      ? scoped.accounts.find((a) => a.id === activeAccountId)
+      : undefined
+  const activeAcctLimits = activeAcct ? (acctUsage[activeAcct.id]?.limits ?? []) : []
+  const leadIsAccount = !!activeAcct && activeAcctLimits.length > 0
+  const leadLimits = leadIsAccount ? activeAcctLimits : limits
   const status = claudeUsage?.status ?? visibleRemote[0]?.usage.status ?? 'unavailable'
   const hasData = limits.length > 0 || enabled.length > 0
   const fetching = refreshing
@@ -403,7 +443,7 @@ export function UsageIndicator({
   // The pill leads with whatever is closest to biting, so a scoped model cap that is nearly
   // exhausted can't hide behind a comfortable 5h window. Considers every enabled provider, not
   // just Claude, so an exhausted Codex window drives the bar too.
-  const primary = primaryLimit([...limits, ...enabled.flatMap((p) => p.limits)])
+  const primary = primaryLimit([...leadLimits, ...enabled.flatMap((p) => p.limits)])
   const updatedAt = claudeUsage?.updatedAt ?? visibleRemote[0]?.usage.updatedAt ?? null
 
   const refresh = async (e: React.MouseEvent): Promise<void> => {
@@ -452,7 +492,8 @@ export function UsageIndicator({
             />
           </span>
         )}
-        {limits.map((l, i) => (
+        {leadIsAccount && <span className="usage-pill__dim">{activeAcct!.label.slice(0, 10)}</span>}
+        {leadLimits.map((l, i) => (
           <span key={limitKey(l)}>
             {i > 0 && <span className="usage-pill__sep">·</span>}
             <span className="usage-pill__num">
@@ -460,11 +501,26 @@ export function UsageIndicator({
             </span>
           </span>
         ))}
+        {/* System collapses to ONE chip when a managed account leads. */}
+        {leadIsAccount &&
+          (() => {
+            const worst = primaryLimit(limits)
+            if (!worst) return null
+            return (
+              <span className="usage-pill__provider">
+                <span className="usage-pill__sep">·</span>
+                <span className="usage-pill__num">
+                  {percentNumber(worst.usedPercent, percentMode)}% Sys
+                </span>
+              </span>
+            )
+          })()}
         {/* One compact chip per local managed account, carrying only its worst limit — since the
             account SWITCHER made rotation a first-class flow, "which account has headroom" must
             be answerable from the pill. Full breakdowns stay in the popover. */}
         {scope.kind === 'local' &&
           scoped.accounts.map((a) => {
+            if (leadIsAccount && a.id === activeAcct!.id) return null
             const worst = primaryLimit(acctUsage[a.id]?.limits ?? [])
             if (!worst) return null
             return (
