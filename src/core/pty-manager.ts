@@ -283,6 +283,12 @@ function runWithStdin(file: string, args: readonly string[], input: string): Pro
  * be something the user exports from their own profile, and we do not get to guess.
  *
  * `CLAUDE_CONFIG_DIR` is NOT here either — it is account scope, already owned by the block below.
+ *
+ * Scope, precisely: this strips the AMBIENT env inherited from the launching process. Project env
+ * and custom-agent env are merged AFTER it and still win on a collision — a project that declares
+ * `CLAUDE_CODE_CHILD_SESSION` re-sets it. That last-wins order is deliberate elsewhere and is left
+ * alone: those values are declared by the user in their own config, not inherited by accident, and
+ * the whole point of a custom agent's env block is that it is an escape hatch.
  */
 export const AGENT_SESSION_ENV_STRIP: readonly string[] = [
   'CLAUDECODE',
@@ -1651,6 +1657,41 @@ export class PtyManager {
     }
   }
 
+  /** Whether this app-run has already scrubbed the server's global env (once is enough). */
+  private serverEnvScrubbed = false
+
+  /**
+   * Unset the launching-session names from the tmux server's GLOBAL environment.
+   *
+   * `update-environment` is NOT enough on its own, and the gap is not theoretical [MEASURED
+   * against a real tmux]: it governs what is copied into (or stripped from) each NEW session, but
+   * a server that was STARTED by a polluted client keeps the value in its own global env forever —
+   * `tmux show-environment -g CLAUDE_CODE_MESSAGING_TOKEN` hands that bearer to anything running in
+   * any pane, upgraded app or not. So the names must be actively unset once per run.
+   *
+   * One invocation, not one per name: `set-environment -gu A ; set-environment -gu B ; …` in a
+   * single argv. Fail-open like its sibling above — no server yet means there is no global env to
+   * scrub, and a server that refuses costs this hardening, never the terminal the user asked for.
+   *
+   * Does NOT reach back into panes that already exist: a shell spawned before the upgrade keeps
+   * its own process environment until that node is recreated. Recreating the node (× then reopen,
+   * or "Refresh terminal") is the migration.
+   */
+  private scrubServerEnv(): void {
+    if (this.serverEnvScrubbed || !this.tmuxPath) return
+    this.serverEnvScrubbed = true
+    const args = ['-L', TMUX_SOCKET]
+    AGENT_SESSION_ENV_STRIP.forEach((name, i) => {
+      if (i > 0) args.push(';')
+      args.push('set-environment', '-gu', name)
+    })
+    try {
+      execFileSync(this.tmuxPath, args, { stdio: 'ignore' })
+    } catch {
+      /* no server yet, or an old tmux that dislikes the chain — nothing to scrub either way */
+    }
+  }
+
   registerIpc(): void {
     platform().handleWithSender(
       IPC.ptyCreate,
@@ -3002,6 +3043,9 @@ export class PtyManager {
         ...Object.keys(customEnvMerged),
         ...Object.keys(projectEnv ?? {})
       ])
+      // update-environment strips these from NEW sessions, but a server started by a polluted
+      // client still holds them in its own global env, readable from any pane. Scrub it once.
+      this.scrubServerEnv()
       const attachFlags = tmuxAttachFlags(!!sinks)
       args = [
         '-L',

@@ -123,13 +123,25 @@ describe('project settings at the spawn — LOCAL leg', () => {
     // disables transcript persistence, and the transcript is what feeds the context meter, session
     // names, the ⌘M view and find-bar search — all dead, silently, on a healthy-looking session.
     // The messaging token is a bearer for the launching session's IPC, readable from any pane.
+    // An INDEPENDENT fixture, not a loop over the production list: looping it would let someone
+    // delete a name from the deny-list and delete its expectation in the same edit, and a name the
+    // test never SEEDS passes only because the var was absent. Every one of these is seeded below.
+    const EXPECT_STRIPPED = [
+      'CLAUDECODE',
+      'CLAUDE_CODE_CHILD_SESSION',
+      'CLAUDE_CODE_SESSION_ID',
+      'CLAUDE_CODE_BRIDGE_SESSION_ID',
+      'CLAUDE_CODE_ENTRYPOINT',
+      'CLAUDE_CODE_EXECPATH',
+      'CLAUDE_CODE_MESSAGING_TOKEN',
+      'CLAUDE_CODE_MESSAGING_SOCKET',
+      'CLAUDE_PID'
+    ]
+    expect([...AGENT_SESSION_ENV_STRIP].sort()).toEqual([...EXPECT_STRIPPED].sort())
+
     const restore = { ...process.env }
+    for (const k of EXPECT_STRIPPED) process.env[k] = `parent-${k}`
     Object.assign(process.env, {
-      CLAUDECODE: '1',
-      CLAUDE_CODE_CHILD_SESSION: '1',
-      CLAUDE_CODE_SESSION_ID: 'parent-session',
-      CLAUDE_CODE_MESSAGING_TOKEN: 'sekrit',
-      CLAUDE_CODE_MESSAGING_SOCKET: '/tmp/cc-socks/1.sock',
       // Real user configuration that shares the prefix — must SURVIVE. This is the assertion that
       // stops someone "simplifying" the deny-list into a CLAUDE_CODE_* prefix sweep.
       CLAUDE_CODE_USE_BEDROCK: '1',
@@ -138,7 +150,7 @@ describe('project settings at the spawn — LOCAL leg', () => {
     try {
       await manager(null)
       await create({ persistKey: NODE })
-      for (const k of AGENT_SESSION_ENV_STRIP) expect(spawns[0].env[k]).toBeUndefined()
+      for (const k of EXPECT_STRIPPED) expect(spawns[0].env[k]).toBeUndefined()
       expect(spawns[0].env.CLAUDE_CODE_USE_BEDROCK).toBe('1')
       expect(spawns[0].env.CLAUDE_CODE_MAX_OUTPUT_TOKENS).toBe('4096')
     } finally {
@@ -258,6 +270,24 @@ describe('project settings at the spawn — LOCAL leg', () => {
     expect(seen[0]).toContain('PROJECT_TOKEN')
     // The VALUE never rides the tmux argv (that is the whole point of update-environment).
     expect(spawns[0].args.join(' ')).not.toContain('abc')
+  })
+
+  it('scrubs the launching-session names from the tmux server global env', async () => {
+    // update-environment only governs what each NEW session copies or drops. A server STARTED by a
+    // polluted client keeps the value in its own global env, where `show-environment -g` hands the
+    // messaging bearer to any pane — proven against a real tmux in account-env.realtmux.test.ts.
+    // This is the other half: that create() actually issues the scrub.
+    const mgr = await manager(null, { tmux: '/usr/bin/tmux' })
+    let scrubbed = 0
+    ;(mgr as unknown as { scrubServerEnv: () => void }).scrubServerEnv = () => {
+      scrubbed += 1
+    }
+    ;(mgr as unknown as { getSettings: () => unknown }).getSettings = () => ({
+      ...DEFAULT_SETTINGS,
+      tmuxEnabled: true
+    })
+    await create({ persistKey: NODE })
+    expect(scrubbed).toBe(1)
   })
 })
 

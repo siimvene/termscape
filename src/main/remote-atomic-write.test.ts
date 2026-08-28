@@ -182,26 +182,31 @@ describe('remoteAtomicWrite', () => {
    * `chmod 600 -dir/...` would be parsed as options on every shell. Runs under a real shell so it
    * fails on whichever chmod the developer actually has.
    */
-  it.skipIf(!SHELL)('chmods a temp under a dash-leading relative parent', () => {
-    const root = mkdtempSync(path.join(os.tmpdir(), 'nt-remote-dashdir-'))
-    roots.push(root)
-    mkdirSync(path.join(root, '-dashdir'))
-    const write = remoteAtomicWrite('-dashdir/creds.json', {
-      restrictPermissions: true,
-      chmod600: true
-    })
+  // Windows-skipped like the sibling mode test above: Git Bash may run the command fine while
+  // Node reports a mode that is not 0600, so the assertion would fail on a working write.
+  it.skipIf(!SHELL || process.platform === 'win32')(
+    'chmods a temp under a dash-leading relative parent',
+    () => {
+      const root = mkdtempSync(path.join(os.tmpdir(), 'nt-remote-dashdir-'))
+      roots.push(root)
+      mkdirSync(path.join(root, '-dashdir'))
+      const write = remoteAtomicWrite('-dashdir/creds.json', {
+        restrictPermissions: true,
+        chmod600: true
+      })
 
-    execFileSync(SHELL!, ['-c', write.command], {
-      cwd: root,
-      input: 'secret',
-      stdio: ['pipe', 'pipe', 'pipe']
-    })
+      execFileSync(SHELL!, ['-c', write.command], {
+        cwd: root,
+        input: 'secret',
+        stdio: ['pipe', 'pipe', 'pipe']
+      })
 
-    const published = path.join(root, '-dashdir', 'creds.json')
-    expect(readFileSync(published, 'utf8')).toBe('secret')
-    expect(statSync(published).mode & 0o777).toBe(0o600)
-    expect(readdirSync(path.join(root, '-dashdir')).filter((n) => n.endsWith('.tmp'))).toEqual([])
-  })
+      const published = path.join(root, '-dashdir', 'creds.json')
+      expect(readFileSync(published, 'utf8')).toBe('secret')
+      expect(statSync(published).mode & 0o777).toBe(0o600)
+      expect(readdirSync(path.join(root, '-dashdir')).filter((n) => n.endsWith('.tmp'))).toEqual([])
+    }
+  )
 
   it.skipIf(!SHELL)('keeps overlapping real-shell writers on separate temps', async () => {
     const root = mkdtempSync(path.join(os.tmpdir(), 'nt-remote-overlap-'))

@@ -20,7 +20,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { execFileSync } from 'child_process'
 import fs from 'fs'
 import path from 'path'
-import { tmuxConf } from './pty-manager'
+import { AGENT_SESSION_ENV_STRIP, tmuxConf } from './pty-manager'
 import { makeTmuxTmpdir } from './tmux-test-socket'
 
 const SOCKET = `nt-accttest-${process.pid}`
@@ -139,5 +139,46 @@ describe('managed-account isolation on a shared tmux server (issue #419)', () =>
       { CODEX_HOME: '/home/u/.codex', NODETERM_CODEX_ACCOUNT_ID: '' }
     )
     expect(await waitFor(out)).toBe('CX=[/home/u/.codex] ID=[]\n')
+  })
+
+  /**
+   * The launching agent session's bearer, and why `update-environment` alone does NOT close it
+   * (consort finding). update-environment governs what is copied into or stripped from each NEW
+   * session; the server's OWN global env keeps whatever the starting client carried, so
+   * `show-environment -g` still hands the token to anything running in any pane. `scrubServerEnv`
+   * unsets the names once per app-run — this measures that the unset chain works, and that
+   * listing a name in update-environment on its own would NOT have been enough.
+   */
+  it('a bearer left in the server GLOBAL env survives update-environment, and the scrub removes it', () => {
+    if (!tmuxOk) return
+    // Seed the server's global env the way a polluted client would have.
+    tmux(['set-environment', '-g', 'CLAUDE_CODE_MESSAGING_TOKEN', 'leaked-bearer'])
+    tmux(['set-environment', '-g', 'CLAUDE_CODE_CHILD_SESSION', '1'])
+    expect(tmux(['show-environment', '-g', 'CLAUDE_CODE_MESSAGING_TOKEN'])).toContain('leaked-bearer')
+
+    // A session created by a CLEAN client is stripped — the half that already worked...
+    tmux(['new-session', '-d', '-s', 'scrubbed', 'sleep 30'])
+    expect(tmux(['show-environment', '-t', 'scrubbed'])).not.toContain('leaked-bearer')
+    // ...while the GLOBAL copy is still there for any pane to read. This is the hole.
+    expect(tmux(['show-environment', '-g', 'CLAUDE_CODE_MESSAGING_TOKEN'])).toContain('leaked-bearer')
+
+    // The scrub: the exact chained argv `scrubServerEnv` builds.
+    const args: string[] = []
+    AGENT_SESSION_ENV_STRIP.forEach((name, i) => {
+      if (i > 0) args.push(';')
+      args.push('set-environment', '-gu', name)
+    })
+    tmux(args)
+
+    for (const name of AGENT_SESSION_ENV_STRIP) {
+      let out = ''
+      try {
+        out = tmux(['show-environment', '-g', name])
+      } catch {
+        out = '' // tmux exits non-zero with "unknown variable" once it is gone — also a pass
+      }
+      expect(out).not.toContain('leaked-bearer')
+      expect(out).not.toMatch(new RegExp(`^${name}=`, 'm'))
+    }
   })
 })
