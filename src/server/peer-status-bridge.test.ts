@@ -2,13 +2,13 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
-import { readPeerMirror, startPeerStatusBridge } from './peer-status-bridge'
+import { readPeerMirror, readPeerUsage, startPeerStatusBridge } from './peer-status-bridge'
 import { IPC } from '../shared/ipc'
 
-function tmpMirror(nodes: Record<string, unknown>): string {
+function tmpMirror(nodes: Record<string, unknown>, usage?: unknown): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'peer-mirror-'))
   const file = path.join(dir, 'agent-status.json')
-  fs.writeFileSync(file, JSON.stringify({ v: 1, updatedAt: 1, nodes }))
+  fs.writeFileSync(file, JSON.stringify({ v: 1, updatedAt: 1, nodes, ...(usage ? { usage } : {}) }))
   return file
 }
 
@@ -99,5 +99,25 @@ describe('startPeerStatusBridge', () => {
     fs.renameSync(tmp, file)
     await vi.waitFor(() => expect(broadcast).toHaveBeenCalledTimes(2), { timeout: 3000 })
     expect(broadcast.mock.calls[1][1]).toMatchObject({ nodeId: 'a', state: 'done' })
+  })
+})
+
+describe('readPeerUsage', () => {
+  it('passes a well-formed usage block through, null when absent/malformed', () => {
+    const withU = tmpMirror({}, { updatedAt: 9, accounts: [{ accountId: null, email: 'a@b', limits: [] }] })
+    expect(readPeerUsage(withU)).toEqual({ updatedAt: 9, accounts: [{ accountId: null, email: 'a@b', limits: [] }] })
+    expect(readPeerUsage(tmpMirror({}))).toBeNull()
+    expect(readPeerUsage(tmpMirror({}, { accounts: 'nope' }))).toBeNull()
+  })
+})
+
+describe('startPeerStatusBridge — usage', () => {
+  it('broadcasts usage:update once on start and again only when updatedAt changes', () => {
+    const file = tmpMirror({}, { updatedAt: 5, accounts: [] })
+    const broadcast = vi.fn()
+    stops.push(startPeerStatusBridge(file, { broadcast, ownState: () => undefined, watch: false }))
+    const usageCalls = () => broadcast.mock.calls.filter((c) => c[0] === 'usage:update')
+    expect(usageCalls().length).toBe(1)
+    expect(usageCalls()[0][1]).toEqual({ updatedAt: 5, accounts: [] })
   })
 })

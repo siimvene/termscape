@@ -37,6 +37,28 @@ interface PeerNode {
   updatedAt?: number
 }
 
+/** Read the mirror's raw JSON once — shared by the node reader and the usage reader. */
+function readMirrorJson(file: string): Record<string, unknown> | null {
+  try {
+    const raw = JSON.parse(fs.readFileSync(file, 'utf8'))
+    return typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>) : null
+  } catch {
+    return null
+  }
+}
+
+/** Pass the mirror's `usage` block through, lightly validated (the desktop wrote it; the phone
+ *  renders it). Returns null when absent/malformed so the bridge can skip the broadcast. */
+export function readPeerUsage(file: string): { updatedAt: number; accounts: unknown[] } | null {
+  const raw = readMirrorJson(file)
+  const u = raw?.usage
+  if (typeof u !== 'object' || u === null) return null
+  const accounts = (u as { accounts?: unknown }).accounts
+  if (!Array.isArray(accounts)) return null
+  const updatedAt = (u as { updatedAt?: unknown }).updatedAt
+  return { updatedAt: typeof updatedAt === 'number' ? updatedAt : 0, accounts }
+}
+
 /** Tolerant read of a peer mirror file: absent/corrupt/foreign-shaped → empty map, never throw. */
 export function readPeerMirror(file: string): Map<string, PeerNode> {
   const out = new Map<string, PeerNode>()
@@ -85,8 +107,17 @@ export interface PeerBridgeDeps {
 export function startPeerStatusBridge(file: string, deps: PeerBridgeDeps): () => void {
   const own = deps.ownState ?? nodeState
   const last = new Map<string, string>()
+  let lastUsageAt = -1
 
   const sweep = (full = false) => {
+    // Account usage (Settings → Usage on the phone). The desktop mirror already carries every
+    // local account's rate-limit snapshot; forward it change-gated on `updatedAt`, and replay in
+    // full on the poll tick so a late-joining WS client is not stuck without numbers.
+    const usage = readPeerUsage(file)
+    if (usage && (full || usage.updatedAt !== lastUsageAt)) {
+      lastUsageAt = usage.updatedAt
+      deps.broadcast(IPC.usageUpdate, usage)
+    }
     const seen = new Set<string>()
     for (const [nodeId, n] of readPeerMirror(file)) {
       if (own(nodeId) !== undefined) continue
