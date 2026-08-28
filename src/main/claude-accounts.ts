@@ -18,6 +18,9 @@ import type { SshProjectManager } from './remote-ssh/ssh-project'
 const execFileP = promisify(execFile)
 const LOGIN_POLL_MS = 2000
 const LOGIN_TIMEOUT_MS = 5 * 60 * 1000
+/** Hard cap on how long `claude:accounts-add` may spend on the version probe before answering —
+ *  the probe shells out and must never make the Add button appear hung (consort/field finding). */
+const ADD_VERSION_PROBE_BUDGET_MS = 1500
 
 // Re-exported for this module's other consumers (claude-usage.ts) so their import path is
 // unchanged; the implementation now lives in core (../core/claude-config-dir).
@@ -85,7 +88,17 @@ export function initClaudeAccounts(getSshManager?: () => SshProjectManager | und
     // Ensure fullscreen TUI in the new account dir (write-if-absent, version-gated). Best-effort,
     // off the response path — the memoized probe + write both fail open.
     void ensureClaudeFullscreenTuiInto(configDir)
-    const versionSupported = await checkClaudeVersion()
+    // The version probe must NEVER gate the response: it shells out to the login shell + `claude
+    // --version`, and on a machine whose login shell is slow/interactive, or whose Claude CLI
+    // isn't on the GUI PATH, that walk can take seconds — the Add button then spins as if hung
+    // (real reports on a colleague's laptop). The account dir already exists and works; the only
+    // thing the probe feeds is the < 2.1 keychain-scope WARNING, so bound it hard and assume
+    // supported on timeout (the warning is dismissable, a hung button is not). The renderer can
+    // re-probe via claude.cliCaps() if it wants the accurate answer later.
+    const versionSupported = await Promise.race([
+      checkClaudeVersion(),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(true), ADD_VERSION_PROBE_BUDGET_MS))
+    ])
     return { id, configDir, versionSupported }
   })
 
