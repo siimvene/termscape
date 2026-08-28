@@ -273,30 +273,22 @@ section for details.
 
 ## 📦 Download
 
-> **Self-host fork users:** build or grab the fork `.dmg` from
-> [Build & install (this fork)](#build--install-this-fork) above — the channels below are the
-> **upstream** product (Enes Kirca's official builds), not this modified fork.
+This fork is **local build / install only** — no Homebrew tap, no auto-update feed, no App
+Store presence. You build it (or grab the prebuilt binary from Releases) yourself.
 
-Grab the latest build from **[nodeterm.dev](https://nodeterm.dev)** — the download button
-detects your platform. Everything is also listed at
-[nodeterm.dev/releases](https://nodeterm.dev/releases):
+- **macOS (Apple Silicon)** — build with `npm run dist`, or download the unsigned `.dmg` from
+  this fork's [Releases](https://github.com/siimvene/nodeterm/releases). Unsigned, so first
+  launch is **right-click → Open**. No auto-update — pull + rebuild to upgrade
+  (see [Build & install (this fork)](#build--install-this-fork)).
+- **Linux (x64)** — build it: `npm run dist:linux` → AppImage + `.deb` in `dist/`.
+- **iOS** — **Remote Claude**, sideloaded from
+  [nodeterm-mobile Releases](https://github.com/siimvene/nodeterm-mobile/releases) (AltStore /
+  Sideloadly + your own Apple ID; see that repo's release notes).
 
-- **macOS** — `.dmg` for Apple Silicon and Intel (auto-updates), or **Homebrew**:
-
-  ```bash
-  brew tap nodeterm/tap
-  brew trust nodeterm/tap        # Homebrew ≥6 refuses to load an untrusted tap
-  brew install --cask nodeterm
-  ```
-
-  Both first lines are required. On its own, `brew install --cask nodeterm` only searches
-  `homebrew/cask` and reports the cask as not found; without the trust grant, Homebrew ≥6
-  fails rather than prompting. The cask tracks each promoted release, and the app updates
-  itself (electron-updater), so `brew upgrade` is rarely needed for it.
-- **Linux (x64)** — self-updating **AppImage**, or a `.deb` for Debian/Ubuntu
-  (`sudo apt install ./nodeterm-*.deb`; updates are manual for `.deb`).
-- **iOS** — **nodeterm mobile** on the
-  [App Store](https://apps.apple.com/app/nodeterm/id6790581233).
+> Want the **official** nodeterm instead — auto-updating builds, Homebrew, the App Store app?
+> That's Enes Kirca's upstream product: [nodeterm.dev](https://nodeterm.dev) ·
+> [eneskirca/nodeterm](https://github.com/eneskirca/nodeterm). This fork is a private,
+> modified self-host build, not those.
 
 ## 🛠 Build from source
 
