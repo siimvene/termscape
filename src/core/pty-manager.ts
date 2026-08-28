@@ -260,12 +260,54 @@ function runWithStdin(file: string, args: readonly string[], input: string): Pro
  * inherited API key. LOCAL conf only — see `tmuxUpdateEnvironmentLine` for why the remote conf
  * must not get these.
  */
+/**
+ * Env names that identify the AGENT SESSION THAT LAUNCHED THE APP, and must never reach a terminal
+ * node. Launch nodeterm from inside a Claude Code session — `open -a nodeterm` from an agent's
+ * shell, or a canvas terminal that starts a second instance — and `{ ...process.env }` hands every
+ * pane the PARENT session's identity.
+ *
+ * The one that bites is `CLAUDE_CODE_CHILD_SESSION`: the child claude disables transcript
+ * persistence, and this app reads that transcript for nearly everything. No transcript ⇒ no context
+ * meter (`context-tail` only publishes once it parses a `usage` line), no session-name adoption,
+ * no ⌘M transcript view, no find-bar transcript search — all silently, on a session that otherwise
+ * looks perfectly healthy. [MEASURED 2026-08-28: 9 of 14 live sessions on the author's machine
+ * carried these, and the nodes with a meter were exactly the ones whose tmux session predated the
+ * polluted launch.] `CLAUDE_CODE_MESSAGING_TOKEN` + its socket are worse in kind than in effect:
+ * a bearer for the launching session's IPC, readable by anything running in any pane.
+ *
+ * **A deny-list, deliberately — never a `CLAUDE_CODE_*` prefix sweep.** That prefix also carries
+ * genuine user configuration (`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`,
+ * `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, and `CLAUDE_CODE_OAUTH_TOKEN`, whose removal is governed by
+ * `AUTH_ENV_STRIP` and its managed-account rules). Sweeping the prefix would break a Bedrock or
+ * Vertex user's terminals to fix a marker. `CLAUDE_EFFORT` is likewise left alone: it may equally
+ * be something the user exports from their own profile, and we do not get to guess.
+ *
+ * `CLAUDE_CONFIG_DIR` is NOT here either — it is account scope, already owned by the block below.
+ */
+export const AGENT_SESSION_ENV_STRIP: readonly string[] = [
+  'CLAUDECODE',
+  'CLAUDE_CODE_CHILD_SESSION',
+  'CLAUDE_CODE_SESSION_ID',
+  'CLAUDE_CODE_BRIDGE_SESSION_ID',
+  'CLAUDE_CODE_ENTRYPOINT',
+  'CLAUDE_CODE_EXECPATH',
+  'CLAUDE_CODE_MESSAGING_TOKEN',
+  'CLAUDE_CODE_MESSAGING_SOCKET',
+  'CLAUDE_PID'
+]
+
 export const ACCOUNT_SCOPE_UPDATE_ENV: readonly string[] = [
   'CLAUDE_CONFIG_DIR',
   ...AUTH_ENV_STRIP,
   'CODEX_HOME',
   'NODETERM_CODEX_ACCOUNT_ID',
-  ...CODEX_AUTH_ENV_STRIP
+  ...CODEX_AUTH_ENV_STRIP,
+  // Listed for update-environment's REMOVAL half, exactly like the account-scope names above:
+  // deleting these from the client env alone never touches the GLOBAL env of a tmux server that a
+  // polluted client already started, so every later session would keep inheriting them from the
+  // server. Listing them makes tmux strip each one from a session whose creating client lacks it —
+  // and `ensureUpdateEnvKeys` retrofits a long-lived pre-fix server before the session is created.
+  ...AGENT_SESSION_ENV_STRIP
 ]
 
 export function tmuxConf(scrollback: number): string {
@@ -2573,6 +2615,10 @@ export class PtyManager {
     delete env.NODETERM_SERVER_PASSWORD
     delete env.TMUX
     delete env.TMUX_PANE
+    // The launching agent session's own identity/IPC vars — see AGENT_SESSION_ENV_STRIP. Deleting
+    // them here covers the client env; the same names are in ACCOUNT_SCOPE_UPDATE_ENV so tmux also
+    // strips them from a session whose server was seeded by a polluted client.
+    for (const k of AGENT_SESSION_ENV_STRIP) delete env[k]
 
     // A GUI app launched from Finder/Dock inherits only a minimal PATH, so spawned terminals
     // couldn't find tools in /usr/local/bin, Homebrew, ~/.local/bin, nvm, bun, etc. (the classic

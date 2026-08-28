@@ -1415,6 +1415,22 @@ else, and its context links must keep classifying across restarts).
     the project-default account), and validation runs against `accountsForProject`, not the raw
     list, so a **pending** account or one **pinned to another machine's host** is never stamped
     onto a node it cannot run on (both used to reach the missing-dir fallback at spawn).
+  - **The LAUNCHING agent session's identity never reaches a pane** (`AGENT_SESSION_ENV_STRIP`,
+    2026-08-28). `buildPtyEnv` spreads `{ ...process.env }`, so a nodeterm started from inside a
+    Claude Code session (`open -a nodeterm` from an agent's shell, a canvas terminal launching a
+    second instance) handed EVERY pane the parent session's markers. `CLAUDE_CODE_CHILD_SESSION` is
+    the one that bites: the child claude disables transcript persistence, and this app reads that
+    transcript for the context meter, session-name adoption, the ⌘M view and the find-bar's
+    transcript index — so all four die **silently** on a session that looks perfectly healthy.
+    `CLAUDE_CODE_MESSAGING_TOKEN` + its socket are a bearer for the parent's IPC, readable from any
+    pane. [MEASURED: 9 of 14 live sessions carried them; the nodes that still had a meter were
+    exactly those whose tmux session predated the polluted launch.] It is a **deny-list, never a
+    `CLAUDE_CODE_*` prefix sweep** — that prefix also carries real user config
+    (`USE_BEDROCK`, `USE_VERTEX`, `MAX_OUTPUT_TOKENS`, and `OAUTH_TOKEN`, which belongs to
+    `AUTH_ENV_STRIP`'s managed-account rules); sweeping it breaks a Bedrock user's terminals to fix
+    a marker. The names ALSO ride `ACCOUNT_SCOPE_UPDATE_ENV` for the same reason the account names
+    do: deleting them from the client env never touches the global env of a tmux server a polluted
+    client already started.
   - **Env injection** — `pty-manager` sets `CLAUDE_CONFIG_DIR` in the spawn env AND as a tmux `-e`
     (local); for a remote node it emits an **absolute-path** remote tmux `-e` built from the
     connection-cached `remoteHome` (skipped **fail-open** if home is unresolved). `AUTH_ENV_STRIP`

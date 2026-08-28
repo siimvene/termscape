@@ -15,6 +15,7 @@ import { IPC } from '../shared/ipc'
 import { TMUX_SOCKET, sessionName } from './tmux-naming'
 import { DEFAULT_SETTINGS } from '../shared/types'
 import { AUTH_ENV_STRIP, isReservedSpawnEnvKey } from './claude-accounts-core'
+import { AGENT_SESSION_ENV_STRIP } from './pty-manager'
 import { MODEL_GATEWAY_ENV_KEYS } from '../shared/agents/model-gateway'
 import { hookServer } from './agents/hook-server'
 import type { ProjectSpawnOverrides } from './project-spawn-overrides'
@@ -114,6 +115,36 @@ describe('project settings at the spawn — LOCAL leg', () => {
     await manager(async () => ({ env: { PROJECT_TOKEN: 'abc' } }))
     await create({ persistKey: NODE, ownerProjectId: PROJECT })
     expect(spawns[0].env.PROJECT_TOKEN).toBe('abc')
+  })
+
+  it('never hands a pane the launching agent session identity', async () => {
+    // Launch nodeterm from inside a Claude Code session (`open -a nodeterm` from an agent shell)
+    // and `{ ...process.env }` gave every pane the PARENT session's markers. The child claude then
+    // disables transcript persistence, and the transcript is what feeds the context meter, session
+    // names, the ⌘M view and find-bar search — all dead, silently, on a healthy-looking session.
+    // The messaging token is a bearer for the launching session's IPC, readable from any pane.
+    const restore = { ...process.env }
+    Object.assign(process.env, {
+      CLAUDECODE: '1',
+      CLAUDE_CODE_CHILD_SESSION: '1',
+      CLAUDE_CODE_SESSION_ID: 'parent-session',
+      CLAUDE_CODE_MESSAGING_TOKEN: 'sekrit',
+      CLAUDE_CODE_MESSAGING_SOCKET: '/tmp/cc-socks/1.sock',
+      // Real user configuration that shares the prefix — must SURVIVE. This is the assertion that
+      // stops someone "simplifying" the deny-list into a CLAUDE_CODE_* prefix sweep.
+      CLAUDE_CODE_USE_BEDROCK: '1',
+      CLAUDE_CODE_MAX_OUTPUT_TOKENS: '4096'
+    })
+    try {
+      await manager(null)
+      await create({ persistKey: NODE })
+      for (const k of AGENT_SESSION_ENV_STRIP) expect(spawns[0].env[k]).toBeUndefined()
+      expect(spawns[0].env.CLAUDE_CODE_USE_BEDROCK).toBe('1')
+      expect(spawns[0].env.CLAUDE_CODE_MAX_OUTPUT_TOKENS).toBe('4096')
+    } finally {
+      for (const k of Object.keys(process.env)) if (!(k in restore)) delete process.env[k]
+      Object.assign(process.env, restore)
+    }
   })
 
   it('asks the reader with the OWNING project id, once per spawn', async () => {

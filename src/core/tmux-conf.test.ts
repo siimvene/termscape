@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 
-import { ACCOUNT_SCOPE_UPDATE_ENV, tmuxConf } from './pty-manager'
+import { ACCOUNT_SCOPE_UPDATE_ENV, AGENT_SESSION_ENV_STRIP, tmuxConf } from './pty-manager'
 
 describe('tmuxConf', () => {
   const c = tmuxConf(50000)
@@ -61,6 +61,32 @@ describe('tmuxConf', () => {
     // auth strip; OPENAI_API_KEY likewise) must appear exactly once.
     for (const dup of ['ANTHROPIC_AUTH_TOKEN', 'OPENAI_API_KEY']) {
       expect(line!.split(dup).length - 1).toBe(1)
+    }
+  })
+
+  it('carries the launching agent session names for the same removal semantics', () => {
+    // Deleting these from the client env alone leaves them in the GLOBAL env of a tmux server a
+    // polluted client already started, so every later session re-inherits them from the server.
+    const line = c.split('\n').find((l) => l.startsWith('set -g update-environment '))
+    for (const name of AGENT_SESSION_ENV_STRIP) expect(line).toContain(name)
+  })
+
+  it('strips session identity but never legitimate Claude Code configuration', () => {
+    // The guard against "simplify this to a CLAUDE_CODE_* prefix sweep". Those four are user
+    // configuration that shares the prefix; sweeping it would break a Bedrock/Vertex user's
+    // terminals, and would take CLAUDE_CODE_OAUTH_TOKEN out from under AUTH_ENV_STRIP's
+    // managed-account rules. CLAUDE_CONFIG_DIR is account scope and owned elsewhere.
+    expect(AGENT_SESSION_ENV_STRIP).toContain('CLAUDE_CODE_CHILD_SESSION')
+    expect(AGENT_SESSION_ENV_STRIP).toContain('CLAUDE_CODE_MESSAGING_TOKEN')
+    for (const keep of [
+      'CLAUDE_CODE_USE_BEDROCK',
+      'CLAUDE_CODE_USE_VERTEX',
+      'CLAUDE_CODE_MAX_OUTPUT_TOKENS',
+      'CLAUDE_CODE_OAUTH_TOKEN',
+      'CLAUDE_CONFIG_DIR',
+      'CLAUDE_EFFORT'
+    ]) {
+      expect(AGENT_SESSION_ENV_STRIP).not.toContain(keep)
     }
   })
 })
