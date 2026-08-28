@@ -24,6 +24,7 @@ import { codexAccountSelectable } from '../../../canvas/codex-account-switch'
 import { AccountIdentityPills } from '../../AccountIdentityPills'
 import { ConfirmDialog } from '../../ConfirmDialog'
 import { SettingsSection } from '../SettingsSection'
+import { AgentIcon } from '@renderer/lib/agentIcons'
 import { SearchableRow } from '../SearchableRow'
 import { Button } from '@renderer/ui/Button'
 import { Input } from '@renderer/ui/Input'
@@ -94,6 +95,30 @@ function AddingLabel({ where }: { where: string }): React.JSX.Element {
 function applyAccounts(fn: (accs: ClaudeAccount[]) => ClaudeAccount[]): void {
   const s = useSettings.getState()
   s.update({ claudeAccounts: fn(s.settings.claudeAccounts) })
+}
+
+/** A clear provider heading for an account block — icon + name + one-line description, with a top
+ *  divider so the Claude and Codex sections read as distinct groups (they looked identical before). */
+function ProviderHeader({
+  agentId,
+  name,
+  description
+}: {
+  agentId: 'claude' | 'codex'
+  name: string
+  description: string
+}): React.JSX.Element {
+  return (
+    <div className="flex items-center gap-3 border-t border-[color:var(--border)] pt-4 first:border-t-0 first:pt-0">
+      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[color:var(--surface-raised)]">
+        <AgentIcon agentId={agentId} size={20} />
+      </div>
+      <div className="min-w-0">
+        <div className="text-[15px] font-semibold text-[color:var(--text)]">{name} accounts</div>
+        <div className="text-[12px] leading-snug text-[color:var(--muted)]">{description}</div>
+      </div>
+    </div>
+  )
 }
 
 /** The same fresh-read/transform for the Codex account list. */
@@ -483,12 +508,17 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
     <SettingsSection
       id="accounts"
       title="Accounts"
-      description="Isolated Claude logins. Each account has its own config dir, credentials, and transcripts; a node keeps the account it was created with for life."
+      description="Isolated Claude and Codex logins. Each account keeps its own config dir, credentials, and transcripts; a node keeps the account it was created with for life."
       isActive={isActive}
       searchEntries={ENTRIES}
     >
       <SearchableRow {...ROWS.accounts}>
         <div className="space-y-4">
+          <ProviderHeader
+            agentId="claude"
+            name="Claude"
+            description="Isolated Claude logins — each has its own config dir, credentials, and transcripts."
+          />
           {versionWarning ? (
             <div className="flex items-start justify-between gap-3 rounded-md border border-[color:var(--danger)]/40 bg-[color:var(--danger)]/10 px-3 py-2 text-[13px] leading-relaxed text-[color:var(--danger)]">
               <span>
@@ -677,6 +707,11 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
           is shown as a pill; the credential-storage kind is deliberately not surfaced. */}
       <SearchableRow {...ROWS.codex}>
         <div className="space-y-4">
+          <ProviderHeader
+            agentId="codex"
+            name="Codex"
+            description="Isolated Codex (OpenAI) logins, grouped by the machine their credentials live on."
+          />
           {codexGroups.map((group) => (
             <MachinePanel
               key={group.host || 'local'}
