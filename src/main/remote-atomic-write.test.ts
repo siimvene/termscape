@@ -1,5 +1,5 @@
 import { execFileSync, spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'child_process'
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'fs'
 import os from 'os'
 import path from 'path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -60,7 +60,9 @@ describe('remoteAtomicWrite', () => {
     expect(second.temporaryPath).not.toBe(first.temporaryPath)
     expect(first.command).toContain('umask 077; mkdir -p -- ~/' + "'a b'")
     expect(first.command).toContain(`cat > ${quoteRemotePath(first.temporaryPath)}`)
-    expect(first.command).toContain(`chmod 600 -- ${quoteRemotePath(first.temporaryPath)}`)
+    // No `--`: BSD chmod reads it as a filename and exits 1, killing the publish (see the impl).
+    expect(first.command).toContain(`chmod 600 ${quoteRemotePath(first.temporaryPath)}`)
+    expect(first.command).not.toContain('chmod 600 --')
     expect(first.command).toContain(`mv -f -- ${quoteRemotePath(first.temporaryPath)} ${quoteRemotePath("~/a b/quo'te\\name.json")}`)
     expect(first.command).toContain(`rm -f -- ${quoteRemotePath(first.temporaryPath)}`)
     expect(first.command).toContain('exit "$nt_status"')
@@ -172,6 +174,33 @@ describe('remoteAtomicWrite', () => {
       'literal-name'
     )
     expect(readdirSync(root).filter((name) => name.endsWith('.tmp'))).toEqual([])
+  })
+
+  /**
+   * The `./` guard that replaced chmod's `--`. A target whose PARENT begins with a dash is the
+   * only way the temp path can start with one (the leaf is always `.nodeterm-…`), and an unguarded
+   * `chmod 600 -dir/...` would be parsed as options on every shell. Runs under a real shell so it
+   * fails on whichever chmod the developer actually has.
+   */
+  it.skipIf(!SHELL)('chmods a temp under a dash-leading relative parent', () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'nt-remote-dashdir-'))
+    roots.push(root)
+    mkdirSync(path.join(root, '-dashdir'))
+    const write = remoteAtomicWrite('-dashdir/creds.json', {
+      restrictPermissions: true,
+      chmod600: true
+    })
+
+    execFileSync(SHELL!, ['-c', write.command], {
+      cwd: root,
+      input: 'secret',
+      stdio: ['pipe', 'pipe', 'pipe']
+    })
+
+    const published = path.join(root, '-dashdir', 'creds.json')
+    expect(readFileSync(published, 'utf8')).toBe('secret')
+    expect(statSync(published).mode & 0o777).toBe(0o600)
+    expect(readdirSync(path.join(root, '-dashdir')).filter((n) => n.endsWith('.tmp'))).toEqual([])
   })
 
   it.skipIf(!SHELL)('keeps overlapping real-shell writers on separate temps', async () => {

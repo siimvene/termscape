@@ -55,7 +55,21 @@ export function remoteAtomicWrite(
   const parent = options.makeParent === false
     ? ''
     : `mkdir -p -- ${quoteRemotePath(parentPath)} && `
-  const protect = options.chmod600 ? ` && chmod 600 -- ${temporary}` : ''
+  // `chmod` is the ONE command here that must not take `--`. BSD chmod (every macOS SSH host)
+  // accepts options only BEFORE the mode operand, so a trailing `--` is parsed as a FILENAME:
+  // `chmod: --: No such file or directory`, exit 1 — and since this sits in the `&&` chain ahead
+  // of `mv`, the publish never ran at all. GNU coreutils and busybox both accept it, and CI has no
+  // macOS job, so these tests had never been green on a Mac. Both callers are credential writes
+  // (the hook endpoint bearer and the per-node identity token in `remote-ssh/remote-hooks.ts`), so
+  // on a macOS host the reverse hook tunnel was abandoned outright — no agent status, no context
+  // meter, no subagent cards, no canvas control for remote nodes. Fail-closed, so nothing was
+  // corrupted: the old file survives and the temp is cleaned.
+  // `--` protected a path that could begin with `-`; `./` does the same job and is portable.
+  // (mkdir/mv/rm keep their `--`: those parse it correctly everywhere.)
+  const chmodOperand = temporaryPath.startsWith('-')
+    ? quoteRemotePath(`./${temporaryPath}`)
+    : temporary
+  const protect = options.chmod600 ? ` && chmod 600 ${chmodOperand}` : ''
   const command =
     `${prefix}${parent}{ cat > ${temporary}${protect} && mv -f -- ${temporary} ${target}; ` +
     `nt_status=$?; ` +
