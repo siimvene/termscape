@@ -94,15 +94,41 @@ started, concepts, agents, remote access, troubleshooting.
   project-grouped session list, real SwiftTerm terminals, Settings → Usage, and local
   finished / needs-you notifications.
 
-**Deploy notes (fork-specific)**
-- Server: `npm run build && npm run server:build`, then restart the launchd-supervised
-  server. **After any `npm run dist`, run `npm run rebuild`** — the x64 DMG step rebuilds
-  node-pty for x86_64 and clobbers the arm64 native module the server loads, which otherwise
-  makes every server-side `pty:create` fail.
-- Desktop app: `npm run dist`, then swap `/Applications/nodeterm.app` (the packaged app is
-  frozen — `out/` builds only reach the Server Edition).
-- Every fork code change passes a cross-vendor **consort review** before push (the private
-  fork's own gate), on top of upstream's contribution rules.
+### Build & install (this fork)
+
+Build from **this fork**, not upstream — the whole point is the modifications above. The npm
+commands operate on your local checkout, so they produce *your* app; `upstream` is only ever
+for *pulling* fixes, never the source you build.
+
+```sh
+# 1. Clone THIS fork, self-host branch (not eneskirca/nodeterm)
+git clone -b feat/ungated-selfhost https://github.com/siimvene/nodeterm.git
+cd nodeterm
+npm install                      # deps + node-pty rebuilt against Electron's ABI (postinstall)
+
+# 2. Desktop app — build an unsigned .dmg and install it
+npm run dist                     # → dist/nodeterm-<ver>-arm64.dmg (+ x64)
+npm run rebuild                  # REQUIRED after dist: the x64 build clobbers node-pty's arm64
+                                 # native module that the Server Edition loads — skip it and every
+                                 # server-side pty:create fails
+# install: open the .dmg and drag to /Applications, or hot-swap a running install:
+osascript -e 'quit app "nodeterm"'; sleep 3
+rm -rf /Applications/nodeterm.app
+ditto dist/mac-arm64/nodeterm.app /Applications/nodeterm.app
+open -a /Applications/nodeterm.app
+
+# 3. Server Edition (the always-on core) — build + (re)start
+npm run build && npm run server:build
+node out/server/main.cjs         # or under launchd/systemd; front with `tailscale serve` for remote
+```
+
+Prebuilt (unsigned) desktop `.dmg`s are attached to this fork's
+[Releases](https://github.com/siimvene/nodeterm/releases) — first launch: right-click → Open to
+clear Gatekeeper (unsigned). The iOS client ships from its own repo
+([nodeterm-mobile](https://github.com/siimvene/nodeterm-mobile)).
+
+Every fork code change passes a cross-vendor **consort review** before push (the private fork's
+own gate), on top of upstream's contribution rules.
 
 ---
 
@@ -247,6 +273,10 @@ section for details.
 
 ## 📦 Download
 
+> **Self-host fork users:** build or grab the fork `.dmg` from
+> [Build & install (this fork)](#build--install-this-fork) above — the channels below are the
+> **upstream** product (Enes Kirca's official builds), not this modified fork.
+
 Grab the latest build from **[nodeterm.dev](https://nodeterm.dev)** — the download button
 detects your platform. Everything is also listed at
 [nodeterm.dev/releases](https://nodeterm.dev/releases):
@@ -269,6 +299,10 @@ detects your platform. Everything is also listed at
   [App Store](https://apps.apple.com/app/nodeterm/id6790581233).
 
 ## 🛠 Build from source
+
+> **Building this fork?** Use [Build & install (this fork)](#build--install-this-fork) above.
+> The generic commands below build whatever checkout you are in — on `feat/ungated-selfhost`
+> they produce your modified app, not upstream's.
 
 Requires Node.js 20+ on macOS or Linux (tmux recommended — it's what makes sessions
 survive restarts). A source checkout does **not** carry the bundled tmux: run
