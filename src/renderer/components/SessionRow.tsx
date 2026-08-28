@@ -59,7 +59,7 @@ export function SessionRow({
 
   return (
     <div
-      className="ss-row"
+      className={`ss-row${row.selected ? ' is-active' : ''}`}
       draggable={!editing}
       onClick={onClick}
       onContextMenu={onContextMenu}

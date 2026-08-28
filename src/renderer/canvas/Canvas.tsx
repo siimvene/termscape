@@ -1869,7 +1869,8 @@ export function Canvas() {
               agentId: n.data.agentId,
               cwd: n.data.cwd,
               ssh: n.data.ssh,
-              parentId: n.parentId
+              parentId: n.parentId,
+              selected: n.selected
             }))
         : null,
     [nodes, sessionsOpen]

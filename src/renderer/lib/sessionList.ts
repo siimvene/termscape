@@ -16,6 +16,10 @@ export interface SessionNodeInput {
   ssh?: SshConnection
   /** Parent group node id when this node lives inside a canvas group frame. */
   parentId?: string
+  /** Selected on the canvas right now. Only ever true for the ACTIVE project, whose nodes come
+   *  from live React Flow state — an inactive project's rows are read from the serialized store,
+   *  which carries no selection. That asymmetry is correct: one canvas, one selection. */
+  selected?: boolean
 }
 
 export interface ProjectInput {
@@ -235,6 +239,8 @@ export interface SessionRowVM {
   sshHost?: string
   sessionId?: string
   usesContext: boolean
+  /** Mirrors the canvas selection, so the list shows WHICH session you are looking at. */
+  selected: boolean
   /** Populated only when the sidebar is grouped by status (rows are flattened across projects):
    *  the project the session belongs to, so the row can show a project monogram and route
    *  project-scoped callbacks. Absent in project mode, where the enclosing group carries it. */
@@ -307,6 +313,7 @@ function toRow(
     cwd: n.cwd,
     sshHost: n.ssh?.host,
     sessionId: status?.sessionId,
+    selected: !!n.selected,
     usesContext: n.agentId ? hasUsage(n.agentId) : false,
     // Only populated in status mode (flattened across projects); absent in project mode.
     projectId: project?.id,

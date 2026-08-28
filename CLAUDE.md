@@ -720,6 +720,35 @@ session.
   ⌘M **ChatPanel** transcript view on a Claude *terminal* node (see the terminal bullet's Cmd/Ctrl+M),
   not any SDK chat node.
 
+**Node resize is a HIT-AREA problem, not a clipping one** (2026-08-28, measured via CDP
+`elementFromPoint` sweeps — do not re-derive this from reading CSS, it is counter-intuitive twice
+over). `NodeResizer`'s controls are a 1px edge line and a 5px corner dot, and canvas zoom scales
+both DOWN. Two independent defects; fixing either alone changes nothing a user can feel:
+- **Width** — widened hit-only by `.react-flow__resize-control ::after` boxes in `styles.css`
+  (8px out / 4px in, outward-biased). Visuals are untouched: hit-testing credits a pseudo-element's
+  box to the element that owns the drag listener, so GroupNode's transparent `lineStyle` still
+  renders as nothing.
+- **Stacking** — the controls ship `z-index: auto`, and `.term-node` is **`position: static`**, so
+  every overlay inside it (`.term-hover-guard` z 2 covering the whole body, offscreen plate 3,
+  closed plate 4) competes in the SAME stacking context and wins. The inward half of any widening
+  is dead until the controls are raised (now `z-index: 5` — deliberately below the bridge/link
+  handles at 20 and the upload overlay at 30, which must stay grabbable).
+
+The **visible** half is the other half of the same feature (Siim, 2026-08-28: "bolder frame around
+agent windows to better handle resizing"): `.term-node`'s border is **2px**, not a 1px hairline that
+reads as decoration rather than as something grabbable, and hovering a grab zone tints it accent at
+20% so the widened band is discoverable instead of being an invisible 11px you must already know
+about. A wider hit zone nobody can see is still guesswork — ship the two together. Thickening the
+border is safe only because `* { box-sizing: border-box }` is global: the content box shrinks rather
+than the node growing, so no reflow and no tmux SIGWINCH storm.
+
+The static-position fact also kills the obvious wrong theory: `.term-node` is `overflow: hidden`,
+but an overflow clip only applies to descendants whose CONTAINING BLOCK is inside it — the controls
+are positioned against `.react-flow__node`, an ancestor — so they were never clipped, and moving
+`<NodeResizer>` out of the root is a pure no-op. **Known remaining dead spot:** the bridge/link
+handles are 13×13 at the vertical centre of the left and right edges, so resize is unreachable
+there by design; the rest of each edge is a ~12px band.
+
 Monaco is wired in `renderer/editor/monaco-setup.ts` (language workers bundled via Vite
 `?worker` — no CDN; CSP `worker-src` allows them). Markdown rendering is shared in
 `renderer/lib/markdown.ts` (`marked` + DOMPurify sanitize).
@@ -1939,6 +1968,15 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
     once-per-run resume card (it would sit invisible under the opaque overlay).
 - **Command palette** (`CommandPalette.tsx`): ⌘/Ctrl+K; `Canvas.buildCommands` (create,
   switch project, jump to node by title/tag, open file…).
+**The sessions list marks the CANVAS SELECTION** (`SessionRowVM.selected` → `.ss-row.is-active`,
+2026-08-28). `.ss-row.is-active` existed in `styles.css` from the start but **nothing ever set the
+class on a row** — `is-active` reached only `.ss-tab` and `.ss-group` — so the list never showed
+which agent you were looking at, and a dead rule read as a working feature to everyone who grepped
+it. Selection rides the existing `liveActiveNodes` memo (which already recomputes on every `nodes`
+change, so carrying `n.selected` is free) and is therefore **only ever true for the ACTIVE
+project**: every other project's rows come from the serialized store, which holds no selection.
+That asymmetry is correct — one canvas, one selection — so do not "fix" it by persisting selection.
+
 - **Explorer** (`ExplorerPanel.tsx`, 🗂 / ⌘⇧E): lazy file tree of the active project `cwd`
   (`fs:list`); click a file → opens an editor node; right-click → Copy Path / Reveal /
   **New File… / New Folder…** (empty-area right-click targets the root; SSH projects create on the

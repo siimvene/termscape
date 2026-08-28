@@ -13,6 +13,7 @@ const row: SessionRowVM = {
   statusUpdatedAt: 1,
   unread: false,
   usesContext: false,
+  selected: false,
   projectId: 'p1',
   projectName: 'Project',
   projectColor: '#123'

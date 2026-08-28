@@ -343,6 +343,7 @@ describe('projectSignalCounts', () => {
       stateLabel: 'Unknown',
       unread: false,
       usesContext: false,
+      selected: false,
       ...s
     }))
   })

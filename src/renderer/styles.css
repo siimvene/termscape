@@ -1057,7 +1057,11 @@ body,
   display: flex;
   flex-direction: column;
   background: var(--panel);
-  border: 1px solid var(--border);
+  /* 2px, not 1px: the frame is the RESIZE TARGET, and a hairline reads as decoration rather than
+     as something you can grab (Siim, 2026-08-28 — the visual half of the 1px-hit-zone fix above).
+     Safe to thicken because `* { box-sizing: border-box }` is global, so the terminal's content box
+     shrinks instead of the node growing — no reflow, no tmux SIGWINCH storm. */
+  border: 2px solid var(--border);
   border-top-width: 3px;
   border-radius: 10px;
   overflow: hidden;
@@ -2510,7 +2514,9 @@ body,
 }
 
 .term-node.collapsed {
-  border-bottom-width: 1px;
+  /* Tracks the base border width — a collapsed node must not render a thinner bottom edge than
+     its sides. */
+  border-bottom-width: 2px;
 }
 
 .term-node.collapsed .term-node__body,
@@ -6017,6 +6023,55 @@ button.group-node__setup:disabled {
   }
 }
 
+/* ---- Node resize grab zones ----
+   React Flow's NodeResizer defaults are a 1px edge line and a 5px corner dot, and canvas zoom
+   scales both DOWN (at 0.5x zoom the line is half a screen pixel) — so starting a resize was
+   hit-or-miss. Two separate things were wrong, and fixing only one changes nothing you can feel:
+
+   1. WIDTH. The ::after boxes widen only the HIT area — hit-testing credits a pseudo-element's box
+      to its owning element, which is where the resizer's drag listener lives, so the visible
+      line/dot (and GroupNode's transparent lineStyle) render exactly as before.
+   2. STACKING. `.term-node` is position:static, so every overlay INSIDE it competes with the
+      resize controls in the same stacking context — and the controls ship with `z-index: auto`,
+      which loses to all of them. The full-body `.term-hover-guard` (z 2) swallowed the whole
+      inward half; the offscreen (3) and closed (4) plates the same. Hence z-index 5: above those,
+      deliberately BELOW the bridge/link handles (20) and the upload overlay (30), which stay
+      grabbable. [MEASURED via CDP elementFromPoint sweeps across all four edges, 2026-08-28.]
+
+   Outward-biased (8px out / 4px in) so the inner slice can't swallow the header's drag strip or a
+   corner button. The resizer only mounts while the node is SELECTED, so none of this touches
+   drag-to-move, terminal clicks, or hover on an unselected node. */
+.react-flow__resize-control {
+  z-index: 5;
+}
+.react-flow__resize-control.line::after,
+.react-flow__resize-control.handle::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+}
+.react-flow__resize-control.line.left::after { left: -8px; right: -4px; }
+.react-flow__resize-control.line.right::after { left: -4px; right: -8px; }
+.react-flow__resize-control.line.top::after { top: -8px; bottom: -4px; }
+.react-flow__resize-control.line.bottom::after { top: -4px; bottom: -8px; }
+/* Corner dots carry BOTH an axis class (e.g. `handle top left`), so these compose into all four. */
+.react-flow__resize-control.handle.left::after { left: -8px; right: -4px; }
+.react-flow__resize-control.handle.right::after { left: -4px; right: -8px; }
+.react-flow__resize-control.handle.top::after { top: -8px; bottom: -4px; }
+.react-flow__resize-control.handle.bottom::after { top: -4px; bottom: -8px; }
+
+/* Hovering the grab zone lights it up, so the widened band is DISCOVERABLE rather than an invisible
+   11px you have to already know about — the cursor change alone only tells you once you are on it.
+   `:hover` fires here because the ::after is part of the control's own rendering, which is the same
+   property the hit-testing relies on. Group frames are excluded: GroupNode hides its resizer line on
+   purpose (inline `lineStyle` transparent), and a sharp-cornered band over a rounded dashed frame
+   reads as a rendering bug. */
+.react-flow__node:not(.react-flow__node-group) .react-flow__resize-control.line:hover::after,
+.react-flow__node:not(.react-flow__node-group) .react-flow__resize-control.handle:hover::after {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  border-radius: 3px;
+}
+
 /* React Flow controls dark theme */
 .react-flow__controls {
   border-radius: 10px;
@@ -6935,7 +6990,18 @@ button.group-node__setup:disabled {
   border: 1px solid transparent;
 }
 .ss-row:hover { background: var(--panel-header); }
-.ss-row.is-active { background: rgba(var(--tint-rgb), 0.06); border-color: var(--border); }
+/* The session you are actually looking at. This rule EXISTED but nothing ever set `is-active` on a
+   row (only on `.ss-tab` / `.ss-group`), so the list gave no clue which agent was selected — and at
+   `--border` (10% tint) over a 6% wash it would have been near-invisible anyway. Now a real accent
+   outline: the row is a target you navigate BY, so it has to read at a glance from across the
+   canvas (Siim, 2026-08-28). Beats `:hover` on source order at equal specificity, so an active row
+   keeps its outline while hovered — the `:hover` pair below just deepens it. */
+.ss-row.is-active {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+.ss-row.is-active:hover { background: color-mix(in srgb, var(--accent) 20%, transparent); }
+.ss-row.is-active .ss-title { color: var(--text); font-weight: 600; }
 
 .ss-dot { width: 8px; height: 8px; border-radius: 50%; margin-top: 5px; flex: 0 0 auto; }
 .ss-dot--unknown { background: var(--muted-2); }
