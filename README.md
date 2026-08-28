@@ -50,6 +50,62 @@ same live sessions.
 📚 **Full documentation lives at [nodeterm.dev/docs](https://nodeterm.dev/docs)** — get
 started, concepts, agents, remote access, troubleshooting.
 
+---
+
+## 🔧 Self-host fork (this branch)
+
+> This is a **private fork** of [eneskirca/nodeterm](https://github.com/eneskirca/nodeterm)
+> (BUSL-1.1, © Enes Kirca), on branch `feat/ungated-selfhost`. It runs the Server Edition
+> as the primary core for a personal, always-on, self-hosted setup, and adds a set of
+> multi-account and mobile-companion capabilities on top of upstream. Not for redistribution —
+> see [License](#-license).
+
+**Self-host posture**
+- The **Server Edition** (`node out/server/main.cjs`) is the always-on core, fronted by
+  `tailscale serve` so the desktop app, a browser, and the phone all reach the *same* live
+  tmux sessions from anywhere on the tailnet. Layout is committed `.nodeterm/project.json`,
+  so a folder-backed project is portable and shareable by design.
+- A **desktop → server project sync** (launchd `WatchPaths`) mirrors every folder-backed
+  desktop project into the server's index, so the phone sees the same projects the desktop
+  does.
+
+**Multi-account Claude, first class**
+- **Running-session account switcher** — a node menu action moves a live Claude session onto
+  another managed account (or the system account) by copying its transcript into the target
+  account dir, then reusing the model-switch's SIGTERM → recycle → `--resume` choreography.
+  The same conversation continues under the new account's rate limits; copy-before-flip so a
+  failed copy mutates nothing. Refuses busy / hibernating / remote / recurring-job sessions.
+- **Account-registration self-heal** — a pending account whose config dir already holds a
+  completed login reconciles itself at launch (the dir is the truth); Retry races capture
+  before opening a login node; a re-logged dir refreshes a stale email automatically.
+- **Usage pill leads with the project's active account** — the account of the most recently
+  active agent session owns the pill; system and the other accounts collapse to compact chips.
+  Per-account rate-limit stats also fan out to the mobile client.
+
+**Agent-status bridge**
+- A **peer-status bridge** in the Server Edition tails the desktop's status mirror and
+  re-broadcasts agent state (and account usage) over the WebSocket, so desktop-spawned
+  sessions show live RUNNING / NEEDS-YOU badges — and usage numbers — on browser and phone.
+
+**iOS companion**
+- **Remote Claude** — a native SwiftUI client (public, MIT):
+  [github.com/siimvene/nodeterm-mobile](https://github.com/siimvene/nodeterm-mobile).
+  Attaches to the same tmux sessions over the Server Edition's WS-RPC protocol; live
+  project-grouped session list, real SwiftTerm terminals, Settings → Usage, and local
+  finished / needs-you notifications.
+
+**Deploy notes (fork-specific)**
+- Server: `npm run build && npm run server:build`, then restart the launchd-supervised
+  server. **After any `npm run dist`, run `npm run rebuild`** — the x64 DMG step rebuilds
+  node-pty for x86_64 and clobbers the arm64 native module the server loads, which otherwise
+  makes every server-side `pty:create` fail.
+- Desktop app: `npm run dist`, then swap `/Applications/nodeterm.app` (the packaged app is
+  frozen — `out/` builds only reach the Server Edition).
+- Every fork code change passes a cross-vendor **consort review** before push (the private
+  fork's own gate), on top of upstream's contribution rules.
+
+---
+
 ## ✨ Features
 
 <table>
