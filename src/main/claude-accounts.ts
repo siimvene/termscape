@@ -92,14 +92,32 @@ export function initClaudeAccounts(getSshManager?: () => SshProjectManager | und
     // --version`, and on a machine whose login shell is slow/interactive, or whose Claude CLI
     // isn't on the GUI PATH, that walk can take seconds — the Add button then spins as if hung
     // (real reports on a colleague's laptop). The account dir already exists and works; the only
-    // thing the probe feeds is the < 2.1 keychain-scope WARNING, so bound it hard and assume
-    // supported on timeout (the warning is dismissable, a hung button is not). The renderer can
-    // re-probe via claude.cliCaps() if it wants the accurate answer later.
-    const versionSupported = await Promise.race([
-      checkClaudeVersion(),
-      new Promise<boolean>((resolve) => setTimeout(() => resolve(true), ADD_VERSION_PROBE_BUDGET_MS))
-    ])
-    return { id, configDir, versionSupported }
+    // thing the probe feeds is the < 2.1 keychain-scope WARNING, so bound it hard — a hung Add
+    // button is not acceptable.
+    //
+    // The timeout resolves FALSE (= show the warning), not true. It used to assume "supported",
+    // justified by the renderer re-probing via claude.cliCaps() later — but AccountsSection never
+    // calls it, so that recovery does not exist, and the late probe result is discarded. The
+    // effect was that the very machine this budget exists for (slow login shell) is the one where
+    // a < 2.1 CLI's keychain-collision warning was silently suppressed. Failing safe costs a
+    // dismissable notice when a modern CLI merely answered slowly; failing open costs account B's
+    // login overwriting account A's shared unscoped Keychain credential. (Consort finding,
+    // 2026-08-28 — verified: `isSupportedClaudeVersion` in core documents the collision, and the
+    // renderer warns only on `!versionSupported`.)
+    let probeTimer: NodeJS.Timeout | undefined
+    try {
+      const versionSupported = await Promise.race([
+        checkClaudeVersion(),
+        new Promise<boolean>((resolve) => {
+          probeTimer = setTimeout(() => resolve(false), ADD_VERSION_PROBE_BUDGET_MS)
+        })
+      ])
+      return { id, configDir, versionSupported }
+    } finally {
+      // The losing branch is never observed again; leaving the timer armed kept a handle alive per
+      // Add. (The probe subprocess is separately bounded by its own timeout.)
+      if (probeTimer) clearTimeout(probeTimer)
+    }
   })
 
   ipcMain.handle(IPC.claudeAccountsWaitLogin, async (_e, id: string, ctx?: AccountCtx) => {
