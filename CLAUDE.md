@@ -733,14 +733,24 @@ both DOWN. Two independent defects; fixing either alone changes nothing a user c
   closed plate 4) competes in the SAME stacking context and wins. The inward half of any widening
   is dead until the controls are raised (now `z-index: 5` — deliberately below the bridge/link
   handles at 20 and the upload overlay at 30, which must stay grabbable).
+- **…but NEVER on a group frame** (`:not(.react-flow__node-group)`, consort finding, MEASURED). A
+  frame has none of those inner overlays, so it never needed the raise — and the raise breaks it
+  outright: `.group-node__label` / `.group-node__actions` are `top: 0` + `translateY(-50%)`, i.e.
+  centred ON the top border at `z-index: auto`, so a raised top-edge control covered the pill and
+  the rename input, colour dot, Ungroup, Close **and the pill itself (the frame's `dragHandle`)**
+  all hit-tested to the resize line the moment the frame was selected. Left at `auto` they win on
+  DOM order, since GroupNode renders the resizer before them. **Any future raise of a node-level
+  control owes the same question: what sits ON the border of a frame?**
 
 The **visible** half is the other half of the same feature (Siim, 2026-08-28: "bolder frame around
 agent windows to better handle resizing"): `.term-node`'s border is **2px**, not a 1px hairline that
 reads as decoration rather than as something grabbable, and hovering a grab zone tints it accent at
 20% so the widened band is discoverable instead of being an invisible 11px you must already know
 about. A wider hit zone nobody can see is still guesswork — ship the two together. Thickening the
-border is safe only because `* { box-sizing: border-box }` is global: the content box shrinks rather
-than the node growing, so no reflow and no tmux SIGWINCH storm.
+border is bounded only because `* { box-sizing: border-box }` is global: the node does not GROW, the
+content box shrinks by 1px per thickened side instead. That is **not** the same as "no reflow" — a
+terminal near a cell boundary can lose a column or row on the upgrade render, which the
+ResizeObserver reports to the pty as an ordinary resize. One re-fit per node, once.
 
 The static-position fact also kills the obvious wrong theory: `.term-node` is `overflow: hidden`,
 but an overflow clip only applies to descendants whose CONTAINING BLOCK is inside it — the controls
@@ -1976,6 +1986,10 @@ it. Selection rides the existing `liveActiveNodes` memo (which already recompute
 change, so carrying `n.selected` is free) and is therefore **only ever true for the ACTIVE
 project**: every other project's rows come from the serialized store, which holds no selection.
 That asymmetry is correct — one canvas, one selection — so do not "fix" it by persisting selection.
+Accepted edge (consort, ACKNOWLEDGED not fixed): during the documented one-render project-switch
+window React Flow still holds the OUTGOING project's nodes while `activeProjectId` is already the
+incoming one, so a selected row can flash under the wrong project header for a frame. Cosmetic and
+self-correcting on the next render; guarding it would mean threading ownership through the memo.
 
 - **Explorer** (`ExplorerPanel.tsx`, 🗂 / ⌘⇧E): lazy file tree of the active project `cwd`
   (`fs:list`); click a file → opens an editor node; right-click → Copy Path / Reveal /

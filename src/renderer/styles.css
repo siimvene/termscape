@@ -1059,8 +1059,11 @@ body,
   background: var(--panel);
   /* 2px, not 1px: the frame is the RESIZE TARGET, and a hairline reads as decoration rather than
      as something you can grab (Siim, 2026-08-28 — the visual half of the 1px-hit-zone fix above).
-     Safe to thicken because `* { box-sizing: border-box }` is global, so the terminal's content box
-     shrinks instead of the node growing — no reflow, no tmux SIGWINCH storm. */
+     `* { box-sizing: border-box }` is global, so the node does not GROW — the content box shrinks
+     by 1px per thickened side instead. That is not the same as "no reflow": a terminal sitting near
+     a cell boundary can lose a column or row on the upgrade render, which the ResizeObserver then
+     reports to the pty as an ordinary resize. One re-fit per node, once — not a storm, but not
+     nothing either. */
   border: 2px solid var(--border);
   border-top-width: 3px;
   border-radius: 10px;
@@ -6041,7 +6044,16 @@ button.group-node__setup:disabled {
    Outward-biased (8px out / 4px in) so the inner slice can't swallow the header's drag strip or a
    corner button. The resizer only mounts while the node is SELECTED, so none of this touches
    drag-to-move, terminal clicks, or hover on an unselected node. */
-.react-flow__resize-control {
+/* NOT on group frames (`:not(.react-flow__node-group)`) — consort review, 2026-08-28, MEASURED.
+   The raise exists only to clear overlays that live INSIDE `.term-node` (hover guard z 2, offscreen
+   plate 3, closed plate 4); a group frame has none of them, so it never needed it and is actively
+   harmed by it. `.group-node__label` and `.group-node__actions` are `top: 0` + `translateY(-50%)`,
+   i.e. centred ON the top border, at `z-index: auto` — so a raised top-edge control covered the
+   pill outright: with the frame selected, the rename input, the colour dot, Ungroup, Close AND the
+   pill itself (which is the frame's `dragHandle`) all hit-tested to the resize line. Left at `auto`
+   they win on DOM order instead, since GroupNode renders the resizer BEFORE them. Frames still get
+   the widened ::after band everywhere the pill is not. */
+.react-flow__node:not(.react-flow__node-group) .react-flow__resize-control {
   z-index: 5;
 }
 .react-flow__resize-control.line::after,

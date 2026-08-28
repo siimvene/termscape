@@ -39,3 +39,33 @@ describe('SessionRow status age', () => {
     expect(html).toContain('Entered this state 5m ago')
   })
 })
+
+/**
+ * `.ss-row.is-active` shipped in the stylesheet with NOTHING ever setting the class, so the list
+ * silently never marked the selected session while looking implemented to anyone who grepped the
+ * CSS. That failure is invisible to a test that only checks one direction — a permanently-false
+ * (or inverted) `selected` renders perfectly valid markup — so both directions are asserted here.
+ */
+describe('SessionRow selection', () => {
+  const render = (selected: boolean): string =>
+    renderToStaticMarkup(
+      <SessionRow
+        row={{ ...row, selected }}
+        onClick={vi.fn()}
+        onClose={vi.fn()}
+        onRename={vi.fn()}
+        onAiName={vi.fn()}
+        onContextMenu={vi.fn()}
+        onDragStart={vi.fn()}
+        onDragEnd={vi.fn()}
+      />
+    )
+
+  it('marks the row active when the node is selected on the canvas', () => {
+    expect(render(true)).toContain('ss-row is-active')
+  })
+
+  it('leaves an unselected row unmarked', () => {
+    expect(render(false)).not.toContain('is-active')
+  })
+})
