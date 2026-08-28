@@ -207,6 +207,10 @@ export const IPC = {
   usageFetch: 'usage:fetch',
   usageRefresh: 'usage:refresh',
   usageUpdate: 'usage:update',
+  /** Self-host: per-ACCOUNT usage snapshot forwarded from the desktop status mirror to phone
+   *  clients (server peer-status-bridge). Distinct from `usageUpdate` (a `ClaudeUsage` for the
+   *  browser popover) — the payload shape differs, so they must NOT share a channel. */
+  accountsUsage: 'accounts:usage',
   /** Non-Claude providers (codex, …) as one list; Claude keeps its own account-aware channels. */
   usageProviders: 'usage:providers',
   /** Claude usage for the connected SSH hosts' accounts, read ON those hosts over their

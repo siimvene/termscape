@@ -116,7 +116,7 @@ export function startPeerStatusBridge(file: string, deps: PeerBridgeDeps): () =>
     const usage = readPeerUsage(file)
     if (usage && (full || usage.updatedAt !== lastUsageAt)) {
       lastUsageAt = usage.updatedAt
-      deps.broadcast(IPC.usageUpdate, usage)
+      deps.broadcast(IPC.accountsUsage, usage)
     }
     const seen = new Set<string>()
     for (const [nodeId, n] of readPeerMirror(file)) {

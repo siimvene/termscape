@@ -116,7 +116,7 @@ describe('startPeerStatusBridge — usage', () => {
     const file = tmpMirror({}, { updatedAt: 5, accounts: [] })
     const broadcast = vi.fn()
     stops.push(startPeerStatusBridge(file, { broadcast, ownState: () => undefined, watch: false }))
-    const usageCalls = () => broadcast.mock.calls.filter((c) => c[0] === 'usage:update')
+    const usageCalls = () => broadcast.mock.calls.filter((c) => c[0] === 'accounts:usage')
     expect(usageCalls().length).toBe(1)
     expect(usageCalls()[0][1]).toEqual({ updatedAt: 5, accounts: [] })
   })
