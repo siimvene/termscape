@@ -178,6 +178,7 @@ import { initCanvasSync } from '../core/canvas-sync'
 import { retainUntilDismissed } from './notifications'
 import { installManagedAgentHooks } from '../core/agents/hooks'
 import { createSubagentTail } from '../core/subagent-tail'
+import { createWorkflowAgentsTail } from '../core/workflow-agents-tail'
 import { createContextTail, type TaskNotification } from '../core/context-tail'
 import { geminiContextParse } from '../core/gemini-session'
 import { codexContextParse } from '../core/codex-session'
@@ -2031,6 +2032,22 @@ app.whenReady().then(async () => {
   const subagentTail = createSubagentTail(({ toolUseId, chunk }) => {
     if (!win.isDestroyed()) win.webContents.send(IPC.agentSubagentActivity, { toolUseId, chunk })
   })
+  // The Workflow tool spawns N agents IN-PROCESS: they fire no per-agent hooks, so the subagent
+  // tail can't see them. Their transcripts land under <transcript>/subagents/workflows/<wf_*>/;
+  // this tail watches those and emits the SAME subagent-start/-end + streamed chunks the hook-driven
+  // Task fan-out does (synthetic toolUseId is the card key — no new renderer event kind). Fed through
+  // the SAME two channels as subagentTail. Local only: begin()/end() are bracketed by the parent
+  // session's own Workflow PreToolUse/PostToolUse in the raw listener's LOCAL branch below.
+  const workflowTail = createWorkflowAgentsTail({
+    event: (ev) => {
+      const e = { agentId: 'claude', ...ev } satisfies NormalizedAgentEvent
+      sendToMain(IPC.agentStatus, e)
+      recordAgentEvent(e)
+    },
+    chunk: ({ toolUseId, chunk }) => {
+      if (!win.isDestroyed()) win.webContents.send(IPC.agentSubagentActivity, { toolUseId, chunk })
+    }
+  })
   // Async subagents (Claude's default) end via a <task-notification> queued into the PARENT
   // transcript — their PostToolUse is only a launch ack (see the raw listener below). The
   // context tails already read that transcript, so they surface the notification here and we
@@ -2727,6 +2744,8 @@ app.whenReady().then(async () => {
         }
         nodeSubagents.delete(nodeId)
       }
+      // No Workflow wiring on the REMOTE branch: workflowTail fs-watches the transcript locally, and
+      // a remote node's Workflow transcripts live on the HOST — unreachable by a local watcher.
       return
     }
     const transcriptPath = safeTranscriptPath(p.transcript_path)
@@ -2749,11 +2768,24 @@ app.whenReady().then(async () => {
         if (nodeId) nodeSubagents.get(nodeId)?.delete(p.tool_use_id)
       }
     }
+    // Workflow tool: bracket the in-process fan-out's transcript watch on its own Pre/PostToolUse.
+    // Detected here in the RAW listener (normalize.ts maps tool_name 'Workflow' to a generic
+    // 'working' and stays untouched), the same way SUBAGENT_TOOLS is. transcriptPath is the JAILED
+    // one — never pass an unjailed path. end() runs its own final read + grace, so the PostToolUse
+    // may fire while agents are still flushing.
+    if (p.tool_use_id && p.tool_name === 'Workflow') {
+      if (p.hook_event_name === 'PreToolUse') {
+        workflowTail.begin(p.tool_use_id, nodeId, p.session_id, transcriptPath)
+      } else if (p.hook_event_name === 'PostToolUse') {
+        workflowTail.end(p.tool_use_id)
+      }
+    }
     // Session over → release any still-tracked async subagent tails for this node (their
     // task-notifications will never arrive once the session is gone).
     if (p.hook_event_name === 'SessionEnd' && nodeId) {
       for (const toolUseId of nodeSubagents.get(nodeId) ?? []) subagentTail.finish(toolUseId)
       nodeSubagents.delete(nodeId)
+      workflowTail.release(nodeId) // teardown parity with subagentTail on SessionEnd
     }
   })
 
@@ -2791,6 +2823,7 @@ app.whenReady().then(async () => {
       }
       nodeSubagents.delete(nodeId)
     }
+    workflowTail.release(nodeId) // teardown parity with subagentTail on pty:destroy/recycle
   }
   // A SECOND listener on these channels (PtyManager registers its own): both fire, in registration
   // order, on ipcMain AND in the platform's listener table — so a peer closing a node releases the

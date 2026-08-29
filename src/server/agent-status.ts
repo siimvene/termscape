@@ -14,6 +14,7 @@ import { recordAgentEvent, recordRawToolEvent, recordContextUsage,
   nodeState
 } from '../core/agent-status-mirror'
 import { createSubagentTail, type SubagentTail } from '../core/subagent-tail'
+import { createWorkflowAgentsTail, type WorkflowAgentsTail } from '../core/workflow-agents-tail'
 import { createContextTail, type ContextTail, type TaskNotification } from '../core/context-tail'
 import { geminiContextParse } from '../core/gemini-session'
 import { codexContextParse } from '../core/codex-session'
@@ -42,6 +43,7 @@ export interface HookLike {
 export interface WireAgentStatusOptions {
   hooks?: HookLike
   subagentTail?: SubagentTail
+  workflowTail?: WorkflowAgentsTail
   contextTail?: ContextTail
 }
 
@@ -72,6 +74,24 @@ export function wireAgentStatus(
     opts.subagentTail ??
     createSubagentTail(({ toolUseId, chunk }) => {
       platform.broadcast(IPC.agentSubagentActivity, { toolUseId, chunk })
+    })
+  // The Workflow tool spawns N agents IN-PROCESS: they fire no per-agent hooks, so the subagent
+  // tail can't see them. Their transcripts land under <transcript>/subagents/workflows/<wf_*>/;
+  // this tail watches those and emits the SAME subagent-start/-end + streamed chunks (synthetic
+  // toolUseId is the card key — no new renderer event kind), through the SAME two broadcast channels
+  // as subagentTail. Injectable like subagentTail so tests can drive it. begin()/end() are bracketed
+  // by the parent session's own Workflow PreToolUse/PostToolUse in the raw listener below.
+  const workflowTail =
+    opts.workflowTail ??
+    createWorkflowAgentsTail({
+      event: (ev) => {
+        const e = { agentId: 'claude', ...ev } satisfies NormalizedAgentEvent
+        platform.broadcast(IPC.agentStatus, e)
+        recordAgentEvent(e)
+      },
+      chunk: ({ toolUseId, chunk }) => {
+        platform.broadcast(IPC.agentSubagentActivity, { toolUseId, chunk })
+      }
     })
 
   // Async subagents (Claude's default) end via a <task-notification> queued into the PARENT
@@ -262,11 +282,25 @@ export function wireAgentStatus(
         if (nodeId) nodeSubagents.get(nodeId)?.delete(p.tool_use_id)
       }
     }
+    // Workflow tool: bracket the in-process fan-out's transcript watch on its own Pre/PostToolUse.
+    // Detected here in the RAW listener (normalize.ts maps tool_name 'Workflow' to a generic
+    // 'working' and stays untouched), the same way SUBAGENT_TOOLS is. transcriptPath is the JAILED
+    // one — never pass an unjailed path. end() runs its own final read + grace, so the PostToolUse
+    // may fire while agents are still flushing. (No SSH branch here — the server has no SSH-project
+    // manager, so every node it serves is local; the desktop's REMOTE branch has no Workflow wiring.)
+    if (p.tool_use_id && p.tool_name === 'Workflow') {
+      if (p.hook_event_name === 'PreToolUse') {
+        workflowTail.begin(p.tool_use_id, nodeId, p.session_id, transcriptPath)
+      } else if (p.hook_event_name === 'PostToolUse') {
+        workflowTail.end(p.tool_use_id)
+      }
+    }
     // Session over → release any still-tracked async subagent tails for this node (their
     // task-notifications will never arrive once the session is gone).
     if (p.hook_event_name === 'SessionEnd' && nodeId) {
       for (const toolUseId of nodeSubagents.get(nodeId) ?? []) subagentTail.finish(toolUseId)
       nodeSubagents.delete(nodeId)
+      workflowTail.release(nodeId) // teardown parity with subagentTail on SessionEnd
     }
   })
 
@@ -294,6 +328,7 @@ export function wireAgentStatus(
       for (const toolUseId of subs) subagentTail.finish(toolUseId)
       nodeSubagents.delete(nodeId)
     }
+    workflowTail.release(nodeId) // teardown parity with subagentTail on pty:destroy/recycle
   }
   platform.on(IPC.ptyDestroy, (nodeId: string) => releaseNodeTails(nodeId))
   platform.on(IPC.ptyRecycle, (nodeId: string) => releaseNodeTails(nodeId))

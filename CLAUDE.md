@@ -1230,6 +1230,34 @@ else, and its context links must keep classifying across restarts).
   (`<…>/<sessionId>/subagents/agent-<id>.jsonl`, matched by `tool_use_id` via the sibling
   `.meta.json`), tails it read-only, formats each line (assistant text + tool calls + results),
   and streams chunks over `agent:subagent-activity` into the store.
+- **Workflow (ultracode) agent visualization** — Claude Code's Workflow tool spawns N agents
+  in-process; they fire **no per-agent hooks** at all, so there is nothing to normalize per
+  agent. Only the PARENT session's `PreToolUse`/`PostToolUse` on `tool_name === 'Workflow'`
+  fire, and the shells' RAW listeners (mirroring how `SUBAGENT_TOOLS` is handled there) use that
+  pair to start/stop `core/workflow-agents-tail.ts`, which fs-tails
+  `<transcriptPath minus .jsonl>/subagents/workflows/<wf_runId>/journal.jsonl` for `started`/
+  `result` records (undocumented Claude internals — same risk tier as the Task subagent tail
+  above; expect to re-measure on CLI upgrades) — a killed/errored agent gets `started` but never
+  `result` (`end()`'s grace-window force-close heals it a card + end). Adoption is
+  **offset-from-current-size on the begin-time scan**: `begin()` readdirs the root IMMEDIATELY
+  (PreToolUse hooks are blocking, so the current run's `wf_*` dir cannot exist yet), adopting any
+  dir already there at its journal's current length — a PRIOR run's journal stays silent, only a
+  genuinely **resumed** run (which reuses its `wf_*` dir and appends) streams, and a dir appearing
+  later reads from offset 0. An ENOENT root at that first look is an ANSWER (no prior run ever
+  existed), never a deferred first scan. `end()` mirrors `subagent-tail.finish`: dirs stay OPEN
+  and streaming through a 1.5 s grace window (plus one late scan, so a sub-500 ms run is still
+  discovered), with the force-close at the window's END; `release()` marks dirs dropped so an
+  in-flight async read can never emit into a torn-down node. Dir→begin association is scoped to
+  the ROOT (concurrent Workflow calls on different nodes must never cross-attribute). Each event
+  re-enters the pipeline as an ordinary synthetic `subagent-start`/`subagent-end`
+  (`toolUseId: 'wfagent:<wfDirName>:<agentId>'`, `agentId: 'claude'`) plus chunks on the existing
+  `agent:subagent-activity` channel keyed by the same id — the renderer needed **zero** changes:
+  `state/agentNodes.ts` and Canvas's `agent:status`/`onSubagentActivity` listeners neither assume
+  a toolUseId shape nor gate on `SUBAGENT_CAPABLE` (that list only gates the shells' own decision
+  to attempt a tail). **Remote (SSH) sessions are a documented degrade, not wired**: the journal
+  lives on the host, and `workflow-agents-tail.ts` reads local disk only — no ControlMaster leg —
+  so a Workflow run on an SSH-project node shows the parent tool call's ordinary `working` state
+  and nothing more, exactly like before this feature.
 - **/loop, /schedule & /cron node** (agents in `RECURRING_CAPABLE`) — detected from the **tools**
   the agent invokes (robust; users often phrase it in natural language so the prompt rarely starts
   with the slash): `PreToolUse` for `Skill` (skill ∈ loop/schedule/cron), `CronCreate` (→ cron,
