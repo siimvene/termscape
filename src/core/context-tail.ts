@@ -144,6 +144,18 @@ export interface ContextTailOptions {
   /** Fired when a tracked session's transcript records a tool RESULT — see `hasToolResult`. */
   onToolResult?: (sessionId: string) => void
   /**
+   * Fired with every read's COMPLETE lines (torn tail carried to the next read) — the generic
+   * sibling of the two claude-shaped callbacks above, for an agent-specific sniffer the shell
+   * wires per tail (codex uses it to spot `SubAgentActivity` records in the parent rollout).
+   * `meta.initial` marks the session's FIRST delivery: those lines are a historical REPLAY (a
+   * tracked transcript's tail, up to INITIAL_READ_CAP), not live appends — a lifecycle sniffer
+   * must reconcile them (e.g. drop already-completed pairs) instead of treating them as events.
+   * Bounded caveat: the tail caps reads at INITIAL_READ_CAP and JUMPS the offset over larger
+   * bursts (only the latest usage matters to the meter), so a sniffer can miss records buried
+   * in a multi-MB append burst — consumers must heal from later records, degrade, never crash.
+   */
+  onLines?: (sessionId: string, lines: string[], meta: { initial: boolean }) => void
+  /**
    * How to read the used/window numbers out of this agent's transcript. Defaults to claude's
    * `parseLatestUsage`. gemini and codex pass their own (`core/gemini-session.ts`
    * `geminiContextParse`, `core/codex-session.ts` `codexContextParse`) because the numbers live
@@ -177,6 +189,8 @@ interface Tracked {
    * line would be lost and its subagent card stuck on working forever. Reset on offset jumps.
    */
   carry: Buffer | null
+  /** `onLines` has delivered at least once — its first delivery is flagged `initial` (a replay). */
+  linesSeen?: boolean
   /**
    * The window the PARSER last read out of the transcript itself, if it can state one (codex, and
    * gemini via its model id). `null` = never stated. Sticky like `used`/`model`: a chunk with no
@@ -276,6 +290,10 @@ export function createContextTail(
               opts.onTaskNotification(sessionId, n)
           }
           if (opts?.onToolResult && hasToolResult(completeLines)) opts.onToolResult(sessionId)
+          if (opts?.onLines && completeLines.length) {
+            opts.onLines(sessionId, completeLines, { initial: !t.linesSeen })
+            t.linesSeen = true
+          }
         }
       }
 

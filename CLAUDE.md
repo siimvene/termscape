@@ -1212,7 +1212,8 @@ else, and its context links must keep classifying across restarts).
   its `contextTail`, the hook-fed path authority). The browser's real reader is
   `buildTranscriptApi` in ws-bridge — deliberately NOT folded into `buildClaudeApi`, which the
   relay shares and must not adopt it.
-- **Subagent visualization** (agents in `SUBAGENT_CAPABLE`) — `subagent-start`/`subagent-end`
+- **Subagent visualization** (agents in `SUBAGENT_CAPABLE` — this bullet is claude's Task
+  mechanism; codex's hook-less mechanism is its own bullet below) — `subagent-start`/`subagent-end`
   normalized events (from Claude's `PreToolUse`/`PostToolUse` on tool `Agent`/`Task`, correlated
   by `tool_use_id`) drive a transient `state/agentNodes.ts` store. Claude launches subagents
   **async by default**: that PostToolUse is only a launch ack (`status:'async_launched'`), NOT the
@@ -1258,6 +1259,36 @@ else, and its context links must keep classifying across restarts).
   lives on the host, and `workflow-agents-tail.ts` reads local disk only — no ControlMaster leg —
   so a Workflow run on an SSH-project node shows the parent tool call's ordinary `working` state
   and nothing more, exactly like before this feature.
+- **Codex goal-mode subagent visualization** — a codex node's `spawn_agent` children (oh-my-codex
+  collaboration fleets) fire no hooks either, but two disk facts make them visible (measured,
+  codex-cli 0.146.0, live runs 2026-08-29): the PARENT rollout logs `SubAgentActivity` items
+  (`event_msg`/`item_completed`, `kind: started|completed`, `agent_thread_id`, `agent_path`), and
+  each child writes a full rollout into the SAME sessions tree with its thread id in the FILENAME,
+  a `session_meta` header self-declaring lineage + `agent_nickname`/`agent_role`, and
+  `task_complete.last_agent_message` as its result. Correlation is therefore EXPLICIT — no
+  adoption tricks. The trigger is the codex context tail's generic **`onLines`** callback (the
+  codex analogue of claude's task-notification sniff — the tail already reads the parent file):
+  `parseCodexSubagentActivity` (`core/codex-session.ts`, thread id validated before any filename
+  match) brackets `core/codex-agents-tail.ts`, which locates the child by filename under the
+  `sessions` root walked UP from the parent's path (`sessionsRootOf` — the literal `sessions`
+  segment, never a fixed dirname count, so a shallower future layout fails CLOSED instead of
+  walking above the jailed tree), streams its records (own formatter — codex's
+  `response_item`/`function_call` dialect, `arguments` is a JSON STRING), and emits synthetic
+  `subagent-start`/`-end` (`toolUseId: 'cxagent:<agentThreadId>'`, `agentId: 'codex'`;
+  subagentType = the child's role, label = `nickname · path leaf`). Same grace-window /
+  dropped-flag / carry-cap discipline as the workflow tail, plus four rules its consort pass
+  added: the FIRST `onLines` delivery is a historical REPLAY, so replayed started+completed
+  pairs are dropped (`liveCodexSubagentActivities` — a parent resume must not resurrect finished
+  children; an unpaired `started` is a live child and IS kept, which is the app-restart pickup);
+  a `completed` for a never-seen thread HEALS a card (its `started` fell into an offset-jumped
+  burst — `completed()` takes the same args as `started()` for exactly this); a `started` INSIDE
+  the grace window cancels the pending close (quick follow-up task) while one after the end
+  RE-OPENS the card without replaying (offset kept); and the final close DRAINS (bounded rounds),
+  because one read cap could lose a big backlog's trailing `task_complete`. `SUBAGENT_CAPABLE`
+  gained `codex` — that membership only lights the renderer's fan-out affordances; the tails do
+  the work. Remote (SSH) codex nodes: documented degrade (the gemini/codex raw-listener branch
+  already skips them; local disk only). A plain `codex exec` from a shell has no
+  `parent_thread_id` and is deliberately not attributed.
 - **/loop, /schedule & /cron node** (agents in `RECURRING_CAPABLE`) — detected from the **tools**
   the agent invokes (robust; users often phrase it in natural language so the prompt rarely starts
   with the slash): `PreToolUse` for `Skill` (skill ∈ loop/schedule/cron), `CronCreate` (→ cron,

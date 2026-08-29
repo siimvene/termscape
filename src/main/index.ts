@@ -179,9 +179,10 @@ import { retainUntilDismissed } from './notifications'
 import { installManagedAgentHooks } from '../core/agents/hooks'
 import { createSubagentTail } from '../core/subagent-tail'
 import { createWorkflowAgentsTail } from '../core/workflow-agents-tail'
+import { createCodexAgentsTail } from '../core/codex-agents-tail'
 import { createContextTail, type TaskNotification } from '../core/context-tail'
 import { geminiContextParse } from '../core/gemini-session'
-import { codexContextParse } from '../core/codex-session'
+import { codexContextParse, parseCodexSubagentActivity, liveCodexSubagentActivities } from '../core/codex-session'
 import { codexHome } from '../core/usage/codex-usage'
 import { grokRawFields, isAsyncSubagentLaunch, type NormalizedAgentEvent } from '../shared/agents/normalize'
 import { grokSessionDir, grokSessionsDir } from '../core/agents/grok-paths'
@@ -2114,13 +2115,61 @@ app.whenReady().then(async () => {
   // would mean changing `ContextTail.track(sessionId, path)` and the four call sites that depend on
   // it. The poller (offset reads, torn-line carry, change-gated push) is written once in
   // createContextTail; only the token keys differ, so only `parse` differs. Neither gets
-  // onTaskNotification/onToolResult: both are claude transcript features (subagent cards, the
-  // declined-ask rescue), and neither agent is in SUBAGENT_CAPABLE.
+  // onTaskNotification/onToolResult: both are claude-DIALECT scanners (task-notification lines,
+  // tool_result content blocks) that would parse nothing in another agent's transcript. Codex's
+  // subagent trigger rides the generic `onLines` instead (see its tail below); gemini has no
+  // subagent story and gets no callback at all.
   const geminiContextTail = createContextTail(pushContextUpdate, { parse: geminiContextParse })
   // Hand the gemini session-name reader its path authority (declared above the handlers that use
   // it, assigned here where the tail exists).
   geminiTranscriptPathFor = (sessionId) => geminiContextTail.pathFor(sessionId)
-  const codexContextTail = createContextTail(pushContextUpdate, { parse: codexContextParse })
+  // Codex goal-mode (`spawn_agent`) subagents fire no hooks; the PARENT rollout logs their
+  // lifecycle as SubAgentActivity records, and this tail is already reading that file — so the
+  // codex tail's `onLines` is the whole trigger (the codex analogue of claude's task-notification
+  // sniff above). The events re-enter the pipeline as ordinary synthetic subagent-start/-end +
+  // chunks on the existing channels, agentId 'codex'. Remote (SSH) codex nodes never reach this
+  // tail (the gemini/codex raw-listener branch skips them), so the local-disk reads are safe.
+  const codexAgentsTail = createCodexAgentsTail({
+    event: (ev) => {
+      const e = { agentId: 'codex', ...ev } satisfies NormalizedAgentEvent
+      sendToMain(IPC.agentStatus, e)
+      recordAgentEvent(e)
+    },
+    chunk: ({ toolUseId, chunk }) => {
+      if (!win.isDestroyed()) win.webContents.send(IPC.agentSubagentActivity, { toolUseId, chunk })
+    }
+  })
+  const codexContextTail = createContextTail(pushContextUpdate, {
+    parse: codexContextParse,
+    onLines: (sessionId, lines, meta) => {
+      // The first delivery is a historical REPLAY (a resumed/restarted parent's transcript tail):
+      // drop threads whose completed is in the same replay — they finished before we looked, and
+      // emitting the pair would resurrect a stale card on every resume. Unpaired starteds are
+      // still-live children and are kept (app-restart pickup).
+      let acts = parseCodexSubagentActivity(lines)
+      if (meta.initial) acts = liveCodexSubagentActivities(acts)
+      if (!acts.length) return
+      let nodeId: string | undefined
+      for (const [nid, sid] of nodeContextSession)
+        if (sid === sessionId) {
+          nodeId = nid
+          break
+        }
+      if (!nodeId) return // parent session not associated to a node (yet) — no card to hang off
+      for (const act of acts) {
+        // pathFor is safe here: onLines only ever fires from a read tick, long after this const
+        // is assigned (same reason the closure can reference codexContextTail at all). completed
+        // takes the same args as started so a thread whose 'started' was lost to an offset jump
+        // can still be HEALED into a card.
+        const parentPath = codexContextTail.pathFor(sessionId)
+        if (act.kind === 'started') {
+          codexAgentsTail.started(nodeId, sessionId, act.agentThreadId, act.agentPath, parentPath)
+        } else {
+          codexAgentsTail.completed(nodeId, sessionId, act.agentThreadId, act.agentPath, parentPath)
+        }
+      }
+    }
+  })
   // Remote (SSH-project) counterparts: a node whose pty runs on a remote host has its Claude
   // transcript on that host, so its meter / subagent transcript / search must read over the
   // project's ControlMaster. One RemoteFile bound to the SSH-project manager's own ssh runner
@@ -2665,7 +2714,10 @@ app.whenReady().then(async () => {
       // at Stop), so for codex the tail is released by `releaseNodeTails` on pty:destroy/recycle
       // instead. Handling it here regardless costs nothing and is correct the day codex's event
       // list grows.
-      if (p.hook_event_name === 'SessionEnd' && p.session_id) tail.untrack(p.session_id)
+      if (p.hook_event_name === 'SessionEnd' && p.session_id) {
+        tail.untrack(p.session_id)
+        if (agentId === 'codex' && nodeId) codexAgentsTail.release(nodeId)
+      }
       return
     }
     if (agentId !== 'claude') return
@@ -2824,6 +2876,7 @@ app.whenReady().then(async () => {
       nodeSubagents.delete(nodeId)
     }
     workflowTail.release(nodeId) // teardown parity with subagentTail on pty:destroy/recycle
+    codexAgentsTail.release(nodeId)
   }
   // A SECOND listener on these channels (PtyManager registers its own): both fire, in registration
   // order, on ipcMain AND in the platform's listener table — so a peer closing a node releases the
