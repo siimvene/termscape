@@ -1234,8 +1234,20 @@ else, and its context links must keep classifying across restarts).
 - **Workflow (ultracode) agent visualization** — Claude Code's Workflow tool spawns N agents
   in-process; they fire **no per-agent hooks** at all, so there is nothing to normalize per
   agent. Only the PARENT session's `PreToolUse`/`PostToolUse` on `tool_name === 'Workflow'`
-  fire, and the shells' RAW listeners (mirroring how `SUBAGENT_TOOLS` is handled there) use that
-  pair to start/stop `core/workflow-agents-tail.ts`, which fs-tails
+  fire, and the shells' RAW listeners (mirroring how `SUBAGENT_TOOLS` is handled there) START
+  `core/workflow-agents-tail.ts` on either of them (begin is idempotent). **The Workflow tool is
+  a BACKGROUND launch — its PostToolUse is only the ack, ~1 s after Pre, while the agents run for
+  minutes — so PostToolUse must never `end()` the tail** (the first ship did exactly that and
+  grace-closed the watch before the journal had a record: no cards at all). The real end is the
+  `<task-notification>` queued into the parent transcript, which carries the Workflow call's own
+  `tool_use_id` = the begin key — `onTaskNotification` in both shells calls `workflowTail.end`
+  unconditionally (an unknown key is a no-op, so no workflow-vs-Task discrimination is needed).
+  A run whose notification never lands is closed by the tail's own idle backstop (all agents
+  ended + disk quiet past `IDLE_CLOSE_MS`; a begin that never grows a dir drops after
+  `BEGIN_ORPHAN_MS`), with SessionEnd / node teardown as the last resort. Closed dirs are KEPT
+  in the map until release — deleting them would let a still-active begin on the same root
+  (concurrent workflows on one node) re-adopt an ended run's dir at offset 0 and replay its
+  journal as duplicate cards. The tail fs-tails
   `<transcriptPath minus .jsonl>/subagents/workflows/<wf_runId>/journal.jsonl` for `started`/
   `result` records (undocumented Claude internals — same risk tier as the Task subagent tail
   above; expect to re-measure on CLI upgrades) — a killed/errored agent gets `started` but never

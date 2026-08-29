@@ -31,8 +31,14 @@ const LABEL_ATTEMPTS_MAX = 3
 // is DROPPED (the line's tail then fails to parse and is skipped — degraded, bounded).
 const CARRY_CAP = 4 * SUBAGENT_READ_CAP
 // end() mirrors subagent-tail.finish: the dir keeps streaming through this grace window (files may
-// still be flushing when the PostToolUse fires) and the force-close runs at the END of it.
+// still be flushing when the notification lands) and the force-close runs at the END of it.
 const END_GRACE_MS = 1500
+// Backstops for a run whose <task-notification> never reaches us (TaskStop, a notification line
+// swallowed by a context-tail offset jump): a dir whose agents ALL ended and whose files have been
+// quiet this long is force-closed, and a begin that never grew a dir is dropped — otherwise the
+// 500 ms poll and any unfinished card live until node teardown.
+const IDLE_CLOSE_MS = 10 * 60_000
+const BEGIN_ORPHAN_MS = 30 * 60_000
 // journal.jsonl agentIds are lowercase hex; a 'started'/'result' record is parsed DATA, so a forged
 // agentId ('../../evil') must be refused before it can build a path — validate before any fs use.
 const AGENT_ID_RE = /^[0-9a-f]{1,64}$/
@@ -67,6 +73,8 @@ interface BeginEntry {
   adopted: boolean
   /** At least one wf_* dir has been attached to this begin (association book-keeping). */
   hasDir: boolean
+  /** When begin() registered — a begin that never grows a dir is dropped after BEGIN_ORPHAN_MS. */
+  at: number
 }
 
 interface AgentState {
@@ -93,9 +101,14 @@ interface WfDir {
   journalOffset: number
   journalCarry: Buffer | null
   agents: Map<string, AgentState>
+  /** Last time the journal or an agent transcript grew, or an agent registered — the idle clock. */
+  lastActivityAt: number
   /** An async read is in flight — the next tick skips this dir instead of double-reading. */
   reading?: boolean
-  /** end()'s grace-window force-close ran — ticks skip it. */
+  /** The force-close ran (end() grace or idle backstop) — ticks skip it. The entry is KEPT in the
+   *  map until release(): deleting it would let a still-active begin on the SAME root (concurrent
+   *  workflows on one node) re-adopt this dir at offset 0 and replay its whole journal as
+   *  duplicate cards. */
   closed?: boolean
   /** release() tore this node down. An in-flight async read still holds the object, so every
    *  emission site re-checks this flag — a dropped dir must never emit (stale-card resurrection). */
@@ -123,20 +136,28 @@ function capCarry(carry: Buffer | null): Buffer | null {
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
-export function createWorkflowAgentsTail(deps: {
-  event: (ev: WorkflowAgentEvent) => void
-  chunk: (payload: { toolUseId: string; chunk: string }) => void
-}): WorkflowAgentsTail {
+export function createWorkflowAgentsTail(
+  deps: {
+    event: (ev: WorkflowAgentEvent) => void
+    chunk: (payload: { toolUseId: string; chunk: string }) => void
+  },
+  opts?: { idleCloseMs?: number; beginOrphanMs?: number } // test-speed overrides only
+): WorkflowAgentsTail {
+  const idleCloseMs = opts?.idleCloseMs ?? IDLE_CLOSE_MS
+  const beginOrphanMs = opts?.beginOrphanMs ?? BEGIN_ORPHAN_MS
   // Insertion order matters: it is the "oldest → newest" order association walks.
   const begins = new Map<string, BeginEntry>()
   const dirs = new Map<string, WfDir>() // keyed by full dir path (globally unique)
   let timer: ReturnType<typeof setInterval> | null = null
 
+  // Closed dirs are KEPT in the map (see WfDir.closed), so idleness is "no begin and no dir still
+  // needing ticks", never map sizes.
   const stopTimerIfIdle = (): void => {
-    if (!begins.size && !dirs.size && timer) {
-      clearInterval(timer)
-      timer = null
-    }
+    if (!timer) return
+    if (begins.size) return
+    for (const d of dirs.values()) if (!d.closed && !d.dropped) return
+    clearInterval(timer)
+    timer = null
   }
 
   // Attach a newly discovered dir to a begin() ON THE SAME ROOT: the oldest active one that has no
@@ -201,6 +222,7 @@ export function createWorkflowAgentsTail(deps: {
         return
       }
       a.jsonlOffset += len
+      dir.lastActivityAt = Date.now()
       const data = a.jsonlCarry?.length ? Buffer.concat([a.jsonlCarry, buf]) : buf
       const { text, carry } = splitCompleteLines(data)
       a.jsonlCarry = capCarry(carry)
@@ -303,6 +325,7 @@ export function createWorkflowAgentsTail(deps: {
     if (typeof agentId !== 'string' || !AGENT_ID_RE.test(agentId)) return // forged/garbled — refuse
     if (dir.agents.has(agentId)) return
     dir.agents.set(agentId, makeAgent(dir, agentId))
+    dir.lastActivityAt = Date.now()
   }
 
   const handleResult = async (dir: WfDir, agentId: unknown, resultText: unknown): Promise<void> => {
@@ -341,6 +364,7 @@ export function createWorkflowAgentsTail(deps: {
       return
     }
     dir.journalOffset += len
+    dir.lastActivityAt = Date.now()
     const data = dir.journalCarry?.length ? Buffer.concat([dir.journalCarry, buf]) : buf
     const { text, carry } = splitCompleteLines(data)
     dir.journalCarry = capCarry(carry)
@@ -415,14 +439,50 @@ export function createWorkflowAgentsTail(deps: {
         beginKey: assoc.key,
         journalOffset,
         journalCarry: null,
-        agents: new Map()
+        agents: new Map(),
+        lastActivityAt: Date.now()
       })
     }
   }
 
+  // Force-close a dir: bounded wait for an in-flight tick read, one final drain, heal-start any
+  // straggler, emit its end, mark closed. The entry is KEPT in the map — see WfDir.closed.
+  const closeDir = async (dir: WfDir): Promise<void> => {
+    for (let i = 0; dir.reading && i < 20; i++) await sleep(50)
+    if (dir.dropped || dir.closed) return
+    if (!dir.reading) await readDir(dir)
+    for (const a of dir.agents.values()) {
+      if (a.ended) continue
+      if (!a.started) await tryEmitStart(dir, a, true) // the card must exist before ending
+      await tailAgent(dir, a, true)
+      emitEnd(dir, a)
+    }
+    dir.closed = true
+  }
+
   const tick = (): void => {
+    const now = Date.now()
+    // A begin that never grew a dir: the workflow crashed pre-journal or its notification is the
+    // only thing that will ever reference it — stop scanning its root eventually.
+    for (const [key, b] of begins) if (!b.hasDir && now - b.at > beginOrphanMs) begins.delete(key)
     for (const b of begins.values()) void scanRoot(b)
-    for (const dir of dirs.values()) void readDir(dir)
+    for (const dir of dirs.values()) {
+      if (dir.closed || dir.dropped) continue
+      // Idle backstop for a LOST notification: every agent ended and nothing on disk has grown
+      // for the window — the run is over, close it (and drop its begin) instead of polling and
+      // holding state until node teardown. A run between agent waves resets the clock the moment
+      // its journal grows; a wave gap longer than the window is a documented degrade.
+      if (
+        dir.agents.size > 0 &&
+        now - dir.lastActivityAt > idleCloseMs &&
+        [...dir.agents.values()].every((a) => a.ended)
+      ) {
+        begins.delete(dir.beginKey)
+        void closeDir(dir)
+        continue
+      }
+      void readDir(dir)
+    }
     stopTimerIfIdle()
   }
 
@@ -436,7 +496,8 @@ export function createWorkflowAgentsTail(deps: {
         sessionId,
         root,
         adopted: false,
-        hasDir: false
+        hasDir: false,
+        at: Date.now()
       }
       begins.set(wfToolUseId, b)
       // Immediate first scan — the adoption trick's correctness depends on it running BEFORE the
@@ -460,21 +521,7 @@ export function createWorkflowAgentsTail(deps: {
         if (b) await scanRoot(b, true)
         setTimeout(() => {
           void (async () => {
-            const closing = [...dirs.values()].filter((d) => d.beginKey === wfToolUseId)
-            for (const dir of closing) {
-              // Bounded wait for an in-flight tick read, so the final pass sees its offsets.
-              for (let i = 0; dir.reading && i < 20; i++) await sleep(50)
-              if (dir.dropped) continue // release() landed during the grace window
-              await readDir(dir)
-              for (const a of dir.agents.values()) {
-                if (a.ended) continue
-                if (!a.started) await tryEmitStart(dir, a, true) // the card must exist before ending
-                await tailAgent(dir, a, true)
-                emitEnd(dir, a)
-              }
-              dir.closed = true
-              dirs.delete(dir.path)
-            }
+            for (const dir of dirs.values()) if (dir.beginKey === wfToolUseId) await closeDir(dir)
             stopTimerIfIdle()
           })()
         }, END_GRACE_MS)

@@ -308,6 +308,67 @@ describe('createWorkflowAgentsTail', () => {
     expect(end.result).toBe('late flush') // grace kept the dir open — not a bare force-close
   }, 15000)
 
+  it('9. an ended run is never re-adopted: post-end journal appends emit nothing', async () => {
+    // The finalizer KEEPS the closed dir in the map — deleting it would let a still-active begin
+    // on the same root re-adopt the dir at offset 0 and replay the whole journal as fresh cards.
+    const h = setup()
+    cleanups.push(h.base)
+    fs.mkdirSync(h.root, { recursive: true })
+    const { tail, events } = makeTail()
+    tail.begin('wf-tool-9a', 'nodeI', 'sessI', h.transcriptPath)
+    await wait(200)
+    const dir = mkWfDir(h, 'wf_ended')
+    writeAgent(dir, 'aaa', 'claude-opus-4-8', 'first run')
+    fs.writeFileSync(
+      path.join(dir, 'journal.jsonl'),
+      jrec('started', 'aaa') + '\n' + jrec('result', 'aaa', 'done') + '\n'
+    )
+    await vi.waitFor(() => expect(events.find((e) => e.kind === 'subagent-end')).toBeTruthy(), {
+      timeout: 8000,
+      interval: 100
+    })
+    tail.end('wf-tool-9a')
+    // A SECOND workflow begins on the same root while the first run's dir sits on disk.
+    tail.begin('wf-tool-9b', 'nodeI', 'sessI', h.transcriptPath)
+    await wait(2200) // past the first end's grace; several ticks for 9b's scans
+    const count = events.length
+    fs.appendFileSync(path.join(dir, 'journal.jsonl'), jrec('started', 'bbb') + '\n')
+    await wait(1400)
+    expect(events.length).toBe(count) // the ended dir stayed closed — no replay, no new cards
+    tail.release('nodeI')
+  }, 20000)
+
+  it('10. idle backstop: a run whose notification never arrives closes itself', async () => {
+    const h = setup()
+    cleanups.push(h.base)
+    fs.mkdirSync(h.root, { recursive: true })
+    const events: import('./workflow-agents-tail').WorkflowAgentEvent[] = []
+    const tail = createWorkflowAgentsTail(
+      { event: (ev) => events.push(ev), chunk: () => {} },
+      { idleCloseMs: 800, beginOrphanMs: 60_000 }
+    )
+    tail.begin('wf-tool-10', 'nodeJ', 'sessJ', h.transcriptPath)
+    await wait(200)
+    const dir = mkWfDir(h, 'wf_lost')
+    writeAgent(dir, 'aaa', 'claude-opus-4-8', 'lost notification')
+    fs.writeFileSync(
+      path.join(dir, 'journal.jsonl'),
+      jrec('started', 'aaa') + '\n' + jrec('result', 'aaa', 'finished quietly') + '\n'
+    )
+    // NO tail.end() ever — the notification is lost. The agent ends via its journal result, and
+    // once the dir has been quiet past idleCloseMs the tail closes the run on its own.
+    await vi.waitFor(() => expect(events.find((e) => e.kind === 'subagent-end')).toBeTruthy(), {
+      timeout: 8000,
+      interval: 100
+    })
+    await wait(2500) // past the idle window + a few ticks
+    const count = events.length
+    fs.appendFileSync(path.join(dir, 'journal.jsonl'), jrec('started', 'ccc') + '\n')
+    await wait(1400)
+    expect(events.length).toBe(count) // closed by the backstop — late appends are a degrade, not cards
+    tail.release('nodeJ')
+  }, 20000)
+
   it('6. survives an agent transcript line torn across two reads (carry)', async () => {
     const h = setup()
     cleanups.push(h.base)

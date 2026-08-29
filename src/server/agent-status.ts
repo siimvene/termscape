@@ -116,6 +116,12 @@ export function wireAgentStatus(
     recordAgentEvent(taskDoneEvent)
     subagentTail.finish(n.toolUseId)
     nodeSubagents.get(nodeId)?.delete(n.toolUseId)
+    // A WORKFLOW's real end is this notification too — its PostToolUse is only the background
+    // launch ack (measured: the tool returns "Workflow launched in background" within ~1 s, while
+    // the agents run for minutes). The notification carries the Workflow call's own tool_use_id,
+    // which is exactly the begin key; end() on a toolUseId that never began is a no-op, so this
+    // needs no workflow-vs-task discrimination.
+    workflowTail.end(n.toolUseId)
   }
 
   /** See the identical handler in src/main/index.ts: a tool RESULT settles an ask that ended with
@@ -334,17 +340,19 @@ export function wireAgentStatus(
         if (nodeId) nodeSubagents.get(nodeId)?.delete(p.tool_use_id)
       }
     }
-    // Workflow tool: bracket the in-process fan-out's transcript watch on its own Pre/PostToolUse.
-    // Detected here in the RAW listener (normalize.ts maps tool_name 'Workflow' to a generic
-    // 'working' and stays untouched), the same way SUBAGENT_TOOLS is. transcriptPath is the JAILED
-    // one — never pass an unjailed path. end() runs its own final read + grace, so the PostToolUse
-    // may fire while agents are still flushing. (No SSH branch here — the server has no SSH-project
-    // manager, so every node it serves is local; the desktop's REMOTE branch has no Workflow wiring.)
+    // Workflow tool: start the in-process fan-out's transcript watch on PreToolUse. Detected here
+    // in the RAW listener (normalize.ts maps tool_name 'Workflow' to a generic 'working' and stays
+    // untouched), the same way SUBAGENT_TOOLS is. transcriptPath is the JAILED one — never pass an
+    // unjailed path. PostToolUse must NOT end the watch: the Workflow tool runs in the BACKGROUND,
+    // so its PostToolUse is only the launch ack (~1 s after Pre — ending there grace-closed the
+    // tail before the journal had a single record, which shipped as "no cards at all"). The real
+    // end is the <task-notification> carrying the same tool_use_id — see onTaskNotification.
+    // Post still calls begin() (idempotent) so a listener that missed the Pre still watches.
+    // (No SSH branch here — the server has no SSH-project manager, so every node it serves is
+    // local; the desktop's REMOTE branch has no Workflow wiring.)
     if (p.tool_use_id && p.tool_name === 'Workflow') {
-      if (p.hook_event_name === 'PreToolUse') {
+      if (p.hook_event_name === 'PreToolUse' || p.hook_event_name === 'PostToolUse') {
         workflowTail.begin(p.tool_use_id, nodeId, p.session_id, transcriptPath)
-      } else if (p.hook_event_name === 'PostToolUse') {
-        workflowTail.end(p.tool_use_id)
       }
     }
     // Session over → release any still-tracked async subagent tails for this node (their
