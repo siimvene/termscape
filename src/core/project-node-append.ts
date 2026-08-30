@@ -9,6 +9,7 @@
 // an unsafe id (it becomes a tmux session name).
 
 import { agentConfig } from '../shared/agents/config'
+import { isSafeNodeId } from '../shared/safe-id'
 import { isSafeAccountId } from './claude-accounts-core'
 
 /** What the phone is allowed to choose; everything else is host-derived. */
@@ -50,8 +51,61 @@ function isSshSpec(value: unknown): boolean {
   return typeof c.host === 'string' && c.host !== '' && typeof c.user === 'string' && c.user !== ''
 }
 
+/**
+ * Narrow an off-machine argument into the four fields a remote caller is allowed to choose, or
+ * REFUSE it whole (`null`). Used by the `workspace:register-node` handler
+ * (WorkspaceStore.registerIpc), where the payload arrives as JSON from a WS-RPC client rather than
+ * from a typed in-process caller.
+ *
+ * It does NOT judge the VALUES — `appendProjectNode` below owns the id alphabet and the account
+ * alphabet, and a second copy of those is the one that drifts. What it owns is the far narrower
+ * question of whether each field is the right KIND of thing, and the answer to "no" is a refusal,
+ * never a repair.
+ *
+ * That distinction is the whole point, and it was learned the expensive way. The first version
+ * simply DROPPED a field of the wrong type, which reads as harmless until you follow `accountId`:
+ * appendProjectNode deliberately refuses a bad one rather than writing the node without it (see the
+ * comment at that check — quietly dropping it resurrects the wrong-identity bug the field exists to
+ * fix), and dropping it HERE turned that refusal into dead code. A malformed request would have
+ * been answered `true`, with the session silently registered against the system account: every
+ * account-scoped reader then resolves in the wrong root, and a cold restore resumes the
+ * conversation as the wrong identity. A request we cannot read is refused, not reinterpreted as a
+ * different, weaker request that happens to be expressible.
+ *
+ * `null` is the one exception, and it is an interop rule rather than a leniency: a JSON encoder
+ * asked to write an absent optional very commonly emits `null` (Swift's `encode` versus
+ * `encodeIfPresent` is exactly this fork, and the client this serves is a Swift one), and no
+ * field-level equivalent of the wire protocol's `undef` marker exists to tell the two apart. So
+ * `null` means "omitted" and every OTHER wrong type — a number, an object, an array, a boolean —
+ * means "this request is malformed", which is the honest reading of both.
+ */
+export function remoteNodeInput(value: unknown): RemoteNodeInput | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null
+  const v = value as Record<string, unknown>
+  if (typeof v.id !== 'string') return null
+  const input: RemoteNodeInput = { id: v.id }
+  for (const key of ['title', 'agentId', 'accountId'] as const) {
+    const raw = v[key]
+    if (raw === undefined || raw === null) continue
+    if (typeof raw !== 'string') return null
+    input[key] = raw
+  }
+  return input
+}
+
 export function appendProjectNode(raw: string, input: RemoteNodeInput, now: Date): string | null {
-  if (!SAFE_NODE_ID.test(input.id)) return null
+  // Two predicates, both required, because they bound different things and neither subsumes the
+  // other. SAFE_NODE_ID owns the SHAPE (the boring `term-<alnum>-<alnum≤16>` alphabet that stays
+  // safe as a tmux session name); its middle segment is unbounded, so it alone accepts a 136-char
+  // id. isSafeNodeId owns the LENGTH — the same NODE_ID_MAX=128 cap the pty boundary enforces in
+  // PtyManager.create. Without it a registration could answer TRUE and persist a node whose
+  // persistKey pty:create then REJECTS as too long, so the node exists on the canvas but its
+  // session can never be opened: a dead node plus rev churn, on both this channel and the
+  // pre-existing desktop relay registerNode path. ANDed rather than swapped: isSafeNodeId's charset
+  // (`[A-Za-z0-9._-]`, uppercase and dots and arbitrary structure) is a strict SUPERSET of the
+  // term-shape, so replacing SAFE_NODE_ID with it would widen the accepted set and break the
+  // boring-session-name invariant. Keeping both keeps the narrow shape and merely adds the ≤128 bound.
+  if (!SAFE_NODE_ID.test(input.id) || !isSafeNodeId(input.id)) return null
   // Refused, not silently dropped: an account id becomes a config-DIR path segment
   // (`claude-accounts/<id>`, `~/.nodeterm/claude-accounts/<id>` on a host), so a bad one must never
   // reach the file — and quietly writing the node WITHOUT it would resurrect exactly the
@@ -72,6 +126,15 @@ export function appendProjectNode(raw: string, input: RemoteNodeInput, now: Date
     return null
   }
   if (root.version !== 1 || typeof root.rev !== 'number' || !Array.isArray(root.nodes)) return null
+  // Every ELEMENT has to be an object too, not just the array. `"nodes":[null]` is perfectly valid
+  // JSON, so the parse above accepts it and the "unparsable file" refusal never fires — and the
+  // reads below (`n.kind` in isTerminal, `n.position`/`n.size` in the placement scan) then throw on
+  // it. A throw here is not a worse `null`: this function's callers turn `null` into an honest
+  // `false`, while a throw escapes as a rejected promise, which the `workspace:register-node`
+  // channel delivers to a remote client as a transport-level handler error instead of the boolean
+  // its contract promises. Refused at the boundary rather than with `n?.` at each read, because
+  // there are several reads and the next one added would not know to guard itself.
+  if (!root.nodes.every((n) => typeof n === 'object' && n !== null && !Array.isArray(n))) return null
   const nodes = root.nodes as Array<Record<string, unknown>>
   if (nodes.some((n) => n?.id === input.id)) return null
 
@@ -166,7 +229,27 @@ export function removeProjectNode(raw: string, nodeId: string, now: Date): strin
   }
   if (root.version !== 1 || typeof root.rev !== 'number' || !Array.isArray(root.nodes)) return null
   const nodes = root.nodes as Array<Record<string, unknown>>
-  if (!nodes.some((n) => n?.id === nodeId)) return null
+  const target = nodes.find((n) => n?.id === nodeId)
+  if (!target) return null
+  // Terminal-only, restoring this function's documented "a DESTROYED session's node" contract. A
+  // node's `kind` is absent (legacy default = terminal) or one of terminal/sticky/group/editor/…;
+  // only a terminal has a tmux session behind it, and removal here is the file-half of the relay's
+  // pty.destroy ("End session"). Without the guard, a caller that names an arbitrary id could
+  // delete a sticky note, or a GROUP FRAME whose children then point at a parent that no longer
+  // exists — nodeStatesToFlow re-emits them with `extent:'parent'` against a missing node, and a
+  // worktree-bound frame's ungroup/unbind is bypassed, persisting a dead cwd. Refuse (honest false)
+  // rather than delete something the caller had no session-level business touching.
+  //
+  // THIS GUARD, not the transport, is what makes the terminal-only contract true. It is tempting to
+  // argue the relay's pty.destroy could only ever reach a terminal because it targets an ATTACHED
+  // stream's persistKey, and that only the new arbitrary-id `workspace:remove-node` channel needs
+  // guarding. That reasoning is wrong, and believing it is how the guard would get deleted as
+  // redundant: relay `pty.attach` takes a CLIENT-CHOSEN node id, does not check canvas membership
+  // or kind, and `attachDetached`'s `tmux new-session -A` will CREATE a session for it (see
+  // `handleAttach` in main/remote/host-service.ts). Attaching proves a tmux session exists, never
+  // that the id names a terminal node on anybody's canvas. Both transports need this.
+  const kind = (target.kind as string | undefined) ?? 'terminal'
+  if (kind !== 'terminal') return null
 
   root.nodes = nodes.filter((n) => n?.id !== nodeId)
   root.rev = (root.rev as number) + 1

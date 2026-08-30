@@ -24,7 +24,7 @@ import { readProjectCapabilities, type ProjectCapability } from '../shared/proje
 import type { CapabilityAckMap } from './project-capability-consent'
 import { hoistLegacyNodeExec, type LocalNodeExecMap } from '../shared/node-exec'
 import { collisionSeed, derivedProjectId, freshProjectId } from '../shared/project-id'
-import { appendProjectNode, removeProjectNode, type RemoteNodeInput } from './project-node-append'
+import { appendProjectNode, remoteNodeInput, removeProjectNode, type RemoteNodeInput } from './project-node-append'
 
 /** Checked remote read: `absent` (no file — safe to push our cache) is NOT `error` (connection
  *  down / ssh failure — a failed read is never evidence of absence, so nothing may be pushed). */
@@ -180,6 +180,26 @@ export class WorkspaceStore {
     platform().handle(IPC.projectSettingsUpdateLocal,
       (projectId: unknown, local: ProjectLocalSettings | undefined) =>
         typeof projectId === 'string' ? this.updateLocalProjectSettings(projectId, local) : false)
+    // A client that started its own session (a phone on the WS-RPC bridge; see docs/mobile-client-
+    // spec.md) asking for it to become a node. The desktop reaches the same two store methods
+    // through the relay (`projects.registerNode` / `pty.destroy` in main/remote/host-service.ts);
+    // registering them HERE is what gives the Server Edition the door, since that host service does
+    // not exist on this shell.
+    //
+    // The args arrive from off-machine, so they are narrowed to the four fields the caller is
+    // allowed to choose before they reach the store — everything else about the node is host-derived
+    // in `appendProjectNode`, which also owns the id/account alphabets. A malformed argument is a
+    // `false`, the same answer every other refusal on this path gives, and it is answered WITHOUT
+    // touching disk: `remoteNodeInput` returns null for a payload whose fields are the wrong kind of
+    // thing rather than dropping them, so a bad `accountId` can never reach the file as an absent
+    // one (see the note on that function for what dropping it costs).
+    platform().handle(IPC.workspaceRegisterNode, (projectId: unknown, node: unknown) => {
+      if (typeof projectId !== 'string' || !projectId) return false
+      const input = remoteNodeInput(node)
+      return input ? this.appendRemoteNode(projectId, input) : false
+    })
+    platform().handle(IPC.workspaceRemoveNode, (nodeId: unknown) =>
+      typeof nodeId === 'string' && nodeId ? this.removeRemoteNode(nodeId) : false)
   }
 
   /**

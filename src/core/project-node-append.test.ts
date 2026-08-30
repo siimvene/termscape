@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { appendProjectNode, removeProjectNode } from './project-node-append'
+import { appendProjectNode, remoteNodeInput, removeProjectNode } from './project-node-append'
 
 const NOW = new Date('2026-07-16T10:00:00.000Z')
 
@@ -172,6 +172,19 @@ describe('appendProjectNode', () => {
     expect(appendProjectNode(baseFile([]), { id: 'term-m1a2b3c-4f8a2c1b' }, NOW)).not.toBeNull()
   })
 
+  it('refuses an over-length id the pty layer would reject (NODE_ID_MAX bound), accepts one at the cap', () => {
+    // SAFE_NODE_ID's middle segment is unbounded, so shape alone accepts a 129-over id; the shared
+    // isSafeNodeId cap (NODE_ID_MAX=128) is what refuses it. Without this an over-long id could
+    // register a node whose persistKey pty:create then rejects, so the node exists but its session
+    // can never open. `term-<121×a>-1` is exactly 128 (accepted); one `a` more is 129 (refused).
+    const at = `term-${'a'.repeat(121)}-1`
+    const over = `term-${'a'.repeat(122)}-1`
+    expect(at.length).toBe(128)
+    expect(over.length).toBe(129)
+    expect(appendProjectNode(baseFile([]), { id: at }, NOW)).not.toBeNull()
+    expect(appendProjectNode(baseFile([]), { id: over }, NOW)).toBeNull()
+  })
+
   it('sanitizes title/agentId: non-strings dropped, title capped', () => {
     const f = JSON.parse(
       appendProjectNode(baseFile([]), { id: 'term-c-1', title: 'x'.repeat(500), agentId: 123 as never }, NOW)!
@@ -219,5 +232,87 @@ describe('removeProjectNode', () => {
     expect(removeProjectNode('{"version":99,"rev":1,"nodes":[]}', 'term-aaa-1', NOW)).toBeNull()
     expect(removeProjectNode('{"version":1}', 'term-aaa-1', NOW)).toBeNull()
     expect(removeProjectNode(baseFile(two), '', NOW)).toBeNull()
+  })
+
+  it('removes ONLY terminal-kind nodes — refuses a group/sticky/editor id, leaving the file untouched', () => {
+    // "End session" removes a session's node; a non-terminal has no tmux session behind it. The
+    // legacy relay pty.destroy could only reach terminals (its target came from an attached
+    // stream's persistKey); the arbitrary-id workspace:remove-node channel must not become a way to
+    // delete a group FRAME (whose children would then dangle at a missing parent) or a sticky note.
+    const mixed = [
+      { ...sibling, id: 'term-t-1' },
+      { id: 'group-g-1', kind: 'group', position: { x: 0, y: 0 } },
+      { id: 'sticky-s-1', kind: 'sticky', position: { x: 0, y: 0 } },
+      { id: 'editor-e-1', kind: 'editor', position: { x: 0, y: 0 } }
+    ]
+    for (const id of ['group-g-1', 'sticky-s-1', 'editor-e-1']) {
+      expect(removeProjectNode(baseFile(mixed), id, NOW)).toBeNull()
+    }
+    // A terminal still goes: an explicit `kind:'terminal'`, and one with kind ABSENT (legacy
+    // default = terminal), and an `ssh-`-prefixed terminal — the guard reads `kind`, not the id.
+    const explicit = JSON.parse(removeProjectNode(baseFile(mixed), 'term-t-1', NOW)!)
+    expect(explicit.nodes.map((n: { id: string }) => n.id)).toEqual([
+      'group-g-1', 'sticky-s-1', 'editor-e-1'
+    ])
+    const noKind = [{ id: 'term-nk-1', position: { x: 0, y: 0 } }, { id: 'group-g-1', kind: 'group' }]
+    const out = JSON.parse(removeProjectNode(baseFile(noKind), 'term-nk-1', NOW)!)
+    expect(out.nodes.map((n: { id: string }) => n.id)).toEqual(['group-g-1'])
+    const sshNode = [{ id: 'ssh-h-1', kind: 'terminal', position: { x: 0, y: 0 } }]
+    expect(removeProjectNode(baseFile(sshNode), 'ssh-h-1', NOW)).not.toBeNull()
+  })
+})
+
+describe('remoteNodeInput', () => {
+  // Shape only. The VALUES are judged by appendProjectNode (id alphabet, account alphabet) — a
+  // second copy of that judgement here is the one that drifts.
+  it('keeps the four fields a remote caller may choose and drops everything else', () => {
+    expect(remoteNodeInput({
+      id: 'term-aaa-1', title: 'Phone', agentId: 'codex', accountId: 'acc1',
+      cwd: '/etc', shell: '/bin/sh', position: { x: 9, y: 9 }
+    })).toEqual({ id: 'term-aaa-1', title: 'Phone', agentId: 'codex', accountId: 'acc1' })
+  })
+
+  // The one that matters: appendProjectNode REFUSES a bad accountId rather than writing the node
+  // without it, because a node registered as the system account resolves every account-scoped read
+  // in the wrong root. Dropping the field here would answer `true` and make that refusal dead code.
+  it('REFUSES a present field of the wrong type rather than dropping it', () => {
+    expect(remoteNodeInput({ id: 'term-aaa-1', accountId: 7 })).toBeNull()
+    expect(remoteNodeInput({ id: 'term-aaa-1', accountId: { dir: '/x' } })).toBeNull()
+    expect(remoteNodeInput({ id: 'term-aaa-1', agentId: ['codex'] })).toBeNull()
+    expect(remoteNodeInput({ id: 'term-aaa-1', title: 7 })).toBeNull()
+  })
+
+  // …but `null` is how a JSON encoder writes an ABSENT optional (Swift's encode vs encodeIfPresent),
+  // and no field-level `undef` marker exists to tell the two apart. Refusing it would fail every
+  // well-behaved client that spells "no managed account" that way.
+  it('reads null as omitted, so an absent optional is not a malformed request', () => {
+    expect(remoteNodeInput({ id: 'term-aaa-1', title: null, agentId: null, accountId: null }))
+      .toEqual({ id: 'term-aaa-1' })
+    expect(remoteNodeInput({ id: 'term-aaa-1', accountId: undefined })).toEqual({ id: 'term-aaa-1' })
+  })
+
+  it('refuses a payload that is not an object, or whose id is not a string', () => {
+    for (const v of [null, undefined, 'nope', 42, [], { }, { id: 42 }, { id: null }]) {
+      expect(remoteNodeInput(v)).toBeNull()
+    }
+  })
+})
+
+describe('appendProjectNode: malformed node ELEMENTS', () => {
+  // "nodes":[null] is valid JSON, so the unparsable-file refusal never fires and the reads below
+  // (isTerminal's n.kind, the placement scan's n.position) would throw. A throw is not a worse
+  // null: the register-node channel promises the caller a boolean, and a rejected promise reaches a
+  // remote client as a transport-level handler error instead.
+  it('refuses a nodes array holding a non-object element instead of throwing', () => {
+    const input = { id: 'term-aaa-1' }
+    for (const bad of ['null', '42', '"str"', '[]']) {
+      const raw = `{"version":1,"rev":7,"nodes":[${bad}]}`
+      expect(() => appendProjectNode(raw, input, NOW)).not.toThrow()
+      expect(appendProjectNode(raw, input, NOW)).toBeNull()
+    }
+  })
+
+  it('still appends when every element is a real object', () => {
+    expect(appendProjectNode(baseFile([sibling]), { id: 'term-aaa-2' }, NOW)).not.toBeNull()
   })
 })

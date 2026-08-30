@@ -630,6 +630,69 @@ describe('appendRemoteNode (phone-registered sessions over the relay)', () => {
   })
 })
 
+describe('workspace:register-node / workspace:remove-node (the WS-RPC door)', () => {
+  // The desktop reaches appendRemoteNode/removeRemoteNode through the relay host service, which
+  // does not exist on the Server Edition — so a phone talking WS-RPC to a self-hosted server could
+  // spawn a live tmux session (`pty:create` with its own persistKey) and then had no way to make it
+  // a node. These two channels are that door, and they are registered in CORE so both shells serve
+  // them (docs/mobile-client-spec.md §5.2).
+  it('round-trips an off-machine registration and removal through the platform handlers', async () => {
+    const store = new WorkspaceStore()
+    store.registerIpc()
+    await store.save(ws([project({ cwd: projRoot })]))
+    const file = path.join(projRoot, '.nodeterm/project.json')
+
+    expect(await fake.handlers['workspace:register-node']('p1', {
+      id: 'term-zz1-1', title: 'Phone claude', agentId: 'claude'
+    })).toBe(true)
+    const appended = JSON.parse(await fs.readFile(file, 'utf-8'))
+    expect(appended.nodes.map((n: { id: string }) => n.id)).toContain('term-zz1-1')
+    expect(appended.nodes.find((n: { id: string }) => n.id === 'term-zz1-1'))
+      .toMatchObject({ agentId: 'claude', title: 'Phone claude' })
+
+    expect(await fake.handlers['workspace:remove-node']('term-zz1-1')).toBe(true)
+    const removed = JSON.parse(await fs.readFile(file, 'utf-8'))
+    expect(removed.nodes.map((n: { id: string }) => n.id)).not.toContain('term-zz1-1')
+  })
+
+  // The payload is JSON from off-machine, not a typed in-process caller. A malformed argument is a
+  // `false` (the session is already running and simply stays unregistered), never a throw that
+  // would come back as an RPC error the client cannot act on.
+  it('answers false for a malformed projectId / node / nodeId instead of throwing', async () => {
+    const store = new WorkspaceStore()
+    store.registerIpc()
+    await store.save(ws([project({ cwd: projRoot })]))
+    const file = path.join(projRoot, '.nodeterm/project.json')
+    const before = await fs.readFile(file, 'utf-8')
+
+    expect(await fake.handlers['workspace:register-node'](7, { id: 'term-zz1-1' })).toBe(false)
+    expect(await fake.handlers['workspace:register-node']('', { id: 'term-zz1-1' })).toBe(false)
+    expect(await fake.handlers['workspace:register-node']('p1', null)).toBe(false)
+    expect(await fake.handlers['workspace:register-node']('p1', { id: 42 })).toBe(false)
+    // A field of the wrong KIND refuses the whole request rather than being dropped. `accountId` is
+    // why: appendProjectNode refuses a bad one instead of writing the node without it, and a drop
+    // here would answer `true` with the session silently registered against the SYSTEM account.
+    expect(await fake.handlers['workspace:register-node']('p1', { id: 'term-zz1-1', accountId: 7 }))
+      .toBe(false)
+    expect(await fake.handlers['workspace:register-node']('p1', { id: 'term-zz1-1', agentId: {} }))
+      .toBe(false)
+    // …but a JSON `null` is how an absent optional is commonly encoded, so it registers.
+    expect(await fake.handlers['workspace:register-node']('p1', { id: 'term-zz1-2', accountId: null }))
+      .toBe(true)
+    expect(await fake.handlers['workspace:remove-node']('term-zz1-2')).toBe(true)
+    // The id is a tmux session name: the alphabet is enforced in appendProjectNode, and a traversal
+    // attempt must not reach disk here either.
+    expect(await fake.handlers['workspace:register-node']('p1', { id: '../../etc/passwd' })).toBe(false)
+    expect(await fake.handlers['workspace:remove-node'](null)).toBe(false)
+    expect(await fake.handlers['workspace:remove-node']('')).toBe(false)
+    // Only the one deliberate register/remove pair above touched the file; every refusal left it
+    // alone, so the node set is back where it started and the rev moved by exactly those two writes.
+    const after = JSON.parse(await fs.readFile(file, 'utf-8'))
+    expect(after.nodes).toEqual(JSON.parse(before).nodes)
+    expect(after.rev).toBe(JSON.parse(before).rev + 2)
+  })
+})
+
 describe('removeRemoteNode (the phone\'s "End session" over the relay)', () => {
   it('finds the node by SCAN (no projectId on the wire), removes it and broadcasts the change', async () => {
     const store = new WorkspaceStore()

@@ -277,6 +277,42 @@ export const IPC = {
   /** Is a folder's .nodeterm/project.json present / absent / unreadable — the distinction
    *  `probeFolder`'s null collapses. Recovery of an `unavailable` project needs it (issue #385). */
   workspaceProjectFileState: 'workspace:project-file-state',
+  /** Append ONE externally-started session to a project's canvas as a terminal node. Args:
+   *  `(projectId, RemoteNodeInput)` → `boolean`. The caller mints the session itself (`pty:create`
+   *  with its own `persistKey`) and then asks to be registered; everything but id/title/agentId/
+   *  accountId is host-derived (`core/project-node-append.ts`), and a refusal (a field of the wrong
+   *  KIND, an unsafe id or accountId, a duplicate, an unparsable project file, an unknown/inline
+   *  project) is an honest `false`, never a throw — the session is already running either way and
+   *  simply stays unregistered. A malformed field refuses the whole request instead of being
+   *  dropped: dropping `accountId` would register the node against the SYSTEM account, which is the
+   *  wrong-identity bug `appendProjectNode`'s own account check exists to prevent. The id is refused
+   *  by the SAME predicate `pty:create` enforces (`isSafeNodeId`, max `NODE_ID_MAX`), so an id whose
+   *  session could never be opened under that `persistKey` can never register a dead node either.
+   *  `false` does NOT distinguish a permanent refusal from a local read/write that failed, and a
+   *  retry after a landed-but-lost write meets the duplicate-id refusal (another `false`), so the
+   *  boolean alone never proves the outcome. A caller may retry a bounded number of times (every
+   *  `false` path writes nothing), then settle the result with a `workspace:load` read-back: the
+   *  minted id present means it registered, absent means it is genuinely unsaved.
+   *
+   *  This is the SAME `WorkspaceStore.appendRemoteNode` the desktop relay serves as
+   *  `projects.registerNode` (src/main/remote/host-service.ts). It lives here so the Server Edition
+   *  has the door too: without it a phone talking WS-RPC to a self-hosted server could spawn a live
+   *  tmux session but never make it a node, and `workspace:save` (a whole-file clobber from a client
+   *  that holds no canvas) is not an acceptable substitute. */
+  workspaceRegisterNode: 'workspace:register-node',
+  /** Take a node off its project's canvas by id, the twin of the above, and the second half of a
+   *  phone's "End session" (`pty:destroy` ends the tmux session; this forgets the node). Args:
+   *  `(nodeId)` → `boolean`. Node ids are globally unique, so the store SCANS its local ref
+   *  projects. Only a TERMINAL-kind node is removed: this is the node-forget half of a session
+   *  teardown (the legacy relay `pty.destroy` can only ever reach a live tmux session, i.e. a
+   *  terminal), so an id naming a sticky, a group frame or an editor node is refused (`false`)
+   *  rather than deleted. That refusal is what keeps a caller which never attached to a session
+   *  from dissolving a worktree-bound group frame (whose children would be orphaned onto a dead
+   *  parent) or a note. `false` is ambiguous by itself: a node in no file, a non-terminal id, and a
+   *  remove that already landed but whose ack was lost all answer `false`, none an error. So a
+   *  bounded retry cannot prove the removal happened; a caller that must know confirms with a
+   *  `workspace:load` read-back (the id absent means it is gone). */
+  workspaceRemoveNode: 'workspace:remove-node',
   projectSettingsRead: 'project-settings:read',
   projectSettingsWriteShared: 'project-settings:write-shared',
   projectSettingsUpdateLocal: 'project-settings:update-local',
