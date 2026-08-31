@@ -4817,7 +4817,6 @@ export function TerminalNode({
           <Tooltip label={hideFanout ? 'Show subagent/loop cards' : 'Hide subagent/loop cards'}>
             <button
               className="term-node__hide-fanout nodrag"
-              title={hideFanout ? 'Show subagent/loop cards' : 'Hide subagent/loop cards'}
               aria-pressed={hideFanout}
               onClick={(e) => {
                 e.stopPropagation()
@@ -4835,7 +4834,6 @@ export function TerminalNode({
             <Tooltip label="Tidy subagent cards into a grid">
               <button
                 className="term-node__tidy-fanout nodrag"
-                title="Tidy subagent cards into a grid"
                 onClick={(e) => {
                   e.stopPropagation()
                   useAgentNodes.getState().tidyFanout(id)
