@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 
 import { ACCOUNT_SCOPE_UPDATE_ENV, AGENT_SESSION_ENV_STRIP, tmuxConf } from './pty-manager'
+import { leadPaneHookLines } from '../shared/tmux-lead-pane'
 
 describe('tmuxConf', () => {
   const c = tmuxConf(50000)
@@ -35,6 +36,12 @@ describe('tmuxConf', () => {
     expect(c).not.toMatch(/set -a[gs]? terminal-overrides/)
   })
 
+  it('declares hyperlinks via terminal-features so OSC 8 links reach the renderer', () => {
+    // tmux strips the OSC 8 escape unless the outer terminal declares support, leaving only the
+    // label text — a link whose URL is not also printed can then never be opened.
+    expect(c).toContain('set -as terminal-features ",*:hyperlinks"')
+  })
+
   it('copies mouse selections through tmux (OSC 52), with no macOS-only pbcopy pipe', () => {
     expect(c).toContain('bind -T copy-mode    MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel')
     expect(c).toContain('bind -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel')
@@ -47,6 +54,24 @@ describe('tmuxConf', () => {
   it('floors history-limit at 1000', () => {
     expect(tmuxConf(10)).toContain('set -g history-limit 1000')
     expect(c).toContain('set -g history-limit 50000')
+  })
+
+  it('lead-pane width OFF (default/0/invalid) is byte-identical and carries no set-hook (issue #119)', () => {
+    // The opt-in guarantee enes set for the feature: with the setting off, the generated conf is
+    // bit-for-bit the pre-feature output — nodeterm ships no tmux hooks unless asked to.
+    expect(tmuxConf(50000, 0)).toBe(c)
+    expect(tmuxConf(50000, NaN)).toBe(c)
+    expect(tmuxConf(50000, -3)).toBe(c)
+    expect(c).not.toContain('set-hook')
+  })
+
+  it('lead-pane width ON only APPENDS the shared guarded hook pair — nothing above changes', () => {
+    const on = tmuxConf(50000, 72)
+    expect(on.startsWith(c)).toBe(true)
+    expect(on).toContain(leadPaneHookLines(72))
+    // Same builder as remoteTmuxConf, so the local and SSH sockets cannot drift.
+    expect(on).toContain('set-hook -g after-resize-pane')
+    expect(on).toContain('set-hook -g after-split-window')
   })
 
   it('lists every account-scope env name in update-environment (issue #419)', () => {

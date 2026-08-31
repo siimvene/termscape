@@ -196,7 +196,7 @@ Hold `⌘⌥` and say it. On-device **Whisper** transcribes locally — review t
 then **Send** (nothing auto-submits). Your voice never leaves the machine.
 
 </td>
-<td><img src="docs/assets/dictation-tour.webp" alt="Dictation — hold cmd-shift-D, speak, review, send into the terminal" /></td>
+<td><img src="docs/assets/dictation-tour.webp" alt="Dictation — hold ⌘⌥, speak, review, send into the terminal" /></td>
 </tr>
 </table>
 
@@ -214,7 +214,6 @@ GitHub Copilot / opencode / Grok / custom) · 📝 **Sticky note** (link to an a
   agent sessions (`claude --resume`). The macOS app **ships its own tmux**, so this works
   with nothing installed; a tmux already on your system is always used in preference to it,
   and terminals opened before an upgrade stay as they were until you refresh the node.
-- **Talk to your terminal** — on-device Whisper dictation (hold ⌘⌥): speak, review, send.
 - **Agent superpowers** — **context links** so agent nodes read each other's transcripts
   on demand; Claude-only **branch a conversation** and **managed accounts** for several
   logged-in Claude identities side by side; agents can drive the canvas (open nodes,
@@ -289,6 +288,20 @@ Store presence. You build it (or grab the prebuilt binary from Releases) yoursel
 > That's Enes Kirca's upstream product: [nodeterm.dev](https://nodeterm.dev) ·
 > [eneskirca/nodeterm](https://github.com/eneskirca/nodeterm). This fork is a private,
 > modified self-host build, not those.
+
+**Trying it out?** Removal is one script — it stops every process nodeterm started, reverts
+the status-hook/skill entries it merged into your agent CLIs' config (your own hooks and
+credentials are never touched), and deletes all of nodeterm's own state. Run it with
+`--dry-run` first to see the full list of what it found:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/eneskirca/nodeterm/main/scripts/uninstall.sh | bash -s -- --dry-run
+curl -fsSL https://raw.githubusercontent.com/eneskirca/nodeterm/main/scripts/uninstall.sh | bash -s -- --yes
+```
+
+The full inventory of what nodeterm writes where (and what the script keeps, like the
+`.nodeterm/` canvas folders inside your own repos) is documented in
+[docs/uninstall.md](docs/uninstall.md).
 
 ## 🛠 Build from source
 

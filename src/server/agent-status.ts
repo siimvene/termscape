@@ -15,10 +15,10 @@ import { recordAgentEvent, recordRawToolEvent, recordContextUsage,
 } from '../core/agent-status-mirror'
 import { createSubagentTail, type SubagentTail } from '../core/subagent-tail'
 import { createWorkflowAgentsTail, type WorkflowAgentsTail } from '../core/workflow-agents-tail'
-import { createCodexAgentsTail, type CodexAgentsTail } from '../core/codex-agents-tail'
 import { createContextTail, type ContextTail, type TaskNotification } from '../core/context-tail'
 import { geminiContextParse } from '../core/gemini-session'
-import { codexContextParse, parseCodexSubagentActivity, liveCodexSubagentActivities } from '../core/codex-session'
+import { codexContextParse } from '../core/codex-session'
+import { createCodexSubagentFormatter } from '../core/codex-subagent-format'
 import { codexHome } from '../core/usage/codex-usage'
 import { setNodeTranscript } from '../core/context-link'
 import { isSafeLocalTranscriptPath } from '../core/claude-accounts-core'
@@ -45,7 +45,6 @@ export interface WireAgentStatusOptions {
   hooks?: HookLike
   subagentTail?: SubagentTail
   workflowTail?: WorkflowAgentsTail
-  codexAgentsTail?: CodexAgentsTail
   contextTail?: ContextTail
 }
 
@@ -163,57 +162,12 @@ export function wireAgentStatus(
   // would mean changing `ContextTail.track(sessionId, path)` and the four call sites that depend on
   // it. The poller (offset reads, torn-line carry, change-gated push) is written once in
   // createContextTail; only the token keys differ, so only `parse` differs. Neither gets
-  // onTaskNotification/onToolResult: both are claude-DIALECT scanners (task-notification lines,
-  // tool_result content blocks) that would parse nothing in another agent's transcript. Codex's
-  // subagent trigger rides the generic `onLines` instead (see its tail below); gemini has no
-  // subagent story and gets no callback at all.
+  // onTaskNotification/onToolResult: both are claude transcript features (the task-notification
+  // sniff exists because claude's hooks never send the async subagent's real end; codex's
+  // SubagentStop hook IS the real end, so its subagent cards need no transcript sniffing —
+  // and the declined-ask rescue is claude-only too).
   const geminiContextTail = createContextTail(pushContextUpdate, { parse: geminiContextParse })
-  // Codex goal-mode (`spawn_agent`) subagents fire no hooks; the PARENT rollout logs their
-  // lifecycle as SubAgentActivity records, and the codex tail is already reading that file — so
-  // its `onLines` is the whole trigger (the codex analogue of claude's task-notification sniff).
-  // Events re-enter the pipeline as ordinary synthetic subagent-start/-end + chunks, agentId
-  // 'codex'. Injectable like subagentTail so tests can drive it.
-  const codexAgentsTail =
-    opts.codexAgentsTail ??
-    createCodexAgentsTail({
-      event: (ev) => {
-        const e = { agentId: 'codex', ...ev } satisfies NormalizedAgentEvent
-        platform.broadcast(IPC.agentStatus, e)
-        recordAgentEvent(e)
-      },
-      chunk: ({ toolUseId, chunk }) => {
-        platform.broadcast(IPC.agentSubagentActivity, { toolUseId, chunk })
-      }
-    })
-  const codexContextTail = createContextTail(pushContextUpdate, {
-    parse: codexContextParse,
-    onLines: (sessionId, lines, meta) => {
-      // The first delivery is a historical REPLAY (a resumed/restarted parent's transcript tail):
-      // drop threads whose completed is in the same replay — they finished before we looked, and
-      // emitting the pair would resurrect a stale card on every resume. Unpaired starteds are
-      // still-live children and are kept (app-restart pickup).
-      let acts = parseCodexSubagentActivity(lines)
-      if (meta.initial) acts = liveCodexSubagentActivities(acts)
-      if (!acts.length) return
-      let nodeId: string | undefined
-      for (const [nid, sid] of nodeContextSession)
-        if (sid === sessionId) {
-          nodeId = nid
-          break
-        }
-      if (!nodeId) return // parent session not associated to a node (yet) — no card to hang off
-      for (const act of acts) {
-        // completed takes the same args as started so a thread whose 'started' was lost to an
-        // offset jump can still be HEALED into a card.
-        const parentPath = codexContextTail.pathFor(sessionId)
-        if (act.kind === 'started') {
-          codexAgentsTail.started(nodeId, sessionId, act.agentThreadId, act.agentPath, parentPath)
-        } else {
-          codexAgentsTail.completed(nodeId, sessionId, act.agentThreadId, act.agentPath, parentPath)
-        }
-      }
-    }
-  })
+  const codexContextTail = createContextTail(pushContextUpdate, { parse: codexContextParse })
 
   hooks.setListener((e) => {
     // Record FIRST: recordAgentEvent computes the stash-priority classification and returns the
@@ -290,7 +244,35 @@ export function wireAgentStatus(
     // on the host; the server has no SSH-project manager (see the module header), so every node it
     // serves is local and there is nothing to skip.
     if (agentId === 'gemini' || agentId === 'codex') {
-      const p = payload as { session_id?: string; transcript_path?: string; hook_event_name?: string }
+      const p = payload as {
+        session_id?: string
+        transcript_path?: string
+        hook_event_name?: string
+        agent_id?: string
+      }
+      // Codex subagent events (spawn_agent), BEFORE the meter track — same rule as the desktop:
+      // every agent_id-tagged event carries the PARENT's session_id with the CHILD's rollout as
+      // transcript_path (measured, codex-cli 0.146.0), so falling through would re-point the
+      // parent's context meter at the child's rollout. The shared subagentTail instance means the
+      // existing nodeSubagents cleanup paths cover codex ids too.
+      if (agentId === 'codex' && p.agent_id) {
+        if (p.hook_event_name === 'SubagentStart') {
+          subagentTail.trackFile(
+            p.agent_id,
+            safeTranscriptPath(p.transcript_path),
+            createCodexSubagentFormatter
+          )
+          if (nodeId) {
+            const set = nodeSubagents.get(nodeId) ?? new Set<string>()
+            set.add(p.agent_id)
+            nodeSubagents.set(nodeId, set)
+          }
+        } else if (p.hook_event_name === 'SubagentStop') {
+          subagentTail.finish(p.agent_id)
+          if (nodeId) nodeSubagents.get(nodeId)?.delete(p.agent_id)
+        }
+        return
+      }
       const transcriptPath = safeTranscriptPath(p.transcript_path)
       const tail = agentId === 'gemini' ? geminiContextTail : codexContextTail
       if (p.session_id && transcriptPath) tail.track(p.session_id, transcriptPath)
@@ -299,10 +281,7 @@ export function wireAgentStatus(
       // at Stop), so for codex the tail is released by `releaseNodeTails` on pty:destroy/recycle
       // instead. Handling it here regardless costs nothing and is correct the day codex's event
       // list grows.
-      if (p.hook_event_name === 'SessionEnd' && p.session_id) {
-        tail.untrack(p.session_id)
-        if (agentId === 'codex' && nodeId) codexAgentsTail.release(nodeId)
-      }
+      if (p.hook_event_name === 'SessionEnd' && p.session_id) tail.untrack(p.session_id)
       return
     }
     if (agentId !== 'claude') return
@@ -389,7 +368,6 @@ export function wireAgentStatus(
       nodeSubagents.delete(nodeId)
     }
     workflowTail.release(nodeId) // teardown parity with subagentTail on pty:destroy/recycle
-    codexAgentsTail.release(nodeId)
   }
   platform.on(IPC.ptyDestroy, (nodeId: string) => releaseNodeTails(nodeId))
   platform.on(IPC.ptyRecycle, (nodeId: string) => releaseNodeTails(nodeId))

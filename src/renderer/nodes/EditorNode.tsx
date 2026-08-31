@@ -5,6 +5,7 @@ import { monaco } from '../editor/monaco-setup'
 import { monacoTheme } from '../lib/appTheme'
 import { useAppTheme } from '../state/useAppTheme'
 import { renderMarkdown } from '../lib/markdown'
+import { opensInPreview } from '../lib/markdownPreview'
 import { useSettings } from '../state/settings'
 import { sshFs } from '../terminal/ssh-fs'
 import { useProjects } from '../state/projects'
@@ -224,6 +225,14 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
       savedRef.current = content
       editor.onDidChangeModelContent(() => setDirty(editor!.getValue() !== savedRef.current))
       editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => saveRef.current())
+      // Markdown files can open straight into the rendered preview (settings.openMarkdownPreview).
+      // Decided here rather than at useState-init because the preview needs the file content —
+      // this is exactly the state a Preview click right after load would produce, so Edit/⌘M
+      // toggle back as usual.
+      if (opensInPreview(ext, s.openMarkdownPreview)) {
+        setPreviewHtml(renderMarkdown(content))
+        setPreview(true)
+      }
     })
 
     return () => {
@@ -263,7 +272,6 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
       />
 
       <div className="term-node__header">
-        <MaximizeButton id={id} maximized={!!data.premaxRect} />
         <span className="term-node__title-text" title={filePath}>
           {fileName}
           {!isImage && !isPdf && dirty ? ' ●' : ''}
@@ -290,6 +298,7 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
             </button>
           </>
         )}
+        <MaximizeButton id={id} maximized={!!data.premaxRect} />
         <button
           className="term-node__close"
           title="Close"

@@ -136,8 +136,13 @@ factories (`createTerminalNode`, `createSshTerminalNode`, `createAgentNode(agent
 group transforms (`groupSelectedNodes`, `ungroupNodes`, `duplicateNode`), and the
 `nodeStatesToFlow` / `flowToNodeStates` serializers. Node kinds (`NodeKind` in
 `src/shared/types.ts`): `terminal | sticky | group | editor | diff | video | web | browser |
-subagent | loop | dino` — `subagent` and `loop` are render-only (ephemeral hook-driven viz) and
-never persisted. A node's `data`
+subagent | loop | dino | trigger` — `subagent` and `loop` are render-only (ephemeral hook-driven
+viz) and never persisted. `trigger` (issue #493, landing in phases — schema only so far, no
+renderer/scheduler yet) is a first-class PERSISTED kind: its spec (`CanvasNodeState.trigger`,
+@shared/trigger) is git-shared CONTENT sanitized as hostile input on every load path
+(`sanitizeNodeTriggers`), and the definition alone never fires — execution consent is the
+machine-local, content-bound `core/trigger-arm-store.ts` (a spec that arrives or CHANGES via git
+reads as disarmed until armed on this machine). A node's `data`
 carries `title, color, group, tags, collapsed, expandedHeight, shell, cwd, text,
 initialCommand, filePath, diffStaged`, `agentId` (which agent CLI a terminal node runs —
 persisted), and `accountId` (which managed Claude account a terminal node runs under — immutable,
@@ -247,7 +252,27 @@ project's nodes only.** The contract:
   nodes, which reattach warm or cold-restore). `hasProjects` counts only **open** projects, so
   closing the last open one shows the welcome screen. **Permanent** deletion (`deleteProject`:
   `transport.destroy(nodeId)` per terminal + drop agent status + SSH teardown) now only happens
-  via the `×` on a "Recently closed" entry.
+  via the `×` on a "Recently closed" entry. **Closing now SAYS what it parks** (issue #442 —
+  "close" read like cleanup while meaning "hide, and keep running"): a project with terminal
+  nodes gets a confirm naming the count, with an opt-in **"end its sessions too"** checkbox
+  (default OFF — parking stays the rule; checked flips the confirm to danger). The pure half is
+  `renderer/lib/projectCloseSessions.ts`: **one definition of N** — the project's terminal-kind
+  nodes, exactly the set the action addresses (`transport.destroy` is idempotent on a dead
+  session), never a liveness-verified count that could disagree with the action; the END happens
+  at confirm time against the re-resolved node set (agents spawn nodes on their own). A relay tab
+  or a 0-terminal project closes silently (byte-identical old path). `endProjectSessions` mirrors
+  `deleteProject`'s teardown EXCEPT it keeps agent status (the persisted sessionId is what lets a
+  reopen cold-restore `--resume`) and never disconnects SSH masters (close never managed the
+  connection). The `×` also confirms now, via `deleteConfirmCopy` — a relay tab gets "removes
+  only this machine's view; reconnecting brings it back" with no danger styling (deleting the
+  view is what turns the next connect into a first-connect re-adopt), local/SSH get the session
+  count + "the folder (incl. .nodeterm/project.json) is not deleted". And "Recently closed" rows
+  show a **live-session badge** (`closedSessionCounts` over ONE on-demand local
+  `sessionMemory.read` per welcome-screen appearance — never a timer; `ok:false` ⇒ no badge,
+  never "0"; an SSH project's host-side sessions are deliberately not claimed by the local
+  count). Server Edition: all renderer-side; the ws-bridge `sessionMemory` is real, so badges
+  describe the server machine; the `sshProject` legs only run for `project.ssh`, which that
+  shell never has.
 - A project's `cwd` (folder picker, `dialog:select-folder`) is passed to terminal/Claude
   node factories so new terminals open there. **Folder ↔ project is deduped:** "Open folder…"
   reuses the existing project with that `cwd` (and its nodes) instead of creating a duplicate.
@@ -1036,7 +1061,8 @@ else, and its context links must keep classifying across restarts).
   process re-advertises the same endpoint (restart handoff). A `setRawListener` channel feeds
   the per-node context-window meter (`context-tail.ts` — **one tail per agent**, each with its own
   `parse` dep: claude's usage records, `codexContextParse`, `geminiContextParse`) and the subagent
-  live-transcript (`subagent-tail.ts`, claude only). The same events feed the **agent-status mirror**
+  live-transcript (`subagent-tail.ts` — claude via meta-dir `track`, codex via `trackFile` with the
+  stateful `codex-subagent-format.ts` formatter). The same events feed the **agent-status mirror**
   (`core/agent-status-mirror.ts`) the mobile companion reads; the mirror carries an optional
   `settings` block (`claudePermissionMode`/`autoSupported`/`claudeAccounts`) so the phone can
   launch agents with the desktop's permission mode + managed accounts, and SSH slices get their
@@ -1212,8 +1238,7 @@ else, and its context links must keep classifying across restarts).
   its `contextTail`, the hook-fed path authority). The browser's real reader is
   `buildTranscriptApi` in ws-bridge — deliberately NOT folded into `buildClaudeApi`, which the
   relay shares and must not adopt it.
-- **Subagent visualization** (agents in `SUBAGENT_CAPABLE` — this bullet is claude's Task
-  mechanism; codex's hook-less mechanism is its own bullet below) — `subagent-start`/`subagent-end`
+- **Subagent visualization** (agents in `SUBAGENT_CAPABLE`) — `subagent-start`/`subagent-end`
   normalized events (from Claude's `PreToolUse`/`PostToolUse` on tool `Agent`/`Task`, correlated
   by `tool_use_id`) drive a transient `state/agentNodes.ts` store. Claude launches subagents
   **async by default**: that PostToolUse is only a launch ack (`status:'async_launched'`), NOT the
@@ -1231,6 +1256,28 @@ else, and its context links must keep classifying across restarts).
   (`<…>/<sessionId>/subagents/agent-<id>.jsonl`, matched by `tool_use_id` via the sibling
   `.meta.json`), tails it read-only, formats each line (assistant text + tool calls + results),
   and streams chunks over `agent:subagent-activity` into the store.
+  **Codex** (2026-08-24, `spawn_agent` collaboration — issue #401) joined via its **native
+  `SubagentStart`/`SubagentStop` hooks**, measured on codex-cli 0.146.0, keyed by `agent_id` (NOT
+  `tool_use_id` — nothing correlates the spawn tool call with the Start it launches; agent_id is
+  stable across the child's life, parallel + nested spawns included, and nested children fire
+  through the same subscription so every card connects flat to the owning terminal node). Facts a
+  refactor must not lose: **(1)** every agent_id-tagged codex event carries the PARENT's
+  `session_id` with the CHILD's rollout as `transcript_path` — both raw listeners skip the
+  context-meter track for them (else the parent's meter re-points at the child) and `normalizeCodex`
+  returns null for child tool events (else a child Bash event flips a finished parent back to
+  RUNNING after an async spawn); pinned by `hook-verified-parity.test.ts`. **(2)** the spawn task
+  text is **encrypted end-to-end** (`tool_input.message` and the NEW_TASK payload are Fernet blobs)
+  — there is no `taskLabel`; the readable `Task name:` header reaches the card via the activity
+  stream instead. **(3)** the live tail is `subagentTail.trackFile` (the path is handed to us —
+  no meta-dir matching) with the **stateful, per-entry** `createCodexSubagentFormatter`
+  (`core/codex-subagent-format.ts`): a spawn child is a FORK of the parent thread, so its rollout
+  opens with a replay of the parent's context, suppressed until the
+  `inter_agent_communication_metadata` / NEW_TASK gate — per entry, because two concurrent
+  subagents sharing one closure would gate each other. **(4)** codex's `SubagentStop` IS the real
+  end (no async-launch-ack trap, no task-notification sniffing), carrying
+  `last_assistant_message` as the card's result. Remote (SSH) codex nodes get cards but no live
+  activity yet (the child rollout is on the host; claude's `remote-subagent-tail` has no codex
+  counterpart — follow-up).
 - **Workflow (ultracode) agent visualization** — Claude Code's Workflow tool spawns N agents
   in-process; they fire **no per-agent hooks** at all, so there is nothing to normalize per
   agent. Only the PARENT session's `PreToolUse`/`PostToolUse` on `tool_name === 'Workflow'`
@@ -1271,36 +1318,6 @@ else, and its context links must keep classifying across restarts).
   lives on the host, and `workflow-agents-tail.ts` reads local disk only — no ControlMaster leg —
   so a Workflow run on an SSH-project node shows the parent tool call's ordinary `working` state
   and nothing more, exactly like before this feature.
-- **Codex goal-mode subagent visualization** — a codex node's `spawn_agent` children (oh-my-codex
-  collaboration fleets) fire no hooks either, but two disk facts make them visible (measured,
-  codex-cli 0.146.0, live runs 2026-08-29): the PARENT rollout logs `SubAgentActivity` items
-  (`event_msg`/`item_completed`, `kind: started|completed`, `agent_thread_id`, `agent_path`), and
-  each child writes a full rollout into the SAME sessions tree with its thread id in the FILENAME,
-  a `session_meta` header self-declaring lineage + `agent_nickname`/`agent_role`, and
-  `task_complete.last_agent_message` as its result. Correlation is therefore EXPLICIT — no
-  adoption tricks. The trigger is the codex context tail's generic **`onLines`** callback (the
-  codex analogue of claude's task-notification sniff — the tail already reads the parent file):
-  `parseCodexSubagentActivity` (`core/codex-session.ts`, thread id validated before any filename
-  match) brackets `core/codex-agents-tail.ts`, which locates the child by filename under the
-  `sessions` root walked UP from the parent's path (`sessionsRootOf` — the literal `sessions`
-  segment, never a fixed dirname count, so a shallower future layout fails CLOSED instead of
-  walking above the jailed tree), streams its records (own formatter — codex's
-  `response_item`/`function_call` dialect, `arguments` is a JSON STRING), and emits synthetic
-  `subagent-start`/`-end` (`toolUseId: 'cxagent:<agentThreadId>'`, `agentId: 'codex'`;
-  subagentType = the child's role, label = `nickname · path leaf`). Same grace-window /
-  dropped-flag / carry-cap discipline as the workflow tail, plus four rules its consort pass
-  added: the FIRST `onLines` delivery is a historical REPLAY, so replayed started+completed
-  pairs are dropped (`liveCodexSubagentActivities` — a parent resume must not resurrect finished
-  children; an unpaired `started` is a live child and IS kept, which is the app-restart pickup);
-  a `completed` for a never-seen thread HEALS a card (its `started` fell into an offset-jumped
-  burst — `completed()` takes the same args as `started()` for exactly this); a `started` INSIDE
-  the grace window cancels the pending close (quick follow-up task) while one after the end
-  RE-OPENS the card without replaying (offset kept); and the final close DRAINS (bounded rounds),
-  because one read cap could lose a big backlog's trailing `task_complete`. `SUBAGENT_CAPABLE`
-  gained `codex` — that membership only lights the renderer's fan-out affordances; the tails do
-  the work. Remote (SSH) codex nodes: documented degrade (the gemini/codex raw-listener branch
-  already skips them; local disk only). A plain `codex exec` from a shell has no
-  `parent_thread_id` and is deliberately not attributed.
 - **/loop, /schedule & /cron node** (agents in `RECURRING_CAPABLE`) — detected from the **tools**
   the agent invokes (robust; users often phrase it in natural language so the prompt rarely starts
   with the slash): `PreToolUse` for `Skill` (skill ∈ loop/schedule/cron), `CronCreate` (→ cron,
@@ -1522,7 +1539,7 @@ else, and its context links must keep classifying across restarts).
     shell's, and the copy/strip would run against that wrong environment (pinned in
     `ssh.test.ts`).
   - **Login flow** — Settings → Accounts → **Add** creates a `pending` account and drops a canvas
-    **login node** that runs `claude /login` under the account dir. Main polls the dir's
+    **login node** that runs `claude /login` under the account dir. Core polls the dir's
     `.claude.json` (`LOGIN_POLL_MS` 2 s, up to `LOGIN_TIMEOUT_MS` 5 min) for `oauthAccount.email`;
     on capture the account flips out of `pending` with its email as the default label. Account
     removal cancels any pending wait + `markDirty`. **Codex accounts have the same two halves** —
@@ -1536,9 +1553,31 @@ else, and its context links must keep classifying across restarts).
     no listener is a silent no-op, which is how the Codex half shipped inert (#346) — pinned now by
     `renderer/lib/nodeterm-events.test.ts`, which fails on any `nodeterm:*` event that is sent but
     never heard.
+  - **The lifecycle is CORE, and both shells register it** (issue #313) —
+    `core/claude-accounts-service.ts` owns the four `claude-accounts:*` channels (add / wait-login
+    / cancel-wait / remove) behind `platform().handle`; `main/claude-accounts.ts` is a thin desktop
+    wrapper and `registerCoreHandlers` calls the same `registerClaudeAccountsIpc()`. Two optional
+    deps carry everything core cannot reach: `installSkill` (desktop passes `installCanvasSkillInto`
+    — the server passes none, because **canvas control is not wired on that shell at all**, so a
+    per-account SKILL.md would point at nothing) and `remote`, a **thunk** resolving the SSH legs
+    (desktop's manager is created after the registration, and the server has none — in both cases
+    an `AccountCtx` carrying a `projectId` degrades to the LOCAL path, which is the pre-existing
+    behavior this preserves). **Three surfaces:** Desktop unchanged (same channels, same shapes,
+    same remote fallbacks); **Server Edition** now full — real `buildClaudeAccountsApi` over the
+    ws-bridge (the 5-min `waitLogin` is a straight passthrough because RpcClient has no request
+    timeout), minus SSH accounts and the canvas skill; **Mobile: N/A** — the phone launches with
+    the accounts the agent-status mirror advertises and never mints one. **Managed CODEX accounts
+    stay desktop-only** and their bridge namespace stays an `E_UNSUPPORTED` stub: the switch verbs
+    authorize the owning window by Electron WebContents id, which has no meaning over a WS
+    connection. The Settings section now *names* that refusal instead of leaving an unhandled
+    promise rejection — a spinner that stops and says nothing reads as a dead button.
   - **Hook install** — the managed hook is merged into **each account dir's** `settings.json` at
     add-account **and** at app launch (local, shared `install-helper.ts`) / via
-    `RemoteHooks.installIntoAccountDir` (remote), so every identity reports agent status.
+    `RemoteHooks.installIntoAccountDir` (remote), so every identity reports agent status. The
+    launch-time loop is ONE function (`installHooksIntoLocalAccounts`, beside the service) that
+    both shells call — the desktop passing the canvas skill as its `extra`. A second copy is the
+    drift this file warns about elsewhere: the Server Edition shipped without the per-account leg
+    entirely, so a managed account there reported no agent status at all.
   - **Account-aware readers** — transcript resolution is scoped per account (`transcriptRootFor`
     picks the account dir's `projects/`, composite cache key includes `accountId`); the same
     threading runs through the session-name poll, restart handoff, and `ChatPanel` (the ⌘M
@@ -1815,7 +1854,10 @@ about which machine they describe. Reading + parsing is `core/session-memory.ts`
   and one per panel open / `⟳`. Same rule this file already sets for **Remote usage**, for the same
   reason: every remote read is an ssh exec plus a `ps` of somebody else's whole process table. The
   full sweep runs on the panel's MOUNT (it is unmounted while closed) and on `⟳` — never on a timer,
-  never from the pill.
+  never from the pill. One more consumer, same discipline: the welcome screen runs ONE **local**
+  sweep per appearance (only while "Recently closed" is non-empty) for its per-project
+  live-session badges (issue #442), bypassing the panel's store on purpose — it must not disturb
+  `state/sessionMemory.ts`'s module-level scope stamp, and its scope is always THIS machine.
 - **The pill is the single owner of the store's `startHostPoll` / `stopHostPoll`** — the timer and the
   active-scope stamp are MODULE SINGLETONS. The panel must never call them: a `stopHostPoll` on
   unmount would clear the pill's interval with nothing left to restart it, and the number would
@@ -1961,8 +2003,14 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
     fall through UNTOUCHED and `syncMenuForStandDown` disables the Close menu item on top of the
     shared list. mac's ⌘W is deliberately unaffected (not a shell key), and ⌘/Ctrl+M and ⌘/Ctrl+0
     keep firing — this is one chord whose terminal meaning outranks its app meaning, not a policy
-    change. One predicate, two consumers, pinned in `keydown-intercept.test.ts` (including a
-    source-level wiring pin, since the menu leg lives against a real Menu in index.ts).
+    change. Falling through main is not enough: xterm's custom key handler runs before the Canvas
+    dispatcher, whose main-intercepted command cases deliberately have no renderer handlers.
+    `terminalChordBubbles` must therefore refuse every `MAIN_INTERCEPTED_COMMAND_IDS` command; if
+    it returned true for `node.close`, xterm would withhold `^W` while the unclaimed event bubbled
+    to Canvas. One predicate, two main-process consumers are pinned in `keydown-intercept.test.ts`
+    (including a source-level wiring pin, since the menu leg lives against a real Menu in index.ts),
+    and `keybindingOverrides.test.ts` pins the renderer-to-xterm hand-off through
+    `terminalKeyAction`.
   - **`terminalFocused` is a MIRROR, and its fail-safe direction is `false` = not focused =
     intercepts ON.** `renderer/lib/terminalFocusMirror.ts` reports focus changes to main and is
     change-deduped (it never re-asserts), so a page that died mid-report, a reload, or a window that
@@ -2211,7 +2259,23 @@ self-correcting on the next render; guarding it would mean threading ownership t
   issues (`GitHubIssueCardView` via `state/githubIssues.ts`, opened through
   `GitHubIssueSummaryModal`, a column move that closes/reopens the issue confirms first). A
   **source filter** (`KanbanSourceFilter`: All / GitHub / Sessions) and a transient per-board
-  **label filter** narrow what shows. **Labels** are a per-project palette (`ProjectKanban` labels,
+  **label filter** narrow what shows.
+  **Where a card comes from is a registry, not a branch per call site** (`renderer/lib/kanbanSources.ts`,
+  2026-08-30 — the same membership-plus-one-leaf discipline `AGENT_CONFIG` uses): each entry declares
+  its filter `label`, its `placement` (`assignment` = the board's own persisted assignments,
+  reorderable within a column; `provider` = the provider reports the column, the board persists
+  nothing and a move is the provider's write), its in-column `lane` order and whether it is
+  `configured` for a given board. Two orders live there deliberately: **declaration order is the
+  source filter's button order** (All · GitHub · Sessions), **`lane` is the in-column stacking order**
+  (sessions above issues) — they genuinely differ, and pinning both is what stops either being
+  re-spelled elsewhere. `KanbanColumn` therefore takes ONE `lanes` prop (`{sourceId, cards, footer?,
+  count}`) instead of a `cards` + eight `github*` props, places them via `byLane` and names no source;
+  the board builds each source's leaf, and the drag union branches on `placement` (`isProviderDrag`)
+  rather than on the string `'github'`. A lane's `count` is passed rather than derived from
+  `cards.length` because a provider reports a server-side total larger than the page fetched so far.
+  What deliberately did NOT move into the registry: the virtual **Ungrouped** column (board
+  semantics, not a source's concern) and `validKanban`, which stays the single shape gate on every
+  load path — a registry entry must never grow its own parallel validation. **Labels** are a per-project palette (`ProjectKanban` labels,
   edited inline via the Notion-style `LabelPicker`: create/assign/rename/recolor/delete through the
   pure `lib/kanban.ts` transforms) plus each GitHub issue's own labels, both filterable. The canvas stays MOUNTED under the opaque overlay (agent-status
   listeners live in Canvas.tsx; `display:none` would 0×0-resize every terminal into a tmux
@@ -2380,20 +2444,30 @@ the same script hand-packs `build/icon.icns` (size-checked frames — issue #369
 zip, `--publish never`). Production release signing/notarization and the update-feed hosting are
 handled outside this repo.
 
-**Windows packaging is GROUNDWORK, not a shippable app** (extracted from external PR #276; a
-Windows build is unusable until the session-host phase merges). Deliberate decisions: the target
+**Windows ships as an UNSIGNED BETA** (extracted from external PR #276; the session-host phase
+#305 merged 2026-08-20, and the decision to release without signing is #454 — CI-green, but no
+real-device daily-use verification yet, and that is a stated risk, not an oversight). Deliberate
+decisions: the target
 is **NSIS via electron-builder** — the fork switched to Squirrel.Windows
 (`electron-builder-squirrel-windows` + an 800-line `windows-installer.mjs` wrapper + its own
 update feed), but our pipeline is electron-builder end-to-end and NSIS is built in, needs no
 extra dependency, and is what electron-updater's generic provider expects on Windows — so
 Squirrel was not adopted. Builds are **unsigned** (no Windows cert; electron-builder skips
-signing when no cert env is present). `bootstrap-windows.bat` (repo root) takes a fresh Windows
+signing when no cert env is present; SmartScreen warns on install). Release wiring is
+`release.yml`'s `release-win` job: on every version tag it uploads the NSIS installer + zip as
+GitHub Release assets — **best-effort by design** (the `publish` promote gate does not wait on
+it, so a Windows failure never strands the mac+linux release) and with **no update-feed leg**:
+`dist:win` stamps `nodeTermUpdates=disabled`, so the shipped app's updater is cleanly off (no
+latest.yml anywhere, no 404 polling; users update by downloading the next installer). Do not
+add `*.yml`/`*.blockmap` to that job's upload globs — that IS the auto-update leg, and it waits
+on signing. `bootstrap-windows.bat` (repo root) takes a fresh Windows
 machine to a built checkout: it verifies Node ≥ 20 / VS Build Tools C++ / Python 3 with exact
 winget hints (it never installs machine-wide tools itself, and refuses to run elevated) and runs
 `npm ci`. `.github/workflows/win-package-smoke.yml` is a **workflow_dispatch-only** packaging
-smoke on windows-latest — build only, never publishes. **Follow-ups, in order:** Windows
-auto-update wiring (electron-updater NSIS leg + `latest.yml` on the nodeterm.dev feed — blocked
-on signing: an unsigned auto-update is a downgrade in trust), a release.yml Windows job, and the
+smoke on windows-latest — build only, never publishes. **Follow-ups, in order:** code signing,
+then Windows auto-update wiring (electron-updater NSIS leg + `latest.yml` on the nodeterm.dev
+feed — blocked
+on signing: an unsigned auto-update is a downgrade in trust), and the
 fork's PE-identity polish (electron-builder leaves `OriginalFilename` empty; the fork's
 `resedit`-based afterSign hook fixes it — cosmetic for NSIS, load-bearing only for Squirrel).
 

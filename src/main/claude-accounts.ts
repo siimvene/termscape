@@ -1,6 +1,16 @@
-// Impure lifecycle for managed Claude accounts: config-dir creation/deletion, login
-// capture (poll .claude.json), CLI version check, hook install. The account LIST lives in
-// settings.json (renderer-owned via useSettings); this module only owns the filesystem.
+// Desktop wiring for the managed-Claude-account lifecycle: config-dir creation/deletion, login
+// capture (poll .claude.json), CLI version check, per-account hook install. The account LIST lives
+// in settings.json (renderer-owned via useSettings); this module only owns the filesystem.
+//
+// The SERVER EDITION serves the same four channels from core's registerClaudeAccountsIpc
+// (src/core/claude-accounts-service.ts, issue #313). The desktop deliberately does NOT route
+// through it yet: this file carries two fixes the shared core copy does not have — the waiters
+// map holds a SET per id (the launch heal + a Retry click legitimately run two concurrent waits
+// for one account; core's single-slot map lets one wait's cleanup deregister the other, breaking
+// cancel), and the Add-account version probe is hard-bounded and fails SAFE on timeout. Porting
+// both into core and collapsing this file onto registerClaudeAccountsIpc is the follow-up; until
+// then, never call registerClaudeAccountsIpc from the desktop shell — the second
+// ipcMain.handle on the same channel throws.
 import { randomUUID } from 'crypto'
 import { promises as fs } from 'fs'
 import path from 'path'

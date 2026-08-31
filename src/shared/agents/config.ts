@@ -125,10 +125,9 @@ export const SESSION_ID_CAPABLE = ['claude', 'copilot'] as const
 // binary and current official reference accept `--session-id=<uuid>`, so it does not borrow an
 // unrelated Claude probe result. Custom agents resolve through their declared base harness.
 export const UNCONDITIONAL_SESSION_ID_CAPABLE = ['copilot'] as const
-// claude: the hook-driven Task tail + the Workflow journal tail. codex: goal-mode (`spawn_agent`)
-// children, surfaced by core/codex-agents-tail.ts off the parent rollout's SubAgentActivity
-// records — the shells' tails do the work; this membership only lights the renderer's fan-out
-// affordances (`canSubagent` → TerminalNode's fanoutCapable) for codex nodes.
+// claude: Task/Agent tool via hooks (tool_use_id-keyed) + the Workflow journal tail. codex:
+// spawn_agent collaboration via its native SubagentStart/SubagentStop hooks (agent_id-keyed),
+// measured on codex-cli 0.146.0.
 export const SUBAGENT_CAPABLE = ['claude', 'codex'] as const
 export const RECURRING_CAPABLE = ['claude'] as const // /loop, /schedule, /cron
 export const BRANCH_CAPABLE = ['claude'] as const

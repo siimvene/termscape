@@ -288,9 +288,10 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '',
     'Verbs:',
     '- `list` — current nodes (id, kind, title). Start here when you need a node id.',
+    '- `help` — print the verb list. Answered by the shim itself, so it works even if the app is down.',
     '- `open-terminal [--count N] [--cwd P] [--cmd C] [--group <id>] [--after <id,id>] [--project <id>]` — open N plain terminals.',
-    '- `open-claude [--count N] [--cwd P] [--prompt T] [--group <id>] [--after <id,id>] [--project <id>]` — open N Claude sessions.',
-    `- \`open-agent --agent ${agentChoices} [--count N] [--cwd P] [--prompt T] [--group <id>] [--after <id,id>] [--project <id>]\` — open`,
+    '- `open-claude [--count N] [--cwd P] [--prompt T] [--model M] [--group <id>] [--after <id,id>] [--project <id>]` — open N Claude sessions.',
+    `- \`open-agent --agent ${agentChoices} [--count N] [--cwd P] [--prompt T] [--model M] [--group <id>] [--after <id,id>] [--project <id>]\` — open`,
     '  any agent CLI. `--group` parents the node(s) into a group frame; a worktree-bound group also',
     '  hands its worktree path down as the cwd. `--after <id,id>` opens the node ARMED: it does not',
     '  start until every listed station has gone idle, and is context-linked to them so it can read',
@@ -302,6 +303,19 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '  included); or an id `open-project` returned to YOU in this session, which never switches the',
     '  user\'s view. A session opened into a non-active project starts when the user next views that',
     '  project — do not poll for it. `--group`/`--after` cannot be combined with `--project`.',
+    '  `--prompt` arrives on ONE LINE: every run of whitespace in it, newlines included, is',
+    '  collapsed to a single space before the session starts. Write the task as continuous prose',
+    '  and use sentences where you would have used bullets — a numbered list arrives as one',
+    '  paragraph. Never begin a prompt with `/`: once flattened, the agent reads the whole prompt',
+    '  as arguments to that slash command, your task is never seen, and the node then sits idle',
+    '  looking healthy. To pick a model use `--model`, not a leading `/model`. To send a long or',
+    '  structured brief, open the node and follow up with `send --node <id> --text "..."`.',
+    '  `--model <id>` picks the model the session launches with, instead of inheriting the',
+    '  default. Use it to keep a cheap station cheap: a node whose whole job is editing a README',
+    '  does not need the model you give the node rewriting a test suite. Honoured by claude, codex',
+    '  and copilot (and custom agents based on them); any other agent ignores it and launches',
+    '  exactly as it would without the flag. The id is passed to the CLI as-is, so a name that',
+    '  agent does not recognise fails inside the session, not at open time — name a model you know.',
     '- `open-project --cwd </abs/path> [--name N] [--color C]` — register (or find) the project for a',
     '  local directory; the reply carries `{ projectId, name, cwd, created }`. Idempotent: the same',
     '  cwd always returns the same project, never a duplicate. Creating/adding asks the user to',
@@ -328,8 +342,10 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '  review panel over that node\'s work: one reviewer per lens, each armed behind the target and linked',
     '  to it, plus a judge armed behind the panel that merges the findings into one verdict. Reviewers are',
     '  told not to change files. Prefer this over asking one agent to double-check itself.',
-    '- `spawn-team --label L --team \'[{"title":"UI","prompt":"...","agent":"claude"}]\'` — one agent per',
+    '- `spawn-team --label L --team \'[{"title":"UI","prompt":"...","agent":"claude","model":"..."}]\'` — one agent per',
     '  role (max 8), arranged in a grid, wrapped in a labeled group, each connected + context-linked to you.',
+    '  `model` is per role, so one team can mix tiers — give an expensive model to the role that needs it',
+    '  and a cheap one to the rest. Same rule as `--model` below.',
     '- `open-worktree --branch <name> [--base <ref>] [--path P] [--group <id>]` — create a git worktree',
     '  wrapped in a bound group frame (terminals inside it run in the worktree). Local projects only.',
     '- `close-worktree --group <id> [--mode unbind|remove]` — unbind keeps the directory; remove asks',
@@ -337,7 +353,9 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '- `branch --node <id>` — branch a Claude node\'s conversation (Claude nodes only).',
     '- `rename --node <id> --title "New Name"` — rename any node (terminals, groups, stickies…).',
     '- `write --node <id> --text "..."` / `close --node <id>` — type into / close a node.',
-    '  Both ask the user to confirm a dialog and may be denied.',
+    '  Both ask the user to confirm a dialog and may be denied. Read WHICH answer came back:',
+    '  `denied by user` is a decision and is FINAL — never re-ask — while `no answer within 120s`',
+    '  means nobody reached the dialog, which is worth one retry when the user is back.',
     '- `send --node <id> --text "..."` / `reply --node <id> --text "..."` — deliver a message into',
     '  another AGENT node in this project (no confirm dialog: verified-only, gated by the project\'s',
     '  agent-messaging switch — off by default — and rate-limited). A busy target is not interrupted',
@@ -413,6 +431,16 @@ export function buildCanvasControlInstructions(shimPath: string): string {
  *  verbatim and the parity test holds the two ends together (issue #367). */
 export const CONTROL_UNREACHABLE_MSG = 'Could not reach nodeterm (control endpoint unreachable).'
 
+/** The verb list `help` prints, DERIVED from the registry rather than re-typed — a verb added to
+ *  `VERBS` is discoverable from the CLI the day it lands, which is the whole point of the verb.
+ *  Names only, deliberately: flags live in the skill body, and a second copy of them here would be
+ *  a second thing to keep in sync. */
+export const helpVerbList = (): string => VERBS.join(' ')
+
+/** The registry, exposed for the `help` test so it asserts against the source of truth rather than
+ *  a copy of the list it is checking. Not for production use — read `VERBS` directly. */
+export const VERBS_FOR_TEST: readonly ControlVerb[] = VERBS
+
 export const CONTROL_SHIM_SCRIPT = `#!/bin/sh
 # nodeterm canvas-control CLI (auto-generated — do not edit).
 
@@ -444,6 +472,23 @@ ${CODEX_SANDBOX_HINT_SH}
 
 nt_verb="list"
 if [ $# -gt 0 ]; then nt_verb="$1"; shift; fi
+
+# \`help\` is answered HERE, not by the server: a bare invocation defaults to \`list\`, so the verb
+# set was undiscoverable from the CLI itself — the one place an agent looks when its skill text is
+# not to hand. Local and free, so it also answers when the app is down.
+if [ "$nt_verb" = "help" ] || [ "$nt_verb" = "--help" ] || [ "$nt_verb" = "-h" ]; then
+  echo "nodeterm canvas control — usage: sh <this script> <verb> [--flag value]"
+  echo
+  echo "Verbs:"
+  echo "  ${helpVerbList()}"
+  echo
+  # Single quotes: a backtick inside a double-quoted echo is command substitution, and the first
+  # word of the verb list is \`list\` — which sh then tried to RUN.
+  echo 'Run with no verb to list the current nodes (same as \`list\`).'
+  echo "Flags take a value: --flag value, or --flag=value when the value starts with '--'."
+  echo "Per-verb flags are documented in the manage-nodeterm-canvas skill / instructions block."
+  exit 0
+fi
 
 # Translate \`--flag value\` pairs — plus the one bare positional the show-image/show-video and
 # write/close/rename/branch/send/reply/sticky forms accept — into curl --data-urlencode arguments. The positional
@@ -612,9 +657,11 @@ value is allowed anywhere on the line, not only at the end.
 
 Verbs:
 - \`list\` — list current nodes (id, kind, title). Start here when you need a node id.
+- \`help\` — print the verb list. The shim answers this itself, without reaching the app, so it
+  is also what to run when you are unsure whether the control endpoint is alive.
 - \`open-terminal [--count N] [--cwd P] [--cmd C] [--group <id>] [--after <id,id>] [--project <id>]\` — open N plain terminals (default 1).
-- \`open-claude [--count N] [--cwd P] [--prompt T] [--group <id>] [--after <id,id>] [--project <id>]\` — open N Claude sessions (default 1).
-- \`open-agent --agent ${agentChoices} [--count N] [--cwd P] [--prompt T] [--group <id>] [--after <id,id>] [--project <id>]\` — open N sessions of any agent CLI.
+- \`open-claude [--count N] [--cwd P] [--prompt T] [--model M] [--group <id>] [--after <id,id>] [--project <id>]\` — open N Claude sessions (default 1).
+- \`open-agent --agent ${agentChoices} [--count N] [--cwd P] [--prompt T] [--model M] [--group <id>] [--after <id,id>] [--project <id>]\` — open N sessions of any agent CLI.
   \`--group\` parents the node(s) into an existing group frame; a worktree-bound group also
   hands its worktree path down as the cwd.
   \`--after <id,id>\` opens the node **armed**: it does NOT start yet, and launches itself once
@@ -632,6 +679,27 @@ Verbs:
   TARGET project's (its cwd, its default account and permission mode). A session opened into a
   non-active project starts when the user next views that project — do not poll for it; the reply
   says so. \`--group\`/\`--after\` cannot be combined with \`--project\`.
+  \`--prompt\` arrives on ONE LINE. Every run of whitespace in it — newlines included — is
+  collapsed to a single space before the session starts, because the prompt is passed as an
+  argument on the agent CLI's launch command line and that line is typed into the pane. So write
+  the task as continuous prose: a numbered list or a markdown heading arrives as one paragraph,
+  and indentation is lost. Two consequences worth planning around:
+  - **Never start a prompt with \`/\`.** Flattened, \`/model sonnet\` followed by your task reads
+    to the agent as one slash command whose argument is the entire rest of the prompt. The
+    command fails, your task is never seen, and the node then sits at an idle prompt looking
+    perfectly healthy — including to \`--after\`, which will arm everything behind it. Use
+    \`--model\` for the model; there is no supported way to run a slash command at launch.
+  - **For a long or structured brief, split it.** Open the node with a short \`--prompt\` (or
+    none), then deliver the body with \`send --node <id> --text "..."\`, which preserves the text
+    as written.
+  \`--model <id>\` decides which model the session LAUNCHES with, instead of inheriting the
+  project default. This is the lever for cost: a station whose job is editing a README does not
+  need the model you give the station rewriting a 1000-line test suite, and without this flag
+  every station you open runs on the same one. Honoured by claude, codex and copilot (and custom
+  agents declaring one of those as their base); every other agent IGNORES it and launches exactly
+  as it would have — the flag is never an error, so a mixed fan-out needs no special-casing. The
+  id goes to the CLI verbatim: an unknown name fails inside the session on its first turn, not at
+  open time, so name a model you know that CLI accepts rather than guessing.
 - \`open-project --cwd </abs/path> [--name N] [--color C]\` — register (or find) the project for a
   local directory; the reply carries \`{ projectId, name, cwd, created }\`. Idempotent: the same
   cwd always returns the same project, never a duplicate — and \`--name\`/\`--color\` apply only
@@ -677,9 +745,11 @@ Verbs:
   they share one checkout, and finding is a separate job from fixing. Use this instead of asking
   one agent "are you sure?": several INDEPENDENT looks from different angles catch what one pass,
   or several identical passes, cannot.
-- \`spawn-team --label "Frontend Team" --team '[{"title":"UI","prompt":"...","agent":"claude"}]'\` —
+- \`spawn-team --label "Frontend Team" --team '[{"title":"UI","prompt":"...","agent":"claude","model":"..."}]'\` —
   open one agent per role (each prompt starts that member working), arrange them in a grid,
   wrap them in a labeled group, and connect + context-link each to you. Max 8 roles per call.
+  \`model\` is optional and per role — the same selector \`--model\` applies, so a single team can
+  run its heavy role on a large model and the rest on a cheap one.
 - \`open-worktree --branch <name> [--base <ref>] [--path P] [--group <id>]\` — create a git
   worktree (new branch off base, default: the repo's default branch) and wrap it in a bound
   group frame (or bind it to an existing empty group). Terminals created inside the group
@@ -734,6 +804,9 @@ ${browserGuidanceLines().join('\n')}
 
 Notes:
 - \`write\` and \`close\` require the user to approve a confirmation dialog; they may be denied.
+  Two different replies, two different follow-ups: \`denied by user\` is a decision and is FINAL —
+  never re-ask — whereas \`no answer within 120s\` means the dialog was simply not reached in
+  time, which is worth one retry when the user is back at the machine.
 - \`board\` and \`assign\` act on the CURRENTLY OPEN project's board — the same one you see when you
   toggle the kanban view. They need no confirmation.
 - If the CLI says canvas control is unavailable, you are not in a controllable nodeterm session — do not retry.

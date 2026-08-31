@@ -47,6 +47,7 @@ export const WORKTREE_GROUP_SIZE = { width: 760, height: 540 }
 const EDITOR_SIZE = { width: 660, height: 460 }
 const DIFF_SIZE = { width: 860, height: 500 }
 const DINO_SIZE = { width: 600, height: 200 }
+const TRIGGER_SIZE = { width: 300, height: 170 }
 const VIDEO_SIZE = { width: 640, height: 420 }
 const WEB_SIZE = { width: 720, height: 520 }
 const BROWSER_SIZE = { width: 800, height: 560 }
@@ -164,6 +165,12 @@ export interface NodeData {
    * SSH-project editor still routes to the remote fs after reopen.
    */
   sshFs?: boolean
+  /**
+   * trigger-only: the schedule + payload + target of a trigger node (issue #493). Persisted as
+   * git-shared content and sanitized on every load path; whether it may FIRE on this machine is
+   * the machine-local arm store's question, never this field's. See @shared/trigger.
+   */
+  trigger?: import('@shared/trigger').TriggerSpec
   [key: string]: unknown
 }
 
@@ -784,6 +791,36 @@ export function createCodexAccountLoginNode(
 }
 
 /**
+ * Terminal node that SWITCHES the system (~/.claude) Claude identity — the usage popover's
+ * "Switch account" action (issue #420). Runs `claude /login` with NO `accountId`, so the spawn
+ * env is bit-for-bit the plain-terminal one and the OAuth writes the system `~/.claude` —
+ * which is the point: every system-scope session follows the new org, exactly as a hand-typed
+ * `claude /login` would make them. Deliberately a SEPARATE factory from
+ * `createAccountLoginNode`: that one REQUIRES an accountId because config-dir scoping is its
+ * purpose, and its 'Claude login' title is the durable signature `isAccountLoginNode` keys on
+ * to destroy login nodes together with their removed account — a sweep this node must never be
+ * caught by (both destroy paths also gate on accountId equality, and this node has none).
+ *
+ * The docblock hazard on `isAccountLoginNode` — a respawned `claude /login` overwriting the
+ * system identity — is only a hazard when it happens UNASKED. Here the overwrite is the feature,
+ * and "once" is structural rather than promised: `initialCommand` is consumed on first mount and
+ * never serialized (`flowToNodeStates` drops it), so after an app restart or a machine reboot
+ * this node is an inert plain terminal, not a login prompt nobody requested.
+ *
+ * Local only, on purpose: on an SSH project a system login would rewrite THAT host's ~/.claude,
+ * so the popover does not offer the action there (see UsageIndicator).
+ */
+export function createSystemLoginNode(index: number, center?: { x: number; y: number }): CanvasNode {
+  const node = createTerminalNode(index, undefined, center)
+  node.data = {
+    ...node.data,
+    title: 'Switch Claude account',
+    initialCommand: 'claude /login'
+  }
+  return node
+}
+
+/**
  * True when node data is (or started as) an account-login terminal (`claude /login`).
  * `initialCommand` is one-shot and never persisted, so the factory title is the only durable
  * signature — serialized copies match on title alone. Used to DESTROY the login node together
@@ -1267,12 +1304,46 @@ export function maximizeNodeToRect(
     height: nodeH(node) || (node.style?.height as number) || 0
   }
   if (!(premaxRect.width > 0) || !(premaxRect.height > 0)) return nodes
+  return withNodeRect(nodes, node, rect, { premaxRect })
+}
+
+/**
+ * Zone snap (issue #394 v1): place `nodeId` at `rect` — a zone of the visible viewport in
+ * ROOT/flow coordinates (`zoneTargetRect`). Plain placement, no toggle state: unlike maximize it
+ * writes no `premaxRect` (a node sent to "left half" has simply been MOVED, exactly as if by
+ * hand) and an existing `premaxRect` is left alone, so a maximized node snapped into a zone still
+ * restores to its pre-maximize spot. Refusals match the maximize matrix minus already-maximized:
+ * unknown id, group frame, collapsed node.
+ */
+export function placeNodeInRect(
+  nodes: CanvasNode[],
+  nodeId: string,
+  rect: { x: number; y: number; width: number; height: number }
+): CanvasNode[] {
+  const node = nodes.find((n) => n.id === nodeId)
+  if (!node || node.type === 'group' || node.data.collapsed) return nodes
+  return withNodeRect(nodes, node, rect, {})
+}
+
+/**
+ * The shared placement core: put `node` at the ROOT-space `rect` (converted to parent-relative),
+ * patch its data, and re-fit the ancestor frames in the same transform — `extent:'parent'` would
+ * otherwise clamp a child bigger than its frame into an inverted range (the snap
+ * `groupSelectedNodes` documents).
+ */
+function withNodeRect(
+  nodes: CanvasNode[],
+  node: CanvasNode,
+  rect: { x: number; y: number; width: number; height: number },
+  dataPatch: Partial<NodeData>
+): CanvasNode[] {
   // rect is root-space; a grouped node's position is relative to its frame, so subtract the
   // ancestor origins (root position minus own offset = the parent chain's origin).
+  const root = rootPosition(node, nodes)
   const originX = root.x - node.position.x
   const originY = root.y - node.position.y
   const next = nodes.map((n) =>
-    n.id === nodeId
+    n.id === node.id
       ? {
           ...n,
           position: { x: rect.x - originX, y: rect.y - originY },
@@ -1282,7 +1353,7 @@ export function maximizeNodeToRect(
           // Drop the stale measurement in the same tick: flowToNodeStates prefers `measured` over
           // `width`/`height`, and a commit racing the re-measure would persist the OLD size.
           measured: undefined,
-          data: { ...n.data, premaxRect, expandedHeight: rect.height }
+          data: { ...n.data, expandedHeight: rect.height, ...dataPatch }
         }
       : n
   )
@@ -1299,23 +1370,7 @@ export function restoreMaximizedNode(nodes: CanvasNode[], nodeId: string): Canva
   const node = nodes.find((n) => n.id === nodeId)
   const prev = node?.data.premaxRect
   if (!node || !prev) return nodes
-  const root = rootPosition(node, nodes)
-  const originX = root.x - node.position.x
-  const originY = root.y - node.position.y
-  const next = nodes.map((n) =>
-    n.id === nodeId
-      ? {
-          ...n,
-          position: { x: prev.x - originX, y: prev.y - originY },
-          width: prev.width,
-          height: prev.height,
-          style: { ...n.style, width: prev.width, height: prev.height },
-          measured: undefined,
-          data: { ...n.data, premaxRect: undefined, expandedHeight: prev.height }
-        }
-      : n
-  )
-  return fitAncestorChain(next, node.parentId)
+  return withNodeRect(nodes, node, prev, { premaxRect: undefined })
 }
 
 /**
@@ -1667,7 +1722,8 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
         ssh: n.ssh,
         sshRemoteTmux: n.sshRemoteTmux,
         sshFs: n.sshFs,
-        worktree: n.worktree
+        worktree: n.worktree,
+        trigger: n.trigger
       }
     }
   })
@@ -1693,7 +1749,9 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
                   ? WEB_SIZE
                   : kind === 'dino'
                     ? DINO_SIZE
-                    : TERMINAL_SIZE
+                    : kind === 'trigger'
+                      ? TRIGGER_SIZE
+                      : TERMINAL_SIZE
   return nodes
     .map((n) => {
       const kind: NodeKind = (n.type as NodeKind) ?? 'terminal'
@@ -1738,6 +1796,7 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
         sshRemoteTmux: n.data.sshRemoteTmux,
         sshFs: n.data.sshFs,
         worktree: n.data.worktree,
+        trigger: n.data.trigger,
         premaxRect: n.data.premaxRect
       }
     })
