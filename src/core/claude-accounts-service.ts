@@ -63,7 +63,11 @@ export interface ClaudeAccountsDeps {
   pollMs?: number
 }
 
-const waiters = new Map<string, { cancelled: boolean }>()
+// A SET per id: the launch heal + a Retry click legitimately run two concurrent waits for one
+// account, and a single-slot map let one wait's cleanup deregister the other — cancel then
+// no-op'd and the orphan poll ran to its full LOGIN_TIMEOUT_MS deadline, uncancellable, with
+// repeated calls accumulating pollers.
+const waiters = new Map<string, Set<{ cancelled: boolean }>>()
 
 async function checkClaudeVersion(): Promise<boolean> {
   // The < 2.1 warning is about the shared macOS Keychain service; on Linux/Windows
@@ -119,7 +123,9 @@ export function registerClaudeAccountsIpc(deps: ClaudeAccountsDeps = {}): void {
     // Local path: `claudeConfigDirFor` also validates the id shape (rejects traversal).
     const configDir = remote ? null : claudeConfigDirFor(id)
     const w = { cancelled: false }
-    waiters.set(id, w)
+    const set = waiters.get(id) ?? new Set()
+    set.add(w)
+    waiters.set(id, set)
     const deadline = Date.now() + LOGIN_TIMEOUT_MS
     try {
       while (!w.cancelled && Date.now() < deadline) {
@@ -136,13 +142,15 @@ export function registerClaudeAccountsIpc(deps: ClaudeAccountsDeps = {}): void {
       }
       return null
     } finally {
-      waiters.delete(id)
+      // Ownership-checked: remove only THIS wait; a concurrent wait for the same id survives.
+      const live = waiters.get(id)
+      live?.delete(w)
+      if (live && live.size === 0) waiters.delete(id)
     }
   })
 
   platform().handle(IPC.claudeAccountsCancelWait, (id: string) => {
-    const w = waiters.get(id)
-    if (w) w.cancelled = true
+    for (const w of waiters.get(id) ?? []) w.cancelled = true
   })
 
   platform().handle(IPC.claudeAccountsRemove, async (id: string, ctx?: AccountCtx) => {

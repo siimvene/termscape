@@ -105,6 +105,23 @@ describe('registerClaudeAccountsIpc — the four channels', () => {
     await expect(pending).resolves.toBeNull()
   })
 
+  // Consort finding (cross-vendor review of the upstream merge). The launch heal and a Retry
+  // click legitimately run two concurrent waits for one account, so a single-slot waiters map is
+  // reachable, not theoretical: the second `set(id, w)` overwrote the first, leaving cancel able
+  // to reach only the newest — the orphan then polled the full LOGIN_TIMEOUT_MS (5 min),
+  // uncancellable, and repeated calls accumulated pollers. Desktop carried the Set-per-id fix;
+  // core — which is what the Server Edition serves — did not. Against the single-slot map the
+  // first wait is never cancelled and this test times out rather than failing an assertion.
+  it('cancelWaitLogin cancels EVERY concurrent wait for one id, not just the newest', async () => {
+    registerClaudeAccountsIpc({ pollMs: 5 })
+    const { id } = await call(IPC.claudeAccountsAdd)
+    const first = call(IPC.claudeAccountsWaitLogin, id)
+    const second = call(IPC.claudeAccountsWaitLogin, id)
+    await new Promise((r) => setTimeout(r, 20))
+    await call(IPC.claudeAccountsCancelWait, id)
+    await expect(Promise.all([first, second])).resolves.toEqual([null, null])
+  })
+
   it('remove() deletes the account dir', async () => {
     registerClaudeAccountsIpc()
     const { id, configDir } = await call(IPC.claudeAccountsAdd)
