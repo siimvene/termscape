@@ -16,6 +16,7 @@ import { useSettings } from '../../state/settings'
 import { useTerminalSearch } from '../../terminal/useTerminalSearch'
 import { LocalTransport } from '../../terminal/local-transport'
 import { clipboardImages, droppedPaths, pasteHasText, pastedFiles } from '../../terminal/file-drop'
+import { useFileDropZone } from '../../terminal/useFileDropZone'
 import { guardMiddleClickPaste } from '../../terminal/middle-click'
 import { parseOsc52 } from '../../terminal/osc52'
 import { activateUnicode11 } from '../../terminal/unicode-width'
@@ -101,7 +102,6 @@ export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch }: Moda
   // answers a project×host attachment id for a session on a foreign host, which names no project at
   // all — the per-project appearance would silently vanish for exactly those cards.
   const visual = useXtermVisualSettings(owningProjectId())
-  const [dropping, setDropping] = useState(false)
   const [uploading, setUploading] = useState(false)
   // Same copy feedback as the canvas node — a copy here is the same act as a copy there, including
   // the agent gate: a claude card stays silent because claude prints its own copy line.
@@ -384,16 +384,6 @@ export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch }: Moda
   }, [visual])
 
   // File drop → paste the path(s) into the co-attached session, just like the canvas node.
-  const onDragOver = (e: React.DragEvent) => {
-    if (!Array.from(e.dataTransfer.types).includes('Files')) return
-    e.preventDefault()
-    e.dataTransfer.dropEffect = 'copy'
-    if (!dropping) setDropping(true)
-  }
-  const onDragLeave = (e: React.DragEvent) => {
-    const rt = e.relatedTarget as Node | null
-    if (!rt || !(e.currentTarget as HTMLElement).contains(rt)) setDropping(false)
-  }
   /** Drop and paste share one path — same rule as the canvas node (see TerminalNode.insertFiles):
    *  files become paths in the terminal, and only the window-raise differs. */
   const insertFiles = async (files: File[], opts: { raiseWindow: boolean }) => {
@@ -433,14 +423,8 @@ export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch }: Moda
     term.paste(paths.join(' ') + ' ')
   }
 
-  const onDrop = async (e: React.DragEvent) => {
-    const files = Array.from(e.dataTransfer.files)
-    setDropping(false)
-    if (!files.length) return
-    e.preventDefault()
-    e.stopPropagation()
-    await insertFiles(files, { raiseWindow: true })
-  }
+  // Same fragile-Finder-drag fix as the canvas node (see useFileDropZone / acceptsFileDrag).
+  const drop = useFileDropZone((files) => void insertFiles(files, { raiseWindow: true }))
 
   // Cmd/Ctrl+V of a file or of raw image bytes; a text paste falls through to xterm untouched.
   // Capture phase, because xterm's own paste listener sits on the textarea below this wrapper.
@@ -461,10 +445,10 @@ export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch }: Moda
 
   return (
     <div
-      className={`kanban-modal__termwrap${dropping ? ' kanban-modal__termwrap--drop' : ''}`}
-      onDragOver={onDragOver}
-      onDragLeave={onDragLeave}
-      onDrop={onDrop}
+      className={`kanban-modal__termwrap${drop.dropping ? ' kanban-modal__termwrap--drop' : ''}`}
+      onDragOver={drop.onDragOver}
+      onDragLeave={drop.onDragLeave}
+      onDrop={drop.onDrop}
       onPasteCapture={onPaste}
     >
       {uploading && <div className="kanban-modal__upload">Uploading…</div>}

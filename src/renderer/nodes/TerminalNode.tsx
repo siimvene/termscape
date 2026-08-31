@@ -19,6 +19,7 @@ import { WebglAddon } from '@xterm/addon-webgl'
 const ChatPanel = lazy(() => import('./ChatPanel').then((m) => ({ default: m.ChatPanel })))
 import { LocalTransport } from '../terminal/local-transport'
 import { clipboardImages, droppedPaths, pasteHasText, pastedFiles } from '../terminal/file-drop'
+import { useFileDropZone } from '../terminal/useFileDropZone'
 import type { TerminalTransport } from '../terminal/transport'
 import { guardMiddleClickPaste } from '../terminal/middle-click'
 import { patchTerminalScale } from '../terminal/scale-fix'
@@ -150,6 +151,7 @@ import { PresenceChips } from '../components/PresenceChips'
 import { useAgentNodes } from '../state/agentNodes'
 import { useTerminalFocus } from '../state/terminalFocus'
 import { useProjects } from '../state/projects'
+import { useSystemAccount } from '../state/systemAccount'
 import { isKanbanOpen, useViewMode, viewFor } from '../state/viewMode'
 import { useSshConn } from '../state/sshConn'
 import { useWorktrees } from '../state/worktrees'
@@ -1051,11 +1053,14 @@ export function TerminalNode({
   // global settings for this node, and for no other project's nodes.
   const visual = useXtermVisualSettings(owningProjectId())
   const claudeAccounts = useSettings((s) => s.settings.claudeAccounts)
+  // System (~/.claude) account identity for the header chip on a system-default node, resolved the
+  // same way the pickers and usage popover resolve it (custom label → detected email → generic).
+  const systemLabelSetting = useSettings((s) => s.settings.systemAccountLabel)
+  const systemEmail = useSystemAccount((s) => s.email)
   // Header buttons the user chose to hide (Settings). A selector, so toggling one re-renders every
   // mounted node right away instead of waiting for a remount. Search, Close and the worktree-move
   // button are absent from `isHidden`'s inventory and stay put whatever the list says.
   const hiddenHeaderButtons = useSettings((s) => s.settings.hiddenHeaderButtons)
-  const accountChip = accountChipLabel(data.accountId, claudeAccounts)
   const bodyRef = useRef<HTMLDivElement>(null)
   /** Where a press on the hover guard started, for the click-vs-drag test in `onGuardUp`. */
   const guardDownAt = useRef<{ x: number; y: number } | null>(null)
@@ -1120,7 +1125,6 @@ export function TerminalNode({
   const dwellRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [showColors, setShowColors] = useState(false)
   const [armed, setArmed] = useState(true)
-  const [dropping, setDropping] = useState(false)
   // Overlay while dropped files upload to an SSH host (scp is seconds-long with zero feedback);
   // doubles as a brief "Upload failed" flash when nothing made it.
   const [uploadNote, setUploadNote] = useState<{ text: string; failed?: boolean } | null>(null)
@@ -1406,6 +1410,22 @@ export function TerminalNode({
   // project long after the lifecycle run that would otherwise have captured the answer.
   const offscreenRemoteRef = useRef(false)
   offscreenRemoteRef.current = remoteSession || offscreenCoreIsRemote(session.source)
+  // Header account chip. A managed account always shows (any `accountId`); the SYSTEM default shows
+  // only on a LOCAL node — the chip's identity is THIS machine's `~/.claude` login, which would
+  // misrepresent an SSH/relay node whose core is elsewhere (same "is this remote?" union as the
+  // offscreen gate above). See accountChipLabel for the managed-accounts-exist rule.
+  const nodeIsLocal = !offscreenRemoteRef.current
+  const accountChip = accountChipLabel(
+    data.accountId,
+    claudeAccounts,
+    nodeIsLocal ? { label: systemLabelSetting, email: systemEmail } : undefined
+  )
+  // The system login's email is lazy (resolved once per app session); pull it in when a
+  // system-default node with managed accounts actually needs it. Guarded — a no-op after the first
+  // caller anywhere (Settings, TabBar, or here).
+  useEffect(() => {
+    if (!data.accountId && claudeAccounts.length) useSystemAccount.getState().ensure()
+  }, [data.accountId, claudeAccounts.length])
   // …and published for the hibernation sweep, which needs the same answer at PLAN time (see the
   // policy's `remote` field: excluding these only at the exit let two remote nodes occupy both
   // batch slots forever). Re-published whenever it changes — a local project can become an SSH one.
@@ -4207,16 +4227,6 @@ export function TerminalNode({
   }
 
   // ---- file drop: paste dropped file paths into the terminal (native-terminal behavior) ----
-  const onBodyDragOver = (e: React.DragEvent) => {
-    if (!Array.from(e.dataTransfer.types).includes('Files')) return
-    e.preventDefault()
-    e.dataTransfer.dropEffect = 'copy'
-    if (!dropping) setDropping(true)
-  }
-  const onBodyDragLeave = (e: React.DragEvent) => {
-    const rt = e.relatedTarget as Node | null
-    if (!rt || !(e.currentTarget as HTMLElement).contains(rt)) setDropping(false)
-  }
   /**
    * Files arriving by DROP or by PASTE become paths in the terminal — what a native terminal does
    * on a drop, and the only thing a shell (or an agent reading its prompt) can act on. Shared so
@@ -4284,14 +4294,9 @@ export function TerminalNode({
     presence.reportFocus(id)
   }
 
-  const onBodyDrop = async (e: React.DragEvent) => {
-    const files = Array.from(e.dataTransfer.files)
-    setDropping(false)
-    if (!files.length) return
-    e.preventDefault()
-    e.stopPropagation()
-    await insertFiles(files, { raiseWindow: true })
-  }
+  // A drop from Finder is a file drag we raise our window for; the hook keeps a flaky-tick Finder
+  // drag from wedging the overlay (see useFileDropZone / acceptsFileDrag).
+  const drop = useFileDropZone((files) => void insertFiles(files, { raiseWindow: true }))
 
   // Cmd/Ctrl+V of a FILE (copied in Finder/Explorer) or of raw image bytes (a screenshot). A paste
   // carrying neither is ordinary text and belongs to xterm — hence the early return, and hence the
@@ -4872,12 +4877,12 @@ export function TerminalNode({
 
       {/* Body always mounted (keeps xterm alive); hidden via CSS when collapsed. */}
       <div
-        className={`term-node__body${dropping ? ' dropping' : ''}`}
+        className={`term-node__body${drop.dropping ? ' dropping' : ''}`}
         onMouseEnter={onBodyEnter}
         onMouseLeave={onBodyLeave}
-        onDragOver={onBodyDragOver}
-        onDragLeave={onBodyDragLeave}
-        onDrop={onBodyDrop}
+        onDragOver={drop.onDragOver}
+        onDragLeave={drop.onDragLeave}
+        onDrop={drop.onDrop}
         onPasteCapture={onBodyPaste}
       >
         <div

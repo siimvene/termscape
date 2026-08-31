@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
 import {
+  acceptsFileDrag,
   canvasImageFiles,
   canvasImageSink,
   clipboardImages,
@@ -9,6 +10,22 @@ import {
   pastedFiles,
   uploadNameFor
 } from './file-drop'
+
+describe('acceptsFileDrag', () => {
+  it('accepts a dragover that advertises files', () => {
+    expect(acceptsFileDrag(['Files'], false)).toBe(true)
+  })
+
+  it('ignores a non-file dragover that was never a file drag', () => {
+    expect(acceptsFileDrag(['text/plain', 'text/uri-list'], false)).toBe(false)
+  })
+
+  it('keeps accepting once a file drag is recognized, even on an empty-types tick', () => {
+    // The macOS/Electron flake: a mid-drag dragover reports no types. Re-deciding from types
+    // alone would reject the drop here and wedge the overlay; the active latch keeps it accepted.
+    expect(acceptsFileDrag([], true)).toBe(true)
+  })
+})
 
 describe('escapeDroppedPath', () => {
   it('escapes what a shell would otherwise interpret', () => {

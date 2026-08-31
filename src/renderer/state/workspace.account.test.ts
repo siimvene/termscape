@@ -53,6 +53,35 @@ describe('accountChipLabel', () => {
       tooltip: 'Unknown account'
     })
   })
+
+  it('shows the named system default on a local node when managed accounts exist', () => {
+    const r = accountChipLabel(undefined, [acct({})], {
+      label: 'Workspace',
+      email: 'me@work.example'
+    })
+    expect(r).toEqual({ short: 'Workspace', tooltip: 'Workspace (me@work.example)' })
+  })
+
+  it('no system chip when there are no managed accounts (nothing to disambiguate)', () => {
+    expect(
+      accountChipLabel(undefined, [], { label: 'Workspace', email: 'me@work.example' })
+    ).toBeNull()
+  })
+
+  it('no system chip when the caller withholds system identity (SSH/relay node)', () => {
+    expect(accountChipLabel(undefined, [acct({})], undefined)).toBeNull()
+  })
+
+  it('system chip falls back to the detected email when unlabeled', () => {
+    const r = accountChipLabel(undefined, [acct({})], { label: '', email: 'me@work.example' })
+    expect(r).toEqual({ short: 'me', tooltip: 'me@work.example' })
+  })
+
+  it('system chip reads "System account" when neither label nor email is known', () => {
+    const r = accountChipLabel(undefined, [acct({})], { label: '', email: null })
+    expect(r?.short).toBe('System acc…')
+    expect(r?.tooltip).toBe('System account')
+  })
 })
 
 describe('systemAccountDisplay', () => {

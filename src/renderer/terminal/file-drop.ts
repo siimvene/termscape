@@ -7,6 +7,20 @@ export function escapeDroppedPath(p: string): string {
   return p.replace(/([ \t"'`\\()&;|<>$!*?[\]{}#~])/g, '\\$1')
 }
 
+/**
+ * Whether a `dragover` should be accepted (preventDefault'd) as a file drop.
+ *
+ * macOS/Electron report `DataTransfer.types` INTERMITTENTLY during a Finder drag — some dragover
+ * ticks list `'Files'`, some list nothing at all. The handler runs on every tick, so re-deciding
+ * acceptance from `types` alone lets one empty tick reject the drop. A rejected drop fires neither
+ * `drop` nor a resetting `dragleave`, so the paste silently fails AND the "Drop to insert path"
+ * overlay wedges. Once a drag has been recognized as carrying files (`alreadyActive`), keep
+ * accepting it until it ends — one blind tick must not sink the whole drop.
+ */
+export function acceptsFileDrag(types: readonly string[], alreadyActive: boolean): boolean {
+  return alreadyActive || types.includes('Files')
+}
+
 /** Extension for a clipboard blob that arrives with no filename, keyed off its MIME type. A
  *  screenshot is `image/png` with an empty `name`, and an agent asked to look at `pasted-<ts>`
  *  with no suffix has to guess what it is holding. */

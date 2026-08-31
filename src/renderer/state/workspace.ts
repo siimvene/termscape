@@ -685,14 +685,33 @@ export function createAgentNode(
  * Chip text for an account-bound node header. Given a node's `accountId` and the known
  * accounts, returns the short chip label (the part of the account label before `@`, capped
  * at ~10 chars with an ellipsis) plus a tooltip (`label (email)`, or just the label when no
- * email). Returns `null` when there's no `accountId` (render no chip). An `accountId` that no
- * longer resolves to a known account (removed) yields `Unknown account` for both.
+ * email). An `accountId` that no longer resolves to a known account (removed) yields
+ * `Unknown account` for both.
+ *
+ * The SYSTEM default (`~/.claude`, no `accountId`) gets a chip too — but ONLY when `system` is
+ * supplied AND managed accounts exist. The caller passes `system` for LOCAL nodes only: the chip's
+ * identity is THIS machine's login, so it would misrepresent an SSH/relay node whose core lives on
+ * another machine. And with no managed accounts there is nothing to disambiguate, so the header
+ * stays chip-free (byte-identical to before this feature). Labeled by the same `systemAccountDisplay`
+ * the pickers and usage popover use, so the system name never drifts across surfaces — which is the
+ * bug this closes: a NAMED system default showed nothing while every managed account showed its
+ * chip.
  */
 export function accountChipLabel(
   accountId: string | undefined,
-  accounts: ClaudeAccount[]
+  accounts: ClaudeAccount[],
+  system?: { label?: string; email?: string | null }
 ): { short: string; tooltip: string } | null {
-  if (!accountId) return null
+  if (!accountId) {
+    if (!system || !accounts.length) return null
+    const label = (system.label ?? '').trim()
+    const email = system.email || undefined
+    const display = systemAccountDisplay(label, email)
+    const base = display.split('@')[0]
+    const short = base.length > 10 ? `${base.slice(0, 10)}…` : base
+    const tooltip = label && email ? `${label} (${email})` : display
+    return { short, tooltip }
+  }
   const acct = accounts.find((a) => a.id === accountId)
   if (!acct) return { short: 'Unknown account', tooltip: 'Unknown account' }
   const base = acct.label.split('@')[0]
