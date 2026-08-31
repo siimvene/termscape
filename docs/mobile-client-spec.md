@@ -44,6 +44,7 @@ requirement:
 | Answer permission prompts (allow/deny) | ✅ | | |
 | Ack finished sessions (`agent:ack-done`) | ✅ | | |
 | Context meter per session (`context:update`) | ✅ | | |
+| Usage dashboard (subscription + rate-limit, per account) | ✅ | | |
 | Transcript read (chat view of a Claude session) | ✅ | | |
 | Dictation: Apple on-device (default) | ✅ | | |
 | Dictation: server-side whisper (`speech:transcribe`) | ✅ (optional alternative) | | |
@@ -505,11 +506,37 @@ frame cap is 8 MiB (§4.10) — an oversized frame closes the WHOLE socket with 
 [src: src/server/ws.ts:36-54], dropping every open terminal on that server AND the dictation.
 Cap recordings at ~2 minutes, or split longer audio into separate `speech:transcribe` requests.
 
-### 5.6 Served but not needed for v0 (do not stub-fail if used later)
+### 5.6 usage — subscription & rate-limit dashboard [src: src/core/usage/usage-service.ts:301-460; src/server/handlers/index.ts:116-122]
+
+The Server Edition boots the SAME core usage service the desktop runs, pointed at THIS host's own
+Claude and Codex accounts (`startUsageService({localAccounts, codexAccounts})`), so every channel
+below answers the host's real numbers. `usage:remote` is the one structural exception: no SSH
+ControlMaster is injected server-side, so it is `[]` here. Read is on demand; nothing here is
+required for a terminal to work.
+
+| Method | Kind | Args | Returns | Notes |
+|---|---|---|---|---|
+| `usage:fetch` | REQ | `[accountId?]` | `ClaudeUsage` | Claude subscription windows for ONE account. Omit `accountId` = the system `~/.claude`; pass a managed account's id for its own. Cached ~5 min; a repeat inside that window is served from cache [src: usage-service.ts:301-306] |
+| `usage:refresh` | REQ | `[accountId?]` | `ClaudeUsage` | Same, bypassing the cache — the pull-to-refresh path [src: usage-service.ts:307] |
+| `usage:providers` | REQ | `[force?:Bool]` | `[ProviderUsage]` | Non-Claude agents' limits (codex/gemini/grok/…), each row keyed by `provider` and, for an account-scoped provider (codex), `accountId`. This is the popover's **Codex** section [src: usage-service.ts:405] |
+| `usage:remote` | REQ | `[{hostKey?, force?}]` | `[RemoteAccountUsage]` | Structurally `[]` on the Server Edition (no SSH). Safe to call; build no UI expecting rows [src: usage-service.ts:440] |
+
+**Enumerating the rows — there is no "list usage" call.** Read `settings:load` → `claudeAccounts`
+(§11.7) and mirror the desktop UI's own loop: `usage:fetch()` for the system row, then
+`usage:fetch(a.id)` for each account with `pending:false` and **no `host`** (a host-pinned account's
+config dir lives on another machine and never resolves here), plus one `usage:providers` call for the
+Codex/other rows [src: src/renderer/components/UsageIndicator.tsx:247-249,370-379]. A `status` of
+`unavailable` means that identity has no OAuth subscription to show (API-key billing / logged out) —
+render nothing for it, never an error.
+
+**Push:** `usage:update` (CAST, §6) carries a fresh `ClaudeUsage` for the **system account only**,
+whenever its cache repopulates [src: usage-service.ts:271-274]. Managed-account rows are not pushed;
+re-fetch them on foreground and pull-to-refresh.
+
+### 5.7 Served but not needed for v0 (do not stub-fail if used later)
 
 fs (`fs:list/read/read-binary/write/mkdir/exists`), all `git:*`, `commit:generate`,
-`files:quick-open` / `files:download-ticket` / `files:save-upload`, `usage:*` (+ `usage:update`
-event; `usage:remote` is structurally `[]` on the server), `session-memory:read` / `:host`,
+`files:quick-open` / `files:download-ticket` / `files:save-upload`, `session-memory:read` / `:host`,
 board-log, logs, `project-settings:*`, `project-setup:*`, `claude-cli:caps`,
 `codex-identity:caps` (degraded), `agent:discover-models`, github issues/control, presence,
 `canvas:mut` [src: src/server/index.ts + src/server/handlers/ registrations]. File downloads do **not** stream over the WS: mint a
@@ -548,7 +575,8 @@ All events arrive as JSON `ev` frames except `pty:data:<sid>` (binary, §4.5).
 | `speech:progress` | `[{id, pct}]` | yes (model downloads) |
 | `workspace:migrated` / `workspace:corrupt-recovered` | migration note / filename | yes |
 | `workspace:external-change` | `[Project]` (the updated project) | **YES**, pushed by `workspace:register-node` / `workspace:remove-node` [src: src/core/workspace-store.ts:1322-1323,1378-1379]; no other server code emits it and no v0 client subscribes (the phone re-`workspace:load`s instead, §5.2) |
-| `usage:update`, `git:clone-progress`, `log:batch`, `board-log:changed:<pid>`, `project-setup:*`, `github-issues:changed:<pid>` | various | yes — not needed v0 |
+| `usage:update` | `[ClaudeUsage]` — the SYSTEM account's fresh snapshot (managed rows are not pushed, §5.6) | yes [src: src/core/usage/usage-service.ts:271-274] |
+| `git:clone-progress`, `log:batch`, `board-log:changed:<pid>`, `project-setup:*`, `github-issues:changed:<pid>` | various | yes — not needed v0 |
 
 ### 6.2 `NormalizedAgentEvent` — the payload that drives everything
 
@@ -1051,6 +1079,19 @@ list row carries its server identity. Failures are isolated per server.
 - **Quick actions:** **Add Server** (§3.6 form). QR pairing = v1.
 - **DISCOVER carousel:** three static education cards — *tmux Sessions* (sessions survive the
   app), *Scrollback* (history restored after reboots), *Voice → Terminal* (dictation).
+- **USAGE panel (bottom)** — the subscription and rate-limit dashboard, mirroring the desktop
+  popover (§5.6). One block per identity, in this order: the **system** account first, then each
+  managed Claude account (`settings.claudeAccounts`, `pending:false` and no `host`), then the
+  **Codex** and any other rows from `usage:providers`. Each block is the account's label/email as a
+  heading and one **bar per limit** — Session, Weekly, and any per-model scoped cap (`scopeLabel`,
+  e.g. **Fable**) — each showing **percent LEFT** and its reset time. The bar INVERTS the wire
+  convention: `UsageLimit.usedPercent` is the portion USED, the bar fills to `100 - usedPercent`
+  (the `resetsAt` is Unix ms, shown relative — "Resets in 5h 1m"). Pull-to-refresh calls
+  `usage:refresh` for every visible account and `usage:providers` with `force`. An identity whose
+  `status` is `unavailable` is OMITTED, not shown empty; `error` shows a one-line "couldn't read".
+  This is v0 and needs no new server work — every channel is already served (§5.6). N/A when no
+  server is connected (nothing to read).
+
 - **Hard requirement (repeat of §1):** no subscription banner, no quota, no "Unlock", no Pair
   Desktop, no Restore Purchase.
 
@@ -1259,8 +1300,10 @@ just renders `usedPercent` + `model`.
   [src: types.ts:2199-2215].
 - `TranscriptLine` = `{role:'user'|'assistant'|'tool', text}` [src: types.ts:2194-2197].
 - `Settings` fields a phone MAY read: `claudePermissionMode` (default `'auto'`), `defaultShell`,
-  `tmuxScrollback` (default 50000). Everything else is desktop render config — ignore, never
-  write back [src: types.ts:1111-1495].
+  `tmuxScrollback` (default 50000), and `claudeAccounts`
+  (`[{id, label, email?, host?, pending?, createdAt}]`) — the last to enumerate the usage
+  dashboard's per-account rows (§5.6) [src: types.ts:1079-1089]. Everything else is desktop render
+  config — ignore, never write back [src: types.ts:1111-1495].
 - `SpeechModelInfo` = `{id, file, approxMB, pro, downloaded, sizeMB?}`
   [src: types.ts:1537-1541].
 
@@ -1281,6 +1324,25 @@ name on connect even if it consumes nothing (arg shape unpinned — §12 item 6)
 `{op:'upsert', node:CanvasNodeState, src?, seq?}` | `{op:'remove', id:String, src?, seq?}` —
 `seq` is server-authoritative; never trust a client-set value.
 
+
+### 11.10 Usage types [src: src/shared/types.ts:1921-1998,2082-2115]
+
+- `ClaudeUsage` = `{limits:[UsageLimit], session:ClaudeUsageWindow|null,
+  weekly:ClaudeUsageWindow|null, email:String|null, updatedAt:Number(ms),
+  status:'unavailable'|'fetching'|'ok'|'error'}`. Prefer `limits[]`; `session`/`weekly` are
+  back-compat conveniences [src: types.ts:2082-2099].
+- `UsageLimit` = `{kind:String, group:String|null, usedPercent:Number(0-100, USED),
+  severity:String|null, resetsAt:Number(ms)|null, windowMinutes:Number|null, scopeLabel:String|null,
+  isActive:Bool}`. `kind` is `'session'|'weekly_all'|'weekly_scoped'|`future; `group` coarsens it to
+  `'session'|'weekly'`; `scopeLabel` carries the model name of a scoped cap (`'Fable'`), so a new
+  model needs no new field [src: types.ts:1937-1962].
+- `ClaudeUsageWindow` = `{leftPercent:Number(0-100, LEFT), resetsAt:Number(ms)|null}` — already
+  inverted to "left" for the bar [src: types.ts:1921-1926].
+- `ProviderUsage` = `{provider:String, limits:[UsageLimit], account:String|null, accountId?:String,
+  updatedAt:Number, status:(as ClaudeUsage)}`. `accountId` present ⇒ an account-scoped row (codex);
+  rows keyed by it never merge into another account's [src: types.ts:1968-1987].
+- `RemoteAccountUsage` = `{hostKey:String, accountId:String|null, label:String, usage:ClaudeUsage}` —
+  `[]`-only on the Server Edition [src: types.ts:2107-2115].
 ---
 
 ## 12. Open questions / unverified items
