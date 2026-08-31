@@ -84,22 +84,40 @@ export function nodeFitRect(node: FocusableNode, all: readonly FocusableNode[]):
   return { ...absolutePosition(node, all), ...size }
 }
 
+/** A chrome-free sub-rectangle of the pane to frame within, offset from the pane's top-left (all in
+ *  screen px). Lets the unmeasured focus path reserve the same space around the sidebar/dock/etc.
+ *  that the measured `fitView` path gets from `solveFitPadding`, instead of centering under them. */
+export interface FocusRegion {
+  offsetX: number
+  offsetY: number
+  width: number
+  height: number
+}
+
 /** The viewport that frames `rect` in a `containerWidth × containerHeight` pane, with the same
- *  padding/zoom clamp `fitView` would have applied. Null when the container has no size yet. */
+ *  padding/zoom clamp `fitView` would have applied. Null when the container has no size yet.
+ *
+ *  With a `region`, `rect` is framed inside that sub-rectangle instead of the whole pane: the fit
+ *  is solved for the region's size and the resulting translation shifted by the region's offset, so
+ *  the node lands centred in the free space — never underneath the chrome the region excludes. */
 export function viewportForRect(
   rect: Rect,
   containerWidth: number,
-  containerHeight: number
+  containerHeight: number,
+  region?: FocusRegion
 ): Viewport | null {
-  if (!(containerWidth > 0) || !(containerHeight > 0)) return null
-  return getViewportForBounds(
+  const w = region ? region.width : containerWidth
+  const h = region ? region.height : containerHeight
+  if (!(w > 0) || !(h > 0)) return null
+  const vp = getViewportForBounds(
     rect,
-    containerWidth,
-    containerHeight,
+    w,
+    h,
     FIT_NODE_OPTIONS.minZoom,
     FIT_NODE_OPTIONS.maxZoom,
     FIT_NODE_OPTIONS.padding
   )
+  return region ? { x: vp.x + region.offsetX, y: vp.y + region.offsetY, zoom: vp.zoom } : vp
 }
 
 /** Whether React Flow already knows this node's on-screen size — i.e. whether `fitView` will

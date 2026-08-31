@@ -146,6 +146,29 @@ describe('viewportForRect', () => {
   it('refuses to compute against a container it cannot size', () => {
     expect(viewportForRect({ x: 0, y: 0, width: 600, height: 400 }, 0, 0)).toBeNull()
   })
+
+  it('frames the node clear of the sidebar when given a chrome-free region', () => {
+    // The regression this guards: on a cross-project focus the node was centred in the FULL pane
+    // and landed partly under the (pinned) sessions sidebar. Reserving the sidebar's 400px on the
+    // left as a region must push the node's centre into the free half, not the pane's centre.
+    const rect = { x: 4000, y: 3000, width: 600, height: 400 }
+    const region = { offsetX: 400, offsetY: 0, width: 880, height: 900 } // pane 1280×900, sidebar 400
+    const vp = viewportForRect(rect, 1280, 900, region)!
+    // Node centre in screen px = vp.x + centreX * zoom. It must sit inside [400, 1280], i.e. clear
+    // of the sidebar, and near the free region's own centre (400 + 880/2 = 840).
+    const centreX = vp.x + 4300 * vp.zoom
+    expect(centreX).toBeGreaterThan(400)
+    expect(centreX).toBeCloseTo(840, 0)
+    // The plain (no-region) framing put the centre at the pane middle (640) — under the sidebar.
+    const plain = viewportForRect(rect, 1280, 900)!
+    expect(plain.x + 4300 * plain.zoom).toBeCloseTo(640, 0)
+  })
+
+  it('is identical to the plain framing when the region is the whole pane', () => {
+    const rect = { x: 4000, y: 3000, width: 600, height: 400 }
+    const full = { offsetX: 0, offsetY: 0, width: 1280, height: 900 }
+    expect(viewportForRect(rect, 1280, 900, full)).toEqual(viewportForRect(rect, 1280, 900))
+  })
 })
 
 describe('isMeasured', () => {

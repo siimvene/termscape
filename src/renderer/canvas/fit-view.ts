@@ -140,14 +140,17 @@ export function rectToPadding(outer: FitRect, rect: FitRect): FitPadding {
 }
 
 /**
- * Solve the fit-view padding for the current chrome layout and content shape.
- * Returns null when there is nothing sensible to solve, so callers can fall back to plain fitView.
+ * Solve the largest chrome-free region for the current chrome layout and content shape.
+ * Returns the pane's own rect (`outer`) and the winning free sub-rect (`free`), both in SCREEN
+ * pixels, or null when there is nothing sensible to solve. `contentW`/`contentH` are used only for
+ * the aspect-ratio comparison inside `largestFreeRect`, so any units consistent between the two
+ * work — canvas-space node dimensions are fine when the on-screen size is not yet known.
  */
-export function solveFitPadding(
+export function solveFreeRegion(
   wrap: HTMLElement,
   contentW: number,
   contentH: number
-): FitPadding | null {
+): { outer: FitRect; free: FitRect } | null {
   if (contentW <= 0 || contentH <= 0) return null
   const v = wrap.getBoundingClientRect()
   const outer: FitRect = { left: v.left, top: v.top, right: v.right, bottom: v.bottom }
@@ -159,5 +162,18 @@ export function solveFitPadding(
   }
   if (width(viewport) < 1 || height(viewport) < 1) return null
   const rect = largestFreeRect(viewport, chromeObstacles(viewport), contentW, contentH)
-  return rect ? rectToPadding(outer, rect) : null
+  return rect ? { outer, free: rect } : null
+}
+
+/**
+ * Solve the fit-view padding for the current chrome layout and content shape.
+ * Returns null when there is nothing sensible to solve, so callers can fall back to plain fitView.
+ */
+export function solveFitPadding(
+  wrap: HTMLElement,
+  contentW: number,
+  contentH: number
+): FitPadding | null {
+  const solved = solveFreeRegion(wrap, contentW, contentH)
+  return solved ? rectToPadding(solved.outer, solved.free) : null
 }

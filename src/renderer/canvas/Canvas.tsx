@@ -33,7 +33,7 @@ import {
   setWatchedNode,
   wakeHibernatedNode
 } from '../nodes/TerminalNode'
-import { solveFitPadding } from './fit-view'
+import { solveFitPadding, solveFreeRegion } from './fit-view'
 import { MacWheelGestureRouter, trackpadRoutingEnabled } from './wheel-gesture'
 import { selectedLocalFilePaths } from './canvas-file-copy'
 import {
@@ -5931,8 +5931,11 @@ export function Canvas() {
    * a flat 20% ratio has to reserve enough slack for the dock/minimap on EVERY side, which
    * is what kept a big node (a group frame most of all) further away than it needed to be.
    * The free-rect solver reclaims the space the chrome does not actually occupy, so the node
-   * is framed tighter without sliding underneath anything. Falls back to the flat ratio when
-   * there is nothing sensible to solve — the same ratio the unmeasured branch uses.
+   * is framed tighter without sliding underneath anything. The UNMEASURED branch solves the same
+   * free region (from the node's persisted canvas size, which is all the aspect-ratio pick needs)
+   * — otherwise a cross-project focus, which is exactly the unmeasured case, centred the node in
+   * the full pane and parked it half under the pinned sessions sidebar. Both branches fall back to
+   * the flat 20% ratio when there is nothing sensible to solve.
    */
   const frameNode = useCallback(
     (node: Node) => {
@@ -5951,8 +5954,24 @@ export function Canvas() {
         return
       }
       const rect = nodeFitRect(node as FocusableNode, nodesRef.current as FocusableNode[])
-      const wrap = flowWrapRef.current?.getBoundingClientRect()
-      const viewport = rect && wrap ? viewportForRect(rect, wrap.width, wrap.height) : null
+      const wrapEl = flowWrapRef.current
+      const wrap = wrapEl?.getBoundingClientRect()
+      // Frame inside the chrome-free region — the same space the measured branch reserves via
+      // solveFitPadding — so a cross-project focus does not land the node under the (pinned)
+      // sessions sidebar / dock / minimap. The node's canvas-space size is enough for the solver's
+      // aspect-ratio pick; the on-screen size is exactly what we don't have here yet.
+      const region =
+        rect && wrapEl ? solveFreeRegion(wrapEl, rect.width, rect.height) : null
+      const focusRegion = region
+        ? {
+            offsetX: region.free.left - region.outer.left,
+            offsetY: region.free.top - region.outer.top,
+            width: region.free.right - region.free.left,
+            height: region.free.bottom - region.free.top
+          }
+        : undefined
+      const viewport =
+        rect && wrap ? viewportForRect(rect, wrap.width, wrap.height, focusRegion) : null
       // Size unknowable / no pane yet: leave the camera where it is. Standing still beats
       // teleporting the user to the origin, which is the bug this branch exists for.
       if (viewport) void setViewport(viewport, { duration: 300 })
