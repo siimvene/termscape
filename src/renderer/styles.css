@@ -6394,7 +6394,14 @@ button.group-node__setup:disabled {
   position: absolute;
   bottom: 34px;
   left: 0;
-  width: 280px;
+  /* Wider than the old 280px single-column stack: each account now lays its Session/Weekly/Fable
+     windows out in a row (`.usage-account__windows`), so the panel trades height for width and a
+     3-account list stops running off the top and bottom of the screen. */
+  width: 340px;
+  /* Hard safety net for the 4th+ account: even the grid can't fit an unbounded list in the
+     bottom-left corner, so cap to the viewport (minus the pill's own offset) and scroll. */
+  max-height: calc(100vh - 60px);
+  overflow-y: auto;
   padding: 14px 16px;
   border-radius: 12px;
   background: rgba(var(--popover-rgb), 0.98);
@@ -6425,6 +6432,29 @@ button.group-node__setup:disabled {
   color: rgba(var(--tint-rgb), 0.65);
 }
 .usage-row__hidden-label { display: none; }
+/* An account's usage windows (Session / Weekly / Fable) laid out side by side instead of stacked,
+   so one account is a single compact row of cells rather than three tall rows. Fixed 3 columns
+   keeps Session/Weekly/Fable aligned down the panel across accounts; an account with fewer windows
+   (e.g. Codex has no Fable) simply leaves the trailing cell empty, and more than three wrap to a
+   second grid row. */
+.usage-account__windows {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px 12px;
+  margin-top: 8px;
+}
+/* The grid supplies the vertical rhythm, so the row drops its own top margin and tightens up to
+   fit a ~94px cell: smaller title, stacked meta (percent over reset instead of side by side). */
+.usage-account__windows .usage-row { margin-top: 0; min-width: 0; }
+.usage-account__windows .usage-row__title { font-size: 12px; margin-bottom: 5px; }
+.usage-account__windows .usage-row__meta {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  margin-top: 5px;
+  font-size: 11px;
+  white-space: nowrap;
+}
 .usage-account {
   margin-top: 14px;
   padding-top: 12px;

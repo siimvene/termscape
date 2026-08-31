@@ -131,9 +131,13 @@ function AccountUsageBlock({
         <DefaultAccountMark isDefault={isDefault} onUse={onUse} />
       </div>
       {(email ?? u?.email) && <div className="usage-account__email">{email ?? u?.email}</div>}
-      {u?.limits.map((l) => (
-        <LimitRow key={limitKey(l)} limit={l} mode={mode} />
-      ))}
+      {u && u.limits.length > 0 && (
+        <div className="usage-account__windows">
+          {u.limits.map((l) => (
+            <LimitRow key={limitKey(l)} limit={l} mode={mode} />
+          ))}
+        </div>
+      )}
       {u && u.limits.length === 0 && <div className="usage-popover__empty">No usage data.</div>}
       {!u && <div className="usage-popover__empty usage-pill__pulse">···</div>}
     </div>
@@ -172,9 +176,13 @@ function RemoteUsageBlock({
         <DefaultAccountMark isDefault={isDefault} onUse={onUse} />
       </div>
       {row.usage.email && <div className="usage-account__email">{row.usage.email}</div>}
-      {row.usage.limits.map((l) => (
-        <LimitRow key={limitKey(l)} limit={l} mode={mode} />
-      ))}
+      {row.usage.limits.length > 0 && (
+        <div className="usage-account__windows">
+          {row.usage.limits.map((l) => (
+            <LimitRow key={limitKey(l)} limit={l} mode={mode} />
+          ))}
+        </div>
+      )}
       {row.usage.limits.length === 0 && (
         <div className="usage-popover__empty">
           {row.usage.status === 'error' ? 'Could not read usage on this host.' : 'No usage data.'}
@@ -203,9 +211,13 @@ function ProviderBlock({ u, mode }: { u: ProviderUsage; mode: 'used' | 'remainin
     <div className="usage-account">
       <div className="usage-account__label">{label}</div>
       {u.account && <div className="usage-account__email">{u.account}</div>}
-      {u.limits.map((l) => (
-        <LimitRow key={limitKey(l)} limit={l} mode={mode} />
-      ))}
+      {u.limits.length > 0 && (
+        <div className="usage-account__windows">
+          {u.limits.map((l) => (
+            <LimitRow key={limitKey(l)} limit={l} mode={mode} />
+          ))}
+        </div>
+      )}
       {u.limits.length === 0 && (
         <div className="usage-popover__empty">
           {u.status === 'error' ? 'Could not read usage.' : 'No usage data.'}
@@ -607,9 +619,13 @@ export function UsageIndicator({
                 {enabled.length > 0 && limits.length > 0 && (
                   <div className="usage-account__label">Claude</div>
                 )}
-                {limits.map((l) => (
-                  <LimitRow key={limitKey(l)} limit={l} mode={percentMode} />
-                ))}
+                {limits.length > 0 && (
+                  <div className="usage-account__windows">
+                    {limits.map((l) => (
+                      <LimitRow key={limitKey(l)} limit={l} mode={percentMode} />
+                    ))}
+                  </div>
+                )}
                 {!hasData && <div className="usage-popover__empty">No usage data.</div>}
                 {claudeUsage?.email && (
                   <div className="usage-account">
