@@ -99,7 +99,11 @@ export function formatLine(line: string): string {
       .map((c: { type?: string; text?: string; name?: string; input?: unknown; thinking?: string }) => {
         if (c.type === 'text') return c.text ?? ''
         if (c.type === 'thinking') {
-          const t = (c.thinking ?? '').replace(/\s+/g, ' ').trim()
+          // The transcript is untrusted JSON, so the declared type is a compile-time claim only:
+          // a non-string `thinking` reaches `.replace` and throws out of formatLine. The local
+          // tick catches (and silently drops that whole read), but the remote and workflow
+          // formatters call it uncaught — an unhandled rejection. Narrow at the boundary instead.
+          const t = typeof c.thinking === 'string' ? c.thinking.replace(/\s+/g, ' ').trim() : ''
           if (!t) return ''
           return `✻ ${t.length > THINKING_HEAD ? `${t.slice(0, THINKING_HEAD)}…` : t}`
         }

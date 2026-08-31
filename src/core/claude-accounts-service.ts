@@ -22,6 +22,8 @@ import { platform } from './platform'
 const execFileP = promisify(execFile)
 const LOGIN_POLL_MS = 2000
 const LOGIN_TIMEOUT_MS = 5 * 60 * 1000
+// Wall-clock budget for the Add-account CLI version probe — see its use in the add handler.
+const ADD_VERSION_PROBE_BUDGET_MS = 1500
 
 /**
  * Optional per-call SSH context. When `projectId` is present AND that project has a live
@@ -114,8 +116,25 @@ export function registerClaudeAccountsIpc(deps: ClaudeAccountsDeps = {}): void {
     // Ensure fullscreen TUI in the new account dir (write-if-absent, version-gated). Best-effort,
     // off the response path — the memoized probe + write both fail open.
     void ensureClaudeFullscreenTuiInto(configDir)
-    const versionSupported = await checkClaudeVersion()
-    return { id, configDir, versionSupported }
+    // Bound the probe: it shells out through a LOGIN shell, which on a slow machine can take
+    // ~10 s, and Add-account is a button — an unbounded await leaves it spinning with no signal.
+    // The timeout resolves FALSE (= show the < 2.1 keychain-collision warning), not true: failing
+    // safe costs a dismissable notice when a modern CLI merely answered slowly, while failing
+    // open costs account B's login overwriting account A's shared unscoped Keychain credential.
+    let probeTimer: NodeJS.Timeout | undefined
+    try {
+      const versionSupported = await Promise.race([
+        checkClaudeVersion(),
+        new Promise<boolean>((resolve) => {
+          probeTimer = setTimeout(() => resolve(false), ADD_VERSION_PROBE_BUDGET_MS)
+        })
+      ])
+      return { id, configDir, versionSupported }
+    } finally {
+      // The losing branch is never observed again; leaving the timer armed keeps a handle alive
+      // per Add. (The probe subprocess is separately bounded by its own execFile timeout.)
+      if (probeTimer) clearTimeout(probeTimer)
+    }
   })
 
   platform().handle(IPC.claudeAccountsWaitLogin, async (id: string, ctx?: AccountCtx) => {

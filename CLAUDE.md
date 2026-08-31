@@ -1278,6 +1278,16 @@ else, and its context links must keep classifying across restarts).
   `last_assistant_message` as the card's result. Remote (SSH) codex nodes get cards but no live
   activity yet (the child rollout is on the host; claude's `remote-subagent-tail` has no codex
   counterpart — follow-up).
+  **A child that was already running before this app process started is invisible, by design of a
+  hook-driven pipeline** (consort finding on the v0.3.4 merge, ACKNOWLEDGED not fixed): tracking is
+  created by `SubagentStart`, that event is one-shot, and a tmux session outlives the app — so
+  after a restart the child's later activity and its `SubagentStop` are discarded for want of a
+  card. Claude's Task subagents behave identically. This fork briefly did better: the deleted
+  `core/codex-agents-tail.ts` read the parent rollout's `SubAgentActivity` records from DISK and
+  `liveCodexSubagentActivities` deliberately kept an unpaired `started` as the app-restart pickup.
+  It was removed as superseded here because running it BESIDE the native hooks keys the same child
+  two ways (`cxagent:<threadId>` vs `agent_id`) and renders **two cards**. Restoring the pickup
+  therefore means reconciling the two keyings, not reviving the file.
 - **Workflow (ultracode) agent visualization** — Claude Code's Workflow tool spawns N agents
   in-process; they fire **no per-agent hooks** at all, so there is nothing to normalize per
   agent. Only the PARENT session's `PreToolUse`/`PostToolUse` on `tool_name === 'Workflow'`
