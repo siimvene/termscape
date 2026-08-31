@@ -5775,6 +5775,33 @@ button.group-node__setup:disabled {
   word-break: break-word;
 }
 
+/* The expanded body renders typed segments (lib/subagentActivity.ts) like a regular agent
+   window: markdown prose in the UI font, thinking dimmed, tool calls as secondary mono rows.
+   The container above stays monospace pre-wrap for the un-parsed fallbacks (placeholder text,
+   the result-task line). */
+.subagent-node__prose {
+  font-family:
+    -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Roboto, sans-serif;
+  font-size: 12px;
+  white-space: normal;
+  color: #e3e3e3;
+  margin: 6px 0;
+}
+.subagent-node__prose pre,
+.subagent-node__prose code {
+  font-family: 'SF Mono', Menlo, Monaco, monospace;
+  font-size: 11px;
+}
+.subagent-node__think {
+  color: rgba(255, 255, 255, 0.42);
+  font-style: italic;
+  margin: 5px 0;
+}
+.subagent-node__tool {
+  color: rgba(255, 255, 255, 0.55);
+  margin: 3px 0;
+}
+
 .subagent-node__head {
   display: flex;
   align-items: center;

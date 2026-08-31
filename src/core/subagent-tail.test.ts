@@ -24,6 +24,23 @@ describe('formatSubagentChunk', () => {
     // the chunk joins surviving lines with '\n' (mirrors the tail's read loop exactly).
     expect(formatSubagentChunk(text)).toBe('hi\n$ Bash ls')
   })
+
+  it('streams thinking blocks as a ✻-prefixed, whitespace-collapsed head', () => {
+    // The regression this guards: thinking was dropped by the whitelist, so a reasoning-model
+    // subagent (a workflow fleet's default) rendered as a bare wall of tool calls — the whole
+    // reasoning narrative lives in thinking blocks there, with text only at the very end.
+    const think = (s: string): string =>
+      JSON.stringify({ type: 'assistant', message: { content: [{ type: 'thinking', thinking: s }] } })
+    expect(formatSubagentChunk(think('weigh  the\n two options'))).toBe('✻ weigh the two options')
+    // Capped at a head + ellipsis so one long think cannot scroll every `$ tool` line out of the
+    // renderer's bounded 12 KB activity tail.
+    const long = formatSubagentChunk(think('x'.repeat(5000)))
+    expect(long.startsWith('✻ ')).toBe(true)
+    expect(long.endsWith('…')).toBe(true)
+    expect(long.length).toBeLessThan(320)
+    // An empty/whitespace-only thinking block emits nothing.
+    expect(formatSubagentChunk(think('  \n '))).toBe('')
+  })
 })
 
 describe('splitCompleteLines', () => {
