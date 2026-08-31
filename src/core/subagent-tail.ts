@@ -76,8 +76,16 @@ function summarizeResult(content: unknown): string {
   return `  ↳ ${first}${extra}`
 }
 
-// Render one transcript line as a clean activity log: assistant prose verbatim,
-// tool calls as `$ Tool arg`, tool results as a one-line summary. Skips metadata.
+// A thinking block's head is enough to narrate WHAT the agent is reasoning about; streaming it
+// whole would let one long think scroll every `$ tool` line out of the renderer's bounded
+// activity tail (agentNodes keeps the last 12 KB per card).
+const THINKING_HEAD = 300
+
+// Render one transcript line as a clean activity log: assistant prose verbatim, thinking as a
+// `✻`-prefixed head, tool calls as `$ Tool arg`, tool results as a one-line summary. Skips
+// metadata. Thinking matters most on reasoning models (a workflow fleet's default), where nearly
+// the whole turn is thinking blocks and visible text arrives only at the end — dropping them
+// left those cards as a bare wall of tool calls.
 export function formatLine(line: string): string {
   let o: { type?: string; message?: { content?: unknown } }
   try {
@@ -88,8 +96,13 @@ export function formatLine(line: string): string {
   const content = o.message?.content
   if (o.type === 'assistant' && Array.isArray(content)) {
     return content
-      .map((c: { type?: string; text?: string; name?: string; input?: unknown }) => {
+      .map((c: { type?: string; text?: string; name?: string; input?: unknown; thinking?: string }) => {
         if (c.type === 'text') return c.text ?? ''
+        if (c.type === 'thinking') {
+          const t = (c.thinking ?? '').replace(/\s+/g, ' ').trim()
+          if (!t) return ''
+          return `✻ ${t.length > THINKING_HEAD ? `${t.slice(0, THINKING_HEAD)}…` : t}`
+        }
         if (c.type === 'tool_use') {
           const arg = toolArg(c.name, c.input)
           return `$ ${c.name}${arg ? ` ${arg}` : ''}`

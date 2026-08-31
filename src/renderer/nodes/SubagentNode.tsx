@@ -1,8 +1,18 @@
-import { useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import { Handle, NodeResizer, Position, type NodeProps } from '@xyflow/react'
 import { NODE_MIN_SIZES } from '../lib/nodeSizing'
 import type { CanvasNode } from '../state/workspace'
 import { useAgentNodes } from '../state/agentNodes'
+import { parseActivitySegments } from '../lib/subagentActivity'
+import { renderMarkdown } from '../lib/markdown'
+
+/** Memoized markdown block (the ChatPanel `MarkdownText` pattern): marked+DOMPurify would
+ *  otherwise re-run for EVERY prose segment on each streamed chunk. Segment text is stable
+ *  once the stream has moved past it, so cache per text. */
+const ProseBlock = memo(function ProseBlock({ text }: { text: string }) {
+  const html = useMemo(() => renderMarkdown(text, { breaks: true }), [text])
+  return <div className="subagent-node__prose term-chat__text" dangerouslySetInnerHTML={{ __html: html }} />
+})
 
 function fmtDur(ms: number): string {
   const s = Math.round(ms / 1000)
@@ -82,7 +92,27 @@ export function SubagentNode({ id, data, selected }: NodeProps<CanvasNode>) {
       {expanded && (
         <div className="subagent-node__term nodrag nowheel" ref={bodyRef}>
           {data.title ? <div className="subagent-node__result-task">{data.title as string}</div> : null}
-          {body || (working ? 'Working… (live output appears here)' : 'No output.')}
+          {body ? (
+            // Rendered like a regular agent window (the ⌘M chat view's reading experience), not a
+            // raw text dump: prose as markdown, thinking dimmed, tool calls as secondary rows.
+            parseActivitySegments(body).map((seg, i) =>
+              seg.kind === 'prose' ? (
+                <ProseBlock key={i} text={seg.text} />
+              ) : seg.kind === 'thinking' ? (
+                <div key={i} className="subagent-node__think">
+                  ✻ {seg.text}
+                </div>
+              ) : (
+                <div key={i} className="subagent-node__tool">
+                  {seg.text}
+                </div>
+              )
+            )
+          ) : working ? (
+            'Working… (live output appears here)'
+          ) : (
+            'No output.'
+          )}
         </div>
       )}
     </div>

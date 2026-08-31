@@ -176,7 +176,10 @@ export const useAgentNodes = create<AgentNodesState>((set) => ({
   appendActivity: (toolUseId, chunk) =>
     set((s) => {
       if (!s.byId[toolUseId]) return s
-      const activity = ((s.activityById[toolUseId] ?? '') + chunk).slice(-12000) // bounded tail
+      // Bounded tail. 48 KB, up from 12: the expanded card now renders like an agent window
+      // (markdown prose + thinking + tool rows — lib/subagentActivity.ts), and 12 KB of a
+      // reasoning agent's stream was a few turns of scrollback. Still a hard cap per card.
+      const activity = ((s.activityById[toolUseId] ?? '') + chunk).slice(-48000)
       return { activityById: { ...s.activityById, [toolUseId]: activity } }
     }),
 
