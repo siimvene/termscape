@@ -208,6 +208,13 @@ passed with the code they were meant to pin removed, including one mutation that
 Watch for fixtures that cannot discriminate: if every row in your fixture happens to make the
 mutant's output identical to the real one, the test proves nothing while looking thorough.
 
+**Run the suite BEFORE you package, never after.** `npm run dist` (electron-builder) rebuilds
+`node-pty` for the packaged app, and afterwards every test that spawns a real pty fails with
+`Failed to spawn terminal (posix_spawn…)` — `sessionRename.realtty`, `pty-spawn-diagnosis` and
+`server-e2e` are the ones that go red. It reads exactly like a regression you just caused, and the
+node-pty marker test stays green (it checks the patched source, not the built binary). `npm run
+rebuild` restores it. Don't spend an hour bisecting your own diff first.
+
 **Never pin behaviour by reading source text.** `expect(SRC).toContain('...')` is the fixture that
 can never discriminate: it is satisfied by code that is present *and wrong*. We shipped one —
 `src/main/menu-accelerator-intercepts.test.ts` matched three strings inside the `before-input-event`

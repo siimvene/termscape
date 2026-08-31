@@ -63,6 +63,19 @@ upgrade that silently drops the patch fails loudly. **If that test is red, your 
 unpatched, not your code** — run `npm run rebuild`. It deliberately does not measure descriptors
 (that is environment-dependent); it checks the source the native module is built from. Upstream:
 microsoft/node-pty#950 — if the fix lands there, delete the script, its wiring and that test.
+
+**PACKAGING INVALIDATES THE TEST ENVIRONMENT — always `npm test` BEFORE `npm run dist`, never
+after.** electron-builder runs its own `npmRebuild`, which replaces
+`node_modules/node-pty/build/Release/pty.node` with the binary it wants for the packaged app. The
+suite keeps running afterwards, and the marker test above still PASSES (it reads the patched
+*source*, not the built binary) — but every test that spawns a real pty starts failing with
+`Failed to spawn terminal (posix_spawn…)`. Measured 2026-08-31 during the v0.3.4 merge: a green
+14-failure run became 23 the moment a packaging run landed in between, and the three newly-red
+files (`sessionRename.realtty`, `pty-spawn-diagnosis`, `server-e2e`) went back to green after
+`npm run rebuild` with no code change at all. The trap is that it reads exactly like a code
+regression and the machine is nowhere near `kern.tty.ptmx_max` (37 of 511 here), so the obvious
+explanation is the wrong one. If a pty-spawning test goes red right after you packaged, run
+`npm run rebuild` before you debug anything.
 ```
 ```
 
