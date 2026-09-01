@@ -2,8 +2,9 @@
 
 Thanks for looking. This file is the short door: enough to get running, plus the house rules that
 actually get a pull request sent back. The long version — every subsystem and the reasoning behind
-its invariants — lives in `CLAUDE.md` at the repo root, which is also loaded automatically if you
-work with an AI coding agent.
+its invariants — lives in `CLAUDE.md` at the repo root plus the per-subsystem rule files under
+`.claude/rules/`, which are also loaded automatically if you work with an AI coding agent (the root
+on every session, each rule file when a source file it covers is read).
 
 nodeterm is licensed **BUSL-1.1** (converts to MIT after four years — see `LICENSE`). Contributions
 are accepted under that license.
@@ -145,8 +146,8 @@ The same applies to any hook-server signature change; this repo has shipped one 
 three times.
 
 **Do not take scrolling away from tmux.** It owns the mouse, the scrollback and the alternate
-screen. A previous design moved that into the emulator and failed structurally; `CLAUDE.md` explains
-why in detail.
+screen. A previous design moved that into the emulator and failed structurally; `.claude/rules/terminal.md`
+explains why in detail.
 
 **A spawn-env write does not reach a tmux session on its own.** The shared tmux server takes each
 new session's env from its own GLOBAL env (inherited from whichever client *started* the server) —
@@ -242,7 +243,12 @@ checklists for exactly this.
 Two files, two audiences:
 
 - **`CONTRIBUTING.md`** (this file) — what another human needs before touching the code.
-- **`CLAUDE.md`** — the deep invariants, per subsystem, with the reasoning and the measurements.
+- **`CLAUDE.md` + `.claude/rules/*.md`** — the deep invariants, with the reasoning and the
+  measurements. The root holds what applies to every change and a routing table; each rule file
+  holds one subsystem and declares (`paths:` frontmatter) which source files it covers, so a coding
+  agent loads it only when it touches that code. A new deep invariant goes into the rule file whose
+  `paths` own the code; if you add, move or rename a source file, check the globs still reach it.
+  `.claude/rules/` is the only tracked part of `.claude/`.
 
 **If you change or discover something other contributors must know, update this file too.** An
 invariant that only lives in a commit message is one refactor away from being violated by someone

@@ -17,8 +17,11 @@ build/icon.icns
 
 .playwright-mcp/
 
-# concurrent-session worktrees / local agent state
-.claude/
+# concurrent-session worktrees / local agent state — except the path-scoped rule files, which
+# are the deep half of CLAUDE.md and must ship with the repo (a bare `.claude/` would also exclude
+# them: git cannot re-include a file whose parent directory is ignored, hence the `/*` form)
+.claude/*
+!.claude/rules/
 .worktrees/
 
 # backend lives in its own repo
