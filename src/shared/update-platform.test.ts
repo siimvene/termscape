@@ -67,9 +67,15 @@ describe('local dist scripts opt out of the production update feed', () => {
     expect(pkg.scripts.release).toContain(MARKER)
   })
 
-  it('package.json points at no update feed at all', () => {
+  it('package.json points at no update feed at all — an EXPLICIT null, not an absent key', () => {
+    // Absent is not enough: with no `publish` electron-builder infers a GitHub provider from the git
+    // remote and still writes app-update.yml (measured 2026-09-02: owner/repo of this fork). `null`
+    // is the documented way to tell it not to. The updater is stamped off regardless, so this is
+    // about shipping no feed pointer at all, not about behaviour.
     const build = (pkg as { build?: { publish?: unknown } }).build
-    expect(build?.publish).toBeUndefined()
+    expect(build).toBeDefined()
+    expect('publish' in (build as object)).toBe(true)
+    expect(build?.publish).toBeNull()
   })
 })
 

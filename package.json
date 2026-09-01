@@ -135,7 +135,8 @@
       "artifactName": "${productName}-Setup-${version}.${ext}",
       "oneClick": true,
       "perMachine": false
-    }
+    },
+    "publish": null
   },
   "dependencies": {
     "@xterm/addon-serialize": "^0.14.0",
