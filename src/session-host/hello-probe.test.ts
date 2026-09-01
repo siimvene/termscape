@@ -3,19 +3,27 @@ import net from 'net'
 import os from 'os'
 import path from 'path'
 import { randomUUID } from 'crypto'
-import { rmSync } from 'fs'
+import { mkdtempSync, rmSync } from 'fs'
 import { encodeFrame } from './protocol'
 import { trySessionHostHello } from './hello-probe'
 
 const cleanupPaths: string[] = []
+const cleanupDirs: string[] = []
 afterEach(() => {
   for (const target of cleanupPaths.splice(0)) rmSync(target, { force: true })
+  for (const dir of cleanupDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 
+// AF_UNIX paths are capped at ~104-108 bytes (see the same note in paths.ts). os.tmpdir() on
+// macOS is a long per-process /var/folders path, so a UUID-suffixed name under it can overflow
+// the cap and fail with EINVAL. mkdtemp against the OS's real temp root (macOS: /private/tmp,
+// not the long per-process dir) with a short random suffix keeps well under the limit while
+// still giving every test its own throwaway namespace.
 function testEndpoint(): string {
-  const id = randomUUID()
-  if (process.platform === 'win32') return `\\\\.\\pipe\\nodeterm-hello-probe-${id}`
-  const endpoint = path.join(os.tmpdir(), `nodeterm-hello-probe-${id}.sock`)
+  if (process.platform === 'win32') return `\\\\.\\pipe\\nodeterm-hello-probe-${randomUUID()}`
+  const dir = mkdtempSync(path.join('/tmp', 'nt-'))
+  cleanupDirs.push(dir)
+  const endpoint = path.join(dir, 's.sock')
   cleanupPaths.push(endpoint)
   return endpoint
 }

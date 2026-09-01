@@ -20,6 +20,23 @@ beforeEach(() => {
   // temp dir and every read here misses. Clear it so the homedir fallback is what's tested;
   // the XDG describe block below stubs its own value on top.
   vi.stubEnv('XDG_CONFIG_HOME', '')
+  // A developer running nodeterm runs this suite INSIDE a nodeterm-spawned session, whose env
+  // carries that instance's live hook coordinates. The generated plugin reads them straight from
+  // process.env, so anything a test forgets to stub is inherited from the real app: measured
+  // 2026-09-02, NODETERM_HOOK_SOCK (…/node-terminal/sock/hook.sock) leaked in, the plugin took its
+  // unix-socket branch over the TCP one, and four `fetch`-stub tests saw [] while the POSTs went to
+  // the running app's hook server — green on CI (no app, no env), red on the author's machine. Every
+  // var the plugin reads is cleared here; each block stubs back the ones it actually exercises.
+  for (const key of [
+    'NODETERM_NODE_ID',
+    'NODETERM_HOOK_PORT',
+    'NODETERM_HOOK_SOCK',
+    'NODETERM_HOOK_TOKEN',
+    'NODETERM_HOOK_VERSION',
+    'NODETERM_HOOK_ENDPOINT',
+    'NODETERM_NODE_TOKEN_DIR'
+  ])
+    vi.stubEnv(key, '')
 })
 afterEach(() => {
   vi.unstubAllEnvs()

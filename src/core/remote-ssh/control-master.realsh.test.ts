@@ -16,6 +16,7 @@ import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import { remoteHookEnvArgs, remoteTmuxPtyArgs } from './control-master'
+import { REMOTE_TMUX_PATH_DIRS, remoteTmuxPathPrologue } from '../../shared/ssh'
 import { accountTmuxEnvArgs, remoteAccountConfigDirAbs } from '../claude-accounts-core'
 import { isSafeNodeId, isSafeRemoteHome } from '../remote-safety'
 
@@ -209,10 +210,27 @@ describe('REAL sh: remote tmux PATH resolution + graceful degrade (issue #449)',
     }
   }
 
-  // PATH must hold NO tmux at all for these — the dev/CI box's own /usr/bin/tmux would win the
-  // `command -v` and run for real ("open terminal failed"). An empty dir is the only safe PATH;
-  // everything the guard needs (command, printf, cd, exec) is an sh builtin.
+  // PATH must hold NO tmux at all for these — a tmux the machine already has would win the
+  // `command -v` and run for real ("open terminal failed: not a terminal" on stderr, nothing on
+  // stdout). An empty dir is the only safe PATH; everything the guard needs (command, printf, cd,
+  // exec) is an sh builtin.
   const emptyPath = (): string => fs.mkdtempSync(path.join(os.tmpdir(), 'ntsh-nopath-'))
+
+  // …but an empty PATH is NOT enough, because the line under test APPENDS four fixed install dirs
+  // to it (`REMOTE_TMUX_PATH_DIRS`), and on a dev Mac /opt/homebrew/bin really does hold tmux — so
+  // `command -v tmux` resolved the machine's own binary and BOTH tests below read an empty stdout.
+  // [MEASURED 2026-09-02: /opt/homebrew/bin/tmux 3.7c; Ubuntu CI has none of those three dirs,
+  // which is why this only ever failed on macOS.] Point the three ABSOLUTE dirs at an empty
+  // test-owned dir, keeping `$HOME/.local/bin` (the one this suite is here to prove) intact, so the
+  // only tmux the line can resolve is the one the test placed — on every machine.
+  const withNeutralInstallDirs = (cmd: string, empty: string): string => {
+    const prologue = remoteTmuxPathPrologue()
+    expect(cmd.startsWith(prologue), 'the PATH prologue is no longer the head of the remote line').toBe(true)
+    const dirs = REMOTE_TMUX_PATH_DIRS.split(':')
+      .map((d) => (d.includes('$HOME') ? d : empty))
+      .join(':')
+    return `PATH="$PATH:${dirs}"; ${cmd.slice(prologue.length)}`
+  }
 
   it('finds a tmux that lives only in an appended dir ($HOME/.local/bin)', () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ntsh-home-'))
@@ -220,9 +238,10 @@ describe('REAL sh: remote tmux PATH resolution + graceful degrade (issue #449)',
     fs.mkdirSync(local, { recursive: true })
     fs.copyFileSync(path.join(binDir, 'tmux'), path.join(local, 'tmux'))
     fs.chmodSync(path.join(local, 'tmux'), 0o755)
-    const cmd = remoteTmuxPtyArgs(conn, '/s.sock', 'nt-n1', '/home/u').slice(-1)[0]
+    const empty = emptyPath()
+    const cmd = withNeutralInstallDirs(remoteTmuxPtyArgs(conn, '/s.sock', 'nt-n1', '/home/u').slice(-1)[0], empty)
     // PATH deliberately has NO tmux — only the $HOME/.local/bin append can resolve it.
-    const out = runRaw(cmd, { PATH: emptyPath(), HOME: home })
+    const out = runRaw(cmd, { PATH: empty, HOME: home })
     const argv = out.split('\0').slice(0, -1)
     expect(argv.slice(0, 2)).toEqual(['-L', 'nodeterm-rmt'])
     expect(argv).toContain('new-session')
@@ -232,8 +251,9 @@ describe('REAL sh: remote tmux PATH resolution + graceful degrade (issue #449)',
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ntsh-home-'))
     const shell = path.join(home, 'shell-stub')
     fs.writeFileSync(shell, `#!/bin/sh\nprintf 'SHELL_STUB %s\\n' "$@"\n`, { mode: 0o755 })
-    const cmd = remoteTmuxPtyArgs(conn, '/s.sock', 'nt-n1', '/home/u').slice(-1)[0]
-    const out = runRaw(cmd, { PATH: emptyPath(), HOME: home, SHELL: shell })
+    const empty = emptyPath()
+    const cmd = withNeutralInstallDirs(remoteTmuxPtyArgs(conn, '/s.sock', 'nt-n1', '/home/u').slice(-1)[0], empty)
+    const out = runRaw(cmd, { PATH: empty, HOME: home, SHELL: shell })
     // The message names the fact and the fix — never the raw `command not found: tmux` line.
     expect(out).toContain('nodeterm: tmux was not found on this host.')
     expect(out).toContain('Install tmux on the host')

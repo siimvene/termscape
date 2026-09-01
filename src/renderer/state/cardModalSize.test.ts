@@ -84,6 +84,15 @@ describe('parseCardModalSize', () => {
 
 describe('useCardModalSize store', () => {
   beforeEach(() => {
+    // Newer Node (26.8 here; CI's Node 22 has no such global) ships its own inert `localStorage`
+    // global (a getter that returns undefined unless --localstorage-file is passed). Vitest's jsdom environment only copies a key from the real
+    // jsdom window onto globalThis when that key is either absent from globalThis already or on
+    // its own curated allowlist — and "localStorage" is on neither list there — so on a Node
+    // version that ships the stub, the bare `localStorage` below resolves to Node's inert one
+    // instead of jsdom's real Storage, and every read/write on it silently no-ops. On CI's
+    // Node 22 the jsdom one wins, so this never reproduced there. Reinstate
+    // the real, origin-backed Storage via the JSDOM instance vitest exposes as `globalThis.jsdom`.
+    globalThis.localStorage = (globalThis as unknown as { jsdom: { window: { localStorage: Storage } } }).jsdom.window.localStorage
     localStorage.clear()
     useCardModalSize.setState({ width: null, height: null, maximized: false })
   })
