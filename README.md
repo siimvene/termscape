@@ -192,7 +192,7 @@ assign teammates. Toggle with `⌘⇧B`.
 
 ### Your sessions, anywhere
 
-**Pair your phone** with one QR — *scan with the nodeterm iOS app* — and the **same
+**Pair your phone** with one QR — *scan with the Termscape iOS app* — and the **same
 live session continues in your pocket**, E2E encrypted **over the relay, not just your
 LAN**. The same canvas also runs self-hosted in any browser (Server Edition).
 
@@ -239,7 +239,7 @@ GitHub Copilot / opencode / Grok / custom) · 📝 **Sticky note** (link to an a
   [setup and security details](./docs/github-issues-kanban.md).
 - **AI commit messages & terminal names** — bring-your-own local agent CLI run read-only
   on the staged diff or captured output.
-- **Your sessions, in your pocket** — **nodeterm mobile** (iOS) attaches to the same live
+- **Your sessions, in your pocket** — **Termscape for iOS** attaches to the same live
   tmux sessions: watch an agent work, answer a "needs you", or type into any terminal
   from your phone — plus push notifications and a mobile board view.
 - **Power & sleep** — while an agent is working, nodeterm keeps the machine from
@@ -292,9 +292,9 @@ Store presence. You build it (or grab the prebuilt binary from Releases) yoursel
   launch is **right-click → Open**. No auto-update — pull + rebuild to upgrade
   (see [Build & install (this fork)](#build--install-this-fork)).
 - **Linux (x64)** — build it: `npm run dist:linux` → AppImage + `.deb` in `dist/`.
-- **iOS** — **Remote Claude**, sideloaded from
-  [nodeterm-mobile Releases](https://github.com/siimvene/nodeterm-mobile/releases) (AltStore /
-  Sideloadly + your own Apple ID; see that repo's release notes).
+- **iOS** — **Termscape**, built from
+  [nodeterm-mobile](https://github.com/siimvene/nodeterm-mobile) and shipped through the App
+  Store (via that repo's CI release workflow; see its README for the current status).
 
 > Want the **official** nodeterm instead — auto-updating builds, Homebrew, the App Store app?
 > That's Enes Kirca's upstream product: [nodeterm.dev](https://nodeterm.dev) ·
