@@ -10,6 +10,7 @@ paths:
   - "src/shared/webgl.ts"
   - "src/main/remote-ssh/**"
   - "src/core/pty-*.ts"
+  - "src/core/pane-cwd*.ts"
   - "src/renderer/terminal/**"
   - "src/renderer/glyphgrid/**"
   - "src/renderer/nodes/TerminalNode.tsx"
@@ -230,6 +231,26 @@ unreachable there by construction; a Linux host is expected to have its own. Und
 `scripts/build-tmux.mjs` writes its artifact. If tmux is unavailable from all three,
 `PtyManager` still falls back to a plain shell; `TMUX`/`TMUX_PANE` are stripped from the child env to avoid nesting refusal.
 
+### Stale cwd on a warm reattach (issue #464) — tmux's string is a LINUX-only signal
+
+A warm `new-session -A` reattach can land in a session whose shell sits on a DELETED directory
+inode (the folder was removed and re-created at the same path, so nothing self-heals and every
+prompt prints `getcwd` errors). `PtyManager.paneCwdStale` classifies that through the pure
+`classifyPaneCwd` (`src/core/pane-cwd.ts`) and raises the dismissible "Restart in folder" banner.
+**The tmux answer only carries the signal on Linux**, where `#{pane_current_path}` passes `/proc`'s
+`<path> (deleted)` readlink through. [MEASURED 2026-09-02, tmux 3.7c on macOS 27: darwin's
+`osdep-darwin.c` reads the cwd via `proc_pidinfo(PROC_PIDVNODEPATHINFO)` and the kernel keeps
+naming the unlinked directory by its old path — the answer is byte-identical before the delete,
+after the delete and after the same-named `mkdir`, while `/bin/pwd` inside that pane fails with
+`No such file or directory`. The rule that used to live here, "darwin answers an EMPTY string for
+an unlinked cwd", was inferred from tmux's source and never ran on a device; CI is Linux+Windows,
+so nothing caught it and the banner simply never fired on macOS.] So on darwin the pane's own
+process is asked instead: `lsof -a -p <pane pid> -d cwd -FDin` versus the device+inode on disk at
+that name, parsed by the pure `lsofCwdLinked`. A positive inode mismatch is the only thing that
+answers "unlinked"; anything unreadable degrades to no opinion, and the banner never appears on a
+guess. Both signals are proven against a real tmux in `pane-cwd.realtmux.test.ts`, which asserts
+the same verdict on both platforms through their different evidence.
+
 ### Cold restore (machine reboot)
 
 tmux only survives an **app** restart — a **machine reboot kills the tmux server**, so every
@@ -337,6 +358,23 @@ xterm's own `scrollback` (`xtermScrollback(settings.tmuxScrollback)`, floored at
 `XTERM_SCROLLBACK_MAX` = 10000) is kept for the sessions tmux does *not* back (a plain shell when
 tmux is unavailable) and for the cold-snapshot replay — it is not what the user scrolls in a tmux
 session.
+
+## Session host client: a failed write is an UNDELIVERED frame, not a failed request
+
+`src/core/session-host-client.ts` sends each request one real event-loop turn late so a peer hangup
+that has already reached this process is seen (socket destroyed) while the frame is still unwritten
+— such a frame is rejected as resendable and `request()` replays it on a fresh connection. **That
+recheck is not enough on macOS**: once the host has closed its end of the unix socket, the very next
+write fails with `EPIPE` one poll iteration BEFORE Node reads the EOF and marks the socket
+destroyed, so the frame goes out on a socket that still reports `destroyed === false`. Linux usually
+reads the EOF first, which is why this only ever surfaced there as a Mac-only test failure. A write
+that fails at the syscall is therefore classified (`isUndeliveredWriteFailure`) and put back into the
+undelivered class: every frame is written alone and `encodeFrame` puts its terminating `\n` last,
+while the host dispatches whole lines only, so a refused write delivered nothing and a short write
+delivered a fragment the host can never act on — resending cannot double-apply. Do **not** widen this
+to every write-callback error: `ECANCELED` (libuv cancelling an in-flight write when the socket is
+destroyed) and read-side failures surfacing through a write callback may cover bytes the host already
+received and acted upon, so they stay uncertainty and reject the caller.
 
 ## Terminal node lifecycle (gotchas)
 

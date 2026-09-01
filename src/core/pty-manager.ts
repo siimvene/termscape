@@ -38,7 +38,7 @@ import {
 } from './remote-ssh/control-master'
 import { probeAgentSockToPin } from './remote-ssh/agent-probe'
 import { parsePaneCursor } from './pane-cursor'
-import { classifyPaneCwd } from './pane-cwd'
+import { classifyPaneCwd, lsofCwdLinked } from './pane-cwd'
 import {
   recordFreshSpawnOwner,
   forgetPaneOwner,
@@ -2346,7 +2346,8 @@ export class PtyManager {
    * Is the live tmux session's working directory GONE (deleted, or deleted and re-created at the
    * same path — issue #464)? Asks tmux for `#{pane_current_path}` — a format present since 1.7,
    * so no version hazard — and classifies through the pure `classifyPaneCwd` (see pane-cwd.ts for
-   * the per-platform signals, one measured and one inferred). Exact-match target: `=name:` —
+   * the per-platform signals, both measured). On darwin that string carries no signal at all, so
+   * the pane's own process is asked as well (`paneCwdLinked`). Exact-match target: `=name:` —
    * the trailing colon matters, and is MEASURED (tmux 3.4): for a target-PANE a bare `=name`
    * resolves NOTHING silently (exit 0, every format empty), while `=name:` is "exactly this
    * session, its active pane". Without `=`, tmux falls back to fnmatch-then-prefix matching and
@@ -2356,17 +2357,10 @@ export class PtyManager {
   private async paneCwdStale(persistKey: string): Promise<boolean> {
     if (!this.tmuxPath) return false
     try {
+      const target = `=${sessionName(persistKey)}:`
       const { stdout } = await runAsync(
         this.tmuxPath,
-        [
-          '-L',
-          TMUX_SOCKET,
-          'display-message',
-          '-p',
-          '-t',
-          `=${sessionName(persistKey)}:`,
-          '#{pane_current_path}'
-        ],
+        ['-L', TMUX_SOCKET, 'display-message', '-p', '-t', target, '#{pane_current_path}'],
         { timeout: PROBE_TIMEOUT_MS }
       )
       // Strip ONLY the transport's trailing newline — a path may legally end in spaces, and the
@@ -2379,9 +2373,50 @@ export class PtyManager {
           return false
         }
       }
-      return classifyPaneCwd(reported, dirExists) === 'stale'
+      // darwin only: tmux's string is blind to an unlinked cwd there (MEASURED — see pane-cwd.ts),
+      // so the pane's own process is asked. Every other platform passes `undefined` and keeps the
+      // string rules, which is what CI (Linux, `/proc`'s " (deleted)") exercises.
+      const linked = process.platform === 'darwin' ? await this.paneCwdLinked(target) : undefined
+      return classifyPaneCwd(reported, dirExists, process.platform, linked) === 'stale'
     } catch {
       return false
+    }
+  }
+
+  /**
+   * Is the pane process sitting in a LINKED directory (darwin's half of the stale-cwd probe)?
+   *
+   * macOS has no `/proc`, so the pane's cwd identity comes from `lsof -a -p <pid> -d cwd -FDin`
+   * and is compared against the directory that is on disk at that name right now — a different
+   * inode means the process holds an unlinked one. `#{pane_pid}` is asked in its own round trip
+   * rather than folded into the path format, because a path may legally contain a newline and a
+   * two-field answer could then not be split. `undefined` on any failure (no lsof, dead pane,
+   * unparsable answer): no banner on a guess.
+   */
+  private async paneCwdLinked(target: string): Promise<boolean | undefined> {
+    const lsof = findExecutableSync('lsof', ['/usr/sbin/lsof'])
+    if (!lsof || !this.tmuxPath) return undefined
+    try {
+      const { stdout: pidOut } = await runAsync(
+        this.tmuxPath,
+        ['-L', TMUX_SOCKET, 'display-message', '-p', '-t', target, '#{pane_pid}'],
+        { timeout: PROBE_TIMEOUT_MS }
+      )
+      const pid = Number(pidOut.trim())
+      if (!Number.isInteger(pid) || pid <= 0) return undefined
+      const { stdout } = await runAsync(lsof, ['-a', '-p', String(pid), '-d', 'cwd', '-FDin'], {
+        timeout: PROBE_TIMEOUT_MS
+      })
+      return lsofCwdLinked(stdout, (p) => {
+        try {
+          const st = fs.statSync(p)
+          return st.isDirectory() ? { dev: st.dev, ino: st.ino } : undefined
+        } catch {
+          return undefined
+        }
+      })
+    } catch {
+      return undefined
     }
   }
 

@@ -47,8 +47,10 @@ const KILL_CONFIRMATION_ATTEMPTS = 2
 type PendingEntry = {
   socket: net.Socket
   timer: ReturnType<typeof setTimeout> | null
-  /** True once the frame has been handed to socket.write. Until then the frame provably never
-   * left this process, so a transport drop rejects the entry as resendable (see dropSocket). */
+  /** True once the frame has been handed to socket.write AND that write has not been proven to
+   * have failed. While it is false the frame provably never reached the host as a complete line,
+   * so a transport drop rejects the entry as resendable (see dropSocket). A write that fails at
+   * the syscall clears it again — see `isUndeliveredWriteFailure`. */
   sent: boolean
   resolve: (result: unknown) => void
   reject: (error: Error) => void
@@ -166,6 +168,28 @@ class SessionHostRequestNotDeliveredError extends Error {
     const code = (original as NodeJS.ErrnoException).code
     if (code) this.code = code
   }
+}
+
+/** Does this `socket.write` failure prove the host never saw a COMPLETE frame?
+ *
+ * Every request is written on its own (`socket.write(encodeFrame(full))`) and `encodeFrame` puts
+ * the terminating '\n' last, while the host dispatches only whole lines (`LineFramer`). So a write
+ * the kernel refused delivered nothing, and a write cut short delivered a fragment that is missing
+ * exactly that newline and can never be acted upon — both are as undelivered as a frame never
+ * handed to `write` at all, and resending them cannot double-apply anything.
+ *
+ * Deliberately NOT covered: `ECANCELED` (libuv cancels an in-flight write request when the socket
+ * is destroyed, and those bytes may already have reached the host) and any failure that did not
+ * come from a write syscall — Node reports a read-side error such as a peer RST through pending
+ * write callbacks too, and by then the frame may well have been delivered and acted upon. Those
+ * stay uncertainty and keep rejecting the caller directly. */
+function isUndeliveredWriteFailure(error: Error): boolean {
+  const typed = error as NodeJS.ErrnoException & { syscall?: string }
+  // Never dispatched at all: the stream refused the chunk before any syscall happened.
+  if (typed.code === 'ERR_STREAM_DESTROYED' || typed.code === 'ERR_STREAM_WRITE_AFTER_END') {
+    return true
+  }
+  return typed.syscall === 'write' && typed.code !== 'ECANCELED'
 }
 
 /** How many times `request()` re-runs connect + send for a frame that provably never left the
@@ -753,10 +777,12 @@ export class SessionHostClient {
     // A peer-initiated close races the client's own 'close' event: a cached socket can look live
     // here while the peer already hung up, and a frame written into that gap fails (EPIPE) for
     // work the host never saw. requestOnSocket defers the actual write by one REAL event-loop
-    // turn, so a raced hangup is discovered before any bytes are committed; such a frame is the
-    // one provably-undelivered case and the only one resent here on a fresh connection. A failure
-    // discovered by the write itself stays a plain rejection: by then the frame's delivery is the
-    // transport's business and other requests may already ride on it.
+    // turn, so a raced hangup is usually discovered before any bytes are committed — and when the
+    // hangup outruns even that, the failing write itself is classified (isUndeliveredWriteFailure).
+    // Both are provably-undelivered frames, and they are what gets resent here on a fresh
+    // connection. A failure that cannot prove the host stayed ignorant of the frame (a cancelled
+    // in-flight write, a read-side reset surfacing through the write callback, a timeout) stays a
+    // plain rejection: its delivery is uncertain and other requests may already ride on it.
     let undelivered: SessionHostRequestNotDeliveredError | undefined
     for (let attempt = 0; ; attempt++) {
       try {
@@ -836,10 +862,22 @@ export class SessionHostClient {
             // A response may beat a late write callback. Identity-check this exact pending entry so
             // that callback can neither settle nor delete a newer request that reused surrounding state.
             if (!error || this.pending.get(id) !== pending) return
+            // The recheck above is not enough on macOS: a peer that has closed its end of the unix
+            // socket is reported to us as an EPIPE from the very NEXT write, one poll iteration
+            // before Node reads the EOF and marks the socket destroyed — so the frame goes out on
+            // a socket that still looks current and open. (On Linux the EOF is normally read
+            // first, the recheck sees the loss, and this path is not reached.) Put such a frame
+            // back into the undelivered class so dropSocket rejects it as resendable and request()
+            // replays it on a fresh connection, instead of surfacing a transport race to a caller
+            // whose work the host never even received.
+            if (isUndeliveredWriteFailure(asError(error))) pending.sent = false
             this.dropSocket(socket, asError(error), true)
           })
         } catch (error) {
-          if (this.pending.get(id) === pending) this.dropSocket(socket, asError(error), true)
+          if (this.pending.get(id) !== pending) return
+          // A throwing write never dispatched the chunk, so the same classification applies.
+          if (isUndeliveredWriteFailure(asError(error))) pending.sent = false
+          this.dropSocket(socket, asError(error), true)
         }
       })
     })
