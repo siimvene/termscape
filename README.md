@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/assets/nodeterm.png" alt="Termscape" width="120" height="120" />
+<img src="docs/assets/termscape.png" alt="Termscape" width="120" height="120" />
 
 # Termscape
 

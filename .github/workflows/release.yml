@@ -1,8 +1,10 @@
 name: Release
 
 # Build, code-sign, and notarize the macOS app on every version tag (e.g. v0.1.1),
-# then publish the artifacts (dmg + zip + latest-mac.yml + blockmaps). Those files
-# are what the self-hosted update feed at https://nodeterm.dev/updates serves.
+# then publish the artifacts (dmg + zip). Upstream also ships latest-*.yml + blockmaps here for
+# its update feed at https://nodeterm.dev/updates; this fork has NO update feed (package.json
+# carries no `publish` block, so electron-builder emits no feed files, and every packaged build
+# is stamped nodeTermUpdates=disabled so the in-app updater never polls anything).
 on:
   push:
     tags:
@@ -127,7 +129,7 @@ jobs:
           gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
             gh release create "$tag" --repo "$GITHUB_REPOSITORY" --title "$tag" --verify-tag --prerelease --notes "" || true
           n=1
-          until gh release upload "$tag" dist/*.dmg dist/*.zip dist/*.yml dist/*.blockmap --clobber --repo "$GITHUB_REPOSITORY"; do
+          until gh release upload "$tag" dist/*.dmg dist/*.zip --clobber --repo "$GITHUB_REPOSITORY"; do
             if [ "$n" -ge 5 ]; then
               echo "::error::asset upload failed after $n attempts"
               exit 1
@@ -145,13 +147,13 @@ jobs:
       #     mkdir -p ~/.ssh && echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
       #     chmod 600 ~/.ssh/id_ed25519
       #     ssh-keyscan nodeterm.dev >> ~/.ssh/known_hosts
-      #     rsync -avz dist/*.dmg dist/*.zip dist/*.yml dist/*.blockmap \
+      #     rsync -avz dist/*.dmg dist/*.zip \
       #       deploy@nodeterm.dev:/var/www/nodeterm.dev/updates/
 
   # Linux build: unsigned, so it runs on a plain GitHub runner (fast + free tier), in
   # parallel with the self-hosted mac job — it must never queue behind notarization.
-  # Publishes AppImage + deb + latest-linux.yml to the SAME tag's GitHub Release; the
-  # nodeterm.dev update feed serves latest-linux.yml alongside the mac files.
+  # Publishes AppImage + deb to the SAME tag's GitHub Release. Upstream also ships
+  # latest-linux.yml here for its update feed; this fork has no feed (see the header comment).
   release-linux:
     # Opt-in via the repository variable TERMSCAPE_HOSTED_BUILDS=true, like release-mac above.
     # This fork ships from a local `npm run dist` for now; a hosted Linux/Windows build per tag
@@ -196,7 +198,6 @@ jobs:
           files: |
             dist/*.AppImage
             dist/*.deb
-            dist/latest-linux.yml
 
   # Windows build: UNSIGNED BETA (#454), on a plain GitHub runner. Publishes the NSIS
   # installer + zip as assets on the same tag's GitHub Release — and NOTHING to the update

@@ -58,8 +58,18 @@ describe('local dist scripts opt out of the production update feed', () => {
     expect(dist.filter((s) => !pkg.scripts[s].includes(MARKER))).toEqual([])
   })
 
-  it('release does NOT carry it — a promoted build must keep updating itself', () => {
-    expect(pkg.scripts.release).not.toContain(MARKER)
+  // Fork contract (Termscape): upstream asserts the INVERSE here — its promoted `release` build
+  // must keep updating itself from nodeterm.dev/updates. This fork has no update feed of its own
+  // and must never poll upstream's (a promoted Termscape would otherwise offer to "update" itself
+  // into vanilla nodeterm), so every packaged build carries the marker, `release` included, and
+  // package.json has no `publish` block. If an upstream merge flips this back, the fork is wrong.
+  it('release carries it too — this fork has no update feed, upstream or its own', () => {
+    expect(pkg.scripts.release).toContain(MARKER)
+  })
+
+  it('package.json points at no update feed at all', () => {
+    const build = (pkg as { build?: { publish?: unknown } }).build
+    expect(build?.publish).toBeUndefined()
   })
 })
 
