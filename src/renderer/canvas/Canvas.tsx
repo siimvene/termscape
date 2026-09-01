@@ -359,6 +359,7 @@ import {
   canContextLink,
   canSwitchModel,
   capabilityAgentId,
+  inheritableAccountId,
   createdAgentId,
   resumeCommand,
   AGENT_CONFIG,
@@ -8582,6 +8583,34 @@ export function Canvas() {
         }
         return ids
       }
+      // The managed account a spawned node inherits from the opener/target — carried over ONLY
+      // within the SAME provider (`inheritableAccountId`): a Claude conductor's account must never
+      // reach a `codex` node, where the fail-closed Codex-scope gate (no Codex home for a Claude
+      // id) refuses the spawn and the pane shows "not started locally" (MEASURED 2026-09-02). The
+      // Claude project-default fallback (`resolveNewNodeAccount`) applies to Claude targets only —
+      // `defaultAccountId` is a Claude concept; a Codex target has none, so the provider-matched
+      // inherited id is final. Byte-identical to the old `resolveNewNodeAccount(src.accountId, …)`
+      // for a Claude target (that resolver already discards any non-Claude id), so Claude→Claude
+      // cannot regress; the change is that a Codex target no longer receives a Claude id.
+      const accountForSpawn = (
+        targetAgentId: AgentId,
+        srcAccountId: string | undefined
+      ): string | undefined => {
+        const settings = useSettings.getState().settings
+        const inherited = inheritableAccountId(
+          targetAgentId,
+          srcAccountId,
+          (id) => settings.claudeAccounts.some((a) => a.id === id),
+          (id) => settings.codexAccounts.some((a) => a.id === id)
+        )
+        if (capabilityAgentId(targetAgentId) !== 'claude') return inherited
+        const projStore = useProjects.getState()
+        return resolveNewNodeAccount(
+          inherited,
+          projStore.getProject(projStore.activeProjectId ?? ''),
+          settings.claudeAccounts
+        )
+      }
       // Hold a freshly-built node's launch instead of running it on open. The factories already
       // composed the exact command (agent CLI + permission-mode flag + prompt, or --cmd), so it
       // is MOVED rather than rebuilt — a second construction site is how the two drift apart.
@@ -8732,13 +8761,10 @@ export function Canvas() {
               ? worktreeControlRef.current.cwdForNewNodeIn(intoGroupId)
               : undefined
             // Inherit the source node's managed account, else the project default, else system —
-            // the same funnel as addAgentNode (the factory drops accounts on non-claude agents).
+            // but ONLY within the target agent's own provider (accountForSpawn), so a Claude
+            // conductor's account never leaks into a codex node and trips its fail-closed scope gate.
             const projStore = useProjects.getState()
-            const account = resolveNewNodeAccount(
-              src.data.accountId as string | undefined,
-              projStore.getProject(projStore.activeProjectId ?? ''),
-              useSettings.getState().settings.claudeAccounts
-            )
+            const account = accountForSpawn(agentId, src.data.accountId as string | undefined)
             const after = resolveAfter()
             if (after === null) return // bad --after, already replied
             const agentCwd = args.cwd || groupCwd || srcCwd
@@ -9079,12 +9105,11 @@ export function Canvas() {
             const live = nodesRef.current as CanvasNode[]
             const vStore = useProjects.getState()
             // Reviewers inherit the TARGET's account, not the caller's: they read that node's
-            // transcript, which is resolved inside its own account dir.
-            const vAccount = resolveNewNodeAccount(
-              target.data.accountId as string | undefined,
-              vStore.getProject(vStore.activeProjectId ?? ''),
-              useSettings.getState().settings.claudeAccounts
-            )
+            // transcript, which is resolved inside its own account dir — but only when the target's
+            // account belongs to the REVIEWER's provider (accountForSpawn). A codex reviewer of a
+            // claude target must get the system codex account, not the target's claude id, or the
+            // fail-closed Codex-scope gate refuses the reviewer's own spawn.
+            const vAccount = accountForSpawn(reviewAgent, target.data.accountId as string | undefined)
             // Every node in the panel (reviewers + judge) runs `reviewAgent`, so one resolution
             // serves them all — gated on that agent, not on the caller's.
             const vMode = activePermissionMode(reviewAgent)
@@ -9200,18 +9225,13 @@ export function Canvas() {
               return
             }
             const live = nodesRef.current as CanvasNode[]
-            // Same account funnel as open-claude/open-agent above; per-role the factory
-            // drops the account for non-claude agents.
             const teamStore = useProjects.getState()
-            const teamAccount = resolveNewNodeAccount(
-              src.data.accountId as string | undefined,
-              teamStore.getProject(teamStore.activeProjectId ?? ''),
-              useSettings.getState().settings.claudeAccounts
-            )
             // Build members; fixed role titles pin the node name (titleAuto off).
             const members = roles.map((r, i) => {
-              // Roles may name different agents, so the mode is resolved PER member: claude's
-              // `auto` version gate must not decide what a grok teammate launches with.
+              // Roles may name different agents, so BOTH the mode and the inherited account are
+              // resolved PER member: claude's `auto` version gate must not decide what a grok
+              // teammate launches with, and the conductor's account carries over only to members
+              // of its OWN provider (accountForSpawn) — never a Claude id onto a codex teammate.
               const memberAgent = (r.agent ?? 'claude') as AgentId
               const node = createAgentNode(
                 memberAgent,
@@ -9220,7 +9240,7 @@ export function Canvas() {
                 placeBelow(i),
                 r.prompt,
                 sshFor(srcCwd),
-                teamAccount,
+                accountForSpawn(memberAgent, src.data.accountId as string | undefined),
                 activePermissionMode(memberAgent),
                 teamStore.activeProjectId,
                 // Per-role model, so one team can mix tiers in a single call. A role naming a

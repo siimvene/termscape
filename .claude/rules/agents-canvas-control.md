@@ -133,6 +133,20 @@ paths:
   agent to `spawn-team`/`open-agent` for parallel implementation, long reviews and anything that
   should outlive its turn, and to keep in-process subagents for quick lookups. Cross-vendor review is
   named as a natural node (`open-agent --agent codex`). Edit both variants together, or the test fails.
+- **A new node inherits the opener's managed account ONLY WITHIN THE SAME PROVIDER** (2026-09-02,
+  `inheritableAccountId` in `shared/agents/config.ts`, unit-tested). `open-agent`, `spawn-team` and
+  `verify` forward the conductor's / target's `data.accountId` into every node they create, but a
+  managed Claude account and a managed Codex account share one id alphabet, so the raw id can't say
+  which provider it belongs to. MEASURED on v0.3.4-selfhost.5: from a Claude node on a managed Claude
+  account, `open-agent --agent codex` handed that Claude id to the codex spawn; `resolveCodexSessionScope`
+  found no Codex home for it and its fail-closed gate refused the session — the pane showed "not
+  started locally" and no tmux session existed, twice in a row. The renderer now runs every inherited
+  account through `accountForSpawn` (Canvas.tsx): same-provider ⇒ keep, cross-provider ⇒ `undefined`
+  (the system account, exactly what a toolbar codex node gets); the Claude project-default fallback
+  applies to Claude targets only. The fail-closed gate in `pty-manager` is UNCHANGED — the fix stops
+  leaking the wrong id, it does not make the gate forgiving. When the refusal does fire, TerminalNode
+  surfaces it by name ("Codex refused: managed account <id> has no Codex home") instead of the SSH
+  "not connected to the host" overlay.
 - **Context Link** — a node action gated by `CONTEXT_LINK_CAPABLE` (claude/codex/gemini/opencode;
   **grok**, custom agents + plain terminals excluded — grok's `updates.jsonl` parser is unbuilt): drawing an edge between two builtin-agent nodes lets each
   READ the other's context on demand (pull, not push). Architecture (2026-07, SSH-capable — see

@@ -2769,6 +2769,20 @@ export function TerminalNode({
         // round-trip, or `ssh` is missing). Nothing was spawned — land in the same offline state
         // the near-side guard above produces, retry included.
         if (unavailable) {
+          // A LOCAL Codex node whose explicitly selected managed account has no Codex home — the
+          // fail-closed Codex-scope refusal in pty-manager (`resolveCodexSessionScope`), NOT a host
+          // outage. Routing it through `offline` rendered the SSH "not connected to the host —
+          // session not started locally" overlay on a local node, hiding the real reason. Surface it
+          // by name through `spawnError` (whose "Try again" is exactly right: sign the account in
+          // and a retry succeeds).
+          if (unavailable === 'codex-account') {
+            const acct = data.accountId ? String(data.accountId) : 'system'
+            const reason = `Codex refused: managed account ${acct} has no Codex home. Log in under Settings → Accounts, or open this node on the system Codex account.`
+            setCo(termKey, { spawnError: reason })
+            if (!disposed)
+              term.write(`\r\n\x1b[90m[codex refused: managed account ${acct} has no Codex home]\x1b[0m\r\n`)
+            return
+          }
           setCo(termKey, { offline: true })
           if (!disposed)
             term.write('\r\n\x1b[90m[not connected — nothing was started locally]\x1b[0m\r\n')

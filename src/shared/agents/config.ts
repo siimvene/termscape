@@ -276,6 +276,37 @@ export function capabilityAgentId(id: AgentId): AgentId {
   return baseAgentOf(id) ?? id
 }
 
+/**
+ * The managed account a NEW node may inherit from the node that opened it — allowed ONLY WITHIN THE
+ * SAME PROVIDER. Canvas-control verbs (`open-agent`, `spawn-team`, `verify`) forward the
+ * conductor's / target's `accountId` into every node they create, but a managed Claude account and
+ * a managed Codex account share one id alphabet, so the id alone cannot say which provider it
+ * belongs to — the caller passes both membership resolvers.
+ *
+ * Bug this closes (MEASURED 2026-09-02, shipped v0.3.4-selfhost.5): a Claude conductor's account id
+ * reached a `codex` spawn, `resolveCodexSessionScope` found no Codex home for that id, and its
+ * deliberate fail-closed gate refused the session — the pane showed "not started locally" and no
+ * tmux session existed. The fix is NOT to loosen that gate; it is to stop handing it the wrong
+ * provider's id. A cross-provider id (or an unknown target) yields `undefined` = the system account,
+ * exactly what a toolbar-created node of that provider gets.
+ *
+ * Custom agents resolve through `capabilityAgentId`, so a `baseAgent:'claude'` custom agent is
+ * treated like the builtin Claude here (the node factory still applies its own builtins-only stamp
+ * on top; this only decides what the inheritance funnel offers a target).
+ */
+export function inheritableAccountId(
+  targetAgentId: AgentId,
+  srcAccountId: string | undefined,
+  isClaudeAccount: (id: string) => boolean,
+  isCodexAccount: (id: string) => boolean
+): string | undefined {
+  if (!srcAccountId) return undefined
+  const base = capabilityAgentId(targetAgentId)
+  if (base === 'claude') return isClaudeAccount(srcAccountId) ? srcAccountId : undefined
+  if (base === 'codex') return isCodexAccount(srcAccountId) ? srcAccountId : undefined
+  return undefined
+}
+
 const includes = (list: readonly string[], id: AgentId): boolean =>
   list.includes(capabilityAgentId(id))
 
