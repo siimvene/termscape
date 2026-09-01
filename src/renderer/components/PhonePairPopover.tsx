@@ -89,7 +89,7 @@ export function PhonePairPopover({
           ) : (
             <>
               <img src={qr} width={208} height={208} alt="Pairing QR code" className="phone-pair__qr" />
-              <div className="phone-pair__hint">Scan with the nodeterm iOS app · waiting (10 min)</div>
+              <div className="phone-pair__hint">Scan with the Termscape iOS app · waiting (10 min)</div>
               {relayPlan === 'dev' ? (
                 <div className="phone-pair__warn">
                   Dev build: the relay is off regardless of the toggle, so this code pairs

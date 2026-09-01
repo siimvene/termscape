@@ -11526,7 +11526,7 @@ export function Canvas() {
                 { type: 'separator' },
                 {
                   type: 'label',
-                  label: `nodeterm${appVersion ? ` v${appVersion}` : ''} · ${describeOs(navigator.userAgent)}`
+                  label: `Termscape${appVersion ? ` v${appVersion}` : ''} · ${describeOs(navigator.userAgent)}`
                 }
               ]
             })

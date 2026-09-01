@@ -200,7 +200,7 @@ export function OnboardingFlow({ onClose }: { onClose: () => void }) {
         <div className="onb-cover">
           <div className="onb-cover__brand">
             <OnbBrandMark />
-            <span className="onb-cover__name">nodeterm</span>
+            <span className="onb-cover__name">Termscape</span>
           </div>
           <p className="onb-cover__tagline">A canvas of terminals — spatial, not stacked.</p>
           <div className="onb-cover__props">
@@ -464,7 +464,7 @@ export function OnboardingFlow({ onClose }: { onClose: () => void }) {
               <>
                 <h2>Your sessions, in your pocket</h2>
                 <p>
-                  <strong>nodeterm mobile</strong> attaches to these same live tmux sessions from
+                  <strong>Termscape for iOS</strong> attaches to these same live tmux sessions from
                   your phone — watch an agent work, answer a "needs you", or type into any
                   terminal from anywhere.
                 </p>

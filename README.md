@@ -23,8 +23,8 @@ hidden tabs.
 >
 > **Termscape is not a product.** It is one person's fork of
 > [eneskirca/nodeterm](https://github.com/eneskirca/nodeterm), maintained for personal use,
-> self-hosting experiments and testing. It is renamed only so it can sit beside upstream on the
-> same machine and share a name with its iOS companion — the engineering is upstream's.
+> self-hosting experiments and testing. The engineering is upstream's; the name is shared with
+> its iOS companion.
 >
 > There is no support, no roadmap, no release cadence and no redistribution. If you want the real
 > thing — supported, packaged, and developed in the open — **use
@@ -68,15 +68,6 @@ started, concepts, agents, remote access, troubleshooting.
 > as the primary core for a personal, always-on, self-hosted setup, and adds a set of
 > multi-account and mobile-companion capabilities on top of upstream. Not for redistribution —
 > see [License](#-license).
-
-**On the name.** Only the user-visible branding changed — the app's display name, window title
-and this README. Everything load-bearing deliberately still says `nodeterm`: the data directory
-(`~/Library/Application Support/node-terminal`), the tmux socket and `nt-` session names, the
-`.nodeterm/project.json` layout files, `NODETERM_*` env vars, the hook endpoint and the shims
-installed on SSH hosts. Renaming those would orphan live sessions and years of workspace state,
-break remote hosts mid-flight, and turn every upstream merge into a conflict swamp — and cheap
-upstream merges are the entire point of running a fork. The name is paint; the plumbing is
-upstream's and stays legible as such.
 
 The desktop app shares the **Termscape** name with its iOS companion, which attaches to these same
 tmux sessions.
@@ -407,16 +398,14 @@ the project, and that the project may continue to relicense future versions
 **Termscape is a rename, not an authorship claim.** Essentially all of the engineering here is
 [nodeterm](https://github.com/eneskirca/nodeterm) by **Enes Kirca** — the canvas, the tmux session
 model, the agent/hook architecture, the Server Edition, the kanban board, the transport seam. This
-fork adds a handful of self-host and multi-account conveniences on top and renames the shipped app
-so it can live beside upstream and match its iOS companion.
+fork adds a handful of self-host and multi-account conveniences on top.
 
 - **Upstream project:** [github.com/eneskirca/nodeterm](https://github.com/eneskirca/nodeterm) · [nodeterm.dev](https://nodeterm.dev)
 - **Upstream author:** Enes Kirca ([@eneskirca](https://github.com/eneskirca))
 - **License:** BUSL-1.1, © Enes Kirca — unchanged by this fork
 
-Every upstream commit is preserved in this repository's history and its `upstream/main` remote;
-this fork is merged forward from it rather than detached. If Termscape is useful to you, the
-project to star, fund and file issues against is **nodeterm**, not this fork.
+If Termscape is useful to you, the project to star, fund and file issues against is **nodeterm**,
+not this fork.
 
 ## 📜 License
 

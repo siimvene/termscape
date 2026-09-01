@@ -28,8 +28,10 @@ export const DEFAULT_TERMINAL_THEME_ID = 'nodeterm-dark'
 
 export const TERMINAL_THEMES: readonly TerminalTheme[] = [
   {
+    // NOTE: `id` is the persisted settings value — relabelling is safe, renaming the id
+    // would silently reset every existing user's theme choice.
     id: 'nodeterm-dark',
-    label: 'nodeterm Dark',
+    label: 'Termscape Dark',
     dark: true,
     theme: {
       background: '#1e1e1e',
@@ -254,7 +256,7 @@ export const TERMINAL_THEMES: readonly TerminalTheme[] = [
   },
   {
     id: 'nodeterm-light',
-    label: 'nodeterm Light',
+    label: 'Termscape Light',
     dark: false,
     theme: {
       // The counterpart to `nodeterm-dark`: this background IS the light app palette's `--bg`, so
