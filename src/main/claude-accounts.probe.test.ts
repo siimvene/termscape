@@ -56,10 +56,19 @@ describe('Add-account version probe budget', () => {
   })
 
   it('reports UNSUPPORTED when the probe outruns the budget, so the collision warning still shows', async () => {
-    // Never resolves within the budget — the hung-login-shell case the budget exists for.
-    findInLoginPath.mockImplementation(() => new Promise(() => {}))
-    const res = (await h.handlers[ADD]?.({})) as { versionSupported: boolean }
-    expect(res.versionSupported).toBe(false)
+    // The race only exists on darwin — every other platform short-circuits checkClaudeVersion to
+    // `true` before the probe starts (no shared Keychain, nothing to warn about), so on the Linux
+    // CI runner this test read `true` and reddened. Pin the platform the branch belongs to.
+    const platform = process.platform
+    Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true })
+    try {
+      // Never resolves within the budget — the hung-login-shell case the budget exists for.
+      findInLoginPath.mockImplementation(() => new Promise(() => {}))
+      const res = (await h.handlers[ADD]?.({})) as { versionSupported: boolean }
+      expect(res.versionSupported).toBe(false)
+    } finally {
+      Object.defineProperty(process, 'platform', { value: platform, configurable: true })
+    }
   }, 10_000)
 
   it('does not leave the budget timer armed once the probe answers first', async () => {

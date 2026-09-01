@@ -230,7 +230,9 @@ checklists for exactly this.
 
 ## Pull requests
 
-- Branch from `main`. CI runs `quality`, `CodeQL` and `Dependency review`; all three are required.
+- Branch from `main`. CI runs `quality` and `quality-windows`; both are required. (Upstream nodeterm also
+  runs CodeQL + Dependency review; this private fork does not — both need GitHub Advanced Security,
+  which a private repo without it answers with a failing upload, not a skipped scan.)
 - Explain **why**, not just what. If a decision has a trade-off, name it and say what you rejected.
 - If you measured something, put the numbers in — they save the next person the same afternoon.
 - Say what you did **not** verify. That is more useful than a confident summary.

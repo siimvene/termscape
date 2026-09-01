@@ -17,6 +17,12 @@ jobs:
     # 10× and a slow notarization poll can burn hundreds). Everything else is identical: the runner
     # signs + notarizes + publishes the GitHub Release, which nodeterm.dev proxies for downloads and
     # the update feed. The runner checks out into its own _work dir, so it never touches the dev repo.
+    #
+    # Opt-in via the repository variable TERMSCAPE_MAC_RUNNER=true. This fork has no self-hosted
+    # runner registered, and a job whose runner label matches nothing sits QUEUED for 24 h before
+    # GitHub times it out — every tag left one behind. Register the runner, set the variable, and
+    # the job comes back exactly as upstream ships it.
+    if: vars.TERMSCAPE_MAC_RUNNER == 'true'
     runs-on: [self-hosted, macOS, ARM64]
     steps:
       - uses: actions/checkout@v7
@@ -148,6 +154,11 @@ jobs:
   # nodeterm.dev update feed serves latest-linux.yml alongside the mac files.
   release-linux:
     runs-on: ubuntu-latest
+    env:
+      # electron-vite's renderer bundle (Monaco + xterm + React Flow) blows Node's default old-space
+      # ceiling on the hosted runner: both hosted jobs died with "JavaScript heap out of memory"
+      # on every tag. The runners have 16 GB; give V8 half of it.
+      NODE_OPTIONS: --max-old-space-size=8192
     steps:
       - uses: actions/checkout@v7
 
@@ -193,6 +204,8 @@ jobs:
   # already-promoted release back to prerelease by re-writing its fields.
   release-win:
     runs-on: windows-latest
+    env:
+      NODE_OPTIONS: --max-old-space-size=8192 # same OOM as release-linux, see there
     steps:
       - uses: actions/checkout@v7
 
@@ -256,6 +269,12 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     needs: [release-mac, release-linux]
+    # A SKIPPED release-mac (opt-in variable unset, see above) must not skip the promote: linux
+    # alone is a complete release for this fork. A failed or cancelled job still blocks it.
+    if: >-
+      !cancelled() &&
+      needs.release-linux.result == 'success' &&
+      (needs.release-mac.result == 'success' || needs.release-mac.result == 'skipped')
     steps:
       - uses: actions/checkout@v7
         with:
