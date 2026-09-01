@@ -100,7 +100,7 @@ tmux sessions.
   sessions show live RUNNING / NEEDS-YOU badges — and usage numbers — on browser and phone.
 
 **iOS companion**
-- **Remote Claude** — a native SwiftUI client (public, MIT):
+- **Termscape for iOS** — a native SwiftUI client (public, MIT):
   [github.com/siimvene/nodeterm-mobile](https://github.com/siimvene/nodeterm-mobile).
   Attaches to the same tmux sessions over the Server Edition's WS-RPC protocol; live
   project-grouped session list, real SwiftTerm terminals, Settings → Usage, and local
