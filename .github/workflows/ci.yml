@@ -30,8 +30,14 @@ jobs:
       - name: Tests
         run: npm test
 
+      # The renderer bundle peaks at ~3.9 GB RSS (measured locally, 2026-09-01), and V8 sizes its
+      # default heap off physical RAM — on the 7 GB tier a private repo's hosted runners get, that
+      # is well under 2 GB, so the build OOMs before it can finish. Same cap as release.yml's
+      # hosted jobs; scoped to this step so vitest's workers above don't each inherit it.
       - name: Build (electron-vite)
         run: npm run build
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
 
   # Windows is becoming a supported target (extraction from #276). The full suite still contains
   # POSIX-shaped fixtures (/bin/sh, AF_UNIX binds), so this job runs the suites whose behaviour is
