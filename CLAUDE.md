@@ -271,10 +271,6 @@ the overlap tests exercise the resulting race.
 
 - Code comments, UI strings, and identifiers are all in **English**. Match this when editing.
 - Path aliases: `@shared/*`, `@renderer/*` (see the tsconfig files / vite config).
-- **Subagent model:** when dispatching subagents (implementers, reviewers, etc. — e.g. in
-  the subagent-driven-development workflow), use the latest model, **Opus 5**
-  (`claude-opus-5`). This overrides any cheaper-model defaults in a skill's model-selection
-  guidance.
 - **Three surfaces — design every feature for all of them.** nodeterm now ships on three
   fronts, and a feature is not "done" until you've decided how it behaves on each (even if
   the decision is "not applicable here"):
