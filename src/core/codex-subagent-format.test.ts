@@ -125,4 +125,38 @@ describe('createCodexSubagentFormatter', () => {
     const fmt = createCodexSubagentFormatter()
     expect(fmt([META, TOKENS, '{not json', ''].join('\n'))).toBe('')
   })
+
+  // The CURRENT rollout dialect for the model's own prose (measured 2026-09-01 across 15 live
+  // rollouts): `response_item`/`message` with role `assistant` and `output_text` content items.
+  // The 0.146.0 captures above carry prose as event_msg/agent_message; both must render.
+  const ASSISTANT_MSG = j({
+    type: 'response_item',
+    payload: {
+      type: 'message',
+      role: 'assistant',
+      content: [{ type: 'output_text', text: 'I’m treating this as a code-review lane.' }]
+    }
+  })
+  const USER_MSG = j({
+    type: 'response_item',
+    payload: {
+      type: 'message',
+      role: 'user',
+      content: [{ type: 'input_text', text: 'parent context replayed by the fork' }]
+    }
+  })
+
+  it('streams response_item/message assistant prose (current dialect), never user text', () => {
+    const fmt = createCodexSubagentFormatter()
+    expect(fmt([META, ASSISTANT_MSG, USER_MSG, TOOL].join('\n'))).toBe(
+      ['I’m treating this as a code-review lane.', '$ exec echo hello-from-subagent'].join('\n')
+    )
+  })
+
+  it('replayed parent message records stay suppressed before the task delivery', () => {
+    const fmt = createCodexSubagentFormatter()
+    expect(fmt([ASSISTANT_MSG, USER_MSG, META, ASSISTANT_MSG].join('\n'))).toBe(
+      'I’m treating this as a code-review lane.'
+    )
+  })
 })

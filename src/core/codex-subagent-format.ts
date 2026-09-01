@@ -27,9 +27,11 @@ interface RolloutLine {
     // event_msg/sub_agent_activity
     kind?: string
     agent_path?: string
-    // response_item/agent_message | custom_tool_call_output
+    // response_item/agent_message | response_item/message | custom_tool_call_output
     content?: unknown
     output?: unknown
+    // response_item/message
+    role?: string
     // response_item/function_call | custom_tool_call
     name?: string
     arguments?: string
@@ -113,6 +115,16 @@ export function createCodexSubagentFormatter(): (text: string) => string {
       return ''
     }
     if (o.type === 'response_item') {
+      // The model's own prose in the CURRENT rollout dialect: `message` with role `assistant`,
+      // content `[{type:'output_text', text}]` (measured 2026-09-01 across 15 live rollouts —
+      // 186 of these vs 20 legacy `agent_message`s; the 0.146.0 captures this file was built on
+      // predate it). Reasoning stays invisible by construction: every `reasoning` item measured
+      // carried `summary: []` + `encrypted_content` only, so unlike claude's `✻` heads there is
+      // nothing readable to render. Deliberately BELOW the `live` gate: the fork replay carries
+      // the parent's message records too, and a role check alone would stream the parent's words.
+      if (p.type === 'message') {
+        return p.role === 'assistant' ? textItems(p.content).trim() : ''
+      }
       if (p.type === 'function_call' && p.name) {
         const arg = argSummary(p.arguments)
         return `$ ${p.name}${arg ? ` ${arg}` : ''}`
