@@ -4,7 +4,7 @@
   "engines": {
     "node": "^22.22.2 || ^24.15.0 || >=26.0.0"
   },
-  "description": "node-based terminal manager — multiple draggable, zoomable terminals on a single canvas.",
+  "description": "Termscape — a personal, self-hosted fork of nodeterm: multiple draggable, zoomable terminals on a single canvas. For personal use and testing.",
   "author": {
     "name": "enes",
     "email": "eneskirca@gmail.com"
@@ -35,8 +35,8 @@
     "postinstall": "node scripts/patch-node-pty.mjs && electron-rebuild -f -w node-pty,smart-whisper"
   },
   "build": {
-    "appId": "com.nodeterm.app",
-    "productName": "nodeterm",
+    "appId": "ee.vene.termscape.desktop",
+    "productName": "Termscape",
     "directories": {
       "output": "dist",
       "buildResources": "build"

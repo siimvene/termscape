@@ -173,7 +173,7 @@ export function UpdateCard(): JSX.Element | null {
 
       {status.kind === 'available' && (
         <>
-          <p className="update-card__body">nodeterm v{status.version} is downloading.</p>
+          <p className="update-card__body">Termscape v{status.version} is downloading.</p>
           <button className="update-card__link" onClick={openReleases}>
             Release notes
           </button>
@@ -197,7 +197,7 @@ export function UpdateCard(): JSX.Element | null {
 
       {status.kind === 'downloaded' && (
         <>
-          <p className="update-card__body">nodeterm v{status.version} is ready to install.</p>
+          <p className="update-card__body">Termscape v{status.version} is ready to install.</p>
           <button className="update-card__link" onClick={openReleases}>
             Release notes
           </button>
@@ -211,7 +211,7 @@ export function UpdateCard(): JSX.Element | null {
       )}
 
       {status.kind === 'upToDate' && (
-        <p className="update-card__body">nodeterm is on the latest version.</p>
+        <p className="update-card__body">Termscape is on the latest version.</p>
       )}
 
       {status.kind === 'required' && (

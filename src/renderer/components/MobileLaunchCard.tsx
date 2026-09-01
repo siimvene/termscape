@@ -7,7 +7,7 @@ import { IOS_APP_STORE_URL } from '@renderer/lib/links'
 export { markMobileLaunchSeen, shouldShowMobileLaunch } from '@renderer/lib/mobileLaunch'
 
 /**
- * One-time launch announcement for nodeterm mobile (App Store release): a centered card over
+ * One-time launch announcement for Termscape for iOS (App Store release): a centered card over
  * the canvas in the promo style — dark, purple glow, the floating phone mockup from the setup
  * tour. Closes for good via the button, Esc, or the backdrop; every path persists the flag.
  */
@@ -25,21 +25,24 @@ export function MobileLaunchCard({ onClose }: { onClose: () => void }): React.JS
       <div
         className="mlaunch"
         role="dialog"
-        aria-label="nodeterm mobile is on the App Store"
+        aria-label="Termscape for iOS is on the App Store"
         onClick={(e) => e.stopPropagation()}
       >
         <h2 className="mlaunch__title">
           Your terminal, <span>everywhere</span>
         </h2>
-        <p className="mlaunch__sub">nodeterm mobile is now on the App Store 🎉</p>
+        <p className="mlaunch__sub">Termscape for iOS is now on the App Store 🎉</p>
         <div className="mlaunch__scene">
           <ScenePhone />
         </div>
         <p className="mlaunch__body">
           Attach to these same live sessions from your phone — watch an agent work, answer a
-          &ldquo;needs you&rdquo;, type into any terminal from anywhere. nodeterm stays free and
-          open source, developed in the open with the community; the app and its Pro features are
-          what fund that work. Your support means everything. ❤️
+          &ldquo;needs you&rdquo;, type into any terminal from anywhere. This desktop build is a
+          personal fork of{' '}
+          <a href="https://github.com/eneskirca/nodeterm" target="_blank" rel="noreferrer">
+            nodeterm
+          </a>{' '}
+          by Enes Kirca, kept for personal use and testing — please support the upstream project. ❤️
         </p>
         <div className="mlaunch__actions">
           <button

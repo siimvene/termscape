@@ -101,7 +101,7 @@ export function WelcomeScreen({
           <circle cx="31" cy="24" r="3.6" fill="#fff" />
           <rect x="33.5" y="32.5" width="10.5" height="5" rx="2.5" fill="#a38dff" />
         </svg>
-        <span className="welcome__name">nodeterm</span>
+        <span className="welcome__name">Termscape</span>
       </div>
       <p className="welcome__tagline">A canvas of terminals. Start a project to begin.</p>
 

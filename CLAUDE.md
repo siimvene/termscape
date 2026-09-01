@@ -18,6 +18,34 @@ workflows who benefit from a spatial layout over stacked tabs. Long-term vision 
 remote access and paid features — the architecture is built so those slot in without a
 UI rewrite (see Transport abstraction below).
 
+## The name: Termscape is paint, `nodeterm` is plumbing — DO NOT "finish" the rename
+
+This fork ships as **Termscape** (matching its iOS companion). The rebrand is deliberately
+**user-visible only**: `build.productName`, `build.appId`, the window title, the `<title>`, the
+welcome screen, the update card and the README. **Everything else still says `nodeterm`/
+`node-terminal` on purpose.** A future agent tidying up "leftover" occurrences would cause real
+damage, so the reasons are recorded here:
+
+- **`package.json` `name` is `node-terminal` and must stay.** It is what Electron's `app.getName()`
+  resolves to, which anchors BOTH `app.getPath('userData')`
+  (`~/Library/Application Support/node-terminal` — every workspace, setting and managed account
+  dir) and the `safeStorage` Keychain entry (`node-terminal Safe Storage`, which encrypts the
+  GitHub token and the model-gateway key). Renaming it silently orphans all of it and makes the
+  stored secrets undecryptable. [MEASURED 2026-09-01: the packaged app has `CFBundleName=nodeterm`
+  yet writes to `…/node-terminal`, so `productName` does NOT drive the path — `name` does. That is
+  precisely why `productName` was safe to change and `name` was not.]
+- **The tmux socket (`node-terminal`) and the `nt-<nodeId>` session names must stay.** They are the
+  live handles on running sessions; renaming detaches every one of them, and the reaper/kill paths
+  address sessions by exactly these strings.
+- **`.nodeterm/project.json`, `~/.nodeterm/` on SSH hosts, `NODETERM_*` env, the hook endpoint file,
+  `nodeterm.sh` / `context.sh` shims, `window.nodeterm`, `nodeterm:*` DOM events, `nodeterm.*`
+  localStorage keys and `nt-media://` must stay.** The git-shared project files are read by other
+  machines, the shims and endpoint files are already installed on remote hosts, and the iOS client
+  speaks these names over the wire. Renaming breaks other machines, not this one — the worst kind.
+- **Merge cost.** `nodeterm` appears ~3,600 times across ~445 files. This fork's value depends on
+  merging upstream cheaply (the v0.3.4 merge was 192 commits); a blanket rename would put a
+  conflict in nearly every future upstream diff, forever.
+
 ## Platform support
 
 macOS, Linux, and a browser Server Edition are the shipping targets; Windows is being brought up

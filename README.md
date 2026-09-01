@@ -1,29 +1,38 @@
 <div align="center">
 
-<img src="docs/assets/nodeterm.png" alt="nodeterm" width="120" height="120" />
+<img src="docs/assets/nodeterm.png" alt="Termscape" width="120" height="120" />
 
-# nodeterm
+# Termscape
 
-**A node-based terminal manager — your terminals and agents on an infinite canvas.**
+**A personal fork of [nodeterm](https://github.com/eneskirca/nodeterm) — terminals and agents on an infinite canvas.**
 
 Multiple real terminals live as draggable nodes on a single pan/zoom canvas, and every
 project doubles as a **Trello-style board of live Claude Code sessions**. Built for
 people with ADHD and scattered workflows: a spatial layout instead of a stack of
 hidden tabs.
 
-[![Platform](https://img.shields.io/badge/platform-macOS%20(arm64%20%2B%20x64)%20·%20Linux%20(x64)-black)](https://nodeterm.dev)
+[![Platform](https://img.shields.io/badge/platform-macOS%20(Apple%20Silicon)-black)](#-build--install)
 [![Built with Electron](https://img.shields.io/badge/built%20with-Electron-47848F?logo=electron&logoColor=white)](https://www.electronjs.org/)
 [![License](https://img.shields.io/badge/license-BUSL--1.1-blue)](./LICENSE)
-[![GitHub stars](https://img.shields.io/github/stars/eneskirca/nodeterm?style=flat)](https://github.com/eneskirca/nodeterm/stargazers)
-[![Latest release](https://img.shields.io/github/v/release/eneskirca/nodeterm?include_prereleases&sort=semver)](https://github.com/eneskirca/nodeterm/releases)
-<!-- Installer downloads: .dmg + .AppImage + .deb across every release, hand-written on purpose.
-     shields' github/downloads/…/total reads ~12× higher because electron-updater's own traffic
-     (latest-*.yml polls, mac .zip deltas, blockmaps) is counted as downloads there. Recount with:
-     gh api --paginate repos/eneskirca/nodeterm/releases --jq \
-       '[.[].assets[] | select(.name|test("\\.(dmg|AppImage|deb)$")) | .download_count] | add' -->
-[![Downloads](https://img.shields.io/badge/downloads-1.2k-brightgreen)](https://github.com/eneskirca/nodeterm/releases)
+[![Upstream](https://img.shields.io/badge/upstream-eneskirca%2Fnodeterm-6f42c1)](https://github.com/eneskirca/nodeterm)
+[![Personal use](https://img.shields.io/badge/scope-personal%20use%20%26%20testing-orange)](#-what-this-fork-is)
 
-[Download](#-download) · [Docs](https://nodeterm.dev/docs) · [Features](#-features) · [Build from source](#-build-from-source) · [Architecture](#-architecture) · [License](#-license)
+</div>
+
+> ### ⚠️ Personal use and testing only
+>
+> **Termscape is not a product.** It is one person's fork of
+> [eneskirca/nodeterm](https://github.com/eneskirca/nodeterm), maintained for personal use,
+> self-hosting experiments and testing. It is renamed only so it can sit beside upstream on the
+> same machine and share a name with its iOS companion — the engineering is upstream's.
+>
+> There is no support, no roadmap, no release cadence and no redistribution. If you want the real
+> thing — supported, packaged, and developed in the open — **use
+> [nodeterm](https://github.com/eneskirca/nodeterm) and support that project.**
+
+<div align="center">
+
+[What this fork is](#-what-this-fork-is) · [Build & install](#-build--install) · [Features](#-features) · [Architecture](#-architecture) · [Credits](#-credits) · [License](#-license)
 
 </div>
 
@@ -37,7 +46,7 @@ hidden tabs.
   <sub>▶ <a href="docs/assets/hero-tour.mp4">Watch the 30-second tour with sound</a></sub>
 </div>
 
-## Why nodeterm
+## Why a canvas
 
 Stacked terminal tabs hide context — you lose track of what's running where. nodeterm
 turns that into a **map**: every shell is a node you can place, group, label, and zoom
@@ -52,13 +61,25 @@ started, concepts, agents, remote access, troubleshooting.
 
 ---
 
-## 🔧 Self-host fork (this branch)
+## 🔧 What this fork is
 
-> This is a **private fork** of [eneskirca/nodeterm](https://github.com/eneskirca/nodeterm)
+> **Termscape** is a **private fork** of [eneskirca/nodeterm](https://github.com/eneskirca/nodeterm)
 > (BUSL-1.1, © Enes Kirca), on branch `feat/ungated-selfhost`. It runs the Server Edition
 > as the primary core for a personal, always-on, self-hosted setup, and adds a set of
 > multi-account and mobile-companion capabilities on top of upstream. Not for redistribution —
 > see [License](#-license).
+
+**On the name.** Only the user-visible branding changed — the app's display name, window title
+and this README. Everything load-bearing deliberately still says `nodeterm`: the data directory
+(`~/Library/Application Support/node-terminal`), the tmux socket and `nt-` session names, the
+`.nodeterm/project.json` layout files, `NODETERM_*` env vars, the hook endpoint and the shims
+installed on SSH hosts. Renaming those would orphan live sessions and years of workspace state,
+break remote hosts mid-flight, and turn every upstream merge into a conflict swamp — and cheap
+upstream merges are the entire point of running a fork. The name is paint; the plumbing is
+upstream's and stays legible as such.
+
+The desktop app shares the **Termscape** name with its iOS companion, which attaches to these same
+tmux sessions.
 
 **Self-host posture**
 - The **Server Edition** (`node out/server/main.cjs`) is the always-on core, fronted by
@@ -380,6 +401,22 @@ By submitting a contribution (pull request, patch, or code snippet), you agree
 that it is licensed under the same [BUSL-1.1](./LICENSE) terms as the rest of
 the project, and that the project may continue to relicense future versions
 (including your contribution) as part of its normal licensing model.
+
+## 🙏 Credits
+
+**Termscape is a rename, not an authorship claim.** Essentially all of the engineering here is
+[nodeterm](https://github.com/eneskirca/nodeterm) by **Enes Kirca** — the canvas, the tmux session
+model, the agent/hook architecture, the Server Edition, the kanban board, the transport seam. This
+fork adds a handful of self-host and multi-account conveniences on top and renames the shipped app
+so it can live beside upstream and match its iOS companion.
+
+- **Upstream project:** [github.com/eneskirca/nodeterm](https://github.com/eneskirca/nodeterm) · [nodeterm.dev](https://nodeterm.dev)
+- **Upstream author:** Enes Kirca ([@eneskirca](https://github.com/eneskirca))
+- **License:** BUSL-1.1, © Enes Kirca — unchanged by this fork
+
+Every upstream commit is preserved in this repository's history and its `upstream/main` remote;
+this fork is merged forward from it rather than detached. If Termscape is useful to you, the
+project to star, fund and file issues against is **nodeterm**, not this fork.
 
 ## 📜 License
 
