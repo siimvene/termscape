@@ -157,8 +157,11 @@ jobs:
     env:
       # electron-vite's renderer bundle (Monaco + xterm + React Flow) blows Node's default old-space
       # ceiling on the hosted runner: both hosted jobs died with "JavaScript heap out of memory"
-      # on every tag. The runners have 16 GB; give V8 half of it.
-      NODE_OPTIONS: --max-old-space-size=8192
+      # on every tag. Hosted runners for a PRIVATE repo are the 2-core / 7 GB tier (public repos
+      # get 16 GB), so the cap leaves ~1 GB for the OS, the toolchain and V8's own non-heap memory
+      # — a cap at or above the box would trade a V8 OOM for a kernel one. If this still dies,
+      # the fix is a `runs-on` larger-runner label, not a bigger number here.
+      NODE_OPTIONS: --max-old-space-size=6144
     steps:
       - uses: actions/checkout@v7
 
@@ -205,7 +208,7 @@ jobs:
   release-win:
     runs-on: windows-latest
     env:
-      NODE_OPTIONS: --max-old-space-size=8192 # same OOM as release-linux, see there
+      NODE_OPTIONS: --max-old-space-size=6144 # same OOM and same 7 GB tier as release-linux, see there
     steps:
       - uses: actions/checkout@v7
 
@@ -259,8 +262,9 @@ jobs:
             sleep 30
           done
 
-  # Flips the release to a published "latest" only when BOTH the mac and linux jobs uploaded
-  # their assets. Until then it stays a prerelease, so /releases/latest (the site + both update
+  # Flips the release to a published "latest" only when every platform job that RAN uploaded its
+  # assets — mac and linux upstream; linux alone here while release-mac is opted out (its `if`
+  # above). Until then it stays a prerelease, so /releases/latest (the site + both update
   # feeds) keeps serving the previous complete release — a mac-runner sleep or an upload
   # failure can no longer put a partial release in front of users. If one platform job
   # fails, fix/rerun it; this job then runs on the rerun and publishes.
