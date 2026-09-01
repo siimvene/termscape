@@ -564,13 +564,33 @@ function bashPane(session: string): string {
   return marker
 }
 
-/** ctrl-c, then a sentinel command: once its file exists, everything queued before it has run. */
-function bashDrain(session: string, tag: string): void {
+/**
+ * ctrl-c, then a sentinel command: once its file exists, everything queued before it has run.
+ *
+ * `settle` MUST hold before the C-c, and that ordering is load-bearing, not tidiness. The tty's
+ * INTR handler FLUSHES the pending input queue — the default line discipline carries no NOFLSH —
+ * and readline discards the line it is on. So a C-c sent while bash has not yet consumed the
+ * pasted bytes destroys the tail of the payload before it can run or even echo. For the CONTROL
+ * that silently disarms the attack: `touch <marker>\r` is flushed, the marker never appears, and
+ * the assertion reads "expected false to be true" — a real failure that looks like the fix broke,
+ * and, worse, a QUIET one that would let the two escaped-payload tests pass vacuously (their whole
+ * job is to be judged against a CONTROL that actually runs). Measured 2026-09-02 on tmux 3.7c
+ * under CPU load: immediate C-c dropped the CONTROL marker 7/40 and 15/40; settling first, 0/40.
+ * The wait is bounded by `waitFor`'s deadline, so a payload that never settles fails loudly with
+ * the `what` it was waiting for, never a hang.
+ */
+function bashDrain(session: string, tag: string, settle: () => boolean, what: string): void {
+  waitFor(settle, `${what} before draining ${tag}`)
   const sentinel = path.join(work, `sent-${tag}`)
   tmux(['-L', SOCKET, 'send-keys', '-t', session, 'C-c'])
   tmux(['-L', SOCKET, 'send-keys', '-t', session, '-l', '--', `touch ${sentinel}`])
   tmux(['-L', SOCKET, 'send-keys', '-t', session, 'Enter'])
   waitFor(() => fs.existsSync(sentinel), `bash to reach the ${tag} sentinel`)
+}
+
+/** capture-pane predicate: the pane has echoed the payload's printable tail (ESC has no glyph). */
+function paneShows(session: string, needle: string): () => boolean {
+  return () => tmux(['-L', SOCKET, 'capture-pane', '-p', '-t', session]).includes(needle)
 }
 
 suite('REAL bash through REAL tmux: the payload cannot become key input', () => {
@@ -579,7 +599,10 @@ suite('REAL bash through REAL tmux: the payload cannot become key input', () => 
       bashPane(`nt-sec-${p}`)
       const m = path.join(work, `pwn-${p}`)
       await send(p, `nt-sec-${p}`, `hello${END}\rtouch ${m}\r`, false)
-      bashDrain(`nt-sec-${p}`, `nt-sec-${p}`)
+      // Settle on the echo the assertion below already looks for: once `hello[201~` is on the
+      // pane, readline has taken the paste as CONTENT, so C-c aborts an inert composed line
+      // rather than flushing an unconsumed tail.
+      bashDrain(`nt-sec-${p}`, `nt-sec-${p}`, paneShows(`nt-sec-${p}`, 'hello[201~'), 'the echoed hello[201~')
       expect(fs.existsSync(m), 'the payload ESCAPED the frame and ran').toBe(false)
       // and the text still arrived as content: ESC has no glyph, its printable tail survives
       expect(tmux(['-L', SOCKET, 'capture-pane', '-p', '-t', `nt-sec-${p}`])).toContain('hello[201~')
@@ -589,7 +612,7 @@ suite('REAL bash through REAL tmux: the payload cannot become key input', () => 
       bashPane(`nt-sec2-${p}`)
       const m = path.join(work, `pwn2-${p}`)
       await send(p, `nt-sec2-${p}`, `SAFE${END}\x15touch ${m} #`, true)
-      bashDrain(`nt-sec2-${p}`, `nt-sec2-${p}`)
+      bashDrain(`nt-sec2-${p}`, `nt-sec2-${p}`, paneShows(`nt-sec2-${p}`, 'SAFE[201~'), 'the echoed SAFE[201~')
       expect(fs.existsSync(m), 'ctrl-u was read as a KEY').toBe(false)
     })
   }
@@ -600,7 +623,11 @@ suite('REAL bash through REAL tmux: the payload cannot become key input', () => 
     const m = path.join(work, 'pwn-ctl')
     const buffer = pasteBufferName()
     tmux(localTmuxPasteArgs(SOCKET, 'nt-sec-ctl', buffer, false), `hello${END}\rtouch ${m}\r`)
-    bashDrain('nt-sec-ctl', 'nt-sec-ctl')
+    // Settle on the attack's OWN effect: the marker is created by `touch <marker>\r` running as a
+    // real command after the payload closed the frame early. Waiting for it before the drain means
+    // the attack has fired by the time C-c lands — the flush can no longer swallow it — and a
+    // sanitized delivery (marker never appears) fails loudly here instead of passing vacuously.
+    bashDrain('nt-sec-ctl', 'nt-sec-ctl', () => fs.existsSync(m), 'the attack to create its marker')
     expect(fs.existsSync(m), 'the attack no longer works — these tests are vacuous').toBe(true)
   })
 })
