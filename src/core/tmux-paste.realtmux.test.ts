@@ -600,9 +600,12 @@ suite('REAL bash through REAL tmux: the payload cannot become key input', () => 
       const m = path.join(work, `pwn-${p}`)
       await send(p, `nt-sec-${p}`, `hello${END}\rtouch ${m}\r`, false)
       // Settle on the echo the assertion below already looks for: once `hello[201~` is on the
-      // pane, readline has taken the paste as CONTENT, so C-c aborts an inert composed line
-      // rather than flushing an unconsumed tail.
-      bashDrain(`nt-sec-${p}`, `nt-sec-${p}`, paneShows(`nt-sec-${p}`, 'hello[201~'), 'the echoed hello[201~')
+      // pane, readline has taken the sanitized payload as CONTENT (the printable tail of the
+      // neutralised close sequence — the pane's bash 3.2 need not do bracketed paste itself for
+      // this to hold), so C-c aborts an inert composed line rather than flushing an unconsumed tail.
+      // …or the marker: if the payload ever DOES escape, settle at once so the labelled assertion
+      // below is the one that fails, not a timeout waiting for an echo that will never come.
+      bashDrain(`nt-sec-${p}`, `nt-sec-${p}`, () => fs.existsSync(m) || paneShows(`nt-sec-${p}`, 'hello[201~')(), 'the echoed hello[201~ (or the escaped marker)')
       expect(fs.existsSync(m), 'the payload ESCAPED the frame and ran').toBe(false)
       // and the text still arrived as content: ESC has no glyph, its printable tail survives
       expect(tmux(['-L', SOCKET, 'capture-pane', '-p', '-t', `nt-sec-${p}`])).toContain('hello[201~')
@@ -612,7 +615,7 @@ suite('REAL bash through REAL tmux: the payload cannot become key input', () => 
       bashPane(`nt-sec2-${p}`)
       const m = path.join(work, `pwn2-${p}`)
       await send(p, `nt-sec2-${p}`, `SAFE${END}\x15touch ${m} #`, true)
-      bashDrain(`nt-sec2-${p}`, `nt-sec2-${p}`, paneShows(`nt-sec2-${p}`, 'SAFE[201~'), 'the echoed SAFE[201~')
+      bashDrain(`nt-sec2-${p}`, `nt-sec2-${p}`, () => fs.existsSync(m) || paneShows(`nt-sec2-${p}`, 'SAFE[201~')(), 'the echoed SAFE[201~ (or the escaped marker)')
       expect(fs.existsSync(m), 'ctrl-u was read as a KEY').toBe(false)
     })
   }
