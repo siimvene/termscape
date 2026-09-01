@@ -210,8 +210,8 @@ export function retireIntoPool(
     projectId,
     node: {
       type: n.type as NodeKind,
-      // No width/height: the ghost is display:none, so nothing lays it out, and the only reader a
-      // size would have had is the minimap (see ghostFlowNode).
+      // No width/height: the ghost is display:none, so the wrapper's inline sizing they would feed
+      // paints nothing, and the one reader that DID paint them is the minimap (see ghostFlowNode).
       // The ghost must render with the values the mounted surface last reported, or the props
       // transition at the switch would navigate the live page (BrowserSurface reloads when its
       // `url` prop moves away from where it is).
