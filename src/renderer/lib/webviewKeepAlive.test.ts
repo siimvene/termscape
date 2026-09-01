@@ -89,7 +89,7 @@ describe('ghostFlowNode', () => {
   const entry: KeepAliveEntry = {
     nodeId: 'b1',
     projectId: 'p2',
-    node: { type: 'browser', width: 560, height: 400, data: { url: 'https://x/', partition: 'persist:x' } as never },
+    node: { type: 'browser', data: { url: 'https://x/', partition: 'persist:x' } as never },
     retiredAt: 1
   }
 
@@ -105,6 +105,16 @@ describe('ghostFlowNode', () => {
     expect(g.data.ghost).toBe(true)
     expect(g.data.url).toBe('https://x/')
     expect(g.data.partition).toBe('persist:x')
+  })
+
+  it('has no dimensions, so the minimap skips it instead of painting a phantom at the origin', () => {
+    // React Flow's MiniMap draws every non-`hidden` node for which `nodeHasDimensions` holds and
+    // ignores `style.display`; a display:none node is never measured, so an explicit size would
+    // be its only one. Mutation: restore `width: entry.node.width` ⇒ this reddens.
+    const g = ghostFlowNode(entry)
+    expect(g.width).toBeUndefined()
+    expect(g.height).toBeUndefined()
+    expect(g.measured).toBeUndefined()
   })
 
   it('caches by entry identity so a drag-frame merge re-emits the same object', () => {

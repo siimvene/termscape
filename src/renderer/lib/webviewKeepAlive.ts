@@ -54,7 +54,7 @@ export interface KeepAliveEntry {
   projectId: string
   /** Snapshot of the node as last seen live. `data` carries what the mounted surface needs to
    *  keep rendering consistently (url/title/partition/filePath…). */
-  node: { type: NodeKind; width?: number; height?: number; data: CanvasNode['data'] }
+  node: { type: NodeKind; data: CanvasNode['data'] }
   /** When this entry went to the background (ms epoch) — LRU key for the cap. 0 = active. */
   retiredAt: number
 }
@@ -77,8 +77,18 @@ const ghostCache = new WeakMap<KeepAliveEntry, CanvasNode>()
 /**
  * The React Flow node a background entry renders as. Same id (key stability), `display:none`
  * (guest survives, IntersectionObserver reads it as hidden so the memory saver's clock runs),
- * non-interactive on every axis, `parentId`-free and parked at the origin — a hidden node has no
- * geometry, so its position only matters for not skewing minimap/fit bounds.
+ * non-interactive on every axis, `parentId`-free and parked at the origin.
+ *
+ * It carries NO width/height, deliberately. `display:none` keeps React Flow's ResizeObserver from
+ * ever measuring it, so an explicit size was the ghost's ONLY geometry — and the MiniMap draws
+ * every non-`hidden` node that has one (`nodeHasDimensions`; it ignores `style.display`). The
+ * first ship gave the ghost its page's size, and every OTHER project's minimap painted a
+ * browser-blue rectangle at its origin that led to empty canvas (field report, 2026-09-01: three
+ * web nodes parked from one project, stacked into one phantom on every other). Without a size the
+ * minimap skips it and fitView never saw it (that path also demands `measured`). Residual: the
+ * ORIGIN itself still enters the minimap's bounds (`getInternalNodesBounds` filters only `hidden`,
+ * which we cannot set — a hidden node is unmounted, i.e. a dead guest), so a canvas far from (0,0)
+ * gets a slightly zoomed-out minimap while ghosts exist. A point, not a phantom.
  */
 export function ghostFlowNode(entry: KeepAliveEntry): CanvasNode {
   const cached = ghostCache.get(entry)
@@ -87,8 +97,6 @@ export function ghostFlowNode(entry: KeepAliveEntry): CanvasNode {
     id: entry.nodeId,
     type: entry.node.type,
     position: { x: 0, y: 0 },
-    width: entry.node.width,
-    height: entry.node.height,
     data: { ...entry.node.data, ghost: true },
     style: { display: 'none' },
     draggable: false,
@@ -202,8 +210,8 @@ export function retireIntoPool(
     projectId,
     node: {
       type: n.type as NodeKind,
-      width: n.width ?? n.measured?.width ?? undefined,
-      height: n.height ?? n.measured?.height ?? undefined,
+      // No width/height: the ghost is display:none, so nothing lays it out, and the only reader a
+      // size would have had is the minimap (see ghostFlowNode).
       // The ghost must render with the values the mounted surface last reported, or the props
       // transition at the switch would navigate the live page (BrowserSurface reloads when its
       // `url` prop moves away from where it is).

@@ -208,7 +208,10 @@ the wire never see any of it):
   React). Visible cost of the hoist: an unselected browser/web node paints above other unselected
   z-0 nodes it overlaps (selection's z 1000 still wins).
 - On switch-away the outgoing project's pages become **ghosts**: same node id, `display:none`,
-  non-interactive, parked at the origin, `data.ghost` telling the surfaces to route facts at the
+  non-interactive, parked at the origin **with NO width/height** (a display:none node is never
+  measured, so an explicit size was its only geometry — and the MiniMap draws every non-`hidden`
+  node that has one, which painted a browser-blue phantom at the origin of every OTHER project;
+  the origin point itself still enters the minimap bounds, accepted), `data.ghost` telling the surfaces to route facts at the
   pool (`updateGhostData`) instead of `updateNodeData`. On return the SAME element goes live
   again; `overlayKeepAliveData` folds ghost-time navigations into the loaded nodes inside the one
   `setNodes`, so the `url` prop never moves under the surviving surface (which would navigate it).
