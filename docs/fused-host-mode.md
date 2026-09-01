@@ -1,6 +1,7 @@
 # Fused host mode + QR device pairing — desktop spec
 
-Status: design, not yet implemented. Written against `~/git/termscape` at
+Status: design, not yet implemented. Host names, tailnet and machine names in the examples below are
+placeholders (`my-mac.tailnet-name.ts.net`), not the measuring machine's. Written against `~/git/termscape` at
 `34aeef26` (branch `feat/ungated-selfhost`) and `~/git/nodeterm-mobile`.
 Every code claim below was read in the tree; the Tailscale claims were re-run on this Mac
 on 2026-09-01 and the captured output is quoted inline. Where the four survey passes
