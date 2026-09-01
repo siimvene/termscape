@@ -225,9 +225,17 @@ describe('parseControlRequest', () => {
     for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
       expect(body).toContain('Canvas nodes or your own in-process subagents?')
       expect(body).toContain('ephemeral cards')
-      expect(body).toMatch(/`spawn-team` \(or `open-agent`/)
+      // The worktree recipe must be the real one: spawn-team ignores --group and opens members in
+      // the caller's checkout (Canvas.tsx `case 'spawn-team'`), so the text may never claim it
+      // creates worktree-bound groups (consort SERIOUS, 2026-09-02).
+      expect(body).toMatch(/`open-worktree --branch <slug>` then `open-agent --group <groupId>`/)
+      expect(body).toMatch(/`spawn-team` ignores `--group`/)
+      expect(body).not.toMatch(/spawn-team[^.]*into worktree-bound/)
       expect(body).toContain('a node per grep is noise')
-      expect(body).toContain('open-agent --agent codex')
+      // "Cross-vendor" is relative to the READER — the marker block is read by codex/gemini/opencode/
+      // copilot too — so the text names no single vendor as the reviewer.
+      expect(body).toContain('open-agent --agent')
+      expect(body).not.toMatch(/cross-vendor review is a natural node: `open-agent --agent codex`/)
     }
   })
 

@@ -2,9 +2,10 @@ name: Release
 
 # Build, code-sign, and notarize the macOS app on every version tag (e.g. v0.1.1),
 # then publish the artifacts (dmg + zip). Upstream also ships latest-*.yml + blockmaps here for
-# its update feed at https://nodeterm.dev/updates; this fork has NO update feed (package.json
-# carries no `publish` block, so electron-builder emits no feed files, and every packaged build
-# is stamped nodeTermUpdates=disabled so the in-app updater never polls anything).
+# its update feed at https://nodeterm.dev/updates; this fork has NO update feed (package.json sets
+# `publish: null` — an ABSENT key is not enough, electron-builder then infers a github provider from
+# the git remote and still writes app-update.yml — and every packaged build is stamped
+# nodeTermUpdates=disabled so the in-app updater never polls anything).
 on:
   push:
     tags:
