@@ -153,6 +153,11 @@ jobs:
   # Publishes AppImage + deb + latest-linux.yml to the SAME tag's GitHub Release; the
   # nodeterm.dev update feed serves latest-linux.yml alongside the mac files.
   release-linux:
+    # Opt-in via the repository variable TERMSCAPE_HOSTED_BUILDS=true, like release-mac above.
+    # This fork ships from a local `npm run dist` for now; a hosted Linux/Windows build per tag
+    # is minutes spent on artifacts nobody downloads (and, until the heap cap below, a failure
+    # mail per tag). With every job opted out a tag push is a no-op run, not a red one.
+    if: vars.TERMSCAPE_HOSTED_BUILDS == 'true'
     runs-on: ubuntu-latest
     env:
       # electron-vite's renderer bundle (Monaco + xterm + React Flow) blows Node's default old-space
@@ -206,6 +211,7 @@ jobs:
   # use `gh release upload --clobber` (never softprops) so a late finish can't flip an
   # already-promoted release back to prerelease by re-writing its fields.
   release-win:
+    if: vars.TERMSCAPE_HOSTED_BUILDS == 'true' # see release-linux
     runs-on: windows-latest
     env:
       NODE_OPTIONS: --max-old-space-size=6144 # same OOM and same 7 GB tier as release-linux, see there
