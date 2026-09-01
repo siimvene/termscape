@@ -231,7 +231,8 @@ checklists for exactly this.
 
 ## Pull requests
 
-- Branch from `main`. CI runs `quality` and `quality-windows`; both are required. (Upstream nodeterm also
+- Branch from `main`. CI runs `quality` and `quality-windows`; keep both green (this private plan has no
+  branch protection, so nothing enforces it for you). (Upstream nodeterm also
   runs CodeQL + Dependency review; this private fork does not — both need GitHub Advanced Security,
   which a private repo without it answers with a failing upload, not a skipped scan.)
 - Explain **why**, not just what. If a decision has a trade-off, name it and say what you rejected.
