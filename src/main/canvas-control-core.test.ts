@@ -216,6 +216,21 @@ describe('parseControlRequest', () => {
   // The parser change in this commit's sibling is only half a fix: an agent that never learns the
   // `=` form simply cannot express a value beginning with `--`, and the failure stays silent for it.
   // So both agent-facing texts must carry the rule, not just one of them.
+  it('both bodies steer substantial or long-lived fan-out to canvas nodes, not in-process subagents', () => {
+    // In-process subagents (Agent/Task tool) are only ever ephemeral cards on the canvas — gone on
+    // the parent's next turn, no terminal/worktree/kanban card — so an agent that fans out that way
+    // for real implementation work leaves the user nothing to watch or keep. Both the SKILL.md and
+    // the marker-block variant must carry the same steer, and keep the "quick lookups stay
+    // in-process" boundary so a node per grep does not become the new default.
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      expect(body).toContain('Canvas nodes or your own in-process subagents?')
+      expect(body).toContain('ephemeral cards')
+      expect(body).toMatch(/`spawn-team` \(or `open-agent`/)
+      expect(body).toContain('a node per grep is noise')
+      expect(body).toContain('open-agent --agent codex')
+    }
+  })
+
   it('the skill text documents --flag=value and warns about values starting with --', () => {
     const body = buildCanvasSkillBody('/x/shim.sh')
     expect(body).toContain('--flag=value')

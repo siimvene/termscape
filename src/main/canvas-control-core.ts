@@ -386,6 +386,15 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '',
     ...codexSandboxGuidanceLines(CONTROL_UNREACHABLE_MSG),
     '',
+    'Canvas nodes or your own in-process subagents? Workers you start with your own subagent/Task',
+    'tool run inside your process: the canvas shows them only as ephemeral cards on your node that',
+    'disappear on your next turn — no terminal, no worktree, no kanban card. For work the user will',
+    'want to watch, steer or keep (parallel implementation across files or repos, a long review,',
+    'anything that should outlive your turn) open real nodes instead: `spawn-team` (or `open-agent`',
+    'per role) into worktree-bound groups, then read results back through the context links. Keep',
+    'in-process subagents for quick lookups and short checks; a node per grep is noise. A cross-vendor',
+    'review is a natural node: `open-agent --agent codex` (or gemini) inherits none of your context.',
+    '',
     'Orchestration ("Build with Nodeterm orchestration"): first decide what is genuinely',
     'independent — for every "and then", ask whether the next step READS the previous step\'s',
     'output. If not, they are separate stations, open them all at once; if it does, open the',
@@ -815,6 +824,16 @@ ${codexSandboxGuidanceLines(CONTROL_UNREACHABLE_MSG).join('\n')}
 
 To orchestrate a team: decide the roles + a concrete starting prompt for each, then one
 \`spawn-team\` call (or \`open-claude\` per role followed by \`group\` + \`arrange\`).
+
+Canvas nodes or your own in-process subagents? Workers you start with your Agent/Task tool run
+inside your process: the canvas shows them only as ephemeral cards on your node (working/done, a
+live tail) that disappear on your next turn — no terminal, no worktree, no kanban card, nothing the
+user can open later. For work the user will want to watch, steer or keep — parallel implementation
+across files or repos, a long review, anything that should outlive your turn — open real nodes
+instead: \`spawn-team\` (or \`open-agent\` per role) into worktree-bound groups, then read the
+results back through the context links. Keep in-process subagents for quick lookups and short
+checks; a node per grep is noise. A cross-vendor review is a natural node: \`open-agent --agent
+codex\` (or gemini) gets a session that inherits none of your context.
 
 Typical requests this skill covers:
 - "Create Claude Code nodes for X and organize them into groups by subject" → decide the

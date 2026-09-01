@@ -126,6 +126,13 @@ paths:
   caller's. The judge is armed on ids that exist only in that tick, which is why `armAfter` takes
   `extraLive` — without it the reviewers would look *deleted*, deletion counts as satisfied, and
   the judge would fire before a single review existed.
+- **Both skill bodies steer fan-out to canvas nodes** (2026-09-02, pinned by
+  `canvas-control-core.test.ts`): an agent's own in-process subagents (Agent/Task tool) surface only as
+  ephemeral cards (see the subagent-visualization bullet in `agents.md`) — gone on the parent's next
+  turn, no terminal/worktree/kanban card — so the SKILL.md and the marker-block variant both tell the
+  agent to `spawn-team`/`open-agent` for parallel implementation, long reviews and anything that
+  should outlive its turn, and to keep in-process subagents for quick lookups. Cross-vendor review is
+  named as a natural node (`open-agent --agent codex`). Edit both variants together, or the test fails.
 - **Context Link** — a node action gated by `CONTEXT_LINK_CAPABLE` (claude/codex/gemini/opencode;
   **grok**, custom agents + plain terminals excluded — grok's `updates.jsonl` parser is unbuilt): drawing an edge between two builtin-agent nodes lets each
   READ the other's context on demand (pull, not push). Architecture (2026-07, SSH-capable — see
