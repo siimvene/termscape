@@ -178,18 +178,22 @@ class SessionHostRequestNotDeliveredError extends Error {
  * exactly that newline and can never be acted upon — both are as undelivered as a frame never
  * handed to `write` at all, and resending them cannot double-apply anything.
  *
- * Deliberately NOT covered: `ECANCELED` (libuv cancels an in-flight write request when the socket
- * is destroyed, and those bytes may already have reached the host) and any failure that did not
- * come from a write syscall — Node reports a read-side error such as a peer RST through pending
+ * Deliberately NOT covered: a syscall failure on a chunk that was NOT written alone (`solo` false —
+ * Node coalesces queued chunks into one writev whose error reaches every chunk, delivered or not),
+ * `ECANCELED` (libuv cancels an in-flight write request when the socket is destroyed, and those
+ * bytes may already have reached the host) and any failure that did not come from a write syscall — Node reports a read-side error such as a peer RST through pending
  * write callbacks too, and by then the frame may well have been delivered and acted upon. Those
  * stay uncertainty and keep rejecting the caller directly. */
-function isUndeliveredWriteFailure(error: Error): boolean {
+export function isUndeliveredWriteFailure(error: Error, solo: boolean): boolean {
   const typed = error as NodeJS.ErrnoException & { syscall?: string }
   // Never dispatched at all: the stream refused the chunk before any syscall happened.
   if (typed.code === 'ERR_STREAM_DESTROYED' || typed.code === 'ERR_STREAM_WRITE_AFTER_END') {
     return true
   }
-  return typed.syscall === 'write' && typed.code !== 'ECANCELED'
+  // A syscall failure is proof only for a chunk that was the whole write request. Node flushes
+  // chunks queued behind an in-flight write as one writev, and a failed writev reports the error
+  // to every chunk in it — including one the peer already received complete and acted upon.
+  return solo && typed.syscall === 'write' && typed.code !== 'ECANCELED'
 }
 
 /** How many times `request()` re-runs connect + send for a frame that provably never left the
@@ -857,6 +861,13 @@ export class SessionHostClient {
           return
         }
         pending.sent = true
+        // Was this frame handed to the kernel ALONE? Node writes a chunk straight through only when
+        // nothing is buffered or in flight (writableLength 0, not corked); anything written while
+        // another write is in flight is queued and later flushed together with its neighbours as
+        // ONE writev request. When such a request fails, EVERY chunk in it receives the error — a
+        // chunk the peer already consumed in full included — so for a coalesced write the failure
+        // proves nothing about this frame's delivery. Only a solo write can be reclassified below.
+        const solo = socket.writableLength === 0 && socket.writableCorked === 0
         try {
           socket.write(encodeFrame(full), (error) => {
             // A response may beat a late write callback. Identity-check this exact pending entry so
@@ -869,14 +880,17 @@ export class SessionHostClient {
             // first, the recheck sees the loss, and this path is not reached.) Put such a frame
             // back into the undelivered class so dropSocket rejects it as resendable and request()
             // replays it on a fresh connection, instead of surfacing a transport race to a caller
-            // whose work the host never even received.
-            if (isUndeliveredWriteFailure(asError(error))) pending.sent = false
+            // whose work the host never even received. A coalesced write (see `solo`) can only be
+            // reclassified when the stream refused it before any syscall — a syscall failure there
+            // may cover bytes the host already acted on, and replaying e.g. sendKeys would type the
+            // same command twice.
+            if (isUndeliveredWriteFailure(asError(error), solo)) pending.sent = false
             this.dropSocket(socket, asError(error), true)
           })
         } catch (error) {
           if (this.pending.get(id) !== pending) return
           // A throwing write never dispatched the chunk, so the same classification applies.
-          if (isUndeliveredWriteFailure(asError(error))) pending.sent = false
+          if (isUndeliveredWriteFailure(asError(error), solo)) pending.sent = false
           this.dropSocket(socket, asError(error), true)
         }
       })

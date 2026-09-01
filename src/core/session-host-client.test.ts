@@ -15,6 +15,7 @@ import {
 import {
   SessionHostClient,
   SessionHostProtocolCompatibilityError,
+  isUndeliveredWriteFailure,
   type SessionSubscriber
 } from './session-host-client'
 
@@ -1967,4 +1968,38 @@ describe('SessionHostClient failure boundaries', () => {
       await expect(within(request)).rejects.toThrow('session-host connection lost')
     }
   )
+})
+
+describe('isUndeliveredWriteFailure — when a failed write proves the host never saw the frame', () => {
+  const errno = (code: string, syscall?: string): Error =>
+    Object.assign(new Error(code), { code, ...(syscall ? { syscall } : {}) })
+
+  it('a SOLO write that failed at the syscall is undelivered (EPIPE, ECONNRESET, ENOTCONN)', () => {
+    for (const code of ['EPIPE', 'ECONNRESET', 'ENOTCONN']) {
+      expect(isUndeliveredWriteFailure(errno(code, 'write'), true)).toBe(true)
+    }
+  })
+
+  it('the SAME syscall failure on a coalesced write proves nothing — a writev error reaches every chunk, delivered or not', () => {
+    // Found by the 2026-09-02 security side-pass: a frame queued behind an in-flight write is
+    // flushed with its neighbours as one writev; if that fails after the peer consumed this frame
+    // complete (and acted on it, e.g. sendKeys typed into the pane), reclassifying it would replay
+    // the command. Only a write handed to the kernel alone may be reclassified.
+    for (const code of ['EPIPE', 'ECONNRESET', 'ENOTCONN']) {
+      expect(isUndeliveredWriteFailure(errno(code, 'write'), false)).toBe(false)
+    }
+  })
+
+  it('a stream that refused the chunk before any syscall is undelivered, solo or not', () => {
+    for (const solo of [true, false]) {
+      expect(isUndeliveredWriteFailure(errno('ERR_STREAM_DESTROYED'), solo)).toBe(true)
+      expect(isUndeliveredWriteFailure(errno('ERR_STREAM_WRITE_AFTER_END'), solo)).toBe(true)
+    }
+  })
+
+  it('ECANCELED and non-write failures stay uncertainty even for a solo write', () => {
+    expect(isUndeliveredWriteFailure(errno('ECANCELED', 'write'), true)).toBe(false)
+    expect(isUndeliveredWriteFailure(errno('ECONNRESET', 'read'), true)).toBe(false)
+    expect(isUndeliveredWriteFailure(new Error('session-host request timed out'), true)).toBe(false)
+  })
 })

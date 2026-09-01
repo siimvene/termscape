@@ -369,10 +369,14 @@ write fails with `EPIPE` one poll iteration BEFORE Node reads the EOF and marks 
 destroyed, so the frame goes out on a socket that still reports `destroyed === false`. Linux usually
 reads the EOF first, which is why this only ever surfaced there as a Mac-only test failure. A write
 that fails at the syscall is therefore classified (`isUndeliveredWriteFailure`) and put back into the
-undelivered class: every frame is written alone and `encodeFrame` puts its terminating `\n` last,
-while the host dispatches whole lines only, so a refused write delivered nothing and a short write
-delivered a fragment the host can never act on — resending cannot double-apply. Do **not** widen this
-to every write-callback error: `ECANCELED` (libuv cancelling an in-flight write when the socket is
+undelivered class — but ONLY when the frame was written alone (`socket.writableLength === 0` and not
+corked at write time): `encodeFrame` puts the terminating `\n` last and the host dispatches whole lines
+only, so a refused or short solo write delivered nothing the host can act on and resending cannot
+double-apply. A chunk queued behind an in-flight write is flushed by Node together with its
+neighbours as ONE writev, and a failed writev hands the error to every chunk in it, delivered or not
+— reclassifying those would replay a `sendKeys` the pane already typed (found by the 2026-09-02
+security side-pass; measured on Node 26 over a unix socket). Do **not** widen this to every
+write-callback error: `ECANCELED` (libuv cancelling an in-flight write when the socket is
 destroyed) and read-side failures surfacing through a write callback may cover bytes the host already
 received and acted upon, so they stay uncertainty and reject the caller.
 

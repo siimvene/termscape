@@ -2394,7 +2394,15 @@ export class PtyManager {
    * unparsable answer): no banner on a guess.
    */
   private async paneCwdLinked(target: string): Promise<boolean | undefined> {
-    const lsof = findExecutableSync('lsof', ['/usr/sbin/lsof'])
+    // The SIP-protected system binary first: unlike ssh/scp there is nothing to gain from a PATH
+    // lsof, and /usr/local/bin (user-writable, ahead of /usr/sbin on a Homebrew Mac) must not be
+    // able to plant one that the main process then runs on every warm reattach.
+    let lsof: string | null = '/usr/sbin/lsof'
+    try {
+      fs.accessSync(lsof, fs.constants.X_OK)
+    } catch {
+      lsof = findExecutableSync('lsof')
+    }
     if (!lsof || !this.tmuxPath) return undefined
     try {
       const { stdout: pidOut } = await runAsync(
