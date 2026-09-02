@@ -73,9 +73,26 @@ interface Payload {
  * with no re-mint. Kept in sync with the server's PRO_FREE_SEATS (nodeterm-server entitlement). */
 export const PRO_FREE_SEATS = 3
 
-/** SELF-HOST UNGATE (fork, internal use): the seat cap reported once the license gate is
- * neutralized — see `statusFrom`, `isPremium`, `licensedSeats`. High enough never to bind a
- * self-hosted relay host. This fork runs every Pro feature on by default; grep SELF-HOST UNGATE. */
+/**
+ * SELF-HOST UNGATE (fork): a BUILD-TIME opt-in that neutralizes the license gate so every Pro
+ * feature is on without an entitlement — see `statusFrom`, `isPremium`, `licensedSeats`.
+ *
+ * Default is OFF: a checkout built without the flag behaves exactly like upstream nodeterm and
+ * gates Pro behind Enes Kirca's signed token. The flag is `TERMSCAPE_UNGATE=1` in the environment
+ * of the BUILD (electron-vite `define` for the desktop main bundle, esbuild `define` in `scripts/build-server.mjs` for the
+ * Server Edition), so it is baked into the artifact and a runtime env var cannot flip a shipped
+ * build. Under vitest nothing is bundled, so the same expression reads the live env — that is how
+ * `license.ungate.test.ts` opts in while `license.test.ts` asserts the gated default.
+ *
+ * Why build-time and default-off (2026-09-02): the fork is going public with the Licensor's
+ * blessing, on the condition that published installers do not strip the paid tier. Source that
+ * ungates by default would make every third-party build a paywall-stripped copy of a paid product;
+ * an opt-in the release script sets keeps the fork's own builds unchanged. Grep SELF-HOST UNGATE.
+ */
+export const SELF_HOST_UNGATE = process.env.TERMSCAPE_UNGATE === '1'
+
+/** SELF-HOST UNGATE: the seat cap reported while the gate is neutralized. High enough never to
+ * bind a self-hosted relay host. */
 const SELF_HOST_SEATS = 999
 
 // Offline verification of our compact Ed25519 token: base64url(payload).base64url(sig).
@@ -133,9 +150,13 @@ function isCount(v: unknown): v is number {
 function statusFrom(token: string | undefined, error: string | null = null): LicenseStatus {
   // SELF-HOST UNGATE: report Pro unconditionally so the renderer's `isPremium` (= status.active)
   // is always true and every gated feature defaults on. Token/error are ignored by design.
-  void token
-  void error
-  return { tier: 'pro', active: true, expiresAt: null, seats: SELF_HOST_SEATS, error: null }
+  if (SELF_HOST_UNGATE) {
+    return { tier: 'pro', active: true, expiresAt: null, seats: SELF_HOST_SEATS, error: null }
+  }
+  const p = verify(token)
+  return p
+    ? { tier: p.tier, active: true, expiresAt: p.exp, seats: seatsFrom(p), error: null }
+    : { tier: null, active: false, expiresAt: null, seats: 0, error }
 }
 
 /**
@@ -144,7 +165,8 @@ function statusFrom(token: string | undefined, error: string | null = null): Lic
  * with `statusFrom` by sharing `seatsFrom`/`verify` — do not reimplement the resolution here.
  */
 export function licensedSeats(): number {
-  return SELF_HOST_SEATS // SELF-HOST UNGATE
+  if (SELF_HOST_UNGATE) return SELF_HOST_SEATS
+  return seatsFrom(verify(load().token))
 }
 
 /**
@@ -208,7 +230,8 @@ export function getStoredEntitlement(): string | null {
 
 /** True when a valid, unexpired Pro entitlement is stored (offline-verified). Gates premium features. */
 export function isPremium(): boolean {
-  return true // SELF-HOST UNGATE
+  if (SELF_HOST_UNGATE) return true
+  return verify(load().token) !== null
 }
 
 // Every refresh started so far (the launch one + whatever the 6h interval fired), chained. The

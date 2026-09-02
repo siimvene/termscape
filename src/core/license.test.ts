@@ -46,13 +46,6 @@ function jsonResponse(body: unknown): { ok: boolean; status: number; json: () =>
 const HOUR = 60 * 60 * 1000
 
 /**
- * SELF-HOST UNGATE (fork) — the seat cap `statusFrom`/`licensedSeats` report unconditionally.
- * Mirrors the un-exported SELF_HOST_SEATS in license.ts; kept local so a future upstream merge
- * sees a test-side constant to delete rather than a bare magic number.
- */
-const SELF_HOST_SEATS = 999
-
-/**
  * Await the refresh initLicense() actually started (launch + anything the 6h interval fired),
  * via the handle license.ts parks it on. This used to be a bounded `flush()` of timed sleeps, and
  * a loaded CI runner beat it: the assertions saw zero broadcasts, and the continuation then landed
@@ -65,16 +58,6 @@ async function refreshed(): Promise<void> {
   await __licenseRefreshesForTests()
 }
 
-/**
- * SELF-HOST UNGATE (fork) is the contract under test in this describe wherever a test names it.
- * `statusFrom()` returns Pro/active unconditionally here (commit "Ungate Pro features for
- * self-hosting"), so nothing the entitlement token says can turn premium off: expiry, a foreign
- * deviceId and a clock rollback are all inert, and `verify()` is unreachable from the public
- * surface. What is still honest — and what these tests therefore assert — is the CLIENT half:
- * the token is fetched, stored, dropped when the server revokes it, and the clock-rollback anchor
- * is still advanced monotonically. A future upstream merge that restores gating should expect the
- * named tests below to flip back to their upstream assertions (active:false), not to be deleted.
- */
 describe('license entitlement refresh', () => {
   let fetchMock: ReturnType<typeof vi.fn>
   let fake: import('./platform-fake').FakePlatform
@@ -146,43 +129,33 @@ describe('license entitlement refresh', () => {
     expect(last.active).toBe(true)
   })
 
-  it('a periodic refresh that finds the device revoked still clears the cached token (SELF-HOST UNGATE: Pro stays on)', async () => {
+  it('a periodic refresh that finds the device revoked drops Pro mid-session', async () => {
     fetchMock.mockResolvedValueOnce(
       jsonResponse({ active: true, token: mint(7 * 24 * 60 * 60) })
     )
-    const { initLicense, getStoredEntitlement } = await import('./license')
+    const { initLicense } = await import('./license')
     initLicense()
     await refreshed()
-    expect(getStoredEntitlement()).not.toBeNull()
+    expect(sent().at(-1)!.active).toBe(true)
 
     // From now on the server says: not entitled (canceled subscription).
     fetchMock.mockResolvedValue(jsonResponse({ active: false }))
     await vi.advanceTimersByTimeAsync(24 * HOUR)
     await refreshed()
-
-    // The honest half is intact: a server that answers "not entitled" still drops the stored
-    // token, so nothing later proves a revoked entitlement to the API.
-    expect(getStoredEntitlement()).toBeNull()
-    // SELF-HOST UNGATE: upstream broadcast active:false here. This fork's statusFrom() never
-    // reads the token, so premium does NOT drop mid-session.
-    expect(sent().at(-1)!.active).toBe(true)
-    expect(sent().at(-1)!.tier).toBe('pro')
+    expect(sent().at(-1)!.active).toBe(false)
   })
 
-  it('stores a token minted for a different device verbatim (SELF-HOST UNGATE: verify() no longer gates)', async () => {
+  it('rejects a token minted for a different device (copied license.json)', async () => {
     // Simulates copying license.json + a foreign token onto this machine.
-    const foreign = mint(7 * 24 * 60 * 60, 'other-device')
-    fetchMock.mockResolvedValue(jsonResponse({ active: true, token: foreign }))
-    const { initLicense, getStoredEntitlement } = await import('./license')
+    fetchMock.mockResolvedValue(
+      jsonResponse({ active: true, token: mint(7 * 24 * 60 * 60, 'other-device') })
+    )
+    const { initLicense } = await import('./license')
     initLicense()
     await refreshed()
 
-    // Upstream: verify() caught the deviceId mismatch, so a copied license.json broadcast
-    // active:false. Here statusFrom() never consults verify() at all — the device binding is
-    // inert and the token is kept exactly as the server sent it.
-    expect(getStoredEntitlement()).toBe(foreign)
     expect(sent().length).toBeGreaterThan(0)
-    expect(sent().at(-1)!.active).toBe(true)
+    expect(sent().at(-1)!.active).toBe(false)
   })
 
   it('broadcasts even when the refresh lands long after a bounded flush would have given up', async () => {
@@ -208,7 +181,7 @@ describe('license entitlement refresh', () => {
     expect(sent()[0].active).toBe(true)
   })
 
-  it('advances the clock-rollback anchor and never walks it back (SELF-HOST UNGATE: expiry is inert)', async () => {
+  it('does not revive an expired token when the system clock is rolled back', async () => {
     fetchMock.mockResolvedValueOnce(
       jsonResponse({ active: true, token: mint(7 * 24 * 60 * 60) })
     )
@@ -222,23 +195,11 @@ describe('license entitlement refresh', () => {
     await vi.advanceTimersByTimeAsync(7 * 24 * HOUR + 12 * HOUR)
     await refreshed()
 
-    const anchor = (): number | undefined =>
-      (
-        JSON.parse(readFileSync(path.join(h.userData, 'license.json'), 'utf-8')) as {
-          lastSeen?: number
-        }
-      ).lastSeen
-    // bumpLastSeen is untouched by the ungate and still records the largest time observed.
-    expect(anchor()).toBe(Math.floor(Date.now() / 1000))
-    const observed = anchor()
-
-    // Attacker rolls the clock back before the expiry. Upstream this mattered: verify() anchored
-    // expiry to `lastSeen`, so the expired token stayed dead. SELF-HOST UNGATE: statusFrom()
-    // reports Pro whatever the clock says — the anchor is kept honest, it just gates nothing.
+    // Attacker rolls the clock back before the expiry: exp is "in the future" again,
+    // but the app has already observed a later time — the token must stay dead.
     vi.setSystemTime(Date.now() - 9 * 24 * HOUR)
     const status = (await fake.handlers[IPC.licenseStatus]()) as LicenseStatus
-    expect(status.active).toBe(true)
-    expect(anchor()).toBe(observed) // a status read never walks the anchor backwards
+    expect(status.active).toBe(false)
   })
 
   it('a slow early write cannot walk the clock anchor backwards past a later one', async () => {
@@ -280,27 +241,15 @@ describe('license entitlement refresh', () => {
       }
       expect(stored.lastSeen).toBe(Math.floor(Date.now() / 1000))
 
-      // SELF-HOST UNGATE: the anchor above is the whole point of this regression — the status
-      // read below only pins that the ungate reports Pro regardless (upstream: active false).
       vi.setSystemTime(Date.now() - 9 * 24 * HOUR)
       const status = (await fake.handlers[IPC.licenseStatus]()) as LicenseStatus
-      expect(status.active).toBe(true)
+      expect(status.active).toBe(false)
     } finally {
       writeSpy.mockRestore()
     }
   })
 })
 
-/**
- * SELF-HOST UNGATE (fork) is the contract under test for every seat case below. Upstream resolved
- * the cap from the verified token (`seatsFrom`: premium → max(PRO_FREE_SEATS, its seats), else 0);
- * this fork's `statusFrom`/`licensedSeats` return SELF_HOST_SEATS unconditionally, so the token's
- * `seats` field, its expiry and its very presence are all inert. The cases are kept one-per-token-
- * shape on purpose: they are the inventory of exactly which upstream seat contracts diverge, so an
- * upstream merge that restores `seatsFrom` has a test per assertion to flip back. What each case
- * still asserts honestly is that the license CLIENT is intact — the token is stored verbatim and
- * the token-authorized routes still refuse without one.
- */
 describe('license seats entitlement', () => {
   let fetchMock: ReturnType<typeof vi.fn>
   let fake: import('./platform-fake').FakePlatform
@@ -334,78 +283,58 @@ describe('license seats entitlement', () => {
     writeFileSync(path.join(h.userData, 'license.json'), JSON.stringify({ token }))
   }
 
-  it('a token carrying seats:5 does not cap the self-host seat count (upstream: 5)', async () => {
-    const token = mint(7 * 24 * 60 * 60, 'test-device', 5)
-    storeToken(token)
-    const { initLicense, licensedSeats, getStoredEntitlement } = await import('./license')
+  it('a premium token carrying seats:5 surfaces seats 5', async () => {
+    storeToken(mint(7 * 24 * 60 * 60, 'test-device', 5))
+    const { initLicense, licensedSeats } = await import('./license')
     initLicense()
     await refreshed()
     const status = (await fake.handlers[IPC.licenseStatus]()) as LicenseStatus
     expect(status.active).toBe(true)
-    // SELF-HOST UNGATE: the token's bought-up cap is ignored — a self-hosted relay host is
-    // never bound by it. The token itself is still stored, unread.
-    expect(status.seats).toBe(SELF_HOST_SEATS)
-    expect(licensedSeats()).toBe(SELF_HOST_SEATS)
-    expect(getStoredEntitlement()).toBe(token)
+    expect(status.seats).toBe(5)
+    expect(licensedSeats()).toBe(5)
   })
 
-  it('a token with no seats field is not resolved to the free baseline (upstream: 3)', async () => {
+  it('a premium token with no seats field defaults to the 3 free Pro seats', async () => {
     storeToken(mint(7 * 24 * 60 * 60))
-    const { initLicense, licensedSeats, PRO_FREE_SEATS } = await import('./license')
+    const { initLicense, licensedSeats } = await import('./license')
     initLicense()
     await refreshed()
     const status = (await fake.handlers[IPC.licenseStatus]()) as LicenseStatus
     expect(status.active).toBe(true)
-    // SELF-HOST UNGATE: upstream resolved a seats-less token to the 3 seats every Pro plan
-    // includes. The baseline constant is deliberately left intact and exported, so restoring
-    // `seatsFrom` upstream-side needs no seat math rewritten — it just stops being consulted.
-    expect(PRO_FREE_SEATS).toBe(3)
-    expect(status.seats).toBe(SELF_HOST_SEATS)
-    expect(licensedSeats()).toBe(SELF_HOST_SEATS)
+    expect(status.seats).toBe(3) // Pro includes 3 seats; existing tokens get them with no re-mint
+    expect(licensedSeats()).toBe(3)
   })
 
-  it('a token below the free baseline is not floored to 3 either (upstream: 3)', async () => {
+  it('a premium token below the free baseline is floored to the 3 free Pro seats', async () => {
     storeToken(mint(7 * 24 * 60 * 60, 'test-device', 2))
     const { initLicense, licensedSeats } = await import('./license')
     initLicense()
     await refreshed()
     const status = (await fake.handlers[IPC.licenseStatus]()) as LicenseStatus
-    // SELF-HOST UNGATE: no flooring happens because no resolution happens — the misconfigured
-    // low value is never read at all.
-    expect(status.seats).toBe(SELF_HOST_SEATS)
-    expect(licensedSeats()).toBe(SELF_HOST_SEATS)
+    expect(status.seats).toBe(3) // never fewer than the 3 included with Pro
+    expect(licensedSeats()).toBe(3)
   })
 
-  it('an absent token still reports Pro, while the token-authorized routes refuse (upstream: 0 seats)', async () => {
+  it('an absent / non-premium token has 0 seats', async () => {
     storeToken(undefined)
-    const { initLicense, licensedSeats, getStoredEntitlement } = await import('./license')
+    const { initLicense, licensedSeats } = await import('./license')
     initLicense()
     await refreshed()
     const status = (await fake.handlers[IPC.licenseStatus]()) as LicenseStatus
-    // SELF-HOST UNGATE: upstream reported active:false / 0 seats with nothing stored.
-    expect(status.active).toBe(true)
-    expect(status.seats).toBe(SELF_HOST_SEATS)
-    expect(licensedSeats()).toBe(SELF_HOST_SEATS)
-    // The client half is unchanged and still honest about having no credential: nothing is
-    // stored, and the routes the entitlement authorizes refuse rather than inventing a license.
-    expect(getStoredEntitlement()).toBeNull()
-    expect(((await fake.handlers[IPC.licenseDetail]()) as LicenseDetail).error).toBe('unauthorized')
+    expect(status.active).toBe(false)
+    expect(status.seats).toBe(0)
+    expect(licensedSeats()).toBe(0)
   })
 
-  it('an expired token still reports Pro (upstream: not premium, 0 seats)', async () => {
-    const token = mint(-60, 'test-device', 5)
-    storeToken(token)
-    const { initLicense, licensedSeats, getStoredEntitlement } = await import('./license')
+  it('an expired token is not premium and has 0 seats', async () => {
+    storeToken(mint(-60, 'test-device', 5))
+    const { initLicense, licensedSeats } = await import('./license')
     initLicense()
     await refreshed()
     const status = (await fake.handlers[IPC.licenseStatus]()) as LicenseStatus
-    // SELF-HOST UNGATE: expiry is inert. `verify()` — signature, device binding and the
-    // lastSeen-anchored expiry check — is unreachable from the public surface in this fork.
-    expect(status.active).toBe(true)
-    expect(status.seats).toBe(SELF_HOST_SEATS)
-    expect(licensedSeats()).toBe(SELF_HOST_SEATS)
-    // Storage is untouched by the ungate: an expired token is kept, not silently discarded.
-    expect(getStoredEntitlement()).toBe(token)
+    expect(status.active).toBe(false)
+    expect(status.seats).toBe(0)
+    expect(licensedSeats()).toBe(0)
   })
 
   it('upgrade opens the base Pro link by default and the add-seats link for target "seats"', async () => {

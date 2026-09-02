@@ -161,6 +161,33 @@ explanation is the wrong one. If a pty-spawning test goes red right after you pa
 `npm test` runs the vitest suite (unit + integration; the remote e2e suites skip when the
 companion server repo isn't checked out). `npm run typecheck` is the fastest correctness gate.
 
+## The Pro gate and the SELF-HOST UNGATE build flag
+
+Upstream gates Pro (Pro whisper models, the upgrade dialog, the seat cap) behind a signed
+per-device entitlement verified offline in `src/core/license.ts`. This fork's bypass of that gate
+is a **build-time opt-in, default OFF**: `TERMSCAPE_UNGATE=1` in the environment of the build is
+baked into the desktop main bundle (electron-vite `define`) and the Server Edition bundle (esbuild
+`define` in `scripts/build-server.mjs`, a Node wrapper so the value never passes through a shell);
+a runtime env var does nothing to a shipped artifact. Without the flag a build from
+this repo behaves exactly like upstream nodeterm.
+
+Why (2026-09-02): the Licensor agreed to the fork going public on the condition that published
+installers do not strip the paid tier. A source tree that ungates by default makes every
+third-party build a paywall-stripped copy of a USD 10/mo product; an opt-in the release step sets
+keeps the fork's own builds unchanged. **Do not make the flag default on, and do not read it at
+runtime.** Tests: `src/core/license.test.ts` is upstream's file verbatim and asserts the gated
+default; `src/core/license.ungate.test.ts` sets the env before `vi.resetModules()` and asserts
+the fork's inversions one token shape at a time. Interactive hosting (`remote:host:start`) and
+Team Access seats (`relay-host-service.ts` `addSeat`) still require a REAL stored entitlement after
+the `isPremium()` check, because they send it to the relay to mint a pairing token; the flag opens
+the UI and the local checks, not upstream's hosted relay for those. The phone-relay standing host
+is free (see `.claude/rules/relay.md`) and mints by device ID when no entitlement is stored — that
+null-entitlement path is deliberate, not a gap the flag left.
+
+Packaging: `build.files` in `package.json` excludes `out/server/**`. The desktop bundle never loads
+it, and without the exclusion a stale `out/server/main.cjs` built with the flag would ride along in
+a later default-off `npm run dist` (electron-vite only rebuilds `out/main|preload|renderer`).
+
 ## Process model (Electron, three contexts)
 
 The codebase is split by Electron process boundary — keep code on the correct side:

@@ -75,6 +75,13 @@ registry is missing a field.
 
 ## House rules
 
+- **The Pro gate stays on by default.** The fork's self-host bypass in `src/core/license.ts`
+  (`SELF-HOST UNGATE`) is a build-time opt-in: `TERMSCAPE_UNGATE=1` in the build environment,
+  baked in by the bundlers. Never flip the default, never read the flag at runtime, and never
+  publish an installer built with it as anything other than a personal build. The Licensor's
+  consent to this fork being public rests on that. `license.test.ts` (upstream's, verbatim) and
+  `license.ungate.test.ts` cover both halves.
+
 - **Anything path-shaped: Windows is a delivery target.** Most of this was written on
   macOS/Linux, so the recurring defect is code that is genuinely correct on POSIX —
   `split('/')`, `startsWith('/')` as an is-absolute test, a bare `fs.rename`. Use

@@ -23,6 +23,10 @@ export default defineConfig({
       'test/ssh-docker/**/*.test.ts'
     ],
     environment: 'node',
+    // SELF-HOST UNGATE (src/core/license.ts) must be OFF for the suite whatever the developer's
+    // shell exports: license.test.ts is upstream's file verbatim and asserts the gated default.
+    // license.ungate.test.ts opts in per-file by setting the env before vi.resetModules().
+    env: { TERMSCAPE_UNGATE: '' },
     // Issue #160: with the default (one worker per core), a 10-core Mac runs ~10 fs-heavy suites
     // at once and transient fd exhaustion (EMFILE) turns into silent test flakiness — probes like
     // `fs.existsSync` swallow the error and answer false, so whole files fail in ways that never

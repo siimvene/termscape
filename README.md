@@ -119,7 +119,7 @@ cd nodeterm
 npm install                      # deps + node-pty rebuilt against Electron's ABI (postinstall)
 
 # 2. Desktop app — build an unsigned .dmg and install it
-npm run dist                     # → dist/nodeterm-<ver>-arm64.dmg (+ x64)
+TERMSCAPE_UNGATE=1 npm run dist  # → dist/nodeterm-<ver>-arm64.dmg; see "Pro gate" below
 npm run rebuild                  # REQUIRED after dist: the x64 build clobbers node-pty's arm64
                                  # native module that the Server Edition loads — skip it and every
                                  # server-side pty:create fails
@@ -129,8 +129,9 @@ rm -rf /Applications/nodeterm.app
 ditto dist/mac-arm64/nodeterm.app /Applications/nodeterm.app
 open -a /Applications/nodeterm.app
 
-# 3. Server Edition (the always-on core) — build + (re)start
-npm run build && npm run server:build
+# 3. Server Edition (the always-on core) — build + (re)start (the flag is baked in at build time,
+#    so it must be set here too; setting it when starting the server does nothing)
+TERMSCAPE_UNGATE=1 npm run build && TERMSCAPE_UNGATE=1 npm run server:build
 node out/server/main.cjs         # or under launchd/systemd; front with `tailscale serve` for remote
 ```
 
@@ -320,6 +321,14 @@ The full inventory of what nodeterm writes where (and what the script keeps, lik
 > **Building this fork?** Use [Build & install (this fork)](#build--install-this-fork) above.
 > The generic commands below build whatever checkout you are in — on `feat/ungated-selfhost`
 > they produce your modified app, not upstream's.
+
+> **Pro gate.** By default a build from this repo gates nodeterm Pro exactly like upstream: Pro
+> features need a signed entitlement from [nodeterm.dev](https://nodeterm.dev). The fork's
+> self-host bypass (`SELF-HOST UNGATE` in `src/core/license.ts`) is a **build-time opt-in**:
+> set `TERMSCAPE_UNGATE=1` in the environment of `npm run build` / `dist` / `server:build` and it
+> is baked into that artifact. It is off by default so that nothing built from this public source
+> strips the paid tier of upstream's product unless the person building it chooses to, for their
+> own machine. Published Termscape installers are personal builds, not official nodeterm releases.
 
 Requires Node.js 20+ on macOS or Linux (tmux recommended — it's what makes sessions
 survive restarts). A source checkout does **not** carry the bundled tmux: run
