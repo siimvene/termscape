@@ -75,8 +75,8 @@ function depSatisfied(depId: string, status: StatusById, live: ReadonlySet<strin
  * as satisfied. (The caller's probe applies the same rule to a group with no entry.)
  */
 /**
- * Node ids whose `pendingLaunch` was armed BY THIS PROCESS (canvas-control `--after`, `verify`,
- * `armForColdOpen`). Only these may auto-fire. A `pendingLaunch` that arrived from disk
+ * Launches armed BY THIS PROCESS (canvas-control `--after`, `verify`, cold-open arming), keyed by
+ * node id and bound to the launch CONTENT. Only these may auto-fire. A `pendingLaunch` that arrived from disk
  * (`.nodeterm/project.json` is git-shared, hostile input) or from a canvas-sync peer is displayed —
  * QUEUED badge, ▶ Run now — but never typed into a shell without a click: before this gate a cloned
  * project.json carrying `{after:[],command:"curl … | sh"}` executed the moment the canvas opened
@@ -85,12 +85,27 @@ function depSatisfied(depId: string, status: StatusById, live: ReadonlySet<strin
  * Canvas (`launchesToFire(...).filter(f => wasArmedThisSession(f.id))`), so `launchesToFire` itself
  * stays a pure dependency-satisfaction function.
  */
-const armedThisSession = new Set<string>()
-export function markArmedThisSession(id: string): void {
-  armedThisSession.add(id)
+/** The exact launch a consent was given for — command + deps + setup gate. A consent is worth
+ *  nothing if the payload under it can change: a canvas-sync peer may upsert the same node id with
+ *  another command, so the registry binds id AND content, and the fire site re-derives the key from
+ *  the node's CURRENT `pendingLaunch` (consort re-review CRITICAL, 2026-09-02). */
+export function launchKey(p: PendingLaunch): string {
+  return JSON.stringify([p.command, p.after, p.awaitSetupGroup ?? null])
 }
-export function wasArmedThisSession(id: string): boolean {
-  return armedThisSession.has(id)
+const armedThisSession = new Map<string, string>()
+export function markArmedThisSession(id: string, launch: PendingLaunch | undefined): void {
+  if (!launch || !launch.command) return
+  armedThisSession.set(id, launchKey(launch))
+}
+/** True only when THIS process armed `id` with exactly this launch (content-bound). */
+export function wasArmedThisSession(id: string, current: PendingLaunch | undefined): boolean {
+  if (!current) return false
+  return armedThisSession.get(id) === launchKey(current)
+}
+/** A consent is consumed once the launch has been delivered (or dropped): it must not survive to
+ *  authorize a later launch that reuses the id. */
+export function forgetArmed(id: string): void {
+  armedThisSession.delete(id)
 }
 /** Test hook only. */
 export function resetArmedThisSession(): void {

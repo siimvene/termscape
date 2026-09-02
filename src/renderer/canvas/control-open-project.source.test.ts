@@ -134,12 +134,19 @@ describe('the --project targeted-opens block (source pins)', () => {
     )
   })
 
+  it('armColdOpenHere is armForColdOpen plus the content-bound consent record (never one without the other)', () => {
+    // The wrapper is the ONLY way cold-open arming may happen: a bare armForColdOpen call would
+    // persist a launch this process never consented to auto-fire (consort re-review, 2026-09-02).
+    expect(src).toMatch(/function armColdOpenHere[\s\S]*?const armed = armForColdOpen\(node\)[\s\S]*?markArmedThisSession\(node\.id, armed\.data\.pendingLaunch/)
+    expect(src.match(/flowToNodeStates\(\[armForColdOpen\(/g)).toBeNull()
+  })
+
   it('the store path arms through armForColdOpen — the launch survives serialization', () => {
     // flowToNodeStates drops initialCommand by design; upserting a node without moving its
     // command into pendingLaunch is the silent-never-starts mutation (Task 2.0's pins prove the
     // round-trip; this pins that the store path actually uses the mover).
     const body = targetedOpensBody()
-    expect(body).toMatch(/flowToNodeStates\(\[armForColdOpen\(node\)\]\)\[0\]/)
+    expect(body).toMatch(/flowToNodeStates\(\[armColdOpenHere\(node\)\]\)\[0\]/)
   })
 
   it('the store path persists (writeDisk) and states the cold-open contract in the reply', () => {

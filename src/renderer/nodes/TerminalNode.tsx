@@ -4749,12 +4749,15 @@ export function TerminalNode({
               title="Run now without waiting"
               onClick={(e) => {
                 e.stopPropagation()
-                // Clear the held launch only once the shell actually took it — a refused delivery
-                // (pane still coming up) must keep the badge and the command, or the only copy of
-                // the launch is gone (consort SERIOUS, 2026-09-02). This click IS the user's consent
-                // for a launch that was loaded from the project file rather than armed here.
-                void api.pty.sendText(id, pendingLaunch.command).then((ok) => {
-                  if (ok) updateNodeData(id, { pendingLaunch: undefined })
+                // This click IS the user's consent for a launch that was loaded from the project file
+                // rather than armed here (see wasArmedThisSession).
+                // Clear FIRST so neither a second click nor the automatic fire effect can submit the
+                // same command while this delivery is in flight (consort re-review SERIOUS); put the
+                // launch back only if the shell refused it, so the only copy is never lost.
+                const held = pendingLaunch
+                updateNodeData(id, { pendingLaunch: undefined })
+                void api.pty.sendText(id, held.command).then((ok) => {
+                  if (!ok) updateNodeData(id, { pendingLaunch: held })
                 })
               }}
             >

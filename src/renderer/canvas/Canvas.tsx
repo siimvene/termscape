@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { PendingLaunch } from '@shared/types'
 import { useShallow } from 'zustand/react/shallow'
 import { playSfx, primeSfx } from '@renderer/lib/sfx'
 import {
@@ -387,7 +388,7 @@ import {
   type RelayTab,
 } from '../session/relay-tab'
 import { buildBackgroundLinkMaps, buildContextLinkNote, buildLinkMap, buildNotePushMessage, classifyLink, hiddenLinkIds, linkIdsCoveredByRopes, pairKey, planBridges, type LinkEndpoint } from '../lib/noteLink'
-import { dependencyEdges, launchesToFire, markArmedThisSession, unmetDeps, wasArmedThisSession, type ArmedNode } from '../lib/pendingLaunch'
+import { dependencyEdges, forgetArmed, launchesToFire, markArmedThisSession, unmetDeps, wasArmedThisSession, type ArmedNode } from '../lib/pendingLaunch'
 import { freeSpot } from '../lib/placement'
 import { pushSessionRename } from '../lib/sessionRename'
 import { useReopenHistory } from '../state/reopenHistory'
@@ -642,6 +643,15 @@ const offsetFrom = (
 // Delivering an armed node's held launch (canvas-control `--after`) can lose the race against
 // that node's own PTY coming up, and a dropped launch is exactly the thing its dependency was
 // waiting for — so a refused delivery is retried a few times instead of vanishing.
+/** `armForColdOpen` + the consent record for whatever launch it produced (nothing recorded when it
+ *  produced none). Cold-open arming is this process's own act, so it may auto-fire — content-bound,
+ *  like every other consent (see wasArmedThisSession). */
+function armColdOpenHere<T extends { id: string; data: { initialCommand?: string; pendingLaunch?: unknown } }>(node: T): T {
+  const armed = armForColdOpen(node)
+  markArmedThisSession(node.id, armed.data.pendingLaunch as PendingLaunch | undefined)
+  return armed
+}
+
 const LAUNCH_DELIVERY_ATTEMPTS = 5
 const LAUNCH_RETRY_MS = 400
 
@@ -1557,7 +1567,7 @@ export function Canvas() {
       // CONSENT GATE: only a launch armed by THIS process may be typed into a shell. A pendingLaunch
       // loaded from .nodeterm/project.json (git-shared, hostile) or received from a canvas-sync peer
       // keeps its QUEUED badge and ▶ Run now — the click is the consent. See wasArmedThisSession.
-      .filter((f) => wasArmedThisSession(f.id))
+      .filter((f) => wasArmedThisSession(f.id, nodes.find((n) => n.id === f.id)?.data.pendingLaunch as PendingLaunch | undefined))
       .filter((f) => !launchInFlight.current.has(f.id))
     for (const f of ready) {
       launchInFlight.current.add(f.id)
@@ -1565,6 +1575,7 @@ export function Canvas() {
       launchAttempts.current.set(f.id, attempt)
       void api.pty.sendText(f.id, f.command).then((ok) => {
         if (ok) {
+          forgetArmed(f.id) // consent consumed: a later launch on this id needs its own
           setNodes((ns) =>
             ns.map((n) => (n.id === f.id ? { ...n, data: { ...n.data, pendingLaunch: undefined } } : n))
           )
@@ -6364,7 +6375,7 @@ export function Canvas() {
                 op: 'upsert',
                 // Cold-open arming happens HERE, by this process: consent to auto-fire (see
                 // wasArmedThisSession) is recorded at the call site, not in the pure helper.
-                node: flowToNodeStates([(markArmedThisSession(node.id), armForColdOpen(node))])[0]
+                node: flowToNodeStates([armColdOpenHere(node)])[0]
               })
           }
           void writeDisk()
@@ -8350,7 +8361,9 @@ export function Canvas() {
           for (const node of tgMade) {
             tgStore.applyNodeMutation(target.id, {
               op: 'upsert',
-              node: flowToNodeStates([armForColdOpen(node)])[0]
+              // Armed by THIS process too (consort re-review SERIOUS): without the consent record the
+              // node would sit QUEUED in the other project despite the "starts when viewed" reply.
+              node: flowToNodeStates([armColdOpenHere(node)])[0]
             })
           }
           void writeDisk()
@@ -8704,15 +8717,9 @@ export function Canvas() {
         if (!unmet.length && !awaitSetupGroup) return node
         // Armed HERE, by this process, on the user's own canvas-control call — the one provenance
         // that may auto-fire (see `wasArmedThisSession`; a loaded/peer launch needs ▶ Run now).
-        markArmedThisSession(node.id)
-        return {
-          ...node,
-          data: {
-            ...node.data,
-            initialCommand: undefined,
-            pendingLaunch: { after, command, ...(awaitSetupGroup ? { awaitSetupGroup } : {}) }
-          }
-        }
+        const armed = { after, command, ...(awaitSetupGroup ? { awaitSetupGroup } : {}) }
+        markArmedThisSession(node.id, armed)
+        return { ...node, data: { ...node.data, initialCommand: undefined, pendingLaunch: armed } }
       }
       // Open `count` nodes INTO a group frame: grow the frame FIRST (extent:'parent' would
       // clamp children landing outside it), then drop each node into the next grid slot

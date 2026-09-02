@@ -192,7 +192,7 @@ describe('reopen-last-closed records and dispatches through the shared history s
     // The bug this pins: flowToNodeStates alone drops initialCommand, so an agent node restored
     // into a project that isn't on screen would never launch its command on the eventual cold
     // open — armForColdOpen is what carries it through serialization.
-    expect(CANVAS_SRC).toContain('node: flowToNodeStates([armForColdOpen(node)])[0]')
+    expect(CANVAS_SRC).toContain('node: flowToNodeStates([armColdOpenHere(node)])[0]')
   })
 
   it('commits the live canvas to the store before every reopenProject call — never a bare switch', () => {
