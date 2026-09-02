@@ -2254,6 +2254,21 @@ export class PtyManager {
         }
       }
     }
+    // Stale-cwd probe (issue #464) — BEFORE the client is attached, never after. The session
+    // already exists on a warm reattach (`!fresh` came from `has-session` above), so its pane can
+    // be asked now. Running it after `spawnSession` cost every warm reattach a 5-second blank
+    // terminal (MEASURED 2026-09-02, tmux 3.7c): tmux paints the screen and sends its terminal
+    // queries (DA1/DA2/OSC 10/11/`?996n`) within ~6 ms of attach, `queueData` flushes 8 ms later,
+    // and the renderer only registers `pty:data:<sid>` in the continuation of THIS reply. With
+    // ~50 ms of `display-message` + `lsof` awaited between the spawn and the return, the first
+    // flush hit a channel nobody listened on: paint and queries gone, xterm never answered, tmux
+    // waited out TTY_QUERY_TIMEOUT (5.000 s) and only then redrew. So on the local tmux path there
+    // must be NO await between `spawnSession` and `return` — the reply has to beat FLUSH_MS.
+    // Pinned by pty-reattach-reply-order.test.ts.
+    const probeStaleCwd = !fresh && tmuxBacked && !options.sshRemote && !!options.persistKey
+    const staleCwdProbe = probeStaleCwd
+      ? await this.paneCwdStale(options.persistKey as string)
+      : false
     const sessionId = this.spawnSession(
       options,
       clientId,
@@ -2328,10 +2343,8 @@ export class PtyManager {
     // its cwd above; a plain shell has no session that outlived anything; an SSH-remote session's
     // cwd lives on the host (its probe would need a remote round trip — deliberately out of v1).
     // Failure/unknowable ⇒ absent ⇒ no banner: the flag is only ever raised on tmux's own answer.
-    const staleCwd =
-      !fresh && tmuxBacked && !options.sshRemote && !spawned?.sessionHost && options.persistKey
-        ? await this.paneCwdStale(options.persistKey)
-        : false
+    // The probe itself ran BEFORE the spawn (see there); a session-host shim is not a tmux pane.
+    const staleCwd = staleCwdProbe && !spawned?.sessionHost
     return {
       sessionId,
       fresh,
