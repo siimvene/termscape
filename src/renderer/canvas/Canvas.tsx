@@ -393,7 +393,7 @@ import { useReopenHistory } from '../state/reopenHistory'
 import { snapshotNode, recreateNodeFromSnapshot } from '../lib/reopenNode'
 import { planReopen } from '../lib/reopenPlan'
 import { oneLine } from '@shared/one-line'
-import { parseLenses, verifyLensPrompt, verifySynthesisPrompt } from '../lib/verifyPanel'
+import { parseLenses, verifyLensPrompt, verifySynthesisPrompt, verifyPanelOrigin } from '../lib/verifyPanel'
 import { useSettings } from '../state/settings'
 import { activePermissionMode, projectPermissionMode } from '../state/permissionMode'
 import { useContextWindow } from '../state/contextWindow'
@@ -9165,7 +9165,9 @@ export function Canvas() {
               : null
             const panelIds = [...reviewerIds, ...(judge ? [judge.id] : [])]
             let next: CanvasNode[] = [...live, ...reviewers, ...(judge ? [judge] : [])]
-            next = arrangeNodes(next, panelIds, { layout: 'grid', origin: placeBelow(0) })
+            // Internal layout (reviewers in a grid/row, verdict below) — the frame is repositioned
+            // as a whole below, so the arrange origin here is provisional.
+            next = arrangeNodes(next, panelIds, { layout: 'grid' })
             const vGroupCount = next.filter((nd) => nd.type === 'group').length
             const existingGroupIds = new Set(
               next.filter((node) => node.type === 'group').map((node) => node.id)
@@ -9174,9 +9176,53 @@ export function Canvas() {
             const vGroup = next.find(
               (node) => node.type === 'group' && !existingGroupIds.has(node.id)
             )!
+            // Place the finished panel frame ADJACENT to the target's container: right of the
+            // target's OUTERMOST (top-level) group frame when it sits in one, else right of the
+            // target node, then pushed clear of other top-level objects. The panel frame stays a
+            // top-level SIBLING of the target's frame — never nested inside it, because that frame
+            // may be worktree-bound and the reviewers must NOT inherit its cwd (they review the
+            // checkout, they do not fork it). All coords are root-space; children are frame-relative
+            // so moving only the frame carries the whole panel.
+            const targetLive = next.find((n) => n.id === targetId)!
+            const rootBoxOf = (n: CanvasNode): { x: number; y: number; w: number; h: number } => {
+              let x = n.position.x
+              let y = n.position.y
+              const seen = new Set<string>([n.id])
+              let pid = n.parentId
+              while (pid && !seen.has(pid)) {
+                seen.add(pid)
+                const p = next.find((c) => c.id === pid)
+                if (!p) break
+                x += p.position.x
+                y += p.position.y
+                pid = p.parentId
+              }
+              return { x, y, w: (n.measured?.width ?? (n.width as number)) || 0, h: (n.measured?.height ?? (n.height as number)) || 0 }
+            }
+            // Outermost ancestor: walk to the top-level node/frame that owns the target.
+            let outermost = targetLive
+            {
+              const seen = new Set<string>([targetLive.id])
+              while (outermost.parentId && !seen.has(outermost.parentId)) {
+                const p = next.find((c) => c.id === outermost.parentId)
+                if (!p) break
+                seen.add(p.id)
+                outermost = p
+              }
+            }
+            const framed = outermost.id !== targetLive.id && outermost.type === 'group'
+            const obstacles = next
+              .filter((n) => !n.parentId && n.id !== vGroup.id)
+              .map(rootBoxOf)
+            const dest = verifyPanelOrigin({
+              node: rootBoxOf(targetLive),
+              frame: framed ? rootBoxOf(outermost) : null,
+              panel: { w: (vGroup.width as number) || 0, h: (vGroup.height as number) || 0 },
+              obstacles
+            })
             next = next.map((nd) =>
               nd.id === vGroup.id
-                ? { ...nd, data: { ...nd.data, title: args.label || `Verify: ${targetTitle}` } }
+                ? { ...nd, position: dest, data: { ...nd.data, title: args.label || `Verify: ${targetTitle}` } }
                 : nd
             )
             setNodes(next)

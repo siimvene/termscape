@@ -4,7 +4,9 @@ import {
   MAX_LENSES,
   parseLenses,
   verifyLensPrompt,
-  verifySynthesisPrompt
+  verifySynthesisPrompt,
+  verifyPanelOrigin,
+  VERIFY_PANEL_GUTTER
 } from './verifyPanel'
 
 describe('parseLenses', () => {
@@ -71,6 +73,46 @@ describe('verifyLensPrompt', () => {
     expect(verifyLensPrompt({ ...base, lens: 'tests', focus: '   ' })).not.toContain(
       'specifically about'
     )
+  })
+})
+
+describe('verifyPanelOrigin', () => {
+  const panel = { w: 500, h: 400 }
+
+  it('places a loose target’s panel immediately right of the node', () => {
+    const node = { x: 100, y: 200, w: 600, h: 400 }
+    const o = verifyPanelOrigin({ node, panel, obstacles: [] })
+    expect(o).toEqual({ x: 100 + 600 + VERIFY_PANEL_GUTTER, y: 200 })
+  })
+
+  it('places a framed target’s panel right of the FRAME, not the node', () => {
+    const node = { x: 140, y: 260, w: 600, h: 400 }
+    const frame = { x: 100, y: 200, w: 700, h: 520 }
+    const o = verifyPanelOrigin({ node, frame, panel, obstacles: [] })
+    expect(o).toEqual({ x: 100 + 700 + VERIFY_PANEL_GUTTER, y: 200 })
+  })
+
+  it('pushes the panel off an occupied spot instead of overlapping', () => {
+    const node = { x: 0, y: 0, w: 600, h: 400 }
+    const preferred = { x: 600 + VERIFY_PANEL_GUTTER, y: 0 }
+    // A node sitting exactly where the panel wants to go.
+    const blocker = { ...preferred, w: panel.w, h: panel.h }
+    const o = verifyPanelOrigin({ node, panel, obstacles: [blocker] })
+    const moved = o.x !== preferred.x || o.y !== preferred.y
+    expect(moved).toBe(true)
+    // And the result no longer overlaps the blocker.
+    const overlaps =
+      o.x < blocker.x + blocker.w && o.x + panel.w > blocker.x &&
+      o.y < blocker.y + blocker.h && o.y + panel.h > blocker.y
+    expect(overlaps).toBe(false)
+  })
+
+  it('anchors OUTSIDE the frame — the panel is a sibling beside it, never inside', () => {
+    const node = { x: 140, y: 260, w: 600, h: 400 }
+    const frame = { x: 100, y: 200, w: 700, h: 520 }
+    const o = verifyPanelOrigin({ node, frame, panel, obstacles: [] })
+    // Left edge of the panel is right of the frame's right edge → it cannot be nested in it.
+    expect(o.x).toBeGreaterThanOrEqual(frame.x + frame.w)
   })
 })
 
