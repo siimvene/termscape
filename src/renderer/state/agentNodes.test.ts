@@ -40,6 +40,37 @@ describe('loop node overrides vs per-turn fan-out', () => {
     expect(st.byId['tu2']).toBeDefined()
   })
 
+  // The aggregate fan-out card (`fanout-<pid>`) is per-turn like the cards it replaces: its dragged
+  // position/size and expanded state must be cleared on a new turn, and it must not stay selected.
+  it('clearForParent drops the aggregate fan-out card overrides and selection', () => {
+    const s = useAgentNodes.getState()
+    s.start('tu1', { parentNodeId: 'n1' })
+    s.setPosition('fanout-n1', { x: 3, y: 4 })
+    s.setSize('fanout-n1', { width: 360, height: 480 })
+    s.toggleExpanded('fanout-n1')
+    s.select('fanout-n1')
+    s.setPosition('loop-n1', { x: 5, y: 6 })
+    s.clearForParent('n1')
+    const st = useAgentNodes.getState()
+    expect(st.positions['fanout-n1']).toBeUndefined()
+    expect(st.sizes['fanout-n1']).toBeUndefined()
+    expect(st.expanded['fanout-n1']).toBeUndefined()
+    expect(st.selectedId).toBeNull()
+    // The loop card still outlives the turn.
+    expect(st.positions['loop-n1']).toEqual({ x: 5, y: 6 })
+  })
+
+  it('tidyFanout snaps the aggregate fan-out card back too', () => {
+    const s = useAgentNodes.getState()
+    s.start('tu1', { parentNodeId: 'n1' })
+    s.setPosition('fanout-n1', { x: 3, y: 4 })
+    s.setSize('fanout-n1', { width: 360, height: 480 })
+    s.tidyFanout('n1')
+    const st = useAgentNodes.getState()
+    expect(st.positions['fanout-n1']).toBeUndefined()
+    expect(st.sizes['fanout-n1']).toBeUndefined()
+  })
+
   it('tidyFanout is a no-op for a parent with no subagents', () => {
     const before = useAgentNodes.getState()
     useAgentNodes.getState().tidyFanout('nobody')

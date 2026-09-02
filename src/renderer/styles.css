@@ -5878,6 +5878,56 @@ button.group-node__setup:disabled {
   color: var(--muted);
 }
 
+/* ---- Aggregate fan-out card: one card standing in for a large fan-out ---- */
+.subagent-node--group {
+  border-left-width: 4px;
+}
+
+.subagent-node__list {
+  margin-top: 8px;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.subagent-row {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-black);
+  overflow: hidden;
+}
+
+.subagent-row__head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 8px;
+  cursor: pointer;
+}
+
+.subagent-row__head:hover {
+  background: rgba(var(--tint-rgb), 0.06);
+}
+
+.subagent-row__task {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
+}
+
+.subagent-node__term--row {
+  flex: none;
+  max-height: 220px;
+  margin: 0 8px 8px;
+}
+
 /* ---- Loop (ephemeral, hook-driven) node ---- */
 .loop-node {
   width: 100%;
