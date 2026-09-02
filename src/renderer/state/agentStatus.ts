@@ -46,8 +46,11 @@ export interface AgentNodeStatus {
   /**
    * Did the hook POST that set the current `state` carry a per-node token? Mirrors
    * `MirrorEntry.stateVerified` (core/agent-status-mirror.ts), which is where the messaging gate
-   * actually reads it — this copy exists so the UI can SHOW identity state, not so anything can
-   * gate on it. TRANSIENT, deliberately excluded from the durable whitelist in `save()`: a relaunch
+   * actually reads it — this copy exists so the UI can SHOW identity state. ONE renderer-side gate
+   * reads it too: `--auto-close` (Canvas's `agent:linked-read` effect → spawnedAlerts.ts
+   * `shouldAutoClose`) refuses to kill a session on an unverified `done`, because `/hook/*` is
+   * fail-open for legacy tokenless posts and a forged `done` was harmless only while every consumer
+   * was display-only. TRANSIENT, deliberately excluded from the durable whitelist in `save()`: a relaunch
    * has seen no events, and a restored `true` would assert proof that was never presented this run.
    */
   stateVerified?: boolean

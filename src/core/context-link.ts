@@ -33,7 +33,6 @@ import {
 } from './context-link-core'
 import {
   CONTEXT_LINK_VERBS,
-  pickLinkNode,
   renderContextLink,
   type ContextLinkFetch,
   type ContextLinkVerb
@@ -240,6 +239,8 @@ export interface LinkedReadEvent {
   /** The node whose transcript/summary/terminal was rendered. */
   nodeId: string
   verb: string
+  /** Wall clock when the read STARTED (before the render), see handleContextLinkRequest. */
+  requestedAt: number
 }
 
 const linkedReadListeners = new Set<(e: LinkedReadEvent) => void>()
@@ -263,6 +264,10 @@ export async function handleContextLinkRequest(req: {
   verb: string
   nodeId: string
   args: Record<string, string>
+  /** The caller proved it is `nodeId` (per-node token verdict `verified`). Absent/false = the read
+   *  is still served (tolerant bucket) but is NEVER reported as a linked read: `--auto-close` acts
+   *  on that report, and an unproven "conductor read its station" must not delete anything. */
+  verified?: boolean
 }): Promise<string> {
   if (!req.nodeId) return 'Not a nodeterm session — nothing to read.'
   if (!CONTEXT_LINK_VERBS.includes(req.verb as ContextLinkVerb)) {
@@ -273,21 +278,32 @@ export async function handleContextLinkRequest(req: {
     return 'No linked nodes. Draw a context-link edge from this node to another on the canvas.'
   }
   try {
-    const out = await renderContextLink(doc, req.verb as ContextLinkVerb, req.args, fetchers)
-    // A CONTENT read (not `list`) of one linked node is the "the conductor has consumed this
-    // station's output" signal `--auto-close` waits for (renderer/lib/spawnedAlerts.ts). Resolved
-    // with the same picker the render used, so the id reported is the node actually read; fired
-    // after the render so a failed read never counts as consumed.
-    if (req.verb !== 'list') {
-      const picked = pickLinkNode(doc, req.args.node)
-      if ('node' in picked) {
-        const ev: LinkedReadEvent = { readerId: req.nodeId, nodeId: picked.node.id, verb: req.verb }
-        for (const cb of linkedReadListeners) {
-          try {
-            cb(ev)
-          } catch (e) {
-            console.warn('[context-link] linked-read listener threw', e)
-          }
+    // Stamped BEFORE the (async) render: the consumer must decide "was the station already done
+    // when this read STARTED", not when the event arrived — a Stop landing mid-render would
+    // otherwise make a read of partial output look like a read of the finished result.
+    const requestedAt = Date.now()
+    // A CONTENT read of one linked node, by a VERIFIED caller, is the "the conductor has consumed
+    // this station's output" signal `--auto-close` waits for (renderer/lib/spawnedAlerts.ts). The
+    // renderer tells us WHICH node and only when it rendered real content — `list`, a picker
+    // message, a sticky note or "has no transcript yet" consumed nothing. Never for an unverified
+    // caller (see the `verified` field above). Emitted after the render returns, so a throw
+    // (caught below) never counts as consumed either.
+    let readNode: LinkDocEntry | null = null
+    const out = await renderContextLink(doc, req.verb as ContextLinkVerb, req.args, fetchers, (n) => {
+      readNode = n
+    })
+    if (readNode && req.verified === true) {
+      const ev: LinkedReadEvent = {
+        readerId: req.nodeId,
+        nodeId: (readNode as LinkDocEntry).id,
+        verb: req.verb,
+        requestedAt
+      }
+      for (const cb of linkedReadListeners) {
+        try {
+          cb(ev)
+        } catch (e) {
+          console.warn('[context-link] linked-read listener threw', e)
         }
       }
     }

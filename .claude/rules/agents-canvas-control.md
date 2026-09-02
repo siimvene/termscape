@@ -238,4 +238,32 @@ paths:
   the project file or a peer must not close anyone's session — the same rule as
   `wasArmedThisSession` for held launches. Order matters (a read while still working consumed
   partial output; `done` alone would destroy the result unread), and the reader must be the spawner
-  (a verify reviewer reading the same node is not its consumer).
+  (a verify reviewer reading the same node is not its consumer). **This is the first place a status
+  event becomes destructive, so it demands two proofs a badge never needed** (blind security pass,
+  2026-09-02, both SERIOUS): (1) the linked read is emitted ONLY for a caller whose per-node token
+  verified — the `/context-link/*` route gates as the tolerant `list` bucket (an unproven legacy
+  caller keeps its transcript), and the hook server now hands `verified: gate.verdict === 'verified'`
+  to the handler, because a bearer holder POSTing `nodeId=<conductor>` would otherwise read in the
+  conductor's name and reap every armed done station; (2) the node's `done` must itself be
+  token-verified (`agentStatus.stateVerified`) AND its transition (`lastEventAt`) must predate the
+  read's start (`LinkedRead.requestedAt`, stamped before the async render) — `/hook/*` is fail-open
+  for tokenless posts by contract, so an unverified `done` is forgeable, and a Stop landing mid-render
+  would otherwise turn a read of partial output into a kill. The `close --spawned` dialog lists EVERY
+  target with title AND id (no "and N more"): a forged rope can put the user's own node in the set,
+  and a target hidden behind a count was never consented to. Four more edges from the same consort
+  pass (Codex, all fixed): (a) a linked read counts as consumption ONLY when the renderer produced
+  real content — `renderContextLink`'s `onContent` callback fires for a transcript/summary with lines
+  or a non-empty terminal capture, never for `list`, a note, a picker message or "has no transcript
+  yet" (a reader told there is nothing has consumed nothing); (b) lineage is resolved ACROSS
+  projects (`spawnLineage` in Canvas: live refs for the project on screen, `useProjects` store for
+  the rest) because hook events arrive for every project's nodes — resolving against the active
+  canvas only made every background-project station fall back to the per-node alert; (c) an
+  auto-close that is DECIDED but whose node is in a background project is kept pending
+  (`autoCloseReadRef`, read + arming retained) and retried from a canvas-change effect when that
+  project is shown, instead of the one-shot event being discarded; (d) a sibling ARMED behind
+  `--after` (`pendingLaunch` present, no state yet) counts as outstanding, so a sequential chain
+  yields ONE aggregate at the end rather than one per link — only a node with no state and no
+  pending launch is "dead" and not outstanding. `--auto-close` additionally requires
+  `CONTEXT_LINK_CAPABLE` (grok/copilot report status but get no bridge, so the close condition
+  would be unreachable) and is refused together with `--project` (`projectTargetFlagRefusal`):
+  the consent lives in the caller's own canvas, and a node in another project is outside it.

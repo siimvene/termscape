@@ -292,7 +292,15 @@ export async function renderContextLink(
   doc: LinkDoc,
   verb: ContextLinkVerb,
   args: { node?: string; n?: string },
-  fetch: ContextLinkFetch
+  fetch: ContextLinkFetch,
+  /**
+   * Called with the node ONLY when real content was rendered for it — a transcript or summary
+   * with lines, or a non-empty terminal capture. Never for `list`, a sticky note, a picker
+   * message, or an explanatory "has no transcript yet" reply: the caller (`--auto-close`'s linked
+   * read, context-link.ts) treats this as "the reader consumed the node's output", and a reader
+   * that was told there is nothing to read has consumed nothing (consort finding 2026-09-02).
+   */
+  onContent?: (node: LinkDocEntry) => void
 ): Promise<string> {
   if (verb === 'list') return renderList(doc)
 
@@ -302,10 +310,15 @@ export async function renderContextLink(
 
   if (node.note != null) return renderNote(node, verb)
 
-  if (verb === 'terminal') return renderTerminal(node, await fetch.terminal(node))
+  if (verb === 'terminal') {
+    const captured = await fetch.terminal(node)
+    if (captured.trim()) onContent?.(node)
+    return renderTerminal(node, captured)
+  }
 
   const lines = await transcriptLinesFor(node, fetch)
   if (typeof lines === 'string') return lines // an explanatory message, not content
+  if (lines.length) onContent?.(node)
   return verb === 'summary'
     ? renderSummary(node, lines, parseSummaryCount(args.n))
     : renderFullTranscript(node, lines)

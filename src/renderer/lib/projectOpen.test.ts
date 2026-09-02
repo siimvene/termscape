@@ -219,12 +219,15 @@ describe('armForColdOpen — the launch moves (never copies) into pendingLaunch 
 
 describe('projectTargetFlagRefusal — the v1 flag exclusion fires (review I-2)', () => {
   const REFUSAL =
-    'project-target-flag-unsupported: --group/--after cannot be combined with --project'
+    'project-target-flag-unsupported: --group/--after/--auto-close cannot be combined with --project'
 
-  it('refuses --group, --after, and both — with the exact named reply', () => {
+  it('refuses --group, --after, --auto-close, and combinations — with the exact named reply', () => {
     expect(projectTargetFlagRefusal({ group: 'g1' })).toBe(REFUSAL)
     expect(projectTargetFlagRefusal({ after: 'n1,n2' })).toBe(REFUSAL)
     expect(projectTargetFlagRefusal({ group: 'g1', after: 'n1' })).toBe(REFUSAL)
+    // Consent for auto-close lives in the caller's own canvas; a node in another project is
+    // outside it, so the flag would silently do nothing — refused instead.
+    expect(projectTargetFlagRefusal({ 'auto-close': 'yes' })).toBe(REFUSAL)
   })
 
   it('passes a request carrying neither flag', () => {

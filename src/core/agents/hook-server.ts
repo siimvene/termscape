@@ -271,8 +271,18 @@ class HookServer {
     | null = null
   // Context-link reads. Same shape as the control handler, but it answers with TEXT (a rendered
   // transcript / summary / terminal capture) rather than acting on the canvas.
+  // `verified` = the caller presented THIS instance's per-node token for `nodeId`. The read itself
+  // stays tolerant (an unproven legacy caller keeps its transcript), but anything DOWNSTREAM that
+  // acts on "node X read node Y" — `--auto-close` deletes a session on that signal — must see the
+  // verdict, or a bearer holder POSTing `nodeId=<conductor>` reads in its name and reaps its stations.
   private contextLinkHandler:
-    | ((req: { verb: string; nodeId: string; args: Record<string, string> }) => Promise<string>)
+    | ((req: {
+        verb: string
+        nodeId: string
+        args: Record<string, string>
+        /** Optional only so read-only callers/tests need not care; absent means NOT verified. */
+        verified?: boolean
+      }) => Promise<string>)
     | null = null
   /**
    * The shared-identity spine's handlers (see core/codex-identity-proxy.ts). Both are injected by
@@ -658,7 +668,7 @@ class HookServer {
           // transcript). The handler owns the authorization — see context-link.ts.
           const text = this.contextLinkHandler
             ? await withTimeout(
-                this.contextLinkHandler({ verb, nodeId, args }),
+                this.contextLinkHandler({ verb, nodeId, args, verified: gate.verdict === 'verified' }),
                 CONTEXT_LINK_READ_MS,
                 CONTEXT_LINK_TIMEOUT_TEXT
               )

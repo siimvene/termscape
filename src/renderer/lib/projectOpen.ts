@@ -68,9 +68,16 @@ export function clearAttachConsentForTests(): void {
  * is red-capable (review #363 I-2) — the dispatch only relays the answer; an empty-string value
  * counts as "not passed" (the shim always sends a value for a bare flag).
  */
-export function projectTargetFlagRefusal(args: { group?: string; after?: string }): string | null {
-  if (args.group || args.after) {
-    return 'project-target-flag-unsupported: --group/--after cannot be combined with --project'
+export function projectTargetFlagRefusal(args: {
+  group?: string
+  after?: string
+  'auto-close'?: string
+}): string | null {
+  // `--auto-close` arms consent in the CALLER's renderer for nodes the caller's canvas can see and
+  // delete; a node opened into another project is neither, so the flag would be a silent no-op
+  // (consort finding 2026-09-02). Refused, like the other id-bearing flags, rather than ignored.
+  if (args.group || args.after || args['auto-close']) {
+    return 'project-target-flag-unsupported: --group/--after/--auto-close cannot be combined with --project'
   }
   return null
 }

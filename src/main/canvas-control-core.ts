@@ -305,7 +305,7 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '  project id, which behaves exactly as if the flag were omitted (a normal open, view switch',
     '  included); or an id `open-project` returned to YOU in this session, which never switches the',
     '  user\'s view. A session opened into a non-active project starts when the user next views that',
-    '  project — do not poll for it. `--group`/`--after` cannot be combined with `--project`.',
+    '  project — do not poll for it. `--group`/`--after`/`--auto-close` cannot be combined with `--project`.',
     '  `--prompt` arrives on ONE LINE: every run of whitespace in it, newlines included, is',
     '  collapsed to a single space before the session starts. Write the task as continuous prose',
     '  and use sentences where you would have used bullets — a numbered list arrives as one',
@@ -701,7 +701,7 @@ Verbs:
   in this session, which never switches the user's view. Defaults inside the target are the
   TARGET project's (its cwd, its default account and permission mode). A session opened into a
   non-active project starts when the user next views that project — do not poll for it; the reply
-  says so. \`--group\`/\`--after\` cannot be combined with \`--project\`.
+  says so. \`--group\`/\`--after\`/\`--auto-close\` cannot be combined with \`--project\`.
   \`--prompt\` arrives on ONE LINE. Every run of whitespace in it — newlines included — is
   collapsed to a single space before the session starts, because the prompt is passed as an
   argument on the agent CLI's launch command line and that line is typed into the pane. So write

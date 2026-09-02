@@ -584,7 +584,7 @@ describe('open-project + --project docs land with the dispatch (issue #338, spec
       // next views it — and the agent is told not to poll for that.
       expect(body, name).toMatch(/starts when the user next views/)
       expect(body, name).toMatch(/do not poll/)
-      expect(body, name).toMatch(/`--group`\/`--after` cannot\s+be combined with `--project`/)
+      expect(body, name).toMatch(/`--group`\/`--after`\/`--auto-close` cannot\s+be combined with `--project`/)
     }
   })
 

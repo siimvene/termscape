@@ -65,18 +65,22 @@ export function spawnedBy(
  * `waiting` needs a HUMAN, and that alert must never be quieted — callers route needs-you
  * straight to the alert path and never ask here.
  *
- * "Outstanding" = a sibling whose state is explicitly live (working/blocked/waiting). A sibling
- * with NO known state (armed behind `--after` and not launched yet, a CLI that never started) is
- * not outstanding: counting "no news" as "still running" would let one dead station hold the
- * aggregate hostage forever — the same trap `pendingLaunch` documents for `--after`. The cost is
- * an aggregate that may fire before a late-arming station starts; that station then fires its own
- * aggregate when it finishes, which is the honest count at that moment.
+ * "Outstanding" = a sibling whose state is explicitly live (working/blocked/waiting), OR one that
+ * is ARMED behind `--after` and has not launched yet (`pendingLaunch` present — a known "will run
+ * later", so a sequential chain yields ONE aggregate at the end, not one per link; consort finding
+ * 2026-09-02). A sibling with NO known state and no pending launch (a CLI that never started, a
+ * station killed by hand) is not outstanding: counting "no news" as "still running" would let one
+ * dead station hold the aggregate hostage forever — the same trap `pendingLaunch` documents for
+ * `--after`. The residual cost: a station that dies silently mid-chain can let an aggregate fire
+ * early; the next completion then fires its own, which is the honest count at that moment.
  */
 export function decideDoneAlert(input: {
   nodeId: string
   ropes: readonly RopeLike[]
   stateOf: (id: string) => AgentState | undefined
   isAgentNode: (id: string) => boolean
+  /** Does the node hold an un-fired `pendingLaunch` (armed behind `--after`)? Default: never. */
+  isArmed?: (id: string) => boolean
 }): DoneAlertDecision {
   const spawner = spawnerOf(input.nodeId, input.ropes, input.isAgentNode)
   if (!spawner) return { kind: 'alert' }
@@ -91,6 +95,7 @@ export function decideDoneAlert(input: {
     const st = input.stateOf(id)
     if (st === 'working' || st === 'blocked' || st === 'waiting') outstanding++
     else if (st === 'done') finished++
+    else if (input.isArmed?.(id)) outstanding++
   }
   if (outstanding > 0) return { kind: 'quiet', spawner, outstanding }
   return { kind: 'aggregate', spawner, finished, total: siblings.length }
@@ -102,16 +107,36 @@ export function decideDoneAlert(input: {
  * station was still working consumed partial output, and closing on `done` alone would destroy the
  * result before the conductor ever looked. The requester must be the spawner: any other linked
  * node reading it (a verify panel's reviewer, say) is not the consumer the flag was set for.
+ *
+ * This is the ONE place a status event becomes destructive (a session is killed with no dialog),
+ * so two proofs are demanded that a display-only badge never needed (blind security pass, 2026-09-02):
+ * - the `done` must be VERIFIED — set by a hook POST that carried this instance's per-node token.
+ *   `/hook/*` is fail-open for legacy tokenless posts by contract, so an unverified `done` on a
+ *   still-working station is forgeable, and before this flag existed a forged status was harmless.
+ * - the `done` transition must PREDATE the read's start (`doneSince <= requestedAt`): a Stop that
+ *   lands while the render is in flight makes the state read `done` on arrival although the
+ *   conductor consumed partial output.
+ * The reader's identity is proven upstream: core/context-link.ts emits the read only for a
+ * verified caller, so a bearer holder POSTing `nodeId=<conductor>` never produces this event.
  */
 export function shouldAutoClose(input: {
   nodeId: string
   readerId: string
+  /** When the read started (LinkedRead.requestedAt). */
+  requestedAt: number
   armed: ReadonlySet<string>
   ropes: readonly RopeLike[]
   stateOf: (id: string) => AgentState | undefined
+  /** Did a token-verified hook POST set the node's current state? */
+  isVerified: (id: string) => boolean
+  /** When the node last CHANGED state (agentStatus `lastEventAt`); undefined = unknown ⇒ refuse. */
+  stateSince: (id: string) => number | undefined
   isAgentNode: (id: string) => boolean
 }): boolean {
   if (!input.armed.has(input.nodeId)) return false
   if (input.stateOf(input.nodeId) !== 'done') return false
+  if (!input.isVerified(input.nodeId)) return false
+  const since = input.stateSince(input.nodeId)
+  if (since === undefined || since > input.requestedAt) return false
   return spawnerOf(input.nodeId, input.ropes, input.isAgentNode) === input.readerId
 }

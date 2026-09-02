@@ -1983,6 +1983,9 @@ export interface LinkedRead {
   /** The node whose summary / transcript / terminal was rendered. */
   nodeId: string
   verb: string
+  /** When the read STARTED (ms epoch) — consumers compare it to the node's state-transition
+   *  time, so a read that began before the node was done never counts as consuming its result. */
+  requestedAt: number
 }
 
 /** One linked node, as the context-link CLI sees it. */
