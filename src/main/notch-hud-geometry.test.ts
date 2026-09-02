@@ -80,3 +80,21 @@ describe('hudGeometry — window placement', () => {
     expect(hudGeometry({ ...display(1710, 1112, 37, true), notchWidth: 220 }).notchWidth).toBe(220)
   })
 })
+
+describe('hudGeometry — the safe-area probe decides when it answered (heuristic only as fallback)', () => {
+  it('a notchless Tahoe menu bar (31 pt, above the heuristic) with safe area 0 is NOT a notch', () => {
+    // The consort finding: macOS 26 draws a taller notchless menu bar, inside the notched range.
+    expect(hudGeometry({ ...display(1440, 900, 31, true), safeAreaTop: 0 }).hasNotch).toBe(false)
+  })
+  it('a probed notch wins even when the strip is below the heuristic', () => {
+    expect(hudGeometry({ ...display(1728, 1117, 26, true), safeAreaTop: 32 }).hasNotch).toBe(true)
+  })
+  it('the probe never makes an external display notched', () => {
+    expect(hudGeometry({ ...display(1728, 1117, 33, false), safeAreaTop: 32 }).hasNotch).toBe(false)
+  })
+  it('null / undefined / NaN probe ⇒ the strip-height heuristic', () => {
+    expect(hudGeometry({ ...display(1728, 1117, 33, true), safeAreaTop: null }).hasNotch).toBe(true)
+    expect(hudGeometry({ ...display(1440, 900, 24, true), safeAreaTop: undefined }).hasNotch).toBe(false)
+    expect(hudGeometry({ ...display(1728, 1117, 33, true), safeAreaTop: Number.NaN }).hasNotch).toBe(true)
+  })
+})

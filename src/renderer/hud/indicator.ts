@@ -51,6 +51,27 @@ export function buildIndicator(rows: readonly IndicatorRow[]): HudIndicator {
   return { workingAgents, doneUnseen, needsYou }
 }
 
+/**
+ * The collapsed capsule's right padding, in px. It exists for ONE reason: to cover the physical
+ * notch, so the black surface reads as a wider notch with the mascots to its left. Therefore:
+ * - expanded ⇒ none (the panel re-centres under the notch and has its own layout);
+ * - notchless ⇒ none: there is no notch under the pill, and padding it by the notch width made a
+ *   ~170 px black bar with the mascots huddled at one end [screenshot-measured 2026-09-02 on a 16"
+ *   MBP whose notch the detector had missed] — the fallback layout must survive a misdetection;
+ * - nothing to show ⇒ none (an empty capsule is hidden anyway);
+ * - otherwise exactly the notch width.
+ * Pure so the decision is unit-tested without a DOM (main.ts only reads the DOM and applies it).
+ */
+export function capsuleOverhangPx(input: {
+  expanded: boolean
+  notchless: boolean
+  indicatorWidth: number
+  notchWidthPx: number
+}): number {
+  if (input.expanded || input.notchless) return 0
+  return input.indicatorWidth > 0 ? input.notchWidthPx : 0
+}
+
 /** Higher rank = drawn further RIGHT (closer to the notch). Claude is the notch-side anchor. */
 const SLOT_RANK: Record<string, number> = {
   claude: 3,

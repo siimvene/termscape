@@ -23,6 +23,7 @@ import {
 import type { NormalizedAgentEvent } from '../shared/agents/normalize'
 import { createHudModel, type HudModel } from './notch-hud-model'
 import { hudGeometry, type HudGeometry } from './notch-hud-geometry'
+import { probeSafeAreaTop } from './notch-safe-area'
 
 /**
  * Assumed physical notch WIDTH (px). Electron exposes no `auxiliaryTopLeftArea`, so we assume a
@@ -148,11 +149,17 @@ class NotchHudController {
     // strictly per row — clicking/Go-ing a row clears that row (onFocusNode), and the × dismisses
     // one by hand. The event is still wired because the renderer's expand state may drive more here.
     this.onExpanded = () => {}
-    this.onDisplayChange = () => this.reposition()
+    this.onDisplayChange = () => {
+      // Reposition NOW with whatever the last probe said (bar/width may have changed), then ask
+      // AppKit again — the primary display may be a different panel after a plug/unplug.
+      this.reposition()
+      void this.refreshSafeArea()
+    }
   }
 
   start(): void {
     this.createWindow()
+    void this.refreshSafeArea()
     this.bindIpc()
     this.unsubs.push(onNodeStateChange((c: NodeStateChange) => this.onModelChange(() => this.model.applyStateChange(c))))
     this.unsubs.push(onNodeNowChange((c: NodeNowChange) => this.onModelChange(() => this.model.applyNowChange(c))))
@@ -238,6 +245,30 @@ class NotchHudController {
     this.schedulePush()
   }
 
+  /**
+   * `NSScreen.safeAreaInsets.top` of the primary display, from the last successful probe
+   * (notch-safe-area.ts). `null` until the first answer, or when the probe cannot answer — the
+   * geometry then falls back to its strip-height heuristic. Re-probed on every display change.
+   */
+  private safeAreaTop: number | null = null
+  private safeAreaProbe: Promise<void> | null = null
+
+  private refreshSafeArea(): Promise<void> {
+    if (this.safeAreaProbe) return this.safeAreaProbe // one in flight at a time; a change re-arms
+    this.safeAreaProbe = probeSafeAreaTop()
+      .then((top) => {
+        if (top === this.safeAreaTop) return
+        this.safeAreaTop = top
+        // The verdict changed (first answer, or a different panel): re-place + re-push so the
+        // renderer swaps between the fused capsule and the floating pill.
+        this.reposition()
+      })
+      .finally(() => {
+        this.safeAreaProbe = null
+      })
+    return this.safeAreaProbe
+  }
+
   private geometry(): HudGeometry {
     const d = screen.getPrimaryDisplay()
     return hudGeometry({
@@ -245,7 +276,9 @@ class NotchHudController {
       workArea: d.workArea,
       // `internal` is what keeps an external monitor at a low resolution from reading as notched.
       internal: d.internal === true,
-      notchWidth: sanitizeNotchWidth(this.tunables.notchWidth)
+      notchWidth: sanitizeNotchWidth(this.tunables.notchWidth),
+      // The decisive signal when the probe answered; the heuristic fills its absence.
+      safeAreaTop: this.safeAreaTop
     })
   }
 

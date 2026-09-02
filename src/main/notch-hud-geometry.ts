@@ -21,6 +21,12 @@ export interface HudGeometryInput {
   internal: boolean
   /** Already-sanitized settings.notchWidth. */
   notchWidth: number
+  /**
+   * `NSScreen.safeAreaInsets.top` of the primary display in points (src/main/notch-safe-area.ts),
+   * when the probe answered. THE decisive signal: > 0 is a notch, 0 is not, regardless of how tall
+   * macOS draws the menu bar. `null`/absent ⇒ fall back to the strip-height heuristic below.
+   */
+  safeAreaTop?: number | null
 }
 
 export interface HudGeometry {
@@ -39,25 +45,24 @@ export interface HudGeometry {
 export const NOTCH_BAR_FLOOR = 24
 
 /**
- * Notch detection threshold: the top strip (menu bar, in logical points) a built-in panel must
- * reserve to count as notched.
+ * FALLBACK notch heuristic, used only when the safe-area probe (`safeAreaTop`) did not answer:
+ * the top strip (menu bar, in logical points) a built-in panel must reserve to count as notched.
  *
- * The two populations do not overlap, which is what makes an absolute threshold safe here:
- * - NOTCHLESS panels reserve a fixed menu bar of 24 pt (25 on a few older/larger fonts), at every
- *   scaling mode — the menu bar is defined in points, not pixels.
- * - NOTCHED panels reserve a strip as tall as the notch, which SHRINKS in points as the scaled
- *   resolution grows but never gets near 24: measured 37 (15" Air / 14" MBP at default),
- *   33 (16" MBP at its default 1728x1117), 31 (15" Air at 1440x932), 28 (15" Air at 1280x829).
- * So anything ≥ 27 pt on an internal panel is a notch; anything ≤ 25 is a plain menu bar.
- *
- * History, because both earlier shapes shipped broken: the first cut was an absolute 32, which
- * the 31/28 scaled modes fell under (issue #508). The second cut was a RATIO of display height
- * (≥ 0.03) on the theory that the notch is a fixed SHARE of its panel — true per panel, but the
- * share differs BETWEEN panels: the 16" MBP's is 33/1117 = 0.0295, so at its default scaling it
- * read as notchless and the HUD drew its floating fallback pill under the menu bar [measured
- * 2026-09-02 via NSScreen: frame 1728x1117, visibleFrame inset 33, safeAreaInsets.top 32]. The
- * real signal is `NSScreen.safeAreaInsets.top`, which Electron does not expose; the strip height
- * is the closest proxy, and 27 sits in the gap between the two populations.
+ * Why it is a fallback and not the rule — three heuristics have now shipped and each was wrong on
+ * some real machine, which is the whole argument for asking AppKit instead (notch-safe-area.ts):
+ * - absolute 32 pt: missed a notched 15" Air's scaled modes, whose strip is 31 and 28 pt (#508);
+ * - ratio ≥ 0.03 of display height: assumed the notch is a fixed share of its panel — true per
+ *   panel, false between panels; the 16" MBP's 33/1117 = 0.0295 read as notchless at its DEFAULT
+ *   scaling and the HUD drew the floating pill under the menu bar [measured 2026-09-02 via
+ *   NSScreen: frame 1728x1117, inset 33, safeAreaInsets.top 32];
+ * - absolute 27 pt (this constant): separates pre-Tahoe notchless menu bars (24–25 pt) from
+ *   notched strips (28–37 pt measured), but macOS Tahoe draws a TALLER notchless menu bar
+ *   (31 pt reported on a notchless M1 Air — consort finding 2026-09-02), which lands inside the
+ *   notched range. No height threshold can be right on both macOS 15 and 26.
+ * When the probe fails (non-darwin, osascript missing) this is what remains; its misdetection now
+ * costs a fused capsule on a notchless Tahoe menu bar, never a pill hidden behind a notch, and the
+ * renderer no longer pads the notchless pill by the notch width, so the other direction costs a
+ * floating pill in the wrong place.
  */
 export const NOTCH_BAR_MIN_PT = 27
 
@@ -77,7 +82,12 @@ export function hudGeometry(input: HudGeometryInput): HudGeometry {
   const inset = input.workArea.y - b.y
   const bar = Math.max(NOTCH_BAR_FLOOR, inset)
   // A physical notch requires a built-in panel whose reserved strip is a notch-sized SHARE of it.
-  const hasNotch = input.internal && inset >= NOTCH_BAR_MIN_PT
+  // The probe decides when it answered; the strip-height heuristic only fills its absence. An
+  // internal panel is required either way — notches exist only on built-in displays, and a probe
+  // of screens[0] while an external is primary describes that external (safe area 0 ⇒ notchless).
+  const probed = typeof input.safeAreaTop === 'number' && Number.isFinite(input.safeAreaTop)
+  const hasNotch =
+    input.internal && (probed ? (input.safeAreaTop as number) > 0 : inset >= NOTCH_BAR_MIN_PT)
   return {
     x: b.x,
     y: b.y,

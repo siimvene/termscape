@@ -8,7 +8,7 @@ import { CLAUDE_MASCOT, CODEX_MASCOT, DONE_BLOB } from '../lib/mascot'
 import { HUD_BRAND_PULSE_CLASS, brandPulseBackground, brandPulsePlan } from '../lib/brandPulse'
 import { createGrokMarkSvg } from '../lib/grokMark'
 import { createCopilotMarkSvg } from '../lib/copilotMark'
-import { buildIndicator, orderIndicatorAgents } from './indicator'
+import { buildIndicator, capsuleOverhangPx, orderIndicatorAgents } from './indicator'
 import { HUD_ROW_CAP, overflowLabel, splitPanelRows } from './panel-rows'
 import { percentText } from '../lib/usageFormat'
 import codexPet from '../assets/pet-codex.webp'
@@ -424,17 +424,15 @@ function buildSubItem(s: HudSubagentRow): HTMLElement {
 // overhang sat ON TOP of the status items, and because the capsule is the click-through hotspot,
 // hovering there also swallowed their clicks (issue #78 — grow-left approved by the owner there).
 function syncCapsuleOverhang(): void {
-  // The right padding exists to COVER the physical notch. The notchless pill has no notch under it,
-  // so padding it by the notch width produced a wide black pill with the mascots huddled at its
-  // left end and ~170 px of nothing to their right [screenshot-measured 2026-09-02, on a 16" MBP
-  // whose notch the previous detector missed]. Both layouts must survive a misdetection, so the
-  // pill hugs its mascots regardless of what main decided about the notch.
-  if (expanded || document.documentElement.classList.contains('notchless')) {
-    capsule.style.paddingRight = ''
-    return
-  }
-  const ext = indicator.offsetWidth
-  capsule.style.paddingRight = ext > 0 ? `${notchWidthPx}px` : ''
+  // Decision is the pure, tested `capsuleOverhangPx` (indicator.ts) — in particular the notchless
+  // pill gets NO notch-width padding, or a misdetected notch turns it into a wide black bar.
+  const px = capsuleOverhangPx({
+    expanded,
+    notchless: document.documentElement.classList.contains('notchless'),
+    indicatorWidth: indicator.offsetWidth,
+    notchWidthPx
+  })
+  capsule.style.paddingRight = px > 0 ? `${px}px` : ''
 }
 
 function render(rows: HudRow[]): void {

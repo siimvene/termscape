@@ -25,19 +25,23 @@ alwaysOnTop:true, focusable:false, skipTaskbar:true}` + `setAlwaysOnTop(true,'sc
   centered notch of this width; 200 left a visible gap), `notchCenterX` (= `bounds.width/2`), and
   `hasNotch`. Re-asserted on `screen` `display-metrics-changed` + `display-added/removed`.
 
-  **`hasNotch` = `display.internal && inset >= NOTCH_BAR_MIN_PT` (27 pt).** The two populations do
-  not overlap: a notchless panel reserves a fixed 24 pt menu bar (25 on a few) at every scaling
-  mode, while a notched panel reserves a strip as tall as the notch, measured 37 (15" Air / 14" MBP
-  default), 33 (16" MBP default 1728x1117), 31 (15" Air 1440x932), 28 (15" Air 1280x829). Two
-  earlier shapes shipped broken: an absolute `>= 32` missed the 31/28 scaled modes (issue #508); a
-  RATIO of display height (`>= 0.03`) assumed the notch is a fixed share of its panel — true per
-  panel, but the share differs between panels, and the 16" MBP's 33/1117 = 0.0295 read as notchless
-  at its default scaling, so the HUD drew the floating fallback pill under the menu bar [measured
-  2026-09-02 via NSScreen: inset 33, safeAreaInsets.top 32]. `NSScreen.safeAreaInsets` is the real
-  signal; Electron does not expose it, and the strip height is the closest proxy. `display.internal`
-  is the second lock — notches exist only on built-in panels. The renderer also refuses to pad the
-  notchless pill by the notch width (`syncCapsuleOverhang`), so a future misdetection costs a
-  floating pill in the wrong place, never a 170 px black bar with the mascots at one end.
+  **`hasNotch` = `display.internal && safeAreaTop > 0`, with `inset >= NOTCH_BAR_MIN_PT` (27 pt)
+  ONLY as the fallback when the probe did not answer.** `safeAreaTop` is `NSScreen.safeAreaInsets.top`
+  of the primary display, which Electron does not expose; `src/main/notch-safe-area.ts` asks AppKit
+  through a fixed JavaScript-for-Automation one-liner (`/usr/bin/osascript`, ~0.3 s, async, fail-open
+  to `null`) at HUD start and on every display change, and the controller re-places + re-pushes when
+  the verdict changes. Three height heuristics shipped and each was wrong on a real machine: an
+  absolute `>= 32` missed a notched 15" Air's scaled modes (31/28 pt, issue #508); a RATIO of display
+  height (`>= 0.03`) assumed the notch is a fixed share of its panel — true per panel, false between
+  panels — and the 16" MBP's 33/1117 = 0.0295 read as notchless at its default scaling, so the HUD
+  drew the floating pill under the menu bar [measured 2026-09-02: inset 33, safeAreaInsets.top 32];
+  an absolute `>= 27` separates pre-Tahoe notchless menu bars (24–25 pt) from notched strips (28–37),
+  but macOS Tahoe draws a taller notchless menu bar (31 pt on a notchless M1 Air — consort finding),
+  inside the notched range. `display.internal` is the second lock — notches exist only on built-in
+  panels, and a probe of `screens[0]` while an external is primary describes that external. The
+  renderer also refuses to pad the notchless pill by the notch width (`capsuleOverhangPx`, pure +
+  tested), so a misdetection in either direction costs a misplaced capsule, never a 170 px black bar
+  with the mascots at one end.
 - **Click-through with a hotspot**: window stays mouse-ignoring; the renderer reports pointer
   enter/leave of the indicator rect over IPC → main toggles `setIgnoreMouseEvents(false/true,
   {forward:true})`. Click in the hotspot → expand; click outside the expanded panel → collapse
