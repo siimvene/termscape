@@ -11,33 +11,41 @@ function display(width: number, height: number, menuBar: number, internal: boole
   }
 }
 
-describe('hudGeometry — notch detection across scaling modes (issue #508)', () => {
-  // The regression: every one of these is the SAME notched panel, and the absolute-32px predecessor
-  // answered true only for the first. The reporter's setting is 1440x932.
+describe('hudGeometry — notch detection across panels and scaling modes (issue #508, 16" regression)', () => {
+  // Every one of these is a notched panel. The absolute-32px first cut answered true only for the
+  // 37s (issue #508, reporter at 1440x932); the ratio second cut (≥ 0.03 of height) answered false
+  // for the 16" MBP at its DEFAULT scaling, whose strip is 33/1117 = 0.0295 — measured on the owner's
+  // machine 2026-09-02 (NSScreen frame 1728x1117, top inset 33, safeAreaInsets.top 32).
   it.each([
     ['15" Air, default 1710x1112', 1710, 1112, 37],
     ['15" Air, scaled 1440x932', 1440, 932, 31],
     ['15" Air, scaled 1280x829', 1280, 829, 28],
     ['14" MBP, default 1512x982', 1512, 982, 37],
-    ['16" MBP, default 1728x1117', 1728, 1117, 37]
+    ['16" MBP, default 1728x1117 (measured 33, below the old 0.03 ratio)', 1728, 1117, 33],
+    ['16" MBP, scaled 2056x1329', 2056, 1329, 28]
   ])('detects the notch on %s', (_label, w, h, bar) => {
     expect(hudGeometry(display(w, h, bar, true)).hasNotch).toBe(true)
   })
 
   it.each([
-    ['1080p external', 1920, 1080, 24],
-    ['1440p external', 2560, 1440, 24],
-    ['scaled 4K external', 3008, 1692, 24],
-    ['pre-notch 13" MacBook internal', 1440, 900, 24],
-    ['pre-notch MacBook, scaled up', 1680, 1050, 24]
-  ])('reports notchless on %s', (_label, w, h, bar) => {
-    expect(hudGeometry(display(w, h, bar, false)).hasNotch).toBe(false)
+    ['1080p external', 1920, 1080, 24, false],
+    ['1440p external', 2560, 1440, 24, false],
+    ['scaled 4K external', 3008, 1692, 24, false],
+    ['pre-notch 13" MacBook internal', 1440, 900, 24, true],
+    ['pre-notch MacBook, scaled up', 1680, 1050, 24, true],
+    ['pre-notch MacBook with the taller 25 pt menu bar', 1440, 900, 25, true]
+  ])('reports notchless on %s', (_label, w, h, bar, internal) => {
+    expect(hudGeometry(display(w, h, bar, internal)).hasNotch).toBe(false)
+  })
+
+  it('a notchless BUILT-IN panel at a low scaled resolution stays notchless (the ratio cut got this wrong)', () => {
+    // 24/640 = 0.0375 cleared the old ratio; the strip is still a plain 24 pt menu bar.
+    expect(hudGeometry(display(1024, 640, 24, true)).hasNotch).toBe(false)
   })
 
   it('never reports a notch on an external display, whatever its menu bar measures', () => {
-    // An external at an unusually low resolution clears the ratio on its own; `internal` is what
-    // stops it. Notches do not exist on external panels.
-    expect(hudGeometry(display(1024, 640, 24, false)).hasNotch).toBe(false)
+    // Notches do not exist on external panels; `internal` is the second lock.
+    expect(hudGeometry(display(1710, 1112, 37, false)).hasNotch).toBe(false)
   })
 
   it('reports notchless when the menu bar is hidden entirely', () => {

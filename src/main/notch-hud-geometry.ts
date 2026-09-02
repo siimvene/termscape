@@ -39,23 +39,27 @@ export interface HudGeometry {
 export const NOTCH_BAR_FLOOR = 24
 
 /**
- * Notch detection threshold, as a FRACTION of the display's logical height — deliberately not an
- * absolute px count.
+ * Notch detection threshold: the top strip (menu bar, in logical points) a built-in panel must
+ * reserve to count as notched.
  *
- * macOS reserves a menu bar exactly as tall as the notch on a notched panel, so that strip is a
- * fixed share of the panel and survives every scaling mode: a 15" Air reports 37/1112 at its
- * default and 31/932 at 1440x932 — both 0.0333. A notchless panel's menu bar is a fixed 24 pt, so
- * its share instead FALLS as the resolution rises: 24/1080 = 0.0222, 24/900 = 0.0267.
+ * The two populations do not overlap, which is what makes an absolute threshold safe here:
+ * - NOTCHLESS panels reserve a fixed menu bar of 24 pt (25 on a few older/larger fonts), at every
+ *   scaling mode — the menu bar is defined in points, not pixels.
+ * - NOTCHED panels reserve a strip as tall as the notch, which SHRINKS in points as the scaled
+ *   resolution grows but never gets near 24: measured 37 (15" Air / 14" MBP at default),
+ *   33 (16" MBP at its default 1728x1117), 31 (15" Air at 1440x932), 28 (15" Air at 1280x829).
+ * So anything ≥ 27 pt on an internal panel is a notch; anything ≤ 25 is a plain menu bar.
  *
- * The predecessor of this constant was an absolute 32 px, which the 0.0333 share only clears while
- * the display is tall enough — i.e. at the default scaling and nowhere else (issue #508).
- *
- * Residual, and why it is survivable: a notchless BUILT-IN panel driven at an unusually low scaled
- * resolution (24/640 = 0.0375) still reads as notched. That misdetection now costs a capsule fused
- * to a notch that is not there, never a pill hidden behind one — the notchless layout no longer
- * occupies the top strip at all (see `.notchless .hud-capsule` in hud.css).
+ * History, because both earlier shapes shipped broken: the first cut was an absolute 32, which
+ * the 31/28 scaled modes fell under (issue #508). The second cut was a RATIO of display height
+ * (≥ 0.03) on the theory that the notch is a fixed SHARE of its panel — true per panel, but the
+ * share differs BETWEEN panels: the 16" MBP's is 33/1117 = 0.0295, so at its default scaling it
+ * read as notchless and the HUD drew its floating fallback pill under the menu bar [measured
+ * 2026-09-02 via NSScreen: frame 1728x1117, visibleFrame inset 33, safeAreaInsets.top 32]. The
+ * real signal is `NSScreen.safeAreaInsets.top`, which Electron does not expose; the strip height
+ * is the closest proxy, and 27 sits in the gap between the two populations.
  */
-export const NOTCH_BAR_RATIO = 0.03
+export const NOTCH_BAR_MIN_PT = 27
 
 /** Total window height ABOVE the top strip — sized to the EXPANDED box (we never resize the frame;
  *  the renderer scales a CSS transform). The strip itself is added on top, because both layouts
@@ -73,7 +77,7 @@ export function hudGeometry(input: HudGeometryInput): HudGeometry {
   const inset = input.workArea.y - b.y
   const bar = Math.max(NOTCH_BAR_FLOOR, inset)
   // A physical notch requires a built-in panel whose reserved strip is a notch-sized SHARE of it.
-  const hasNotch = input.internal && inset > 0 && b.height > 0 && inset / b.height >= NOTCH_BAR_RATIO
+  const hasNotch = input.internal && inset >= NOTCH_BAR_MIN_PT
   return {
     x: b.x,
     y: b.y,

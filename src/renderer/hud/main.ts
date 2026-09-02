@@ -424,7 +424,12 @@ function buildSubItem(s: HudSubagentRow): HTMLElement {
 // overhang sat ON TOP of the status items, and because the capsule is the click-through hotspot,
 // hovering there also swallowed their clicks (issue #78 — grow-left approved by the owner there).
 function syncCapsuleOverhang(): void {
-  if (expanded) {
+  // The right padding exists to COVER the physical notch. The notchless pill has no notch under it,
+  // so padding it by the notch width produced a wide black pill with the mascots huddled at its
+  // left end and ~170 px of nothing to their right [screenshot-measured 2026-09-02, on a 16" MBP
+  // whose notch the previous detector missed]. Both layouts must survive a misdetection, so the
+  // pill hugs its mascots regardless of what main decided about the notch.
+  if (expanded || document.documentElement.classList.contains('notchless')) {
     capsule.style.paddingRight = ''
     return
   }

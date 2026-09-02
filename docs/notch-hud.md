@@ -25,16 +25,19 @@ alwaysOnTop:true, focusable:false, skipTaskbar:true}` + `setAlwaysOnTop(true,'sc
   centered notch of this width; 200 left a visible gap), `notchCenterX` (= `bounds.width/2`), and
   `hasNotch`. Re-asserted on `screen` `display-metrics-changed` + `display-added/removed`.
 
-  **`hasNotch` is a RATIO, never an absolute px count** (`display.internal && inset / bounds.height
-  >= NOTCH_BAR_RATIO` 0.03). macOS reserves a menu bar exactly as tall as the notch, so on a
-  notched panel that strip is a fixed SHARE of the display and survives every scaling mode — a 15"
-  Air reports 37/1112 at its default and 31/932 at 1440x932, both 0.0333. A notchless panel's menu
-  bar is a fixed 24 pt, so its share instead falls as the resolution rises (24/1080 = 0.0222). The
-  predecessor was an absolute `inset >= 32`, which the 0.0333 share only clears while the display
-  is tall enough: the HUD detected the notch at the default scaling and nowhere else, and drew its
-  notchless pill straight into the notch (issue #508). `display.internal` is the second half —
-  notches exist only on built-in panels, so it stops an external at a low resolution from clearing
-  the ratio on its own.
+  **`hasNotch` = `display.internal && inset >= NOTCH_BAR_MIN_PT` (27 pt).** The two populations do
+  not overlap: a notchless panel reserves a fixed 24 pt menu bar (25 on a few) at every scaling
+  mode, while a notched panel reserves a strip as tall as the notch, measured 37 (15" Air / 14" MBP
+  default), 33 (16" MBP default 1728x1117), 31 (15" Air 1440x932), 28 (15" Air 1280x829). Two
+  earlier shapes shipped broken: an absolute `>= 32` missed the 31/28 scaled modes (issue #508); a
+  RATIO of display height (`>= 0.03`) assumed the notch is a fixed share of its panel — true per
+  panel, but the share differs between panels, and the 16" MBP's 33/1117 = 0.0295 read as notchless
+  at its default scaling, so the HUD drew the floating fallback pill under the menu bar [measured
+  2026-09-02 via NSScreen: inset 33, safeAreaInsets.top 32]. `NSScreen.safeAreaInsets` is the real
+  signal; Electron does not expose it, and the strip height is the closest proxy. `display.internal`
+  is the second lock — notches exist only on built-in panels. The renderer also refuses to pad the
+  notchless pill by the notch width (`syncCapsuleOverhang`), so a future misdetection costs a
+  floating pill in the wrong place, never a 170 px black bar with the mascots at one end.
 - **Click-through with a hotspot**: window stays mouse-ignoring; the renderer reports pointer
   enter/leave of the indicator rect over IPC → main toggles `setIgnoreMouseEvents(false/true,
   {forward:true})`. Click in the hotspot → expand; click outside the expanded panel → collapse
@@ -170,7 +173,7 @@ the transparent rest of the window stays click-through. Hidden entirely when idl
 **Tunables** (main constants in `notch-hud.ts` and `notch-hud-geometry.ts`; CSS vars in
 `hud.css :root`, defaults in parens — tune on a Mac): `NOTCH_WIDTH` (168) / `--notch-width` (main
 pushes the real value on the first geometry push), `NOTCH_WIDTH_MIN/MAX` (100/320, the settings
-clamp), `NOTCH_BAR_RATIO` (0.03, notch-detection threshold as a fraction of display height),
+clamp), `NOTCH_BAR_MIN_PT` (27, notch-detection threshold: top-strip height in points on a built-in panel),
 `NOTCH_BAR_FLOOR` (24), `HUD_WINDOW_HEIGHT` (460, added ON TOP of `bar`),
 `--capsule-drop` (0 — the bulge was dropped; kept only for the expand math),
 `--capsule-radius` (16), `--panel-width` (400), `--panel-max-h` (420), `--capsule-dur` (0.22s)/`--capsule-ease`,
