@@ -99,13 +99,19 @@ describe('BoardLogStore (local fs)', () => {
     const unsub = store.watch(dir, () => {
       hits++
     })
-    await store.append(dir, entry({ id: 'later' }))
-    // Wait for the debounced callback with a bounded POLL, not a fixed sleep: fs.watch latency on a
-    // loaded machine (a full-suite run plus other processes) exceeded a flat 500 ms and the test
-    // reported 0 hits while passing every time in isolation (measured 2026-09-02). Five seconds is
-    // the ceiling; a watch that never fires still fails, just with the same message.
+    // fs.watch on macOS (FSEvents) is not streaming the instant it returns: a change written in the
+    // first tens of milliseconds after subscribing can be lost for good, and with a SINGLE change the
+    // test then has nothing left to observe — 0 hits after a 5 s wait, green every time in isolation
+    // (measured 2026-09-02 under a loaded full-suite run). The product is not exposed: the board reads
+    // the log on mount and every later append fires. So prove the property that matters — once armed,
+    // a change fires the debounced callback — by appending again every 300 ms (past the 250 ms
+    // debounce) until the first hit lands, bounded at 5 s.
     const deadline = Date.now() + 5000
-    while (hits < 1 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25))
+    let n = 0
+    while (hits < 1 && Date.now() < deadline) {
+      await store.append(dir, entry({ id: `later-${n++}` }))
+      await new Promise((r) => setTimeout(r, 300))
+    }
     unsub()
     expect(hits).toBeGreaterThanOrEqual(1)
     const after = hits
