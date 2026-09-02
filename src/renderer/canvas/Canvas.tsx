@@ -823,12 +823,14 @@ export function Canvas() {
   const [controlEdges, setControlEdges] = useState<Edge[]>([])
   const controlEdgesRef = useRef<Edge[]>([])
   controlEdgesRef.current = controlEdges
-  // Nodes opened with `--auto-close yes` BY THIS PROCESS. In memory on purpose, never persisted:
-  // the flag authorizes closing a session without a confirm dialog, and a flag loaded from the
-  // git-shared project file (or a canvas-sync peer) would be consent nobody here gave — the same
-  // rule `wasArmedThisSession` applies to held launches. The consume signal is the spawner's
-  // context-link read after the node is done (renderer/lib/spawnedAlerts.ts `shouldAutoClose`).
-  const autoCloseArmedRef = useRef<Set<string>>(new Set())
+  // Nodes opened with `--auto-close yes` BY THIS PROCESS → the node that opened them. In memory on
+  // purpose, never persisted: the flag authorizes closing a session without a confirm dialog, and
+  // a flag loaded from the git-shared project file (or a canvas-sync peer) would be consent nobody
+  // here gave — the same rule `wasArmedThisSession` applies to held launches. The OPENER is
+  // recorded too, not only the target: the consume signal is a context-link read, and the reader
+  // must be this exact node — a rope alone is peer-writable and could nominate another verified
+  // reader as "spawner" (consort re-review 2026-09-02). See spawnedAlerts.ts `shouldAutoClose`.
+  const autoCloseArmedRef = useRef<Map<string, string>>(new Map())
   // The latest VERIFIED content read of each armed node (from `agent:linked-read`), kept until the
   // node closes or a newer read replaces it. Kept rather than consumed on arrival because the
   // decision can be undecidable at that moment — the node lives in a project that is not the one
@@ -843,18 +845,37 @@ export function Canvas() {
   // reports done; an un-fired `pendingLaunch` marks a station as "will run", i.e. outstanding.
   const spawnLineage = useCallback(() => {
     const store = useProjects.getState()
-    const ropes: RopeLike[] = controlEdgesRef.current.map((r) => ({ source: r.source, target: r.target }))
+    const status = useAgentStatus.getState().byId
+    const ropes: RopeLike[] = []
+    const ropeKeys = new Set<string>()
+    const addRope = (source: string, target: string): void => {
+      const k = `${source} ${target}`
+      if (ropeKeys.has(k)) return
+      ropeKeys.add(k)
+      ropes.push({ source, target })
+    }
+    for (const r of controlEdgesRef.current) addRope(r.source, r.target)
+    // Identity: the serialized `agentId`, else the legacy `claude` tag, else what the HOOKS said
+    // this node is running (same ladder as `agentIdOf`) — a plain terminal in which the user
+    // launched an agent by hand has no serialized agentId, yet it is a real conductor/station.
+    const identity = (id: string, serialized: AgentId | undefined, tags: string[] | undefined): AgentId | undefined =>
+      serialized ?? ((tags ?? []).includes('claude') ? 'claude' : undefined) ?? status[id]?.agentId
     const meta = new Map<string, { agentId?: AgentId; armed: boolean }>()
     for (const n of nodesRef.current) {
       if (n.type !== 'terminal') continue
-      meta.set(n.id, { agentId: n.data.agentId as AgentId | undefined, armed: !!n.data.pendingLaunch })
+      meta.set(n.id, {
+        agentId: identity(n.id, n.data.agentId as AgentId | undefined, n.data.tags as string[] | undefined),
+        armed: !!n.data.pendingLaunch
+      })
     }
+    // Every project's STORE copy fills the gaps — the active one included, because during a
+    // project switch the incoming project's nodes are in the store before they reach the live
+    // refs. Live refs win where both know a node; ropes are deduplicated by pair.
     for (const p of store.projects) {
-      if (p.id === store.activeProjectId) continue
-      for (const r of p.ropes ?? []) ropes.push({ source: r.source, target: r.target })
+      for (const r of p.ropes ?? []) addRope(r.source, r.target)
       for (const n of p.nodes) {
         if (n.kind !== 'terminal' || meta.has(n.id)) continue
-        meta.set(n.id, { agentId: n.agentId, armed: !!n.pendingLaunch })
+        meta.set(n.id, { agentId: identity(n.id, n.agentId, n.tags), armed: !!n.pendingLaunch })
       }
     }
     return {
@@ -863,7 +884,9 @@ export function Canvas() {
         const a = meta.get(id)?.agentId
         return !!a && hasHooks(a)
       },
-      isArmed: (id: string): boolean => !!meta.get(id)?.armed
+      isArmed: (id: string): boolean => !!meta.get(id)?.armed,
+      /** Known to SOME project (live or store). False ⇒ the node is gone everywhere. */
+      exists: (id: string): boolean => meta.has(id)
     }
   }, [])
   const [dirty, setDirty] = useState(false)
@@ -8895,6 +8918,16 @@ export function Canvas() {
               })
               return
             }
+            // …and the CONDUCTOR must be able to read: a grok/copilot caller gets no bridge either
+            // (bridgeTo refuses its endpoint), so its stations could never be consumed.
+            const conductorAgent = agentIdOf(sourceNodeId)
+            if (wantAutoClose && !(conductorAgent && canContextLink(conductorAgent))) {
+              reply({
+                ok: false,
+                error: `--auto-close needs the CALLER to support context links (it must read the station to release it); "${conductorAgent ?? 'this node'}" does not`
+              })
+              return
+            }
             const agentCwd = args.cwd || groupCwd || srcCwd
             const make = (i: number): CanvasNode =>
               armAfter(
@@ -8924,7 +8957,7 @@ export function Canvas() {
               : Array.from({ length: count }, (_, i) => addAndConnect(make(i)))
             // Armed in THIS process only (see autoCloseArmedRef) — this is the consent to close
             // without a dialog, and it is never written to the project file.
-            if (wantAutoClose) for (const id of ids) autoCloseArmedRef.current.add(id)
+            if (wantAutoClose) for (const id of ids) autoCloseArmedRef.current.set(id, sourceNodeId)
             // Context-link the new session(s) back to the opener (same rationale as spawn-team:
             // the fan-out needs a fan-in). The nodes were added via setNodes in this tick, so
             // resolve their endpoints from `agentId` rather than the not-yet-updated canvas.
@@ -10572,19 +10605,23 @@ export function Canvas() {
         nodeId,
         readerId: read.readerId,
         requestedAt: read.requestedAt,
-        armed,
+        armedBy: (id) => armed.get(id),
         ropes: lineage.ropes,
         stateOf: (id) => cs.byId[id]?.state,
         // Both proofs a destructive consumer needs and a badge never did (spawnedAlerts.ts):
-        // token-verified transition, and a transition that predates the read's start.
+        // a token-verified `done`, whose PROOF (not merely its transition) predates the read.
         isVerified: (id) => cs.byId[id]?.stateVerified === true,
-        stateSince: (id) => cs.byId[id]?.lastEventAt,
+        verifiedSince: (id) => cs.byId[id]?.stateVerifiedAt,
         isAgentNode: lineage.isAgentNode
       })
       if (!ok) return
-      // Decided, but deletion is a canvas operation on the project ON SCREEN. A node in a
-      // background project stays pending (read + arming kept) and is retried from the
-      // canvas-change effect below the moment its project is shown.
+      // Decided, but deletion is a canvas operation on the project ON SCREEN, and only while the
+      // canvas actually HOLDS the active project: during a switch `nodesRef` still carries the
+      // outgoing project after `activeProjectId` moved (the epoch gap every creation funnel
+      // guards with the same predicate), and a delete there would be attributed to the wrong
+      // project and never persisted. A node in a background project, or one caught in the gap,
+      // stays pending (read + arming kept) and is retried from the canvas-change effect below.
+      if (!canCreateOnCanvas(nodesProjectIdRef.current, useProjects.getState().activeProjectId)) return
       if (!nodesRef.current.some((n) => n.id === nodeId)) return
       armed.delete(nodeId)
       autoCloseReadRef.current.delete(nodeId)
@@ -10604,9 +10641,17 @@ export function Canvas() {
   // on every drag frame like the rope-pruning effect, so it bails before any work when the map is
   // empty — the normal state.
   useEffect(() => {
-    if (!autoCloseReadRef.current.size) return
+    if (!autoCloseReadRef.current.size && !autoCloseArmedRef.current.size) return
+    // Entries for nodes that no longer exist in ANY project (deleted from a background project,
+    // project removed) can never fire; drop them so nothing is retried forever.
+    const { exists } = spawnLineage()
+    for (const id of Array.from(autoCloseArmedRef.current.keys())) {
+      if (exists(id)) continue
+      autoCloseArmedRef.current.delete(id)
+      autoCloseReadRef.current.delete(id)
+    }
     for (const id of Array.from(autoCloseReadRef.current.keys())) tryAutoClose(id)
-  }, [nodes, tryAutoClose])
+  }, [nodes, tryAutoClose, spawnLineage])
 
   // Safety net for a lost Stop POST / crashed CLI: decay working entries that saw no hook
   // event at all for STALE_WORKING_MS (the sweep itself is cheap; see agentStatus.ts).

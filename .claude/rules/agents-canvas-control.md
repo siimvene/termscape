@@ -265,5 +265,24 @@ paths:
   yields ONE aggregate at the end rather than one per link — only a node with no state and no
   pending launch is "dead" and not outstanding. `--auto-close` additionally requires
   `CONTEXT_LINK_CAPABLE` (grok/copilot report status but get no bridge, so the close condition
-  would be unreachable) and is refused together with `--project` (`projectTargetFlagRefusal`):
+  would be unreachable) — for the TARGET and for the CALLER (a grok conductor could never read its
+  stations either) — and is refused together with `--project` (`projectTargetFlagRefusal`):
   the consent lives in the caller's own canvas, and a node in another project is outside it.
+  Re-review round (Codex, 2026-09-02, all fixed): (e) the proof clock is `stateVerifiedAt`, NOT
+  `lastEventAt` — an unverified (forgeable) `done` records the transition, the genuine Stop then
+  re-asserts the same state as verified through the same-state fast path, which refreshes
+  `stateVerified` but never moves `lastEventAt`; a read taken between the two would have passed.
+  `stateVerifiedAt` is stamped on the unverified→verified edge only and cleared on an unverified
+  re-assert; `shouldAutoClose` compares the read's start against it. (f) consent binds the OPENER:
+  `autoCloseArmedRef` is `Map<nodeId, openerId>` and the reader must be that node — a rope is
+  peer-writable and could nominate another verified node as "spawner"; the rope check remains as
+  the second lock. (g) the delete runs only while the canvas HOLDS the active project
+  (`canCreateOnCanvas(nodesProjectIdRef, activeProjectId)`, the epoch predicate every creation
+  funnel uses): during a switch `nodesRef` still carries the outgoing project after
+  `activeProjectId` moved, and a delete there is attributed to the wrong project and never
+  persisted. (h) `spawnLineage` resolves identity with `agentIdOf`'s ladder (serialized agentId →
+  legacy `claude` tag → what the hooks reported) so a plain terminal in which the user launched an
+  agent by hand is a real conductor/station; it merges EVERY project's store copy (the active one
+  included — during a switch the incoming nodes are in the store before the live refs), live refs
+  winning, ropes deduplicated by pair; and the retry effect prunes armed/read entries for nodes
+  that exist in no project.

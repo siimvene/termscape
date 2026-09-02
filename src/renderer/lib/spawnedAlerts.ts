@@ -118,25 +118,34 @@ export function decideDoneAlert(input: {
  *   conductor consumed partial output.
  * The reader's identity is proven upstream: core/context-link.ts emits the read only for a
  * verified caller, so a bearer holder POSTing `nodeId=<conductor>` never produces this event.
+ * The reader must ALSO be the node that armed the flag (`armedBy`), recorded in memory at
+ * `open-*` time: ropes are persisted and peer-writable, so a rope alone could be rewritten to
+ * nominate a different verified node as "spawner" and hand it the kill (consort re-review).
  */
 export function shouldAutoClose(input: {
   nodeId: string
   readerId: string
   /** When the read started (LinkedRead.requestedAt). */
   requestedAt: number
-  armed: ReadonlySet<string>
+  /** The node that opened `id` with `--auto-close` THIS process, or undefined if not armed. */
+  armedBy: (id: string) => string | undefined
   ropes: readonly RopeLike[]
   stateOf: (id: string) => AgentState | undefined
   /** Did a token-verified hook POST set the node's current state? */
   isVerified: (id: string) => boolean
-  /** When the node last CHANGED state (agentStatus `lastEventAt`); undefined = unknown ⇒ refuse. */
-  stateSince: (id: string) => number | undefined
+  /**
+   * When the current state was FIRST asserted VERIFIED (agentStatus `stateVerifiedAt`) — not the
+   * transition time: a forgeable unverified `done` can record the transition early, and the real
+   * Stop then re-asserts it verified without moving the transition clock. undefined ⇒ refuse.
+   */
+  verifiedSince: (id: string) => number | undefined
   isAgentNode: (id: string) => boolean
 }): boolean {
-  if (!input.armed.has(input.nodeId)) return false
+  const opener = input.armedBy(input.nodeId)
+  if (!opener || opener !== input.readerId) return false
   if (input.stateOf(input.nodeId) !== 'done') return false
   if (!input.isVerified(input.nodeId)) return false
-  const since = input.stateSince(input.nodeId)
+  const since = input.verifiedSince(input.nodeId)
   if (since === undefined || since > input.requestedAt) return false
   return spawnerOf(input.nodeId, input.ropes, input.isAgentNode) === input.readerId
 }

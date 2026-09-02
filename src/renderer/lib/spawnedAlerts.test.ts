@@ -109,16 +109,16 @@ describe('shouldAutoClose', () => {
     requestedAt: T0 + 500,
     ropes,
     isAgentNode,
-    armed: new Set(['w1']),
+    armedBy: (id: string) => (id === 'w1' ? 'conductor' : undefined),
     stateOf: states({ w1: 'done' }),
     isVerified: (id: string) => id === 'w1',
-    stateSince: (id: string) => (id === 'w1' ? T0 : undefined)
+    verifiedSince: (id: string) => (id === 'w1' ? T0 : undefined)
   }
-  it('closes only an ARMED node that is verifiably done, done BEFORE the read began, read by its own spawner', () => {
+  it('closes only an ARMED node that is verifiably done, verified BEFORE the read began, read by its own opener', () => {
     expect(shouldAutoClose(base)).toBe(true)
   })
   it('never closes a node that was not armed this session (a flag from disk is not consent)', () => {
-    expect(shouldAutoClose({ ...base, armed: new Set() })).toBe(false)
+    expect(shouldAutoClose({ ...base, armedBy: () => undefined })).toBe(false)
   })
   it('does not close on a read that happened while the node was still working / unknown', () => {
     expect(shouldAutoClose({ ...base, stateOf: states({ w1: 'working' }) })).toBe(false)
@@ -127,12 +127,20 @@ describe('shouldAutoClose', () => {
   it('refuses an UNVERIFIED done — a legacy tokenless hook POST can forge one on a working station', () => {
     expect(shouldAutoClose({ ...base, isVerified: () => false })).toBe(false)
   })
-  it('refuses when the done transition happened AFTER the read started (Stop landed mid-render)', () => {
-    expect(shouldAutoClose({ ...base, stateSince: () => T0 + 501 })).toBe(false)
-    expect(shouldAutoClose({ ...base, stateSince: () => T0 + 500 })).toBe(true) // same instant counts
-    expect(shouldAutoClose({ ...base, stateSince: () => undefined })).toBe(false) // unknown ⇒ refuse
+  it('refuses when the VERIFIED done arrived after the read started (mid-render Stop, or a forged early done later confirmed)', () => {
+    expect(shouldAutoClose({ ...base, verifiedSince: () => T0 + 501 })).toBe(false)
+    expect(shouldAutoClose({ ...base, verifiedSince: () => T0 + 500 })).toBe(true) // same instant counts
+    expect(shouldAutoClose({ ...base, verifiedSince: () => undefined })).toBe(false) // unknown ⇒ refuse
   })
   it('ignores reads by anyone but the spawner (a reviewer reading the same node)', () => {
     expect(shouldAutoClose({ ...base, readerId: 'w2' })).toBe(false)
+  })
+  it('binds consent to the node that ARMED it: a rewritten rope nominating another verified reader gets nothing', () => {
+    // Peer rewrote the rope so `other` now looks like w1's spawner; `other` reads it. The in-memory
+    // arming still names `conductor`, so the read does not close.
+    const rewritten = [{ source: 'other', target: 'w1' }]
+    expect(shouldAutoClose({ ...base, readerId: 'other', ropes: rewritten })).toBe(false)
+    // And the opener without its rope (user deleted the edge) closes nothing either.
+    expect(shouldAutoClose({ ...base, ropes: rewritten })).toBe(false)
   })
 })

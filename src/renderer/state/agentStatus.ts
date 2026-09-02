@@ -55,6 +55,15 @@ export interface AgentNodeStatus {
    */
   stateVerified?: boolean
   /**
+   * When the current state was FIRST asserted by a token-verified POST — the moment its proof
+   * arrived, which is not the moment of the transition: an unverified (forgeable) `done` may
+   * record the transition, and the genuine Stop then re-asserts the same state as verified
+   * WITHOUT moving `lastEventAt`. `--auto-close` compares the read's start against THIS clock, so
+   * a read that consumed output before the real completion never counts (consort finding
+   * 2026-09-02). Cleared whenever the state is re-asserted unverified. TRANSIENT like `stateVerified`.
+   */
+  stateVerifiedAt?: number
+  /**
    * When this node last CHANGED state (or was explicitly woken) — rendered as the status group's
    * relative age and also read as the idle clock by `terminal/hibernation-policy.ts`. Deliberately
    * not `stateAt`: that one is refreshed by every same-state event (freshness), while "how long in
@@ -355,7 +364,13 @@ export function createAgentStatusSession(
             // The evidence rides along, in place and for the same reason: a re-assert of the SAME
             // state by a legacy POST must not leave an earlier `true` standing, or this copy would
             // disagree with the mirror the gate actually reads.
+            const wasVerified = s.byId[id].stateVerified === true
             s.byId[id].stateVerified = verified === true
+            // The proof clock moves only on the unverified→verified edge (and clears on the way
+            // back): a verified re-assert of an already-verified state keeps its original stamp.
+            if (verified === true) {
+              if (!wasVerified) s.byId[id].stateVerifiedAt = now
+            } else s.byId[id].stateVerifiedAt = undefined
           }
           return s
         }
@@ -366,6 +381,7 @@ export function createAgentStatusSession(
         // Written on the same edge the state is — the evidence describes THIS transition, and an
         // absent argument is not evidence.
         next.stateVerified = verified === true
+        next.stateVerifiedAt = verified === true ? now : undefined
         if (agentId !== undefined) next.agentId = agentId
         // Retain the approval ticket only while blocked; any other state clears it (transient).
         next.pendingId = state === 'blocked' ? (pendingId ?? prev.pendingId) : undefined
