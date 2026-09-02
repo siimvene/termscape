@@ -5,6 +5,11 @@
 //
 // Kept free of React/store imports so the lens table and the prompt wording are unit-testable.
 
+import { freeSpot, type Box } from './placement'
+
+/** Breathing room between the target's container and the panel frame's left edge. */
+export const VERIFY_PANEL_GUTTER = 48
+
 /** Lens id → what that reviewer is told to hunt for. */
 const LENS_BRIEFS: Record<string, string> = {
   correctness:
@@ -47,6 +52,35 @@ export function parseLenses(raw: string | undefined): string[] {
     if (out.length >= MAX_LENSES) break
   }
   return out
+}
+
+/**
+ * Where to drop the verify panel's group frame, in ROOT space.
+ *
+ * The panel is anchored immediately to the RIGHT of the target's CONTAINER — the target's group
+ * frame when it sits in one (`frame`), else the target node itself (`node`) — with a fixed gutter,
+ * then pushed further right/down only as far as needed to clear existing top-level nodes/frames.
+ * The push reuses `freeSpot`'s ring search — one layout engine, not a second one.
+ *
+ * Anchoring OUTSIDE the frame's right edge is also what makes the panel a top-level SIBLING of the
+ * target's frame rather than a child of it: the target's frame may be worktree-bound, and reviewers
+ * nested inside it would inherit that cwd — a panel reviews the checkout, it must not fork it. The
+ * caller keeps the panel at the top level; this function only guarantees it lands beside, not over.
+ *
+ * `obstacles` are the other top-level nodes/frames in root space. Pure.
+ */
+export function verifyPanelOrigin(opts: {
+  node: Box
+  frame?: Box | null
+  panel: { w: number; h: number }
+  obstacles: Box[]
+  gutter?: number
+  gap?: number
+}): { x: number; y: number } {
+  const container = opts.frame ?? opts.node
+  const gutter = opts.gutter ?? VERIFY_PANEL_GUTTER
+  const preferred = { x: container.x + container.w + gutter, y: container.y }
+  return freeSpot(opts.obstacles, preferred, { w: opts.panel.w, h: opts.panel.h }, opts.gap)
 }
 
 /** How a given agent is told to read a linked node's work. */

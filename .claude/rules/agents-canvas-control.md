@@ -126,6 +126,20 @@ paths:
   caller's. The judge is armed on ids that exist only in that tick, which is why `armAfter` takes
   `extraLive` — without it the reviewers would look *deleted*, deletion counts as satisfied, and
   the judge would fire before a single review existed.
+  **Panel placement (2026-09-02):** the finished panel frame is dropped ADJACENT to the target's
+  container — immediately RIGHT of the target's OUTERMOST (top-level) group frame when the target
+  sits in one, else right of the target node — with a fixed `VERIFY_PANEL_GUTTER` (48px), then
+  pushed further right/down only as far as needed to clear other top-level nodes/frames. The push
+  reuses `freeSpot`'s ring search (one layout engine, not two); the pure origin math is
+  `verifyPanelOrigin` in `renderer/lib/verifyPanel.ts` (unit-tested: loose→right of node,
+  framed→right of frame, occupied→pushed, sibling-not-child). It used to arrange at `placeBelow(0)`
+  — below the CALLER — so a panel verifying a node inside its own frame landed overlapping that
+  frame with every "waits for"/context edge crossing it (screenshot-verified). The panel frame is a
+  top-level SIBLING of the target's frame, NEVER nested inside it: that frame may be worktree-bound,
+  and a reviewer nested there would inherit its cwd — a panel reviews the checkout, it must not fork
+  it. Anchoring outside the frame's right edge guarantees the sibling relationship geometrically;
+  the nodes are created at top level so `groupSelectedNodes` wraps them into a top-level frame.
+  Children are frame-relative, so repositioning the finished frame alone carries the whole panel.
 - **Both skill bodies steer fan-out to canvas nodes** (2026-09-02, pinned by
   `canvas-control-core.test.ts`): an agent's own in-process subagents (Agent/Task tool) surface only as
   ephemeral cards (see the subagent-visualization bullet in `agents.md`) — gone on the parent's next
