@@ -252,9 +252,17 @@ class NotchHudController {
    */
   private safeAreaTop: number | null = null
   private safeAreaProbe: Promise<void> | null = null
+  /** A display change landed while a probe was in flight: that probe may describe the OLD primary
+   *  panel, so run one more when it settles (consort finding 2026-09-02 — without this, an external's
+   *  `0` could stay authoritative after unplugging it from a notched MacBook until the next event). */
+  private safeAreaDirty = false
 
   private refreshSafeArea(): Promise<void> {
-    if (this.safeAreaProbe) return this.safeAreaProbe // one in flight at a time; a change re-arms
+    if (this.safeAreaProbe) {
+      this.safeAreaDirty = true // one in flight at a time; the trailing edge re-probes once
+      return this.safeAreaProbe
+    }
+    this.safeAreaDirty = false
     this.safeAreaProbe = probeSafeAreaTop()
       .then((top) => {
         if (top === this.safeAreaTop) return
@@ -265,6 +273,7 @@ class NotchHudController {
       })
       .finally(() => {
         this.safeAreaProbe = null
+        if (this.safeAreaDirty && getHudWindow()) void this.refreshSafeArea()
       })
     return this.safeAreaProbe
   }

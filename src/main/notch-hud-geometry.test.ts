@@ -92,6 +92,13 @@ describe('hudGeometry — the safe-area probe decides when it answered (heuristi
   it('the probe never makes an external display notched', () => {
     expect(hudGeometry({ ...display(1728, 1117, 33, false), safeAreaTop: 32 }).hasNotch).toBe(false)
   })
+  it('a hidden menu bar (fullscreen app) keeps the strip as tall as the probed notch', () => {
+    const g = hudGeometry({ ...display(1728, 1117, 0, true), safeAreaTop: 32 })
+    expect(g.hasNotch).toBe(true)
+    expect(g.bar).toBe(32)
+    // …while a notchless probe leaves the bar at its floor.
+    expect(hudGeometry({ ...display(1440, 900, 0, true), safeAreaTop: 0 }).bar).toBe(NOTCH_BAR_FLOOR)
+  })
   it('null / undefined / NaN probe ⇒ the strip-height heuristic', () => {
     expect(hudGeometry({ ...display(1728, 1117, 33, true), safeAreaTop: null }).hasNotch).toBe(true)
     expect(hudGeometry({ ...display(1440, 900, 24, true), safeAreaTop: undefined }).hasNotch).toBe(false)

@@ -80,14 +80,17 @@ export const HUD_WINDOW_HEIGHT = 460
 export function hudGeometry(input: HudGeometryInput): HudGeometry {
   const b = input.bounds
   const inset = input.workArea.y - b.y
-  const bar = Math.max(NOTCH_BAR_FLOOR, inset)
-  // A physical notch requires a built-in panel whose reserved strip is a notch-sized SHARE of it.
   // The probe decides when it answered; the strip-height heuristic only fills its absence. An
   // internal panel is required either way — notches exist only on built-in displays, and a probe
   // of screens[0] while an external is primary describes that external (safe area 0 ⇒ notchless).
   const probed = typeof input.safeAreaTop === 'number' && Number.isFinite(input.safeAreaTop)
   const hasNotch =
     input.internal && (probed ? (input.safeAreaTop as number) > 0 : inset >= NOTCH_BAR_MIN_PT)
+  // The strip is at least as tall as the physical notch when we KNOW the notch: with the menu bar
+  // hidden (a fullscreen app) `inset` is 0 while the housing still occupies its 32 pt, and a
+  // 24 pt fused capsule would sit shorter than the black it is meant to extend, its expanded
+  // content sliding up into the notch's safe area (consort finding 2026-09-02).
+  const bar = Math.max(NOTCH_BAR_FLOOR, inset, hasNotch && probed ? (input.safeAreaTop as number) : 0)
   return {
     x: b.x,
     y: b.y,

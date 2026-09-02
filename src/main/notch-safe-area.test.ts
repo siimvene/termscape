@@ -19,10 +19,11 @@ describe('notch-safe-area', () => {
     expect(await probeSafeAreaTop('win32')).toBeNull()
   })
 
-  it.skipIf(process.platform !== 'darwin')('on a Mac, answers a real inset for the primary display', async () => {
-    // 0 on a notchless panel or with an external as primary; > 0 on a built-in notched panel.
+  it.skipIf(process.platform !== 'darwin')('on a Mac, answers a real inset for the primary display, or null headless', async () => {
+    // 0 on a notchless panel or with an external as primary; > 0 on a built-in notched panel; and
+    // `null` when there is no NSScreen at all (a headless CI runner / SSH session without a window
+    // server) — that is the documented fail-open, not a failure.
     const top = await probeSafeAreaTop()
-    expect(top).not.toBeNull()
-    expect((top as number) >= 0).toBe(true)
+    expect(top === null || (Number.isFinite(top) && top >= 0)).toBe(true)
   })
 })

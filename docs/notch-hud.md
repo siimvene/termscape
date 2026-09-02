@@ -30,7 +30,11 @@ alwaysOnTop:true, focusable:false, skipTaskbar:true}` + `setAlwaysOnTop(true,'sc
   of the primary display, which Electron does not expose; `src/main/notch-safe-area.ts` asks AppKit
   through a fixed JavaScript-for-Automation one-liner (`/usr/bin/osascript`, ~0.3 s, async, fail-open
   to `null`) at HUD start and on every display change, and the controller re-places + re-pushes when
-  the verdict changes. Three height heuristics shipped and each was wrong on a real machine: an
+  the verdict changes (one probe in flight at a time; a display change landing mid-probe re-arms a
+  trailing probe, so an unplugged external's `0` never outlives the event). When the probe says
+  notch, `bar` is floored to the probed inset too: a fullscreen app hides the menu bar (`inset` 0)
+  while the housing keeps its 32 pt, and a 24 pt fused capsule would be shorter than the notch it
+  extends. Three height heuristics shipped and each was wrong on a real machine: an
   absolute `>= 32` missed a notched 15" Air's scaled modes (31/28 pt, issue #508); a RATIO of display
   height (`>= 0.03`) assumed the notch is a fixed share of its panel — true per panel, false between
   panels — and the 16" MBP's 33/1117 = 0.0295 read as notchless at its default scaling, so the HUD
