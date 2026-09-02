@@ -270,6 +270,19 @@ session (you can't keep a live OS process across a reboot):
   persisted in `agentStatus` localStorage — `claude --resume`, `codex resume`, `gemini
   --resume`) when known, else the bare `launchCmd`. The one-shot `data.initialCommand` still wins
   on the very first open, so the agent is never double-launched.
+- **An ARMED node must not auto-resume before its held launch has been delivered.** A node opened
+  with a `pendingLaunch` (canvas-control `--after`, or a cold-opened node — see
+  `.claude/rules/agents-canvas-control.md`) mints its `agentSessionId` at CREATION and holds a
+  `claude --session-id <id> …` launch. On its FIRST mount it is `fresh` (no tmux session yet) with
+  that minted `priorId` set but NO transcript, so the cold-restore branch here would type
+  `claude --resume <id>` into the shell — which prints "No conversation found with session ID: …",
+  wastes a CLI start, and then has the real launch delivered on top (screenshot + pane-verified
+  2026-09-02). So the cold-restore auto-resume AND the in-place relaunch paths gate on the pure
+  `mayRelaunchAgent(data)` (`renderer/lib/pendingLaunch.ts`): `pendingLaunch` present ⇒ never resume;
+  once the "Fire armed nodes" effect delivers and clears `pendingLaunch`, a LATER cold restore
+  resumes normally (the gate is exactly the flag, nothing more). The minted id is still correct — it
+  IS the conversation the launch creates and hooks key on — so the fix is a gate, not a change to the
+  assignment.
 
 ### We have our own VT emulator — check it before asking tmux
 

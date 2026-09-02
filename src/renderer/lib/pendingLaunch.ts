@@ -15,6 +15,23 @@ export interface ArmedNode {
 /** The subset of the agentStatus store this module reads. */
 export type StatusById = Record<string, { state?: AgentState } | undefined>
 
+/**
+ * May a freshly-mounted agent node run its cold-restore `--resume` (or any in-place relaunch)?
+ *
+ * NO while it still holds a `pendingLaunch`. An armed node (canvas-control `--after`, or a
+ * cold-opened node) has NEVER launched its agent: its `agentSessionId` was MINTED at creation and
+ * names a conversation that does not exist yet — the held launch (`--session-id <id> …`, delivered
+ * by the "Fire armed nodes" effect) is what creates it. Resuming first types `claude --resume <id>`
+ * into the fresh shell, which prints "No conversation found with session ID: …", wastes a CLI start,
+ * and then has the real launch delivered on top. Once the fire effect delivers and clears
+ * `pendingLaunch`, a later cold restore resumes normally — so the gate is exactly the pending flag,
+ * nothing more. Three cases: armed (`pendingLaunch` set) ⇒ false; delivered / plain restore (no
+ * `pendingLaunch`) ⇒ true.
+ */
+export function mayRelaunchAgent(data: { pendingLaunch?: PendingLaunch }): boolean {
+  return !data.pendingLaunch
+}
+
 export interface LaunchToFire {
   id: string
   command: string

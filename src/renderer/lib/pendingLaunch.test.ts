@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest'
-import { dependencyEdges, launchesToFire, unmetDeps, type ArmedNode, type StatusById } from './pendingLaunch'
+import {
+  dependencyEdges,
+  launchesToFire,
+  mayRelaunchAgent,
+  unmetDeps,
+  type ArmedNode,
+  type StatusById
+} from './pendingLaunch'
 
 const armed = (id: string, after: string[], command = `echo ${id}`): ArmedNode => ({
   id,
@@ -129,5 +136,26 @@ describe('dependencyEdges', () => {
 
   it('draws nothing once the node is no longer armed', () => {
     expect(dependencyEdges([plain('c')], new Set(['c']))).toEqual([])
+  })
+})
+
+describe('mayRelaunchAgent — an armed node must not cold-restore/resume before its held launch', () => {
+  it('armed (pendingLaunch set) ⇒ NO resume', () => {
+    // The minted agentSessionId names a conversation that does not exist yet; the held launch,
+    // not a `--resume`, is what creates it.
+    expect(mayRelaunchAgent({ pendingLaunch: { after: [], command: 'claude --session-id x' } })).toBe(
+      false
+    )
+    expect(mayRelaunchAgent({ pendingLaunch: { after: ['a'], command: 'claude --session-id x' } })).toBe(
+      false
+    )
+  })
+
+  it('delivered (pendingLaunch cleared by the fire effect) ⇒ resume allowed', () => {
+    expect(mayRelaunchAgent({ pendingLaunch: undefined })).toBe(true)
+  })
+
+  it('plain restore (never armed) ⇒ unchanged, resume allowed', () => {
+    expect(mayRelaunchAgent({})).toBe(true)
   })
 })

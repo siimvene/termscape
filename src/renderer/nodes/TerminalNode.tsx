@@ -134,6 +134,7 @@ import { ContextMeter } from '../components/ContextMeter'
 import { isZoomModifierHeld } from '../lib/zoomModifier'
 import { isHidden } from '../lib/ui-visibility'
 import { readsClaudeTranscript } from '../lib/transcriptGates'
+import { mayRelaunchAgent } from '../lib/pendingLaunch'
 import { liveProjectJumpTarget } from '../lib/projectJump'
 import { renameCommand } from '../lib/sessionRename'
 import {
@@ -3099,7 +3100,10 @@ export function TerminalNode({
         if (data.initialCommand) {
           writeWhenShellReady(data.initialCommand)
           updateNodeData(id, { initialCommand: undefined })
-        } else if (fresh && agentId && canResume(agentId)) {
+        } else if (fresh && agentId && canResume(agentId) && mayRelaunchAgent(data)) {
+          // An ARMED node (`pendingLaunch` still set) has never launched its agent — its minted
+          // `agentSessionId` names a conversation that does not exist yet, so the held launch, not a
+          // `--resume`, is what must create it. Skip here and let the fire effect deliver.
           // Cold restart of an agent node: the live agent is gone, so re-launch it. Resume the
           // prior conversation by its session id when we have one; otherwise start the agent
           // fresh. Plain terminals get nothing here — just the restored shell.
@@ -3217,6 +3221,10 @@ export function TerminalNode({
       guardConcurrentRestart(id, async (targetAgentId?: AgentId, targetModel?: string, restartShell?: boolean) => {
         const st = useAgentStatus.getState().byId[id]
         const currentNode = getNode(id)
+        // An armed node still holding its `pendingLaunch` has never launched: `agentSessionId` is a
+        // minted id whose conversation does not exist yet, so a `--resume` restart would fail. Read
+        // the LIVE node (delivery clears the flag) rather than the mount-time capture.
+        if (currentNode && !mayRelaunchAgent(currentNode.data)) return 'not-eligible'
         const agentSessionId = restartSessionId(st?.sessionId, currentNode?.data.agentSessionId)
         // `data.agentId` can change after a successful same-base swap while this deliberately
         // long-lived terminal effect stays mounted. Read the node NOW instead of trusting the
@@ -3499,6 +3507,11 @@ export function TerminalNode({
       resume: guardConcurrentRestart(id, async (): Promise<ResumePhaseOutcome> => {
         const st = useAgentStatus.getState().byId[id]
         const agentSessionId = st?.sessionId
+        // A node still holding its held launch has never launched (see the cold-restore branch): its
+        // session id is minted, not resumable. Hibernation never selects such a node, so this is
+        // belt-and-suspenders — but the wake path must obey the same rule as every other relaunch.
+        const currentNode = getNode(id)
+        if (currentNode && !mayRelaunchAgent(currentNode.data)) return 'not-eligible'
         if (!agentId || !agentSessionId || !restartTarget()) return 'not-eligible'
         // Command FIRST, pane check LAST. Both of these awaits can take a moment (the claude
         // version probe behind `ensureActivePermissionMode` most of all), and whatever is asked
