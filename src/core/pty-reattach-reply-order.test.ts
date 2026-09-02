@@ -59,6 +59,8 @@ vi.mock('node-pty', () => ({
 
 const liveTmuxSessions = new Set<string>()
 let paneCurrentPath = os.tmpdir()
+/** Fired when the probe is in flight — the window in which another client can act. */
+let duringProbe: (() => void) | null = null
 
 vi.mock('child_process', () => {
   type Cb = (err: Error | null, res?: { stdout: string; stderr: string }) => void
@@ -74,6 +76,7 @@ vi.mock('child_process', () => {
     } else if (args.includes('display-message') && args.includes('#{pane_current_path}')) {
       // The stale-cwd probe. Slow on purpose: this is the await whose position is under test.
       events.push('probe:pane_current_path')
+      duringProbe?.()
       setTimeout(() => ok(paneCurrentPath), PROBE_MS)
     } else if (args.includes('display-message')) {
       events.push('probe:pane_pid')
@@ -107,6 +110,7 @@ describe('warm reattach: the create reply beats the first output flush', () => {
     events.length = 0
     liveTmuxSessions.clear()
     paneCurrentPath = os.tmpdir()
+    duringProbe = null
     userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nt-reattach-'))
     fake = fakePlatform({ userDataDir })
     initPlatform(fake)
@@ -139,7 +143,19 @@ describe('warm reattach: the create reply beats the first output flush', () => {
   const paintsSentTo = (sessionId: string) =>
     fake.sent.filter((s) => s.to === CLIENT && s.channel === IPC.ptyData(sessionId))
 
-  const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
+  /** Poll until `pred` holds (bounded). Preferred over a fixed sleep: the flush is a timer the
+   *  test does not own, so "wait for the observable" cannot be starved into a false failure. */
+  const until = async (pred: () => boolean, ms = 1000): Promise<void> => {
+    const deadline = Date.now() + ms
+    while (!pred()) {
+      if (Date.now() > deadline) throw new Error('condition not reached in time')
+      await new Promise<void>((r) => setTimeout(r, 5))
+    }
+  }
+  /** Every test that spawned must drain the fake pty's 1 ms paint + 8 ms flush before teardown
+   *  resets the platform — a flush landing on an uninitialized platform would throw out of a
+   *  timer, outside any test. */
+  const drained = (sessionId: string) => until(() => paintsSentTo(sessionId).length === 1)
 
   it('probes the pane cwd BEFORE spawning the client, and no output is flushed before the reply', async () => {
     await tmuxManager()
@@ -158,10 +174,8 @@ describe('warm reattach: the create reply beats the first output flush', () => {
     expect(paintsSentTo(r.sessionId)).toHaveLength(0)
 
     // …and the paint is not LOST, only later: it lands after FLUSH_MS, once a listener can exist.
-    await sleep(PROBE_MS + 30)
-    const paints = paintsSentTo(r.sessionId)
-    expect(paints).toHaveLength(1)
-    expect(paints[0].args[0]).toBe(PAINT)
+    await drained(r.sessionId)
+    expect(paintsSentTo(r.sessionId)[0].args[0]).toBe(PAINT)
   })
 
   it('a fresh spawn never runs the probe (there is no pane to ask) and still replies first', async () => {
@@ -173,8 +187,7 @@ describe('warm reattach: the create reply beats the first output flush', () => {
     expect(r.fresh).toBe(true)
     expect(events.filter((e) => e.startsWith('probe:'))).toHaveLength(0)
     expect(paintsSentTo(r.sessionId)).toHaveLength(0)
-    await sleep(30)
-    expect(paintsSentTo(r.sessionId)).toHaveLength(1)
+    await drained(r.sessionId)
   })
 
   it('moving the probe kept its verdict: a pane on a vanished directory is still flagged stale', async () => {
@@ -185,5 +198,22 @@ describe('warm reattach: the create reply beats the first output flush', () => {
     const r = await create()
     expect(r.fresh).toBe(false)
     expect(r.staleCwd).toBe(true)
+    await drained(r.sessionId)
+  })
+
+  it('a delete that lands while the probe is in flight still wins: no spawn, the create is refused', async () => {
+    // The probe is an await between create()'s tombstone check and the spawn, and spawnSession
+    // CLEARS a tombstone for the tmux session it attaches. So a delete racing into that window
+    // must be re-asked immediately before the spawn, or the create resurrects what was deleted.
+    const m = await tmuxManager()
+    liveTmuxSessions.add(sessionName(NODE))
+    const OTHER = 99
+    duringProbe = () =>
+      (m as unknown as { tombstone(persistKey: string, by: number): void }).tombstone(NODE, OTHER)
+
+    const r = await create()
+    expect(r.sessionId).toBe('')
+    expect((r as { closed?: { by: number | null } }).closed).toEqual({ by: OTHER })
+    expect(events).not.toContain('spawn')
   })
 })

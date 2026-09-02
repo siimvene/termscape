@@ -251,8 +251,8 @@ answers "unlinked"; anything unreadable degrades to no opinion, and the banner n
 guess. Both signals are proven against a real tmux in `pane-cwd.realtmux.test.ts`, which asserts
 the same verdict on both platforms through their different evidence.
 
-**The probe runs BEFORE the tmux client is spawned, and nothing may be awaited between
-`spawnSession` and `spawnNew`'s `return` on the local tmux path.** [MEASURED 2026-09-02, tmux
+**The probe runs BEFORE the tmux client is spawned, and on the POSIX local tmux path nothing is
+awaited between `spawnSession` and `spawnNew`'s `return`.** [MEASURED 2026-09-02, tmux
 3.7c] tmux paints the attached screen and sends its terminal queries (DA1/DA2/OSC 10/11/`?996n`)
 within ~6 ms of attach; `queueData` flushes to the client `FLUSH_MS` (8 ms) later; and the renderer
 only registers its `pty:data:<sid>` listener in the continuation of the `pty:create` reply, because
@@ -262,7 +262,12 @@ queries dropped, xterm never answered, and tmux waited out its 5.000 s `TTY_QUER
 redrawing — every project switch past the park window showed blank agent terminals for 5-10 s.
 The session exists before the attach (`!fresh` came from `has-session`), so the pane can be asked
 first. `pty-reattach-reply-order.test.ts` pins both the ordering and "no output reaches the client
-before the create reply".
+before the create reply". Two sibling paths still await after their spawn and inherit the same
+exposure: the dormant Windows warm-tmux confirm (`warmWindowsBackend === 'tmux'`) and the
+session-host `ready` barrier; whoever brings them live owes them the same fix. And because every
+await before the spawn is a window in which another client can DELETE the node, `spawnNew` re-asks
+`liveTombstone` immediately before `spawnSession` (which would otherwise clear the tombstone) —
+`create()`'s own check runs before those awaits and cannot see a delete that lands during them.
 
 ### Cold restore (machine reboot)
 

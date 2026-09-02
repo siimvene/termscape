@@ -2262,13 +2262,25 @@ export class PtyManager {
     // and the renderer only registers `pty:data:<sid>` in the continuation of THIS reply. With
     // ~50 ms of `display-message` + `lsof` awaited between the spawn and the return, the first
     // flush hit a channel nobody listened on: paint and queries gone, xterm never answered, tmux
-    // waited out TTY_QUERY_TIMEOUT (5.000 s) and only then redrew. So on the local tmux path there
-    // must be NO await between `spawnSession` and `return` — the reply has to beat FLUSH_MS.
+    // waited out TTY_QUERY_TIMEOUT (5.000 s) and only then redrew. So on the POSIX local tmux path
+    // there is NO await between `spawnSession` and `return` — the reply has to beat FLUSH_MS. (The
+    // dormant Windows warm-tmux confirm and the session-host `ready` barrier below still await
+    // after their spawn; they inherit the same exposure and owe the same treatment when live.)
     // Pinned by pty-reattach-reply-order.test.ts.
     const probeStaleCwd = !fresh && tmuxBacked && !options.sshRemote && !!options.persistKey
     const staleCwdProbe = probeStaleCwd
       ? await this.paneCwdStale(options.persistKey as string)
       : false
+    // Re-ask the tombstone question HERE, after every await above (has-session, PATH, project
+    // overrides, the cwd probe) and immediately before the spawn. `create()` checked it before
+    // calling us, but a delete can land during those round trips, and `spawnSession` CLEARS the
+    // tombstone of a tmux session it attaches — without this recheck a racing delete would be
+    // undone by the very create it was meant to refuse. Same contract as create()'s check: the
+    // owner's own resurrection is still allowed.
+    if (options.persistKey) {
+      const tomb = this.liveTombstone(options.persistKey)
+      if (tomb && tomb.by !== clientId) return { sessionId: '', fresh: false, closed: { by: tomb.by } }
+    }
     const sessionId = this.spawnSession(
       options,
       clientId,
