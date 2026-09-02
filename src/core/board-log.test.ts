@@ -100,7 +100,12 @@ describe('BoardLogStore (local fs)', () => {
       hits++
     })
     await store.append(dir, entry({ id: 'later' }))
-    await new Promise((r) => setTimeout(r, 500))
+    // Wait for the debounced callback with a bounded POLL, not a fixed sleep: fs.watch latency on a
+    // loaded machine (a full-suite run plus other processes) exceeded a flat 500 ms and the test
+    // reported 0 hits while passing every time in isolation (measured 2026-09-02). Five seconds is
+    // the ceiling; a watch that never fires still fails, just with the same message.
+    const deadline = Date.now() + 5000
+    while (hits < 1 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25))
     unsub()
     expect(hits).toBeGreaterThanOrEqual(1)
     const after = hits
