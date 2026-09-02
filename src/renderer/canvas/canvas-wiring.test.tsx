@@ -155,6 +155,22 @@ describe('breadcrumb wiring the CLAUDE.md bullet calls load-bearing', () => {
     expect(CANVAS_SRC.match(/isMeasured\(internal\)/g) ?? []).toHaveLength(1)
   })
 
+  it('frames the camera synchronously — frameNode never uses the DEFERRED fitView', () => {
+    const body = CANVAS_SRC.slice(
+      CANVAS_SRC.indexOf('const frameNode = useCallback'),
+      CANVAS_SRC.indexOf('const goToNode = useCallback')
+    )
+    expect(body.length).toBeGreaterThan(0)
+    // `useReactFlow().fitView` only QUEUES (fitViewQueued + fitViewOptions) and resolves on the
+    // next setNodes with nodesInitialized === true — which never happens while a keep-alive ghost
+    // (display:none, no size, deliberately not `hidden`) sits in the nodes prop. So the click
+    // moved nothing, and the queued fit resolved later against a node list the target had left:
+    // an EMPTY fit set, bounds {0,0,0,0}, the world origin at maxZoom (138%) — which onMove then
+    // persisted into the project's viewport. The camera must be driven imperatively instead.
+    expect(body).not.toContain('fitView(')
+    expect(body).toContain('setViewport(')
+  })
+
   it('the resume card slot is spent only on a card that can render, and only when opted in', () => {
     // Gated on settings.showResumeCard (default off) FIRST — a disabled card must not spend the
     // one-shot slot — then once per app run, only with a live stop, and never under the opaque

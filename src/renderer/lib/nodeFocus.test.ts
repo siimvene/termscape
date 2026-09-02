@@ -4,6 +4,7 @@ import {
   FIT_NODE_OPTIONS,
   absolutePosition,
   isMeasured,
+  measuredFitRect,
   nodeFitRect,
   viewportForRect
 } from './nodeFocus'
@@ -179,5 +180,66 @@ describe('isMeasured', () => {
     expect(isMeasured({ measured: { width: 600 } })).toBe(false)
     expect(isMeasured({ measured: { width: 0, height: 0 } })).toBe(false)
     expect(isMeasured(undefined)).toBe(false)
+  })
+})
+
+describe('measuredFitRect (the measured focus path, which no longer goes through fitView)', () => {
+  // Canvas.frameNode drops React Flow's DEFERRED fitView entirely and frames BOTH cases itself:
+  // measured ⇒ this rect, unmeasured ⇒ nodeFitRect. These pin that the swap cannot drift.
+  const internal = (over: Record<string, unknown> = {}) => ({
+    measured: { width: 600, height: 400 },
+    internals: { positionAbsolute: { x: 4000, y: 3000 } },
+    ...over
+  })
+
+  it('frames a measured node identically to the persisted-rect path for the same geometry', () => {
+    const fromStore = measuredFitRect(internal())
+    const fromPersisted = nodeFitRect(term(), [term()])
+    expect(fromStore).toEqual(fromPersisted)
+    // …and therefore lands the exact same camera, with and without a chrome-free region.
+    const region = { offsetX: 400, offsetY: 0, width: 880, height: 900 }
+    expect(viewportForRect(fromStore!, 1280, 900)).toEqual(viewportForRect(fromPersisted!, 1280, 900))
+    expect(viewportForRect(fromStore!, 1280, 900, region)).toEqual(
+      viewportForRect(fromPersisted!, 1280, 900, region)
+    )
+  })
+
+  it('uses the absolute position React Flow already resolved (no parent walk needed)', () => {
+    // The store hands out positionAbsolute with the group chain applied, which is why the measured
+    // branch needs neither the node list nor absolutePosition().
+    expect(measuredFitRect(internal({ internals: { positionAbsolute: { x: 5050, y: 260 } } }))).toEqual(
+      { x: 5050, y: 260, width: 600, height: 400 }
+    )
+  })
+
+  it('gives up rather than framing a half-known rect — the caller then stands still', () => {
+    expect(measuredFitRect(internal({ measured: { width: 0, height: 0 } }))).toBeNull()
+    expect(measuredFitRect(internal({ measured: { width: 600 } }))).toBeNull()
+    expect(measuredFitRect({ measured: { width: 600, height: 400 } })).toBeNull()
+    expect(measuredFitRect(internal({ internals: { positionAbsolute: { x: 10 } } }))).toBeNull()
+    expect(measuredFitRect(null)).toBeNull()
+    expect(measuredFitRect(undefined)).toBeNull()
+    // frameNode's rule, end to end: no rect from either source ⇒ no viewport ⇒ setViewport is
+    // never called and the camera stays put. Teleporting to the origin is the bug being fixed.
+    const sizeless: FocusableNode = { id: 'ghost', position: { x: 0, y: 0 } }
+    const rect = measuredFitRect({ measured: {} }) ?? nodeFitRect(sizeless, [sizeless])
+    expect(rect).toBeNull()
+  })
+
+  it('documents the failure mode it replaces: an empty fit set centres the ORIGIN at maxZoom', () => {
+    // What a DEFERRED fitView resolved after a project switch computes: the target has left
+    // nodeLookup, the filtered fit set is empty, getInternalNodesBounds collapses to zeroes and
+    // the zoom divides by 0 ⇒ maxZoom. This is the number to compare a bug report against (138%,
+    // empty canvas, node in the far minimap corner).
+    expect(
+      getViewportForBounds(
+        { x: 0, y: 0, width: 0, height: 0 },
+        1600,
+        900,
+        FIT_NODE_OPTIONS.minZoom,
+        FIT_NODE_OPTIONS.maxZoom,
+        FIT_NODE_OPTIONS.padding
+      )
+    ).toEqual({ x: 800, y: 450, zoom: FIT_NODE_OPTIONS.maxZoom })
   })
 })

@@ -257,9 +257,9 @@ import {
   folderName
 } from '../lib/projectOpen'
 import {
-  FIT_NODE_OPTIONS,
   absolutePosition,
   isMeasured,
+  measuredFitRect,
   nodeFitRect,
   viewportForRect,
   type FocusableNode
@@ -6653,59 +6653,60 @@ export function Canvas() {
   /**
    * The ONE framing implementation behind both deliberate focus (`goToNode`) and breadcrumb
    * back/forward (`stepAndFrame`) — extracted so CLAUDE.md's "Go to node" invariant has a single
-   * copy to regress. Fit the node in view instead of centering at a fixed zoom — `zoom:
-   * max(current, 1)` overshot large terminals (their body never fit the viewport). fitView sizes
-   * the zoom to the node and resolves group-relative positions itself; the clamp keeps a small
-   * node from filling the whole screen and a huge one from being fit microscopic.
+   * copy to regress. It fits the node in view instead of centering at a fixed zoom (`zoom:
+   * max(current, 1)` overshot large terminals — their body never fit the viewport); the clamp in
+   * FIT_NODE_OPTIONS keeps a small node from filling the whole screen and a huge one from being
+   * fit microscopic.
    *
-   * …but ONLY once React Flow has MEASURED the node. Its fit set is filtered by `measured`
-   * (no width/height fallback in there), so an unmeasured node leaves the set EMPTY, the
-   * bounds collapse to {0,0,0,0} and the camera flies to the canvas ORIGIN at max zoom —
-   * empty canvas, node off-screen. That is precisely the state a node is in for the first
-   * tick after its project loads, i.e. on every CROSS-PROJECT focus (OS-notification click,
-   * sessions sidebar, ⌘K jump, presence travel): the load and the focus happen in the same
-   * tick, so measuring can lose the race and only a second attempt would work. In that
-   * window we frame the node ourselves from its persisted size — see lib/nodeFocus.
+   * IT NEVER CALLS `fitView`, and must not be "simplified" back to it. In `@xyflow/react` 12
+   * `fitView` is DEFERRED: it only parks `fitViewQueued` + `fitViewOptions` in the store and
+   * resolves on a later `setNodes` — and ONLY while `nodesInitialized === true`, which this canvas
+   * can never be relied on to be: the webview keep-alive ghosts live in the `<ReactFlow nodes>`
+   * prop with `display:none`, NO width/height and deliberately not `hidden` (a hidden node is
+   * unmounted, i.e. a dead guest — see lib/webviewKeepAlive), so React Flow's ResizeObserver never
+   * measures them and `adoptUserNodes` keeps `nodesInitialized` false forever. Consequence when
+   * this called `fitView`: the click moved the camera not at all ("I have to scroll to the node
+   * myself"), and the fit stayed queued until some unrelated `updateNodeInternals` — frequently
+   * after a project switch, by which point the target id has left `nodeLookup`, so the fit set is
+   * EMPTY, its bounds collapse to {0,0,0,0} and `getViewportForBounds` clamps to maxZoom around
+   * the world ORIGIN (measured: an empty canvas at 138% with the node alone in the far minimap
+   * corner). `onMove` then PERSISTS that camera into the project, so every later activation of it
+   * re-lands on the origin. So the camera is driven imperatively with `setViewport`: synchronous,
+   * and impossible to re-target between call and resolve because there is no resolve.
    *
-   * The measured check must read React Flow's OWN store (`getInternalNode`), not our node
-   * object: `measured` only reaches our state one render later, when `onNodesChange` applies
-   * the dimensions change, so our copy says "unmeasured" for nodes the store has long sized.
+   * Which rect: React Flow's OWN measurement when the store has one (`getInternalNode`, not our
+   * node object — `measured` reaches our state only one render later, when `onNodesChange` applies
+   * the dimensions change, so our copy says "unmeasured" for nodes the store has long sized, and
+   * `internals.positionAbsolute` has the group chain already resolved). Otherwise the node's
+   * PERSISTED size (`lib/nodeFocus`), which needs no layout — that is the state a node is in for
+   * the first tick after its project loads, i.e. on every CROSS-PROJECT focus (OS-notification
+   * click, sessions sidebar, ⌘K jump, presence travel), where the load and the focus happen in the
+   * same tick.
    *
-   * The framing itself is solved against the CURRENT chrome layout, exactly like `fitAll`:
-   * a flat 20% ratio has to reserve enough slack for the dock/minimap on EVERY side, which
-   * is what kept a big node (a group frame most of all) further away than it needed to be.
-   * The free-rect solver reclaims the space the chrome does not actually occupy, so the node
-   * is framed tighter without sliding underneath anything. The UNMEASURED branch solves the same
-   * free region (from the node's persisted canvas size, which is all the aspect-ratio pick needs)
-   * — otherwise a cross-project focus, which is exactly the unmeasured case, centred the node in
-   * the full pane and parked it half under the pinned sessions sidebar. Both branches fall back to
-   * the flat 20% ratio when there is nothing sensible to solve.
+   * The framing itself is solved against the CURRENT chrome layout, exactly like `fitAll`: a flat
+   * 20% ratio has to reserve enough slack for the dock/minimap on EVERY side, which is what kept a
+   * big node (a group frame most of all) further away than it needed to be. The free-rect solver
+   * reclaims the space the chrome does not actually occupy, so the node is framed tighter without
+   * sliding underneath anything — and BOTH rect sources go through that one solver, so no focus
+   * path can park the node half under the pinned sessions sidebar. Falls back to the flat 20%
+   * ratio (no region) when there is nothing sensible to solve.
    */
   const frameNode = useCallback(
     (node: Node) => {
       const internal = getInternalNode(node.id)
-      if (isMeasured(internal)) {
-        const wrap = flowWrapRef.current
-        const size = internal?.measured
-        const solved =
-          wrap && size?.width && size?.height ? solveFitPadding(wrap, size.width, size.height) : null
-        void fitView({
-          nodes: [{ id: node.id }],
-          duration: 300,
-          ...FIT_NODE_OPTIONS,
-          padding: solved ?? FIT_NODE_OPTIONS.padding
-        })
-        return
-      }
-      const rect = nodeFitRect(node as FocusableNode, nodesRef.current as FocusableNode[])
+      // The store's measurement wins. A measured node without an absolute position is not a shape
+      // React Flow produces, but the type allows it — fall through to the persisted size instead
+      // of framing from a half-known rect.
+      const measured = isMeasured(internal) ? measuredFitRect(internal) : null
+      const rect =
+        measured ?? nodeFitRect(node as FocusableNode, nodesRef.current as FocusableNode[])
       const wrapEl = flowWrapRef.current
       const wrap = wrapEl?.getBoundingClientRect()
-      // Frame inside the chrome-free region — the same space the measured branch reserves via
-      // solveFitPadding — so a cross-project focus does not land the node under the (pinned)
-      // sessions sidebar / dock / minimap. The node's canvas-space size is enough for the solver's
-      // aspect-ratio pick; the on-screen size is exactly what we don't have here yet.
-      const region =
-        rect && wrapEl ? solveFreeRegion(wrapEl, rect.width, rect.height) : null
+      // Frame inside the chrome-free region so the node does not land under the (pinned) sessions
+      // sidebar / dock / minimap. The solver uses the rect's dimensions only for its aspect-ratio
+      // pick, so canvas-space size (the persisted case) and on-screen size (the measured case) are
+      // equally valid inputs.
+      const region = rect && wrapEl ? solveFreeRegion(wrapEl, rect.width, rect.height) : null
       const focusRegion = region
         ? {
             offsetX: region.free.left - region.outer.left,
@@ -6717,10 +6718,10 @@ export function Canvas() {
       const viewport =
         rect && wrap ? viewportForRect(rect, wrap.width, wrap.height, focusRegion) : null
       // Size unknowable / no pane yet: leave the camera where it is. Standing still beats
-      // teleporting the user to the origin, which is the bug this branch exists for.
+      // teleporting the user to the origin, which is the bug this path exists for.
       if (viewport) void setViewport(viewport, { duration: 300 })
     },
-    [fitView, setViewport, getInternalNode]
+    [setViewport, getInternalNode]
   )
 
   const goToNode = useCallback(

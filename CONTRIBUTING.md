@@ -150,6 +150,17 @@ lane unaffected.
   unmounting. `display:none` is safe (measured: state, scroll and viewport size survive); a reorder
   or unmount reloads the user's page and loses their in-page state.
 
+- **Never rely on React Flow's `fitView` resolving, and never wait on `nodesInitialized`.**
+  `fitView` is deferred behind that flag, and this canvas holds it at `false` permanently: the
+  webview keep-alive ghosts are `display:none` with no size and cannot be `hidden` (that unmounts
+  the guest), so React Flow never measures them. A queued `fitView` then does nothing on the click
+  and may resolve after a project switch against a node list its target has left — an empty fit
+  set, bounds `{0,0,0,0}`, the camera parked on the world origin at max zoom, and `onMove` persists
+  it. Compute the rect yourself and call `setViewport` (`renderer/lib/nodeFocus.ts` +
+  `Canvas.frameNode`); if the size is unknowable, stand still. `fitAll` may still use `fitView`
+  because it frames the whole canvas and guards the empty-node case, so a late resolve there is
+  harmless — a single-node fit has no such fallback.
+
 These are the ones that come up in review most often. Each exists because its absence caused a real
 bug.
 
