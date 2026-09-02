@@ -105,6 +105,7 @@ const NODE = 'node-reattach-1'
 describe('warm reattach: the create reply beats the first output flush', () => {
   let fake: FakePlatform
   let userDataDir: string
+  let managers: Array<{ killAll(): Promise<void> }> = []
 
   beforeEach(() => {
     events.length = 0
@@ -115,7 +116,10 @@ describe('warm reattach: the create reply beats the first output flush', () => {
     fake = fakePlatform({ userDataDir })
     initPlatform(fake)
   })
-  afterEach(() => {
+  afterEach(async () => {
+    // Stop the manager's snapshot/reap intervals before the platform goes away.
+    for (const m of managers) await m.killAll()
+    managers = []
     vi.restoreAllMocks()
     resetPlatformForTests()
     try {
@@ -130,8 +134,10 @@ describe('warm reattach: the create reply beats the first output flush', () => {
     const m = new PtyManager()
     m.init(() => DEFAULT_SETTINGS)
     m.registerIpc()
+    managers.push(m)
     return m
   }
+  type WithTombstone = { tombstone(persistKey: string, by: number): void }
 
   const create = () =>
     fake.handlers[IPC.ptyCreate](CLIENT, { cols: 80, rows: 24, persistKey: NODE }) as Promise<{
@@ -208,12 +214,35 @@ describe('warm reattach: the create reply beats the first output flush', () => {
     const m = await tmuxManager()
     liveTmuxSessions.add(sessionName(NODE))
     const OTHER = 99
-    duringProbe = () =>
-      (m as unknown as { tombstone(persistKey: string, by: number): void }).tombstone(NODE, OTHER)
+    duringProbe = () => (m as unknown as WithTombstone).tombstone(NODE, OTHER)
 
     const r = await create()
     expect(r.sessionId).toBe('')
     expect((r as { closed?: { by: number | null } }).closed).toEqual({ by: OTHER })
     expect(events).not.toContain('spawn')
+  })
+
+  it('the SAME client deleting mid-create is a later intent, not a resurrection: refused too', async () => {
+    // create()'s pre-flight exempts the owner so a deliberate delete-then-recreate works; that
+    // exemption must not let a create that was already in flight when the delete landed undo it.
+    const m = await tmuxManager()
+    liveTmuxSessions.add(sessionName(NODE))
+    duringProbe = () => (m as unknown as WithTombstone).tombstone(NODE, CLIENT)
+
+    const r = await create()
+    expect(r.sessionId).toBe('')
+    expect((r as { closed?: { by: number | null } }).closed).toEqual({ by: CLIENT })
+    expect(events).not.toContain('spawn')
+  })
+
+  it('a tombstone that PREDATES the create keeps the owner-resurrection contract: the owner may recreate', async () => {
+    const m = await tmuxManager()
+    liveTmuxSessions.add(sessionName(NODE))
+    ;(m as unknown as WithTombstone).tombstone(NODE, CLIENT)
+
+    const r = await create()
+    expect(r.sessionId).not.toBe('')
+    expect(events).toContain('spawn')
+    await drained(r.sessionId)
   })
 })

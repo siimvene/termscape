@@ -265,9 +265,15 @@ first. `pty-reattach-reply-order.test.ts` pins both the ordering and "no output 
 before the create reply". Two sibling paths still await after their spawn and inherit the same
 exposure: the dormant Windows warm-tmux confirm (`warmWindowsBackend === 'tmux'`) and the
 session-host `ready` barrier; whoever brings them live owes them the same fix. And because every
-await before the spawn is a window in which another client can DELETE the node, `spawnNew` re-asks
+await before the spawn is a window in which a client can DELETE the node, `spawnNew` re-asks
 `liveTombstone` immediately before `spawnSession` (which would otherwise clear the tombstone) —
-`create()`'s own check runs before those awaits and cannot see a delete that lands during them.
+`create()`'s own check runs before those awaits and cannot see a delete that lands during them. A
+tombstone recorded after the create began wins whoever set it (the same client deleting mid-create
+is a later intent, not a resurrection); one that predates it stays with `create()`'s owner-exempt
+verdict. A create fulfilled without a session (`closed`, `unavailable`) releases parked recycle
+waiters like a failure does. Known siblings NOT covered here: a session-host delete records its
+tombstone only after the kill acknowledgement, and an SSH delete racing these awaits finds no
+registered session and so never kills the remote tmux — both pre-date this change.
 
 ### Cold restore (machine reboot)
 
