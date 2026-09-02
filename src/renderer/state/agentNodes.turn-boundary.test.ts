@@ -14,6 +14,7 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { useAgentNodes } from './agentNodes'
 import { buildHibernationCandidates } from '../lib/hibernationCandidates'
+import { FANOUT_COMPACT_THRESHOLD } from '../lib/fanoutGroup'
 import { WORKING_STALE_MS } from '@shared/agents/stale'
 
 const reset = (): void => {
@@ -101,6 +102,54 @@ describe('clearFinishedForParent — the turn boundary (issue #547)', () => {
     useAgentNodes.getState().finish('tu-running', {})
     useAgentNodes.getState().clearFinishedForParent('n1')
     expect(useAgentNodes.getState().selectedId).toBeNull()
+  })
+})
+
+describe('clearFinishedForParent — the aggregate fan-out card follows the threshold, not only "all done"', () => {
+  // Canvas collapses MORE THAN FANOUT_COMPACT_THRESHOLD live cards into one `fanout-<pid>` card and
+  // draws fewer individually (lib/fanoutGroup). The aggregate's overrides used to be dropped only
+  // when EVERY card had finished, so a fan-out that shrank from 7 to 1 stopped rendering the
+  // aggregate while its dragged position/size/expansion/selection sat unseen — and resurrected on
+  // the next turn that grew past the threshold (consort review MINOR, 2026-09-02).
+  beforeEach(reset)
+  const fanOut = (n: number): void => {
+    const s = useAgentNodes.getState()
+    for (let i = 0; i < n; i++) s.start(`tu${i}`, { parentNodeId: 'n1' })
+    s.setPosition('fanout-n1', { x: 3, y: 4 })
+    s.setSize('fanout-n1', { width: 360, height: 480 })
+    s.toggleExpanded('fanout-n1')
+    s.select('fanout-n1')
+  }
+  const aggregateState = () => {
+    const st = useAgentNodes.getState()
+    return {
+      pos: st.positions['fanout-n1'],
+      size: st.sizes['fanout-n1'],
+      expanded: st.expanded['fanout-n1'],
+      selected: st.selectedId === 'fanout-n1'
+    }
+  }
+
+  it('drops the aggregate once the survivors no longer render as one card', () => {
+    fanOut(FANOUT_COMPACT_THRESHOLD + 1) // 7: compact
+    const s = useAgentNodes.getState()
+    for (let i = 0; i < FANOUT_COMPACT_THRESHOLD; i++) s.finish(`tu${i}`, {}) // 6 done, 1 working
+    s.clearFinishedForParent('n1')
+    expect(Object.keys(useAgentNodes.getState().byId)).toEqual([`tu${FANOUT_COMPACT_THRESHOLD}`])
+    expect(aggregateState()).toEqual({ pos: undefined, size: undefined, expanded: undefined, selected: false })
+  })
+
+  it('keeps the aggregate while the survivors are still a compact fan-out', () => {
+    fanOut(FANOUT_COMPACT_THRESHOLD + 2) // 8
+    useAgentNodes.getState().finish('tu0', {}) // 7 still working: aggregate still on screen
+    useAgentNodes.getState().clearFinishedForParent('n1')
+    expect(Object.keys(useAgentNodes.getState().byId)).toHaveLength(FANOUT_COMPACT_THRESHOLD + 1)
+    expect(aggregateState()).toEqual({
+      pos: { x: 3, y: 4 },
+      size: { width: 360, height: 480 },
+      expanded: true,
+      selected: true
+    })
   })
 })
 

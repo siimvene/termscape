@@ -153,7 +153,7 @@ import { useSettings } from '../state/settings'
 import { useCodexIdentity, codexSharedIdentity, codexFallbackText } from '../state/codexIdentity'
 import { useAgentStatus, agentStatusForApi, inferInterruptAfterSettle } from '../state/agentStatus'
 import { useLaunchDelivery } from '../state/launchDelivery'
-import { erroredDeps, forgetArmed, launchTooltip } from '../lib/pendingLaunch'
+import { beginLaunch, erroredDeps, forgetArmed, launchTooltip, settleLaunch } from '../lib/pendingLaunch'
 import type { AgentState } from '@shared/agents/normalize'
 import type { ClientId } from '@shared/presence'
 import { PresenceChips } from '../components/PresenceChips'
@@ -1660,14 +1660,11 @@ export function TerminalNode({
   // used to be invisible — see the store. Selected by id so an unarmed node never re-renders on
   // another node's delivery.
   const launchDelivery = useLaunchDelivery((s) => s.byId[id])
-  // ▶ Run now in flight. A latch, not a state: it must refuse the second click of a double-click
-  // synchronously, and it is released only once the node's `pendingLaunch` has actually changed
-  // (delivered ⇒ cleared, or a new launch arrived) — resetting it in the `.then` would reopen a
-  // window between the resolve and the re-render in which a click still sees the old badge.
-  const runNowInFlight = useRef(false)
-  useEffect(() => {
-    runNowInFlight.current = false
-  }, [pendingLaunch])
+  // ▶ Run now's in-flight guard is NOT a component-local latch: it is the module-level registry in
+  // lib/pendingLaunch (`beginLaunch` / `settleLaunch`), shared with the canvas fire effect, so the
+  // two paths that can type this launch into the shell see one claim. A local ref here could not
+  // see a canvas send mid-flight (double submit), and releasing it on `pendingLaunch` identity let a
+  // same-content peer upsert reopen it while a send was outstanding (consort review, 2026-09-02).
   const pendingWaitingOn = [
     ...(pendingLaunch?.after ?? []).map(
       (depId) => ((getNode(depId) as CanvasNode | undefined)?.data.title as string) || depId
@@ -5068,25 +5065,37 @@ export function TerminalNode({
                 e.stopPropagation()
                 // This click IS the user's consent for a launch that was loaded from the project file
                 // rather than armed here (see wasArmedThisSession). Two guarantees:
-                // NO DOUBLE SUBMIT — the latch refuses a second click synchronously, and the process's
-                // consent for this id is revoked BEFORE the send, so the canvas fire effect (which
-                // re-runs on every dep/setup/retry tick and reads `pendingLaunch` off the node) can no
-                // longer submit the same command while this delivery is in flight (consort re-review
-                // SERIOUS). NO LOSS — `pendingLaunch` is dropped only on a delivery that LANDED: the
-                // node holds the only copy, and "session not up yet" is precisely the state a user
-                // reaches for this button in (#569), so a refusal keeps the launch and turns the badge
-                // into ⚠ QUEUED ("1 attempt was refused … press ▶") instead of vanishing.
-                if (runNowInFlight.current) return
-                runNowInFlight.current = true
+                // NO DOUBLE SUBMIT — `beginLaunch` claims the node in the registry SHARED with the
+                // canvas fire effect, synchronously, so a second click, a fire-effect re-run AND a
+                // canvas send already in flight all meet the same claim; the process's consent for
+                // this id is revoked BEFORE the send as well, so the effect cannot re-submit it after
+                // the claim is released either (consort review SERIOUS ×2). NO LOSS — `pendingLaunch`
+                // is dropped only on a delivery that LANDED: the node holds the only copy, and
+                // "session not up yet" is precisely the state a user reaches for this button in
+                // (#569), so a refusal keeps the launch and turns the badge into ⚠ QUEUED ("1 attempt
+                // was refused … press ▶") instead of vanishing. Both outcomes are judged against the
+                // launch the node holds AT SETTLE TIME (`settleLaunch`, read fresh off the flow
+                // store): if a peer replaced it while the send was in flight, A's landing must not
+                // clear B and A's refusal must not mark B failed.
+                const sentKey = beginLaunch(id, pendingLaunch)
+                if (sentKey === null) return
                 forgetArmed(id)
+                const currentLaunch = (): PendingLaunch | undefined =>
+                  (getNode(id) as CanvasNode | undefined)?.data.pendingLaunch as PendingLaunch | undefined
                 void api.pty.sendText(id, pendingLaunch.command).then((ok) => {
+                  if (settleLaunch(id, sentKey, ok, currentLaunch()) === 'stale') return
                   if (ok) {
                     useLaunchDelivery.getState().clear(id)
-                    updateNodeData(id, { pendingLaunch: undefined }) // releases the latch when it lands
+                    updateNodeData(id, { pendingLaunch: undefined })
                   } else {
-                    runNowInFlight.current = false // nothing changed on the node, so release here
                     useLaunchDelivery.getState().markFailed(id, 1)
                   }
+                }, () => {
+                  // A REJECTED RPC (relay closed, `failPending()` in the ws bridge) is a refusal,
+                  // not a hang: without this handler the claim stayed set forever and ▶ was dead
+                  // until the node remounted. The launch is kept, exactly as for a refusal.
+                  if (settleLaunch(id, sentKey, false, currentLaunch()) === 'refused')
+                    useLaunchDelivery.getState().markFailed(id, 1)
                 })
               }}
             >

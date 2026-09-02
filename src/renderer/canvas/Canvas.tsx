@@ -414,11 +414,14 @@ import {
 } from '../session/relay-tab'
 import { buildBackgroundLinkMaps, buildContextLinkNote, buildLinkMap, buildNotePushMessage, classifyLink, hiddenLinkIds, linkIdsCoveredByRopes, pairKey, planBridges, type LinkEndpoint } from '../lib/noteLink'
 import {
+  beginLaunch,
   dependencyEdges,
   forgetArmed,
+  isLaunchInFlight,
   launchesToFire,
   launchRetryDelay,
   markArmedThisSession,
+  settleLaunch,
   unmetDeps,
   wasArmedThisSession,
   LAUNCH_STALL_MS,
@@ -1697,10 +1700,12 @@ export function Canvas() {
   // Bumped to re-run the launch effect: after a refused delivery's backoff, and when a node
   // reports its session ready (`subscribeSessionReady` below).
   const [launchNudge, setLaunchNudge] = useState(0)
-  // Ids whose held launch has been handed to the pty. An id stays here FOREVER once delivery
-  // succeeded — clearing `pendingLaunch` is a state update that can lag a re-render, and this
-  // action is irreversible, so the set (not the node data) is what guarantees exactly-once.
-  const launchInFlight = useRef<Set<string>>(new Set())
+  // Which delivery attempt a node is on — canvas-path policy (the backoff schedule is indexed by it).
+  // The in-flight claim itself is NOT a ref here: it is the module-level registry in
+  // lib/pendingLaunch (`beginLaunch` / `isLaunchInFlight` / `settleLaunch`), shared with the node's
+  // ▶ Run now, so the two paths that can type a held launch into a shell see one claim. Exactly-once
+  // after a LANDED delivery rests on `forgetArmed` (consent consumed synchronously in the settle,
+  // before the `setNodes` that clears `pendingLaunch` can lag a re-render) — see the fire effect.
   const launchAttempts = useRef<Map<string, number>>(new Map())
   // Per-node "the gate is open but nothing has come up to deliver into" timers — the source of the
   // visible `stalled` warning. One per armed node, armed once and cleared the moment the node
@@ -1747,7 +1752,8 @@ export function Canvas() {
       // loaded from .nodeterm/project.json (git-shared, hostile) or received from a canvas-sync peer
       // keeps its QUEUED badge and ▶ Run now — the click is the consent. See wasArmedThisSession.
       .filter((f) => wasArmedThisSession(f.id, nodes.find((n) => n.id === f.id)?.data.pendingLaunch as PendingLaunch | undefined))
-      .filter((f) => !launchInFlight.current.has(f.id))
+      // One delivery per node at a time, across BOTH paths — a ▶ send mid-flight counts too.
+      .filter((f) => !isLaunchInFlight(f.id))
     // Anything we were reporting on that is no longer an armed node — delivered, run by hand with
     // ▶, or deleted — stops being reported. Timers go with it: a stall warning for a node that has
     // already started is a lie with a countdown on it.
@@ -1792,12 +1798,31 @@ export function Canvas() {
       // launch, and only a delivery that lands (or the manual ▶) retires it.
       if (useLaunchDelivery.getState().byId[f.id]?.kind === 'stalled')
         useLaunchDelivery.getState().clear(f.id)
-      launchInFlight.current.add(f.id)
+      // Claim the node in the registry SHARED with ▶ Run now (see beginLaunch); the key it returns is
+      // what the settle below is judged against. Null = a send is already outstanding: send nothing.
+      const sent = nodes.find((n) => n.id === f.id)?.data.pendingLaunch as PendingLaunch | undefined
+      if (!sent) continue
+      const sentKey = beginLaunch(f.id, sent)
+      if (sentKey === null) continue
       const attempt = (launchAttempts.current.get(f.id) ?? 0) + 1
       launchAttempts.current.set(f.id, attempt)
-      void api.pty.sendText(f.id, f.command).then((ok) => {
+      const settle = (ok: boolean): void => {
+        // Judged against the launch the node holds NOW (read fresh off nodesRef), not the one this
+        // closure sent: a canvas-sync peer may have replaced it while the send was in flight, and
+        // A's outcome must say nothing about B — neither clear it nor mark it failed.
+        const verdict = settleLaunch(
+          f.id,
+          sentKey,
+          ok,
+          nodesRef.current.find((n) => n.id === f.id)?.data.pendingLaunch as PendingLaunch | undefined
+        )
+        if (verdict === 'stale') {
+          launchAttempts.current.delete(f.id) // whatever is on the node now starts its own count
+          return
+        }
         if (ok) {
           forgetArmed(f.id) // consent consumed: a later launch on this id needs its own
+          launchAttempts.current.delete(f.id)
           setNodes((ns) =>
             ns.map((n) => (n.id === f.id ? { ...n, data: { ...n.data, pendingLaunch: undefined } } : n))
           )
@@ -1806,9 +1831,8 @@ export function Canvas() {
           return
         }
         // Refused although the session reported ready — a narrow residual race now, not the
-        // whole cold-start window. Let it back out of flight and re-run after the backoff; a
+        // whole cold-start window. The claim is already released; re-run after the backoff. A
         // launch that silently vanishes is worse than a late one.
-        launchInFlight.current.delete(f.id)
         const delay = launchRetryDelay(attempt)
         if (delay !== null) {
           setTimeout(() => setLaunchNudge((v) => v + 1), delay)
@@ -1816,11 +1840,19 @@ export function Canvas() {
         }
         // Out of attempts against a session that IS up. Nothing else will retry this, so it is
         // reported where the person looking at the node can see it — the QUEUED badge turns into
-        // a warning pointing at the manual ▶. The log line stays for a bug report; it is no
-        // longer the only place the failure exists.
+        // a warning pointing at the manual ▶. The consent is consumed here too: with it still
+        // held, the next re-run of this effect (a dep change, a peer upsert, a setup tick) would
+        // send attempt N+1 while the tooltip promises that nothing will retry it. ▶ is now the
+        // only way onward, which is exactly what the badge says. The log line stays for a bug
+        // report; it is no longer the only place the failure exists.
+        forgetArmed(f.id)
+        launchAttempts.current.delete(f.id)
         useLaunchDelivery.getState().markFailed(f.id, attempt)
         console.warn('[pending-launch] gave up delivering held launch for', f.id)
-      })
+      }
+      // A REJECTED RPC (relay closed, `failPending()` in the ws bridge) is a refusal, not a hang:
+      // without the second handler the claim was never released and nothing ever retried.
+      void api.pty.sendText(f.id, f.command).then(settle, () => settle(false))
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- armedDepSig/armedSetupSig/launchNudge are the triggers
   }, [nodes, armedDepSig, armedSetupSig, launchNudge])
@@ -3059,6 +3091,9 @@ export function Canvas() {
           // ...and its keep-alive ghost: a background webview node a peer deleted must not keep
           // its page running invisibly until the next switch.
           useWebviewKeepAlive.getState().drop(mutation.id)
+          // ...and this process's consent for its held launch (a cold-open arming lives in exactly
+          // this kind of background project) — a re-add under the same id needs its own.
+          forgetArmed(mutation.id)
         }
         if (useProjects.getState().applyNodeMutation(projectId, mutation)) markDirty()
         return
@@ -3078,6 +3113,10 @@ export function Canvas() {
         // A removed webview node's keep-alive entry ends with it (see handleNodesChange's remove
         // branch for the local twin of this).
         useWebviewKeepAlive.getState().drop(mutation.id)
+        // So does this process's consent for its held launch: a peer remove followed by a re-add of
+        // the same id with an identical `pendingLaunch` must not auto-fire on inherited consent
+        // (the local twin is in deleteNodes).
+        forgetArmed(mutation.id)
       }
       // Keep the ref in step immediately: a burst (a peer's bulk delete) arrives within one tick,
       // before React re-renders, and each mutation must build on the previous one.
@@ -3180,7 +3219,10 @@ export function Canvas() {
         // A real deletion ends the node's keep-alive entry too — the merge deliberately falls
         // back to an invisible ghost when an entry's node is missing (see mergeWithKeepAlive),
         // so without this a closed browser node's page would keep running unseen.
-        if (c.type === 'remove') useWebviewKeepAlive.getState().drop(c.id)
+        if (c.type === 'remove') {
+          useWebviewKeepAlive.getState().drop(c.id)
+          forgetArmed(c.id) // a removed node's held-launch consent ends with it (see deleteNodes)
+        }
         if ('id' in c && isEph(c.id)) {
           const store = useAgentNodes.getState()
           // Stored as an OFFSET from the parent agent, never as a canvas position — see offsetFrom.
@@ -4947,9 +4989,13 @@ export function Canvas() {
       const set = new Set(ids)
       // A node that is gone can never auto-close; drop its arming and any pending read so the
       // sets hold only live ids (ids are unique per mint, so this is hygiene, not a correctness gate).
+      // Its held-launch CONSENT goes with it, and that one IS a gate: a peer that removes the node
+      // and re-adds the same id with a byte-identical `pendingLaunch` would otherwise inherit this
+      // process's consent and auto-fire without a click (blind security pass, 2026-09-02).
       for (const id of ids) {
         autoCloseArmedRef.current.delete(id)
         autoCloseReadRef.current.delete(id)
+        forgetArmed(id)
       }
       if (opts?.record !== false) {
         const deletedAt = Date.now()
@@ -12168,6 +12214,10 @@ export function Canvas() {
       const store = useProjects.getState()
       if (id === store.activeProjectId) commitActiveToStore()
       if (endSessions) endProjectSessions(id)
+      // The consent registry (lib/pendingLaunch) outlives the project: a closed project's nodes are
+      // reloaded from its git-shared project.json on reopen, and that is a LOADED launch — it gets
+      // the QUEUED badge and ▶, never this process's old consent (blind security pass, 2026-09-02).
+      for (const n of store.getProject(id)?.nodes ?? []) forgetArmed(n.id)
       useReopenHistory.getState().push({ kind: 'project', projectId: id, closedAt: Date.now() })
       disposeRelayTabForProject(id)
       store.closeProject(id)

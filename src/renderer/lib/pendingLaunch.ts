@@ -138,6 +138,72 @@ export function resetArmedThisSession(): void {
   armedThisSession.clear()
 }
 
+/**
+ * The ONE in-flight registry for held-launch deliveries, shared by the two paths that can type a
+ * `pendingLaunch` into a shell: the canvas fire effect (consented launches) and the node's manual
+ * ▶ Run now (the click is the consent). They used to keep independent latches (a Canvas ref and a
+ * TerminalNode ref) that could not see each other, so a consented launch whose canvas `sendText`
+ * was mid-flight could be submitted a second time by ▶ (consort review SERIOUS, 2026-09-02).
+ *
+ * Keyed by node id, bound to the launch CONTENT (`launchKey`) for the same reason the consent
+ * registry is: a settle callback must act on the launch it SENT, not on whatever the node holds by
+ * the time the promise resolves — a canvas-sync peer may have replaced it meanwhile, and then a
+ * landed A must not clear B, and a refused A must not mark B failed. `beginLaunch` is the only way
+ * in and it is synchronous, so a double-click, a fire-effect re-run and a ▶ during a canvas send
+ * all see the same entry. Module-level like the consent registry; nothing here is persisted.
+ */
+const launchesInFlight = new Map<string, string>()
+
+/**
+ * Claim `id` for one delivery attempt. Returns the key the caller must hand back to `settleLaunch`,
+ * or `null` when a delivery for this node is already outstanding — in which case the caller sends
+ * NOTHING. Refuses on the id alone (not id+content): two concurrent sends into one pty is never
+ * what anyone meant, whatever they carry.
+ */
+export function beginLaunch(id: string, launch: PendingLaunch): string | null {
+  if (launchesInFlight.has(id)) return null
+  const key = launchKey(launch)
+  launchesInFlight.set(id, key)
+  return key
+}
+
+export function isLaunchInFlight(id: string): boolean {
+  return launchesInFlight.has(id)
+}
+
+/**
+ * What a settled delivery means for the node. `landed`/`refused` speak about the launch that was
+ * sent AND is still the one on the node; `stale` means the node's launch changed (or went away)
+ * while the send was in flight, so the outcome says nothing about what the node holds now — the
+ * caller must neither clear it nor mark it failed.
+ */
+export type LaunchVerdict = 'landed' | 'refused' | 'stale'
+
+/**
+ * Settle the attempt `beginLaunch` opened. Releases the in-flight claim (only if it is still OURS —
+ * a stale settle must not free a newer launch's claim) and decides the verdict against the node's
+ * CURRENT `pendingLaunch`, which the caller reads fresh at settle time (store / nodesRef), never
+ * from its own closure. `ok=false` covers both a refusal (`sendText` resolved false) and a
+ * REJECTED RPC (relay closed, `failPending()`): a rejection used to have no handler at all, which
+ * left the manual latch set forever and ▶ dead until remount. Every settle path is pure and
+ * synchronous so the sequences above are unit-testable without React.
+ */
+export function settleLaunch(
+  id: string,
+  sentKey: string,
+  ok: boolean,
+  current: PendingLaunch | undefined
+): LaunchVerdict {
+  if (launchesInFlight.get(id) === sentKey) launchesInFlight.delete(id)
+  if (!current || launchKey(current) !== sentKey) return 'stale'
+  return ok ? 'landed' : 'refused'
+}
+
+/** Test hook only. */
+export function resetLaunchesInFlight(): void {
+  launchesInFlight.clear()
+}
+
 export function launchesToFire(
   nodes: readonly ArmedNode[],
   status: StatusById,
@@ -208,8 +274,8 @@ export function dependencyEdges(
  * The fix is mostly NOT here: delivery is now gated on the node reporting its session ready
  * (`isSessionReady`), so the schedule below only has to cover the residual race between "the
  * shell settled" and "tmux will accept a paste for this session". It is nevertheless generous
- * and bounded — roughly 12 s across five attempts — because the alternative to a bound is a
- * retry loop nobody can see the end of.
+ * and bounded — roughly 12 s of backoff across six attempts (`LAUNCH_DELIVERY_ATTEMPTS`) — because
+ * the alternative to a bound is a retry loop nobody can see the end of.
  */
 const LAUNCH_RETRY_SCHEDULE_MS = [400, 800, 1600, 3200, 6400] as const
 
@@ -217,8 +283,14 @@ export function launchRetryDelay(attemptsMade: number): number | null {
   return LAUNCH_RETRY_SCHEDULE_MS[attemptsMade - 1] ?? null
 }
 
-/** Total attempts a refused delivery gets before it is reported as failed. */
-export const LAUNCH_DELIVERY_ATTEMPTS = LAUNCH_RETRY_SCHEDULE_MS.length
+/**
+ * Total SENDS a refused delivery gets before it is reported as failed. The schedule above is the
+ * gaps BETWEEN sends, so it is one shorter than the attempt count: attempt n is followed by
+ * `launchRetryDelay(n)`, and the send after the last gap is the final attempt (`launchRetryDelay`
+ * of it is null). This used to equal the schedule length, which under-counted the sends by one
+ * (six went out while the constant, and the copy derived from it, said five).
+ */
+export const LAUNCH_DELIVERY_ATTEMPTS = LAUNCH_RETRY_SCHEDULE_MS.length + 1
 
 /**
  * How long an armed node whose gate is OPEN may sit with no terminal to deliver into before the

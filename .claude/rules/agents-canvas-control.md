@@ -109,9 +109,11 @@ paths:
   (3) If the deps are **already satisfied at creation**, the node is NOT armed: the command stays
   `initialCommand` so the node's own mount path delivers it through `writeWhenShellReady` —
   arming would hand delivery to the canvas effect, which races the node's PTY into existence.
-  (4) Delivery is **exactly-once via `launchInFlight`** (an id stays in the set forever once
-  `sendText` resolved true — clearing `pendingLaunch` is a state update that can lag a re-render),
-  and a **refused** `sendText` retries (`launchRetryDelay`'s backoff) instead of vanishing.
+  (4) Delivery is **exactly-once via the shared in-flight registry** (`beginLaunch` /
+  `settleLaunch` in `renderer/lib/pendingLaunch`, one claim per node id, consulted by BOTH the fire
+  effect and ▶ Run now — a landed delivery also consumes the consent synchronously, before the
+  `setNodes` that clears `pendingLaunch` can lag a re-render), and a **refused** `sendText` retries
+  (`launchRetryDelay`'s backoff, `LAUNCH_DELIVERY_ATTEMPTS` sends in all) instead of vanishing.
   (5) `pendingLaunch` **is persisted** (unlike `initialCommand`), but agent state is not — so after
   a restart nothing will ever report `done` and the node carries a manual ▶ **run-now** escape in
   its QUEUED badge (which disarms only on a delivery that LANDED — dropping it unconditionally
@@ -242,12 +244,22 @@ paths:
   (canvas-control `--after`/`verify` arming, `armForColdOpen`) fire; a launch loaded from disk or a
   peer keeps its QUEUED badge and ▶ Run now, and the CLICK is the consent. Both boundaries also
   shape-check it (`sanitizePendingLaunch`, @shared/pending-launch — malformed ⇒ inert node, never a
-  crash in `p.after.every`). ▶ Run now takes an in-flight latch and `forgetArmed(id)` synchronously
-  BEFORE the send (so neither a double-click nor a fire-effect re-run can submit it twice), drops
-  `pendingLaunch` only once the delivery LANDED, and on refusal calls `useLaunchDelivery.markFailed`
-  and keeps the launch, so a failed delivery never discards the only copy (upstream's #569 delivery
-  policy + the fork's consent model, merged 2026-09-02). Do not "simplify" the gate into a per-node
-  flag stored in project.json — a flag in the hostile file is not consent.
+  crash in `p.after.every`). ▶ Run now claims the node in the in-flight registry SHARED with the
+  fire effect (`beginLaunch`, synchronous, one claim per id, so a double-click, a fire-effect re-run
+  and a canvas send already mid-flight all meet the same claim) and calls `forgetArmed(id)` BEFORE
+  the send; both paths settle through `settleLaunch`, which judges the outcome against the launch
+  the node holds AT SETTLE TIME (a peer that replaced A with B mid-flight gets neither A's clear nor
+  A's failure applied to B) and treats a REJECTED RPC as a refusal (no wedged claim, ▶ stays live);
+  `pendingLaunch` is dropped only once the delivery LANDED, and a refusal calls
+  `useLaunchDelivery.markFailed` and keeps the launch, so a failed delivery never discards the only
+  copy (upstream's #569 delivery policy + the fork's consent model, merged 2026-09-02; the shared
+  registry, key-checked settle and rejection path closed the consort review's three SERIOUS
+  findings on that merge). The consent ends with the node: `deleteNodes`, the peer `remove`
+  mutation (both branches), React Flow's remove change and `performCloseProject` all `forgetArmed`,
+  so a peer that removes an armed node and re-adds the same id with an identical launch does not
+  inherit this process's consent; and the fire effect consumes the consent when the backoff is
+  exhausted, so "nothing will retry it" is true rather than merely displayed. Do not "simplify" the
+  gate into a per-node flag stored in project.json — a flag in the hostile file is not consent.
 - **Context Link** — a node action gated by `CONTEXT_LINK_CAPABLE` (claude/codex/gemini/opencode/grok;
   custom agents + plain terminals excluded). **grok joined in 2026-09, and the file matters:** its
   readable conversation is `chat_history.jsonl`, NOT the `updates.jsonl` its own hook payloads

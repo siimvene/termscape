@@ -63,6 +63,10 @@ describe('armed-launch delivery (source pins)', () => {
     // can only find in DevTools is a failure the user cannot find.
     expect(body).toContain('markFailed(f.id, attempt)')
     expect(body.slice(0, warn)).toContain('markFailed')
+    // And the give-up is REAL: the consent is consumed with the last attempt, or the next re-run of
+    // the effect (a dep change, a peer upsert, a setup tick) would send attempt N+1 while the
+    // tooltip promises nothing will retry it (blind security pass, 2026-09-02).
+    expect(body).toMatch(/forgetArmed\(f\.id\)[\s\S]{0,120}?markFailed\(f\.id, attempt\)/)
   })
 
   it('says so while it waits — a long stall raises the visible warning rather than staying mute', () => {
@@ -76,11 +80,19 @@ describe('armed-launch delivery (source pins)', () => {
 
   it('keeps the exactly-once and dep-satisfaction invariants the feature already had', () => {
     const body = launchEffect()
-    // Exactly-once: an id enters the in-flight set before the send and only LEAVES it on a
-    // refusal (a successful delivery is irreversible and must never be re-attempted).
-    expect(body).toContain('launchInFlight.current.add(f.id)')
+    // Exactly-once: the node is CLAIMED before the send — in the registry SHARED with ▶ Run now
+    // (lib/pendingLaunch), not a ref of this component's own, or the two paths cannot see each
+    // other's send — and a landed delivery consumes the consent in the same settle that clears the
+    // launch (a successful delivery is irreversible and must never be re-attempted).
+    expect(body).toMatch(/const sentKey = beginLaunch\(f\.id, sent\)[\s\S]{0,80}?if \(sentKey === null\) continue/)
+    expect(body).toContain('isLaunchInFlight(f.id)')
     expect(body).toMatch(/if \(ok\)[\s\S]{0,400}?pendingLaunch: undefined/)
-    expect(body).toMatch(/launchInFlight\.current\.delete\(f\.id\)/)
+    expect(body).toMatch(/if \(ok\)[\s\S]{0,120}?forgetArmed\(f\.id\)/)
+    // Every settle — landed, refused OR a rejected RPC — goes through the key-checked settle, and
+    // the rejection is routed to the same refusal path rather than left unhandled.
+    expect(body).toMatch(/settleLaunch\(\s*f\.id,\s*sentKey,\s*ok,/)
+    expect(body).toContain('.then(settle, () => settle(false))')
+    expect(body).not.toContain('launchInFlight')
     // Satisfaction is still `launchesToFire`'s call — the ready gate is an ADDITIONAL condition,
     // never a replacement for the dependency matrix.
     expect(body).toContain('launchesToFire(')

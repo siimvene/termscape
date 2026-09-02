@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { beforeEach, describe, it, expect } from 'vitest'
 import {
   dependencyEdges,
   launchesToFire,
@@ -10,6 +10,11 @@ import {
   resetArmedThisSession,
   unmetDeps,
   wasArmedThisSession,
+  beginLaunch,
+  isLaunchInFlight,
+  launchKey,
+  resetLaunchesInFlight,
+  settleLaunch,
   LAUNCH_DELIVERY_ATTEMPTS,
   LAUNCH_STALL_MS,
   type ArmedNode,
@@ -252,16 +257,29 @@ describe('launch delivery policy (#569 item 1)', () => {
       delays.push(d)
       expect(attempt).toBeLessThan(20) // guard: a schedule that never ends is the bug, not a fix
     }
-    expect(delays.length).toBe(LAUNCH_DELIVERY_ATTEMPTS)
+    // The delays are the GAPS between sends, so there is one fewer of them than attempts.
+    expect(delays.length).toBe(LAUNCH_DELIVERY_ATTEMPTS - 1)
     // Strictly increasing: a flat schedule is what made the old budget a fixed 2 s wall.
     for (let i = 1; i < delays.length; i++) expect(delays[i]).toBeGreaterThan(delays[i - 1])
     // And the whole window is comfortably wider than the old one, measured from READINESS.
     expect(delays.reduce((a, b) => a + b, 0)).toBeGreaterThan(10_000)
   })
 
+  it('LAUNCH_DELIVERY_ATTEMPTS counts SENDS — the fire loop, replayed, sends exactly that many', () => {
+    // The constant used to equal the schedule length while the loop sent one more than that (it
+    // retries after every non-null delay, and the send after the LAST gap is an attempt too): six
+    // sends went out under a constant, and copy, that said five (blind security pass, 2026-09-02).
+    let sends = 0
+    for (let attempt = 1; ; attempt++) {
+      sends++ // the loop sends, is refused, then asks for the delay before the next attempt
+      if (launchRetryDelay(attempt) === null) break
+    }
+    expect(sends).toBe(LAUNCH_DELIVERY_ATTEMPTS)
+  })
+
   it('an attempt past the end has no delay — nothing silently retries forever', () => {
-    expect(launchRetryDelay(LAUNCH_DELIVERY_ATTEMPTS)).not.toBeNull()
-    expect(launchRetryDelay(LAUNCH_DELIVERY_ATTEMPTS + 1)).toBeNull()
+    expect(launchRetryDelay(LAUNCH_DELIVERY_ATTEMPTS - 1)).not.toBeNull()
+    expect(launchRetryDelay(LAUNCH_DELIVERY_ATTEMPTS)).toBeNull()
   })
 
   it('the stall warning waits longer than a cold project switch could plausibly take', () => {
@@ -329,5 +347,89 @@ describe('▶ Run now × the fire effect — revoking consent before the manual 
     forgetArmed('n') // what ▶ does first
     expect(fire()).toEqual([]) // launch still held on the node, but no longer auto-fires
     expect(nodes[0].data.pendingLaunch).toBe(launch) // …and it was not dropped
+  })
+})
+
+describe('shared in-flight registry — ONE claim per node across the fire effect and ▶ Run now', () => {
+  // The two delivery paths used to keep independent latches (a Canvas ref and a TerminalNode ref)
+  // that could not see each other, so a consented launch whose canvas send was mid-flight could be
+  // sent again by ▶ (consort review SERIOUS, 2026-09-02). Both now claim through `beginLaunch`.
+  const A = { after: [] as string[], command: 'echo A' }
+  const B = { after: [] as string[], command: 'echo B' }
+  beforeEach(() => resetLaunchesInFlight())
+
+  it('a second begin on the same id is refused while the first is outstanding', () => {
+    expect(beginLaunch('n', A)).toBe(launchKey(A)) // the canvas send
+    expect(isLaunchInFlight('n')).toBe(true)
+    expect(beginLaunch('n', A)).toBeNull() // ▶ during that send: nothing goes out
+    expect(beginLaunch('n', B)).toBeNull() // …whatever it would carry: one send per pty at a time
+    expect(beginLaunch('m', A)).toBe(launchKey(A)) // another node is unaffected
+  })
+
+  it('settling releases the claim, so the next attempt (a retry, or ▶) can begin', () => {
+    const key = beginLaunch('n', A)!
+    expect(settleLaunch('n', key, false, A)).toBe('refused')
+    expect(isLaunchInFlight('n')).toBe(false)
+    expect(beginLaunch('n', A)).toBe(key)
+  })
+
+  it('the fire effect filter sees a ▶ send in flight (and vice versa) — the ids meet in one registry', () => {
+    const nodes = [{ id: 'n', data: { pendingLaunch: A } }]
+    beginLaunch('n', A) // ▶ clicked
+    const ready = launchesToFire(nodes, {}, new Set(['n'])).filter((f) => !isLaunchInFlight(f.id))
+    expect(ready).toEqual([])
+  })
+})
+
+describe('settleLaunch — a settle speaks about the launch it SENT, never about a newer one', () => {
+  // A peer may replace `pendingLaunch` (A → B) while A's send is in flight. Settling by node id
+  // alone made A's landing clear B (dropped without delivery) and A's refusal mark B failed
+  // (consort review SERIOUS, 2026-09-02). The verdict is judged against the node's CURRENT launch.
+  const A = { after: [] as string[], command: 'echo A' }
+  const B = { after: [] as string[], command: 'echo B' }
+  const A2 = { after: [] as string[], command: 'echo A' } // same content, new object (peer upsert)
+  beforeEach(() => resetLaunchesInFlight())
+
+  it('landed against the launch still on the node ⇒ landed', () => {
+    const key = beginLaunch('n', A)!
+    expect(settleLaunch('n', key, true, A)).toBe('landed')
+  })
+
+  it('a same-content peer upsert is still the launch we sent — content-bound, not identity-bound', () => {
+    const key = beginLaunch('n', A)!
+    expect(settleLaunch('n', key, true, A2)).toBe('landed')
+  })
+
+  it('the node now holds B ⇒ stale, whichever way A settled (no clear, no failure, for B)', () => {
+    let key = beginLaunch('n', A)!
+    expect(settleLaunch('n', key, true, B)).toBe('stale')
+    key = beginLaunch('n', A)!
+    expect(settleLaunch('n', key, false, B)).toBe('stale')
+  })
+
+  it('the launch is gone from the node ⇒ stale (nothing to clear, nothing to mark)', () => {
+    const key = beginLaunch('n', A)!
+    expect(settleLaunch('n', key, true, undefined)).toBe('stale')
+  })
+
+  it('a stale settle releases only ITS claim — never a newer launch’s', () => {
+    const keyA = beginLaunch('n', A)!
+    // A's claim ends (say, via a refusal), B is claimed, then a late duplicate settle for A arrives.
+    settleLaunch('n', keyA, false, A)
+    const keyB = beginLaunch('n', B)!
+    expect(keyB).not.toBe(keyA)
+    expect(settleLaunch('n', keyA, true, B)).toBe('stale')
+    expect(isLaunchInFlight('n')).toBe(true) // B's send is still outstanding
+    expect(settleLaunch('n', keyB, true, B)).toBe('landed')
+    expect(isLaunchInFlight('n')).toBe(false)
+  })
+
+  it('a REJECTED rpc is settled as a refusal: the claim is released and the launch is kept', () => {
+    // What both callers do in their rejection handler: `settle(false)`. Before there was one, the
+    // ▶ latch stayed set forever and the button was dead until the node remounted.
+    const key = beginLaunch('n', A)!
+    expect(settleLaunch('n', key, false, A)).toBe('refused')
+    expect(isLaunchInFlight('n')).toBe(false)
+    expect(beginLaunch('n', A)).toBe(key) // ▶ works again
   })
 })

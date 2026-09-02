@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { WORKING_STALE_MS } from '@shared/agents/stale'
+import { isCompactFanout } from '../lib/fanoutGroup'
 
 /**
  * Transient visualization of subagents a Claude node spawns (Task/Agent tool), keyed by the
@@ -161,10 +162,12 @@ function cardsOf(s: AgentNodesState, parentNodeId: string): string[] {
  * `fanoutParentId` additionally takes the parent's aggregate fan-out card (`fanout-<pid>`, the ONE
  * card a large fan-out collapses to): it is as per-turn as the cards it stands in for, so its
  * dragged position/size/expanded override and its selection go with them. It is passed only when
- * the parent's WHOLE fan-out is going away — a turn boundary that keeps live cards keeps the
- * aggregate that represents them, and snapping a live card's placement back is the same class of
- * loss issue #547 closed. The aggregate never has a `byId`/`activityById` entry (Canvas derives
- * it), so only the override maps and the selection can carry its id.
+ * the aggregate itself stops rendering — the parent's whole fan-out going away, or the live cards
+ * shrinking to the compact threshold or below (`isCompactFanout`) so Canvas draws them one by one
+ * again. A turn boundary that keeps a still-compact fan-out keeps the aggregate that represents
+ * it, and snapping a live card's placement back is the same class of loss issue #547 closed. The
+ * aggregate never has a `byId`/`activityById` entry (Canvas derives it), so only the override maps
+ * and the selection can carry its id.
  */
 function dropCards(
   s: AgentNodesState,
@@ -284,10 +287,14 @@ export const useAgentNodes = create<AgentNodesState>((set) => ({
     set((s) => {
       const cards = cardsOf(s, parentNodeId)
       const finished = cards.filter((id) => s.byId[id].state === 'done')
-      // The aggregate only follows when the fan-out it stands for is entirely finished; while any
-      // card is still working the aggregate is still on screen, where the user left it.
-      const wholeFanout = finished.length === cards.length
-      return dropCards(s, finished, wholeFanout ? parentNodeId : undefined)
+      // The aggregate follows when the fan-out it stands for stops rendering as ONE card: entirely
+      // finished, or shrunk to the compact threshold or below — Canvas then draws the survivors
+      // individually (`isCompactFanout`), and the aggregate's dragged placement, size, expansion
+      // and selection would otherwise sit unseen and resurrect on a later turn that grows past the
+      // threshold again (consort review MINOR, 2026-09-02). While it is still on screen it stays
+      // where the user left it.
+      const aggregateGone = !isCompactFanout(cards.length - finished.length)
+      return dropCards(s, finished, aggregateGone ? parentNodeId : undefined)
     }),
 
   sweepStaleWorking: (now = Date.now(), staleMs = WORKING_STALE_MS) =>
