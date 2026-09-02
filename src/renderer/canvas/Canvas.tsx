@@ -316,6 +316,7 @@ import { useTeamAccessEvents } from '../state/teamAccess'
 import { useAgentNodes } from '../state/agentNodes'
 import { SubagentNode } from '../nodes/SubagentNode'
 import { LoopNode } from '../nodes/LoopNode'
+import { buildFanoutChildren, isCompactFanout } from '../lib/fanoutGroup'
 import type { NormalizedAgentEvent } from '@shared/agents/normalize'
 import {
   computeWorktreePath,
@@ -1659,6 +1660,43 @@ export function Canvas() {
       if (!parent || parent.data.hideFanout) continue
       const ph = parent.measured?.height ?? (parent.height as number) ?? 400
       const accent = agentConfig((parent.data.agentId as string) ?? 'claude')?.color ?? '#d97757'
+      // Above the threshold, a big fan-out tiles the canvas and edges fan from one node — collapse
+      // it to ONE aggregate card (parent → aggregate, one edge) that expands into the full list.
+      // Each card stays reachable, none is persisted. See renderer/lib/fanoutGroup.ts.
+      if (isCompactFanout(childIds.length)) {
+        const fid = `fanout-${pid}`
+        const children = buildFanoutChildren(childIds, agentById)
+        const anyWorking = children.some((c) => c.state === 'working')
+        eNodes.push({
+          id: fid,
+          type: 'subagent',
+          ...(parent.parentId ? { parentId: parent.parentId } : {}),
+          // Positioned where the FIRST card would have gone (the grid's top-left).
+          position: offsetFrom(parent, ephemeralPos[fid], { x: 0, y: ph + 60 }),
+          draggable: true,
+          selectable: false, // see the loop card above
+          selected: ephSelId === fid,
+          ...dims(fid, 250, 360, 104, 480),
+          data: {
+            title: '',
+            color: accent,
+            group: null,
+            aggregate: true,
+            children,
+            subagentState: anyWorking ? 'working' : 'done',
+            ephExpanded: !!ephExpanded[fid]
+          }
+        } as CanvasNode)
+        eEdges.push({
+          id: `e-${fid}`,
+          source: pid,
+          sourceHandle: 'flow-out',
+          target: fid,
+          animated: anyWorking,
+          style: { stroke: accent, strokeWidth: 1.5 }
+        })
+        continue
+      }
       const COLS = 4
       const COL_W = 240
       const ROW_H = 140
@@ -2817,9 +2855,12 @@ export function Canvas() {
   /** The position of the agent node a card hangs off, in the CARD's own coordinate space (they
    *  share a `parentId`). Undefined when the agent is gone — the card is on its way out too. */
   const ephParentPosition = useCallback((cardId: string): { x: number; y: number } | undefined => {
+    // Both derived prefixes name their parent node id directly; a plain subagent card looks it up.
     const pid = cardId.startsWith('loop-')
       ? cardId.slice('loop-'.length)
-      : useAgentNodes.getState().byId[cardId]?.parentNodeId
+      : cardId.startsWith('fanout-')
+        ? cardId.slice('fanout-'.length)
+        : useAgentNodes.getState().byId[cardId]?.parentNodeId
     return pid ? nodesRef.current.find((n) => n.id === pid)?.position : undefined
   }, [])
 

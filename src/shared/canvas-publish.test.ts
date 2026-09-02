@@ -314,10 +314,11 @@ describe('lazy snapshots', () => {
 })
 
 describe('ephemeral nodes are never published', () => {
-  it('isEphemeralNodeId matches subagent cards (by id set) and loop cards (by prefix)', () => {
+  it('isEphemeralNodeId matches subagent cards (by id set), loop and aggregate cards (by prefix)', () => {
     const eph = new Set(['sub-123'])
     expect(isEphemeralNodeId('sub-123', eph)).toBe(true)
     expect(isEphemeralNodeId('loop-n1', eph)).toBe(true)
+    expect(isEphemeralNodeId('fanout-n1', eph)).toBe(true)
     expect(isEphemeralNodeId('n1', eph)).toBe(false)
   })
 

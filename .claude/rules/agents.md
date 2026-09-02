@@ -488,6 +488,16 @@ else, and its context links must keep classifying across restarts).
   It was removed as superseded here because running it BESIDE the native hooks keys the same child
   two ways (`cxagent:<threadId>` vs `agent_id`) and renders **two cards**. Restoring the pickup
   therefore means reconciling the two keyings, not reviving the file.
+- **Large fan-outs collapse to ONE aggregate card** (2026-09-02, `renderer/lib/fanoutGroup.ts`,
+  `FANOUT_COMPACT_THRESHOLD = 6`): a 17-agent workflow tiled 17 ephemeral cards over the real nodes
+  with 17 edges from one parent — unarrangeable by design (ephemeral nodes live outside React Flow's
+  `nodes` state) and unreadable [screenshot-measured]. Above six LIVE cards for one parent, Canvas
+  renders a single `fanout-<parentId>` card (counts working/done/errored, elapsed) with one edge,
+  placed where the first card would have gone; it expands into a scrollable list of the individual
+  cards, each still subscribing to its own live transcript, so nothing is lost. Six or fewer render
+  individually as before (a hand-sized `parallel()` stays untouched). The aggregate is as ephemeral
+  as the cards it replaces: `isEphemeralId` knows the `fanout-` prefix, its size/position overrides
+  and selection are dropped on the same new-turn/session-end/close events, and it is never persisted.
 - **Workflow (ultracode) agent visualization** — Claude Code's Workflow tool spawns N agents
   in-process; they fire **no per-agent hooks** at all, so there is nothing to normalize per
   agent. Only the PARENT session's `PreToolUse`/`PostToolUse` on `tool_name === 'Workflow'`

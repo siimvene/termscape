@@ -193,7 +193,10 @@ export const useAgentNodes = create<AgentNodesState>((set) => ({
       const expanded = { ...s.expanded }
       // Loop-card overrides (`loop-<pid>`) are deliberately NOT dropped here — the card
       // outlives turns; its overrides go via clearLoop when the loop itself ends.
-      for (const id of ids) {
+      // The aggregate fan-out card (`fanout-<pid>`) IS per-turn, like the cards it replaces, so
+      // its overrides are dropped here alongside them.
+      const fanoutId = `fanout-${parentNodeId}`
+      for (const id of [...ids, fanoutId]) {
         delete byId[id]
         delete activityById[id]
         delete positions[id]
@@ -202,7 +205,8 @@ export const useAgentNodes = create<AgentNodesState>((set) => ({
       }
       // A card that just vanished must not stay "selected" — a later card reusing the id would
       // come back pre-selected.
-      const selectedId = s.selectedId && ids.includes(s.selectedId) ? null : s.selectedId
+      const gone = s.selectedId && (ids.includes(s.selectedId) || s.selectedId === fanoutId)
+      const selectedId = gone ? null : s.selectedId
       return { byId, activityById, positions, sizes, expanded, selectedId }
     }),
 
@@ -213,7 +217,8 @@ export const useAgentNodes = create<AgentNodesState>((set) => ({
       const positions = { ...s.positions }
       const sizes = { ...s.sizes }
       const expanded = { ...s.expanded }
-      for (const id of ids) {
+      // Include the aggregate fan-out card so a "tidy" snaps it back to the default spot too.
+      for (const id of [...ids, `fanout-${parentNodeId}`]) {
         delete positions[id]
         delete sizes[id]
         delete expanded[id]
