@@ -70,7 +70,10 @@ UI rewrite (see Transport abstraction below).
 
 This fork ships as **Termscape** (matching its iOS companion). The rebrand is deliberately
 **user-visible only**: `build.productName`, `build.appId`, the window title, the `<title>`, the
-welcome screen, the update card and the README. **Everything else still says `nodeterm`/
+welcome screen, the update card, the README, the app icon (`scripts/make-icon.mjs` renders
+`resources/brand/termscape-appicon.svg`) and every in-app mark (`TermscapeMark`, guarded by
+`src/renderer/brand-mark.guard.test.ts` — upstream's node-graph logo may not be drawn anywhere,
+BUSL-1.1 grants no rights in it). **Everything else still says `nodeterm`/
 `node-terminal` on purpose.** A future agent tidying up "leftover" occurrences would cause real
 damage, so the reasons are recorded here:
 

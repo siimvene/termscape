@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { TermscapeMark } from './TermscapeMark'
 import { createPortal } from 'react-dom'
 import { useProjects } from '../state/projects'
 import { useViewMode, viewFor } from '../state/viewMode'
@@ -204,26 +205,7 @@ export function TabBar({
 
       <div className="tabbar">
         <div className="brand">
-          <svg className="brand__mark" viewBox="0 0 48 48" width="26" height="26" aria-hidden="true">
-            <defs>
-              <linearGradient id="ntg" x1="0" y1="0" x2="1" y2="1">
-                <stop offset="0" stopColor="#a38dff" />
-                <stop offset="1" stopColor="#622994" />
-              </linearGradient>
-            </defs>
-            <path
-              d="M13 12 L31 24 L13 36"
-              fill="none"
-              stroke="url(#ntg)"
-              strokeWidth="5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-            <circle cx="13" cy="12" r="3.6" fill="#a38dff" />
-            <circle cx="13" cy="36" r="3.6" fill="#a38dff" />
-            <circle cx="31" cy="24" r="3.6" fill="#fff" />
-            <rect x="33.5" y="32.5" width="10.5" height="5" rx="2.5" fill="#a38dff" />
-          </svg>
+          <TermscapeMark className="brand__mark" size={26} />
           <span className="brand__name">Termscape</span>
         </div>
 
