@@ -185,7 +185,8 @@ jobs:
         run: |
           npm run make-icon
           npm run build
-          npx electron-builder --linux --publish never
+          # Same updater-off stamp the dist scripts carry: this fork ships no update feed on any platform.
+          npx electron-builder --linux --publish never -c.extraMetadata.nodeTermUpdates=disabled
 
       # Both jobs target the release for the same tag; softprops updates an existing
       # release rather than failing, so mac/linux artifact sets merge. (A same-instant

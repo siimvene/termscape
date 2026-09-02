@@ -391,13 +391,15 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '(Claude and Codex; other agents\' subagents are not shown at all) that disappear on your next',
     'turn — no terminal, no worktree, no kanban card. For work the user will want to watch, steer or',
     'keep (parallel implementation across files or repos, a long review, anything that should outlive',
-    'your turn) open real nodes instead and read results back through the context links: for',
-    'isolated checkouts, `open-worktree --branch <slug>` then `open-agent --group <groupId>` per role',
-    '(the ONLY recipe that puts a member in a worktree — `spawn-team` ignores `--group` and opens its',
-    'members in YOUR checkout, as a labeled team); for a team that may share your checkout, one',
-    '`spawn-team`. Keep in-process subagents for quick lookups and short checks: a node per grep is noise.',
-    'A review by a DIFFERENT vendor\'s agent than you is a natural node (`open-agent --agent <other>`):',
-    'it starts with none of your context and reads your transcript only through the link.',
+    'your turn) open real nodes instead and read results back through the context links (agents that',
+    'support them — see `link`): for isolated checkouts, `open-worktree --branch <slug>` then',
+    '`open-agent --agent <id> --group <groupId>` per role (the ONLY recipe that puts a member in a',
+    'worktree — `spawn-team` ignores `--group` and opens its members in YOUR checkout, as a labeled',
+    'team); for a team that may share your checkout, one `spawn-team`. Keep in-process subagents for',
+    'quick lookups and short checks: a node per grep is noise. When the user asks for a review by a',
+    'DIFFERENT vendor\'s agent than you, that is a natural node (`open-agent --agent <other>`): it starts',
+    'with none of your context and reads your transcript only through the link. Opening another',
+    'vendor\'s session unasked is not yours to decide — it is a separate account and bill.',
     '',
     'Orchestration ("Build with Nodeterm orchestration"): first decide what is genuinely',
     'independent — for every "and then", ask whether the next step READS the previous step\'s',
@@ -834,13 +836,15 @@ inside your process: the canvas shows them at most as ephemeral cards on your no
 a live tail) that disappear on your next turn — no terminal, no worktree, no kanban card, nothing
 the user can open later. For work the user will want to watch, steer or keep — parallel
 implementation across files or repos, a long review, anything that should outlive your turn —
-open real nodes instead and read the results back through the context links: for isolated
-checkouts, \`open-worktree --branch <slug>\` then \`open-agent --group <groupId>\` per role (this
-is the ONLY recipe that puts a member in a worktree — \`spawn-team\` ignores \`--group\` and opens
-its members in YOUR checkout, as a labeled team); for a team that may share your checkout, one
-\`spawn-team\`. Keep in-process subagents for quick lookups and short checks: a node per grep is noise.
-A review by a DIFFERENT vendor's agent is a natural node (\`open-agent --agent <other>\`): it starts
-with none of your context, and reads your transcript only if it chooses to, through the link.
+open real nodes instead and read the results back through the context links (agents that support
+them — see \`link\`): for isolated checkouts, \`open-worktree --branch <slug>\` then
+\`open-agent --agent <id> --group <groupId>\` per role (this is the ONLY recipe that puts a member
+in a worktree — \`spawn-team\` ignores \`--group\` and opens its members in YOUR checkout, as a
+labeled team); for a team that may share your checkout, one \`spawn-team\`. Keep in-process
+subagents for quick lookups and short checks: a node per grep is noise. When the user asks for a
+review by a DIFFERENT vendor's agent, that is a natural node (\`open-agent --agent <other>\`): it
+starts with none of your context and reads your transcript only if it chooses to, through the link.
+Opening another vendor's session unasked is not yours to decide — it is a separate account and bill.
 
 Typical requests this skill covers:
 - "Create Claude Code nodes for X and organize them into groups by subject" → decide the

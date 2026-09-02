@@ -228,7 +228,11 @@ describe('parseControlRequest', () => {
       // The worktree recipe must be the real one: spawn-team ignores --group and opens members in
       // the caller's checkout (Canvas.tsx `case 'spawn-team'`), so the text may never claim it
       // creates worktree-bound groups (consort SERIOUS, 2026-09-02).
-      expect(body).toMatch(/`open-worktree --branch <slug>` then `open-agent --group <groupId>`/)
+      // `--agent <id>` is mandatory for open-agent (parseControlRequest rejects it otherwise): the
+      // recipe must show it, or an agent copying it gets a refusal (consort SERIOUS, 2026-09-02).
+      expect(body).toMatch(/`open-worktree --branch <slug>` then\s+`open-agent --agent <id> --group <groupId>`/)
+      // Cross-vendor sessions are opened on the USER's request only — another account, another bill.
+      expect(body).toMatch(/When the user asks for a\s+review by a\s+DIFFERENT vendor/)
       expect(body).toMatch(/`spawn-team` ignores `--group`/)
       expect(body).not.toMatch(/spawn-team[^.]*into worktree-bound/)
       expect(body).toContain('a node per grep is noise')
