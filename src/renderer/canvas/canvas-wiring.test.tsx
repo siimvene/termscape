@@ -168,7 +168,49 @@ describe('breadcrumb wiring the CLAUDE.md bullet calls load-bearing', () => {
     // an EMPTY fit set, bounds {0,0,0,0}, the world origin at maxZoom (138%) — which onMove then
     // persisted into the project's viewport. The camera must be driven imperatively instead.
     expect(body).not.toContain('fitView(')
-    expect(body).toContain('setViewport(')
+    // Both rect sources animate over the same 300 ms the old fit did — a bare setViewport(viewport)
+    // would teleport instead.
+    expect(body.match(/setViewport\(viewport, \{ duration: 300 \}\)/g) ?? []).toHaveLength(2)
+    // The MEASURED rect must be framed with solveFitPadding's DIRECTIONAL pixel insets against the
+    // full pane (viewportForRectPadded), which is what the fit it replaces did. Framing it inside
+    // the reduced free region instead pays the 0.2 ratio ON TOP of the reduction and comes out
+    // ~12% smaller — see nodeFocus.test.ts for the numbers.
+    expect(body).toContain('const padded = solveFitPadding(wrapEl, measured.width, measured.height)')
+    expect(body).toContain('viewportForRectPadded(')
+  })
+
+  it('NOTHING in Canvas queues a deferred fit — fitAll is imperative too', () => {
+    // xyflow keeps ONE global fitViewQueued slot, and nothing cancels it. A fit-all queued while a
+    // ghost holds nodesInitialized false outlives the click: it resolves on some later
+    // updateNodeInternals, overriding a node focus that had already landed — and if a project
+    // switch happened in between, its explicit old-project ids leave an empty fit set, i.e. the
+    // origin jump again, persisted by onMove. So the whole file is scanned, not just frameNode.
+    // (Prose in this file writes `fitView` WITHOUT the paren on purpose, so this stays a plain
+    // scan; if a deferred fit is ever genuinely needed, exempt it here by name and say why.)
+    expect(CANVAS_SRC).not.toContain('fitView(')
+    // …and it is not even destructured from useReactFlow any more, so it cannot come back by
+    // accident.
+    expect(CANVAS_SRC).not.toContain('\n    fitView,')
+    const fitAll = CANVAS_SRC.slice(
+      CANVAS_SRC.indexOf('const fitAll = useCallback'),
+      CANVAS_SRC.indexOf('const zoomTo100 = useCallback')
+    )
+    expect(fitAll.length).toBeGreaterThan(0)
+    expect(fitAll).toContain('viewportForRectPadded(')
+    expect(fitAll).toContain('setViewport(viewport, { duration: 300 })')
+    // An empty (or ghost-only) canvas stands still. The old bare fall-through was a no-op only
+    // when React Flow's WHOLE lookup was empty; with a ghost parked at the origin it fit an empty
+    // filtered set instead.
+    expect(fitAll).toContain('if (!fitNodes.length) return')
+    // …and the one caller that fits right after a React `setNodes` must wait a frame for the store
+    // to adopt it: an imperative fitAll reads the bounds NOW, where the queued fit it replaced
+    // resolved after the new nodes landed. Without this, Tidy canvas frames the pre-arrange box.
+    const arrange = CANVAS_SRC.slice(
+      CANVAS_SRC.indexOf('const arrangeAllNodes = useCallback'),
+      CANVAS_SRC.indexOf('const toggleCollapseNodes = useCallback')
+    )
+    expect(arrange.length).toBeGreaterThan(0)
+    expect(arrange).toContain('requestAnimationFrame(() => fitAll())')
   })
 
   it('the resume card slot is spent only on a card that can render, and only when opted in', () => {

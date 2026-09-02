@@ -257,11 +257,13 @@ import {
   folderName
 } from '../lib/projectOpen'
 import {
+  FIT_NODE_OPTIONS,
   absolutePosition,
   isMeasured,
   measuredFitRect,
   nodeFitRect,
   viewportForRect,
+  viewportForRectPadded,
   type FocusableNode
 } from '../lib/nodeFocus'
 import { NODE_MAXIMIZE_MARGIN_PX, maximizeTargetRect } from '../lib/nodeMaximize'
@@ -1434,7 +1436,6 @@ export function Canvas() {
   const {
     setViewport,
     getViewport,
-    fitView,
     zoomIn,
     zoomOut,
     screenToFlowPosition,
@@ -1453,20 +1454,33 @@ export function Canvas() {
   const fitAll = useCallback(() => {
     const wrap = flowWrapRef.current
     // Keep-alive ghosts are invisible stand-ins parked at the origin — framing them would drag
-    // every fit toward 0,0. Excluded from BOTH halves: the padding solve's bounds and fitView's
-    // own fit set (the explicit `nodes` list; a real node unmeasured this early is dropped by
-    // React Flow's measured filter, which at a user-gesture fit means nothing in practice).
+    // every fit toward 0,0 — so they are excluded from the bounds AND from the padding solve.
     const fitNodes = getNodes().filter((n) => (n as CanvasNode).data?.ghost !== true)
+    // Nothing real to fit: stand still. The old code fell back to a bare `fitView` call here,
+    // a no-op only when the WHOLE lookup is empty — with a ghost parked at the origin its
+    // filtered fit set was empty instead, i.e. the origin jump this whole path exists to avoid.
+    if (!fitNodes.length) return
     const bounds = getNodesBounds(fitNodes)
     const padding = wrap ? solveFitPadding(wrap, bounds.width, bounds.height) : null
-    // Nothing to fit, or chrome swallowing the viewport: let fitView use its own framing.
-    void fitView({
-      duration: 300,
-      padding: padding ?? 0.1,
-      // Empty canvas: fall back to the bare call (its no-op), never an empty fit set (origin jump).
-      ...(fitNodes.length ? { nodes: fitNodes.map((n) => ({ id: n.id })) } : {})
-    })
-  }, [fitView, getNodes, getNodesBounds])
+    const rect = wrap?.getBoundingClientRect()
+    // Imperative, like frameNode and for the same reason: React Flow 12's `fitView` is DEFERRED and
+    // there is ONE global queue slot, so a fit queued here (never resolvable while a keep-alive
+    // ghost holds `nodesInitialized` false) could resolve much later — after a node focus, or after
+    // a project switch, where its explicit old-project ids leave an EMPTY fit set and the camera
+    // lands on the world origin at max zoom, persisted by `onMove`. No queue, no late override.
+    // (`getNodesBounds` also counts a real node React Flow has not measured yet, which the old
+    // explicit-ids fit set dropped — at a user-gesture fit that is the better answer, not a change
+    // anyone can perceive.) Zoom limits are the canvas's own: a fit-all must be able to zoom out
+    // past FIT_NODE_OPTIONS' single-node floor.
+    const viewport = rect
+      ? viewportForRectPadded(bounds, rect.width, rect.height, padding ?? 0.1, {
+          minZoom: CANVAS_MIN_ZOOM,
+          maxZoom: CANVAS_MAX_ZOOM
+        })
+      : null
+    // No pane yet, or chrome swallowing the viewport / degenerate bounds: leave the camera alone.
+    if (viewport) void setViewport(viewport, { duration: 300 })
+  }, [setViewport, getNodes, getNodesBounds])
 
   /**
    * Back to 100%, keeping whatever is in the middle of the screen in the middle.
@@ -6624,7 +6638,13 @@ export function Canvas() {
     const ids = targets.map((n) => n.id)
     setNodes((ns) => arrangeNodes(ns, ids, { layout: 'grid' }))
     markDirty()
-    fitAll()
+    // Fit on the NEXT frame, not in this tick. `setNodes` here is React state (`useNodesState`),
+    // so React Flow's store still holds the PRE-arrange geometry while this callback runs — and
+    // `fitAll` is imperative now (it reads `getNodes`/`getNodesBounds` synchronously instead of
+    // queueing a fit that used to resolve after the new nodes were adopted), so calling it here
+    // would frame the old bounding box. Every caller of this is a discrete event, whose state
+    // update React commits before the frame callback runs.
+    requestAnimationFrame(() => fitAll())
   }, [setNodes, markDirty, fitAll])
 
   const toggleCollapseNodes = useCallback(
@@ -6658,7 +6678,8 @@ export function Canvas() {
    * FIT_NODE_OPTIONS keeps a small node from filling the whole screen and a huge one from being
    * fit microscopic.
    *
-   * IT NEVER CALLS `fitView`, and must not be "simplified" back to it. In `@xyflow/react` 12
+   * IT NEVER CALLS `fitView` — nothing in this file does any more (`fitAll` was converted for the
+   * same reason; see its comment). It must not be "simplified" back to it. In `@xyflow/react` 12
    * `fitView` is DEFERRED: it only parks `fitViewQueued` + `fitViewOptions` in the store and
    * resolves on a later `setNodes` — and ONLY while `nodesInitialized === true`, which this canvas
    * can never be relied on to be: the webview keep-alive ghosts live in the `<ReactFlow nodes>`
@@ -6683,25 +6704,47 @@ export function Canvas() {
    * click, sessions sidebar, ⌘K jump, presence travel), where the load and the focus happen in the
    * same tick.
    *
-   * The framing itself is solved against the CURRENT chrome layout, exactly like `fitAll`: a flat
-   * 20% ratio has to reserve enough slack for the dock/minimap on EVERY side, which is what kept a
-   * big node (a group frame most of all) further away than it needed to be. The free-rect solver
-   * reclaims the space the chrome does not actually occupy, so the node is framed tighter without
-   * sliding underneath anything — and BOTH rect sources go through that one solver, so no focus
-   * path can park the node half under the pinned sessions sidebar. Falls back to the flat 20%
-   * ratio (no region) when there is nothing sensible to solve.
+   * Either way the framing is solved against the CURRENT chrome layout, exactly like `fitAll`: a
+   * flat 20% ratio has to reserve enough slack for the dock/minimap on EVERY side, which is what
+   * kept a big node (a group frame most of all) further away than it needed to be. The free-rect
+   * solver reclaims the space the chrome does not actually occupy, so the node is framed tighter
+   * without ever sliding under the pinned sessions sidebar. The two rect sources consume that one
+   * solve DIFFERENTLY, and deliberately: the measured case takes its directional pixel insets
+   * (`solveFitPadding`) against the full pane — byte-identical to the fit it replaces — while the
+   * persisted case, which is only ever a first-tick fallback, frames inside the free region with
+   * the 20% ratio, as it always has. Both fall back to the flat 20% ratio when there is nothing
+   * sensible to solve.
    */
   const frameNode = useCallback(
     (node: Node) => {
       const internal = getInternalNode(node.id)
+      const wrapEl = flowWrapRef.current
+      const wrap = wrapEl?.getBoundingClientRect()
       // The store's measurement wins. A measured node without an absolute position is not a shape
       // React Flow produces, but the type allows it — fall through to the persisted size instead
       // of framing from a half-known rect.
       const measured = isMeasured(internal) ? measuredFitRect(internal) : null
-      const rect =
-        measured ?? nodeFitRect(node as FocusableNode, nodesRef.current as FocusableNode[])
-      const wrapEl = flowWrapRef.current
-      const wrap = wrapEl?.getBoundingClientRect()
+      if (measured && wrapEl && wrap) {
+        // The framing the old single-node `fitView` produced, to the pixel: it passed
+        // `...FIT_NODE_OPTIONS` with `padding` replaced by `solveFitPadding`, i.e. DIRECTIONAL pixel
+        // insets against the FULL pane, into the same `getViewportForBounds` this helper calls.
+        // Reducing the pane to the free region and
+        // padding by the 0.2 RATIO inside it is a different (smaller) framing — the ratio applies
+        // on top of the reduction, and xyflow's asymmetric path pushes the rect flush against the
+        // reserved edge instead of centring it in the remainder. [MEASURED, 600×400 node at
+        // {5050,260}, 1280×900 pane, 400px sidebar: {x:-6569, y:-184.8, zoom:1.38} vs
+        // {x:-5621.67, y:-105.07, zoom:1.2067}.] Pinned in nodeFocus.test.ts.
+        const padded = solveFitPadding(wrapEl, measured.width, measured.height)
+        const viewport = viewportForRectPadded(
+          measured,
+          wrap.width,
+          wrap.height,
+          padded ?? FIT_NODE_OPTIONS.padding
+        )
+        if (viewport) void setViewport(viewport, { duration: 300 })
+        return
+      }
+      const rect = nodeFitRect(node as FocusableNode, nodesRef.current as FocusableNode[])
       // Frame inside the chrome-free region so the node does not land under the (pinned) sessions
       // sidebar / dock / minimap. The solver uses the rect's dimensions only for its aspect-ratio
       // pick, so canvas-space size (the persisted case) and on-screen size (the measured case) are
@@ -12704,7 +12747,6 @@ export function Canvas() {
     isSshProject,
     newProjectFile,
     addProject,
-    fitView,
     persist,
     switchProject,
     goToNode,

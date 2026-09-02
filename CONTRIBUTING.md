@@ -156,10 +156,14 @@ lane unaffected.
   the guest), so React Flow never measures them. A queued `fitView` then does nothing on the click
   and may resolve after a project switch against a node list its target has left — an empty fit
   set, bounds `{0,0,0,0}`, the camera parked on the world origin at max zoom, and `onMove` persists
-  it. Compute the rect yourself and call `setViewport` (`renderer/lib/nodeFocus.ts` +
-  `Canvas.frameNode`); if the size is unknowable, stand still. `fitAll` may still use `fitView`
-  because it frames the whole canvas and guards the empty-node case, so a late resolve there is
-  harmless — a single-node fit has no such fallback.
+  it. There is one global queue slot and nothing cancels it, so a stale fit also overrides a camera
+  move that already landed — which is why NO path in `Canvas.tsx` calls it any more, fit-all
+  included, and a whole-file test pin says so. Compute the rect yourself and call `setViewport`
+  (`renderer/lib/nodeFocus.ts` + `Canvas.frameNode`); if the size is unknowable, stand still. When
+  you reproduce an existing fit, mind that xyflow's **numeric** padding is a ratio applied on top of
+  the bounds while **directional px** insets reserve pane edges — swapping one for the other
+  silently changes the framing (measured: 12% smaller). And finite-check the rect AND the resulting
+  viewport: `setViewport({x: NaN, …})` is accepted, blanks the canvas, and `onMove` persists it.
 
 These are the ones that come up in review most often. Each exists because its absence caused a real
 bug.
