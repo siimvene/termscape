@@ -134,7 +134,11 @@ const ROWS = {
       'resume',
       'offscreen',
       'minutes',
-      'sleep'
+      'sleep',
+      'pause',
+      'paused',
+      'restart',
+      'reopen'
     ]
   }
 }
@@ -326,6 +330,7 @@ export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.El
             'Launch an agent with your own command — e.g. a wrapper script that switches accounts or sets env vars. ' +
             'Used everywhere the agent is launched (new sessions, resumes, restarts), with flags like --resume appended after it, ' +
             'so the command must pass its arguments through — a shell script should end with `exec claude "$@"`. ' +
+            'A flag your command already spells is left alone: write the permission mode here and it wins over the start-up mode below. ' +
             'Leave empty for the default. SSH projects run the same command on the remote host.'
           }
           control={null}
@@ -511,6 +516,18 @@ export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.El
               />
               <span className="text-[13px] text-muted">min</span>
             </div>
+          }
+        />
+        <FieldRow
+          label="Keep paused after closing"
+          description="When Eco hibernates a session, also keep it paused across a project/app reopen instead of auto-resuming — only an explicit Resume brings it back. Manual “Pause session” always persists this way, whatever this is set to."
+          control={
+            <Switch
+              checked={settings.agentHibernationPersistAcrossRestart}
+              ariaLabel="Keep paused after closing"
+              disabled={!settings.agentHibernationEnabled}
+              onChange={(on) => update({ agentHibernationPersistAcrossRestart: on })}
+            />
           }
         />
       </SearchableRow>

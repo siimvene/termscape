@@ -32,7 +32,7 @@ file has been opened yet. A rule you did not load is an invariant you will viola
 | `.claude/rules/persistence.md` | State & persistence (workspace files, project.json, SSH mirror, triggers) |
 | `.claude/rules/projects.md` | Projects (tabs): switch, close/park, reopen, delete, open-folder recovery |
 | `.claude/rules/terminal.md` | Terminal sessions: tmux continuity, PTY lifecycle, cold restore, xterm seeding, TerminalNode |
-| `.claude/rules/nodes.md` | Node kinds, group frames, editor/diff/video/web/browser nodes, resize hit-area, webview keep-alive |
+| `.claude/rules/nodes.md` | Node kinds (incl. trigger), node icons, group frames, editor/diff/video/web/browser nodes, resize hit-area, webview keep-alive |
 | `.claude/rules/agents.md` | Agent support: registry + capabilities, hooks, permission mode, transcripts, subagent/workflow viz, adding a new agent |
 | `.claude/rules/agents-canvas-control.md` | Canvas control (nodeterm.sh shim, verbs, fan-in, --after, verify panel) and Context Link |
 | `.claude/rules/agents-accounts-usage.md` | Managed Claude/Codex accounts, account switch, usage indicator scope, remote usage |
@@ -119,6 +119,18 @@ means — and what you may assume when writing a feature — is three tiers, not
   never assume `/` or a unix socket. When a test can only run on one platform, gate it with
   `it.skipIf(process.platform === 'win32')` (or the inverse) and say why — never let it fail the
   cross-platform CI. The `windows-latest` CI job runs the platform-dependent suites on real Windows.
+- **Line endings are decided by `.gitattributes` (`* text=auto eol=lf`), not by each contributor's
+  git config.** Without it `text`/`eol` are unspecified and Git for Windows' default
+  `core.autocrlf=true` gives every Windows clone CRLF working files — so a test that reads a
+  checked-in file and slices on a `\n`-bearing literal (`CSS.indexOf('}\n}')`,
+  `indexOf('\n}\n')`, `indexOf('\n}')`) matched nothing and failed on a checkout with ZERO local
+  changes (issue #578). Two suites did; one reported 25 theme tokens missing that were all present,
+  which reads like a regression rather than a broken slice. Attributes only apply on re-checkout
+  (`git add --renormalize .` for a tree cloned earlier), so the readers ALSO normalize —
+  `readFileSync(f, 'utf8').replace(/\r\n/g, '\n')` — and `src/shared/line-endings.guard.test.ts`
+  fails on any such read that does not. `*.bat`/`*.cmd`/`*.ps1` are the deliberate exception and
+  keep CRLF: cmd.exe is not reliably tolerant of LF, and those are the files a Windows contributor
+  runs before anything else works.
 
 ## Commands
 
@@ -132,16 +144,33 @@ npm run rebuild    # re-run electron-rebuild for node-pty if you hit ABI/native 
 ```
 
 **`rebuild` and `postinstall` both run `scripts/patch-node-pty.mjs` first, and that is not
-optional.** node-pty 1.1.0's darwin `pty_posix_spawn` leaks a ptmx device on every SUCCESSFUL spawn
-(an off-by-one in the low-fd cleanup) and master+slave on every FAILED one; on this app's spawn
-churn that exhausts `kern.tty.ptmx_max` within hours, and terminals then simply stop opening. The
-script rewrites `node_modules/node-pty/src/unix/pty.cc` before electron-rebuild compiles it.
+optional.** It carries TWO version-pinned native patches for node-pty 1.1.0, one per platform leg:
+- **darwin** — `pty_posix_spawn` leaks a ptmx device on every SUCCESSFUL spawn (an off-by-one in
+  the low-fd cleanup) and master+slave on every FAILED one; on this app's spawn churn that
+  exhausts `kern.tty.ptmx_max` within hours, and terminals then simply stop opening
+  (microsoft/node-pty#950). Rewrites `node_modules/node-pty/src/unix/pty.cc`.
+- **Windows** — the native exit thread deletes its `pty_baton` without closing the HPCON the baton
+  owns, so the session host's taskkill-first kill path (src/session-host/host.ts) leaves a
+  host-parented conhost alive for the life of the long-lived session-host process, one per killed
+  session, and `conpty.kill(id)` reports nothing. The patch serializes baton access, closes the
+  exact HPCON before every baton deletion, and makes `kill(id)` return `true` only as positive
+  proof — the contract `src/session-host/windows-conpty.ts` was ALREADY written against (it
+  shipped with #305 expecting a patched node-pty that did not exist until this patch; do not
+  wire `closeExactWindowsConpty` into the ordinary kill path — after taskkill the exit thread
+  usually wins the race, has already closed the HPCON itself under the patch, and the primitive
+  would then report `false`; it exists for a pre-first-output teardown that bypasses the exit
+  thread). Rewrites `node_modules/node-pty/src/win/conpty.cc` on every host — the file only
+  compiles for the win32 native target, so patching on mac/Linux is harmless and keeps packaged
+  rebuilds honest.
 
-`src/main/node-pty-patch.test.ts` asserts the marker is present in those sources, so a node-pty
-upgrade that silently drops the patch fails loudly. **If that test is red, your `node_modules` is
-unpatched, not your code** — run `npm run rebuild`. It deliberately does not measure descriptors
-(that is environment-dependent); it checks the source the native module is built from. Upstream:
-microsoft/node-pty#950 — if the fix lands there, delete the script, its wiring and that test.
+Both patches run before electron-rebuild compiles the module.
+
+`src/main/node-pty-patch.test.ts` asserts both markers are present in those sources, so a node-pty
+upgrade that silently drops either patch fails loudly. **If that test is red, your `node_modules`
+is unpatched, not your code** — run `npm run rebuild`. It deliberately does not measure descriptors
+or handles (that is environment-dependent); it checks the source the native module is built from.
+Upstream: the darwin leg tracks microsoft/node-pty#950; the Windows leg has no upstream issue yet.
+When a leg's fix lands upstream, delete that leg (and the whole script + test once both are gone).
 
 **PACKAGING INVALIDATES THE TEST ENVIRONMENT — always `npm test` BEFORE `npm run dist`, never
 after.** electron-builder runs its own `npmRebuild`, which replaces
@@ -215,6 +244,18 @@ The codebase is split by Electron process boundary — keep code on the correct 
   browser) plus a web folder/file picker (in-app server-directory browser,
   replacing the native dialog) and WS backpressure; the renderer detects the
   bridge in `src/renderer/main.tsx` (desktop preload path is untouched).
+  The picker's **folder** mode also creates directories (`createPickerFolder`,
+  `renderer/bridge/dialog-picker.tsx`) — the native dialog it replaces has a New Folder
+  button, so without one "Open folder…" in the browser could only ever adopt a directory
+  that already existed on the server. It writes through the same `fs.mkdir`/`fs.exists`
+  the Explorer's "New Folder…" uses and validates the typed name with the same envelope,
+  `newEntryPath` (`renderer/lib/explorerCreate.ts`) — **do not add a second path
+  validator here**; `..`, absolute and empty names are refused in exactly one place. The
+  write deps are optional, so a caller with a read-only fs simply renders no button. File
+  mode has none (nobody opens a file picker to make a folder). Relay tabs get the same
+  button and it writes on the HOST, like every other `fs.*` the picker already uses. SSH
+  projects are a separate flow (`SshProjectDialog` over `sshProject.mkdir`) and already
+  had their own.
   **Phase 3b** boots the loopback **hook server** (`hookServer.start()`) + installs
   the managed hook scripts, and `wireAgentStatus` (`src/server/agent-status.ts`)
   broadcasts `agent:status` / `agent:subagent-activity` / `context:update` over the
@@ -280,6 +321,50 @@ also hold an exclusive candidate lock until the rename and cleanup finish. Never
 those back to `<target>.tmp` / `<target>.part` or a read-only "does the destination exist?" check —
 the overlap tests exercise the resulting race.
 
+## The test suite never touches a live tmux server
+
+This repo is developed from inside nodeterm, so `tmux -L node-terminal` and `-L nodeterm-rmt` are
+not fixture names on a contributor's machine — they are the servers holding every terminal they have
+open. A test that binds one shares a process with the user's whole canvas, and the failure mode is
+not a red test: it is every pane printing `[server exited unexpectedly]` (issue #629).
+
+**Every vitest run gets a private `TMUX_TMPDIR`.** tmux resolves `-L <socket>` to
+`$TMUX_TMPDIR/tmux-<uid>/<socket>` and falls back to `/tmp` when the variable is unset, so
+re-pointing the variable re-points every socket name at once — including the real ones, including
+in a suite nobody thought about. `test/setup/tmux-sandbox.ts` (`globalSetup`) creates the directory,
+kills whatever is still bound inside it and removes it; `test/setup/tmux-worker-env.ts`
+(`setupFiles`) re-asserts it inside each worker and **refuses to run** if it is missing, because
+vitest's env inheritance into workers is an implementation detail and a silent fallback would put
+every test back on the live server. `enterSandbox` also strips `TMUX`/`TMUX_PANE` — a suite run from
+inside a nodeterm terminal inherits a live client's, and production strips both for the same reason.
+
+Two suites deliberately name a real socket, and both are allowlisted with their reason in
+`src/core/tmux-socket-isolation.guard.test.ts`: `agents/pane-owner.test.ts` (the production bytes
+hardcode `-L nodeterm-rmt`; re-spelling it would judge different bytes) and
+`main/remote/host-destroy-tmux.test.ts` (`PtyManager` binds `TMUX_SOCKET` itself). The latter was
+the one file that reached the live server by construction — measured, not inferred — and it now
+refuses to start unless the sandbox is in effect.
+
+**What the sandbox does NOT do:** two suites naming the same socket inside it still share one tmux
+server, so a `kill-server` there is still a shared-server kill — it has just been moved somewhere
+harmless. Measured on CI the day this landed: the guard test's own `kill-server` on
+`node-terminal` ended `host-destroy-tmux.test.ts`'s session mid-assertion. A suite kills its OWN
+sessions by exact target (`-t =<name>`, since a miss falls through to prefix matching), or it owns
+a socket name nothing else uses.
+
+The guard has three legs on purpose, and the weakest one is the scan: a test can still escape by
+handing a real tmux an `env` object it built from scratch with no `TMUX_TMPDIR` in it, which no
+regex sees. So the structural leg is the sandbox, the behavioural leg actually **starts a server on
+the real socket name and proves the socket file landed inside the sandbox** (asserting the env var
+would only prove we set a variable — the resolution rule is a property of tmux), and the scan exists
+to make a third allowlist entry a decision somebody signs for. Same shape as the `fs.rename` guard,
+for the same reason: nobody reading one file can see this.
+
+**What this does not claim.** #629's server death was not traced to a test — the reporter's evidence
+points at tmux's `server_accept()` calling `fatal()` under the suite's process/fd burst on a
+memory-starved machine, and two identical runs finished clean. Sharing a server with the user's live
+sessions is a hazard whatever kills it; this removes the hazard, not a proven cause.
+
 ## Conventions
 
 - **Two docs, two audiences — keep both.** This file holds the deep invariants with their
@@ -300,6 +385,18 @@ the overlap tests exercise the resulting race.
 
 
 - Code comments, UI strings, and identifiers are all in **English**. Match this when editing.
+- **The local machine is not a Mac.** Every user-visible string naming it goes through
+  `renderer/lib/machineName.ts` (`thisMachine()` / `thisMachineCap()` / `machineNoun()` →
+  "this Mac" / "this PC" / "this computer"). A **browser tab always gets the neutral word**: the
+  license, seats and sessions it describes belong to the SERVER, and the viewer's `navigator` says
+  nothing about that machine's OS — a confident wrong noun is worse than a plain one. Issue #563
+  found ~30 such strings, and the damage was not in Accounts but in the copy people must TRUST:
+  "This Mac is not authorized on this license" and "a teammate on a seat can run commands on this
+  Mac". `machineName.guard.test.ts` scans non-comment lines in `src/renderer` + `src/shared` and
+  fails on a new one, with a named-and-reasoned exemption list (the ptmx-limit banner, whose
+  `kern.tty.ptmx_max` really is macOS; the onboarding notch step, which only exists there).
+  `@shared` code cannot ask the renderer, so it takes the machine word as a PARAMETER defaulting
+  to the neutral one (`describeGrant(peer, machine)`) rather than hard-coding a brand.
 - Path aliases: `@shared/*`, `@renderer/*` (see the tsconfig files / vite config).
 - **Three surfaces — design every feature for all of them.** nodeterm now ships on three
   fronts, and a feature is not "done" until you've decided how it behaves on each (even if

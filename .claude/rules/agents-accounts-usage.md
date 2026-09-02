@@ -16,6 +16,8 @@ paths:
   - "src/renderer/state/systemAccount.ts"
   - "src/renderer/state/codexAccountReconcile.ts"
   - "src/renderer/state/systemCodexAccount.ts"
+  - "src/shared/agents/account-*.ts"
+  - "src/renderer/components/settings/sections/AccountsSection*.tsx"
 ---
 # Managed Claude/Codex accounts, account switch, usage indicator scope, remote usage
 
@@ -47,6 +49,38 @@ paths:
     the project-default account), and validation runs against `accountsForProject`, not the raw
     list, so a **pending** account or one **pinned to another machine's host** is never stamped
     onto a node it cannot run on (both used to reach the missing-dir fallback at spawn).
+  - **`boundAccountId(accountId, agentId)` (`shared/agents/account-binding.ts`) is the ONE rule for
+    whether a node is account-bound at all**, and it feeds `data.accountId` *and* the account color
+    from a single decision — split them and a node carries an account it is not painted for, or is
+    painted for one it does not carry. Two surfaces mint nodes and both ask it: `createAgentNode`
+    (canvas) and `appendProjectNode` (the phone's `projects.registerNode`, which used to write
+    whatever the wire sent, so a gemini node could come back bound to a Claude account). Managed
+    accounts belong to the builtin **claude and codex** (S6); a **known** other agent — builtin or
+    custom, since a custom agent inheriting one of those harnesses is still its own agent — never
+    binds. **An UNSTATED agent keeps its binding** — the asymmetry is deliberate: the phone chooses
+    `agentId` and `accountId` independently and is not known to always send the first
+    (docs/ios-protocol-migration.md §6), dropping a real binding is the wrong-identity bug the
+    field exists to prevent, while a stray one on an agent-less node only sets a config-home
+    variable nothing reads. On the canvas `agentId` is always stated, so that path is bit-for-bit
+    what it was. `main` resolves the color off the RAW id and lets the registrar refuse it, rather
+    than re-deriving the gate at the call site.
+  - **Account default node color (`ClaudeAccount.color` / `CodexAccount.color`, optional)** — a
+    per-account default node color (Settings → Accounts) that beats the agent's own brand color in
+    `createAgentNode`, so a second login is recognizable on the canvas. Read off the SAME
+    `boundAccountId` that stamps `data.accountId`, so the color and the binding cannot drift.
+    Applied **at creation** and baked into `data.color` like any other node color: a hand-picked
+    node color is never overwritten and editing the account later repaints nothing. Unset / stale
+    id / an agent that takes no managed account ⇒ the agent's color, unchanged.
+    **Which list answers is `agentAccountColor`'s alone** (`shared/agents/account-color.ts`, one
+    definition shared by `createAgentNode` and the phone-registered node path in `src/main`):
+    claude reads `claudeAccounts`, codex reads `codexAccounts`, everything else reads nothing. The
+    two lists are keyed **independently** — nothing stops the same id appearing in both — so a node
+    colored from the other list would be repainted from a stranger's row; the swatch UI is one
+    component (`AccountColorSwatches`) rendered by both row kinds for the same reason.
+    The value is **re-validated as a string** at the read: the account lists come out of a
+    hand-editable settings.json that nothing checks field-by-field on load, and a `"color": 123`
+    would throw on `.trim()` INSIDE `createAgentNode` — stopping every new node under that account
+    from opening, with nothing pointing back at the edited file.
   - **The LAUNCHING agent session's identity never reaches a pane** (`AGENT_SESSION_ENV_STRIP`,
     2026-08-28). `buildPtyEnv` spreads `{ ...process.env }`, so a nodeterm started from inside a
     Claude Code session (`open -a nodeterm` from an agent's shell, a canvas terminal launching a
@@ -96,7 +130,18 @@ paths:
     guessing "not codex" would let `codex login` write into the system `~/.codex`. A dispatch with
     no listener is a silent no-op, which is how the Codex half shipped inert (#346) — pinned now by
     `renderer/lib/nodeterm-events.test.ts`, which fails on any `nodeterm:*` event that is sent but
-    never heard.
+    never heard. **All THREE login factories take a `cwd`** (`createAccountLoginNode`,
+    `createCodexAccountLoginNode`, `createSystemLoginNode`), and every call site passes the active
+    project's — a login node with none starts in `$HOME`, and an agent CLI whose trust check is
+    keyed on the cwd (Claude Code's is) then asks the user to trust their entire home directory,
+    SSH keys and cloud credentials included, before an OAuth round trip that touches no files
+    (issue #553; a persisted "yes" there grants that workspace for good). It is not a promise the
+    prompt disappears — an untrusted project still prompts — it makes it the exception rather than
+    the rule, without nodeterm writing another tool's trust config on the user's behalf. A
+    **remote** login ignores the local path: `createTerminalNode` prefers `ssh.remoteCwd`, which is
+    the only cwd that means anything for a session running on the host. An SSH project has no local
+    `cwd`, so a LOCAL account added from one still opens in `$HOME` — the honest answer, since that
+    project owns no local directory.
   - **The lifecycle is CORE, and both shells register it** (issue #313) —
     `core/claude-accounts-service.ts` owns the four `claude-accounts:*` channels (add / wait-login
     / cancel-wait / remove) behind `platform().handle`; `main/claude-accounts.ts` is a thin desktop

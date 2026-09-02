@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { assembleLaunchCommand, assembleResumeCommand } from './launch'
+import { assembleLaunchCommand, assembleResumeCommand, promptFilePathError } from './launch'
 import { setCustomAgentBaseResolver } from './config'
 import type { CustomAgent } from '../types'
 
@@ -46,6 +46,37 @@ describe('assembleLaunchCommand — builtins (byte-identical to the historical p
       ).command
     ).toBe('claude')
   })
+  it('grok puts the MINTED SESSION ID before the -- separator, prompt and all', () => {
+    // The failure this guards is not a crash. grok's `--` is END OF OPTIONS: a flag placed after it
+    // is swallowed as part of the PROMPT, so the node launches, looks healthy, mints a session id
+    // nodeterm never learns, and the agent reads "--session-id <uuid>" as the first words of its
+    // instructions. Nothing about the exit code says so — which is why this asserts on POSITION.
+    const cmd = assembleLaunchCommand(
+      {
+        agentId: 'grok',
+        initialPrompt: 'do the thing',
+        sessionId: '01a06126-b981-73f1-8b68-4547e4d7da84',
+        sessionIdFlagSupported: true
+      },
+      ENV
+    ).command
+    expect(cmd).toBe(
+      "grok --session-id 01a06126-b981-73f1-8b68-4547e4d7da84 -- 'do the thing'"
+    )
+    expect(cmd.indexOf('--session-id')).toBeLessThan(cmd.indexOf(' -- '))
+  })
+
+  it('mints nothing for grok when the CLI did not advertise the flag', () => {
+    // The probe answers for the binary in front of us. No advertisement ⇒ NAKED command, never a
+    // blocked launch: an unrecognised flag makes grok exit, so guessing costs the whole session.
+    expect(
+      assembleLaunchCommand(
+        { agentId: 'grok', sessionId: '01a06126-b981-73f1-8b68-4547e4d7da84' },
+        ENV
+      ).command
+    ).toBe('grok')
+  })
+
   it('grok puts the permission flag BEFORE the -- separator', () => {
     expect(
       assembleLaunchCommand({ agentId: 'grok', initialPrompt: 'version', permissionMode: 'plan' }, ENV).command
@@ -282,5 +313,122 @@ describe('quoting by construction — env values can never become shell syntax o
     )
     expect(command).toBe("claude-wopr '--model' '--verbose'")
     expect(missingEnv).toEqual(['GONE'])
+  })
+})
+
+describe('assembleLaunchCommand — promptFile (issue #520)', () => {
+  // The whole point: the TYPED line stays single-line while the pane's shell expands the file at
+  // execution, so a multi-line brief reaches the CLI with its structure intact.
+  it('claude composes the prompt as a "$(cat …)" substitution with the PATH single-quoted', () => {
+    expect(
+      assembleLaunchCommand({ agentId: 'claude', promptFile: '/tmp/brief.md' }, ENV).command
+    ).toBe('claude "$(cat \'/tmp/brief.md\')"')
+  })
+  it('flags still land after the prompt for claude', () => {
+    expect(
+      assembleLaunchCommand(
+        { agentId: 'claude', promptFile: '/tmp/brief.md', permissionMode: 'auto' },
+        ENV
+      ).command
+    ).toBe('claude "$(cat \'/tmp/brief.md\')" --permission-mode auto')
+  })
+  it('grok keeps its flags BEFORE the -- separator, substitution after it', () => {
+    expect(
+      assembleLaunchCommand(
+        { agentId: 'grok', promptFile: '/tmp/brief.md', permissionMode: 'plan' },
+        ENV
+      ).command
+    ).toBe('grok --permission-mode plan -- "$(cat \'/tmp/brief.md\')"')
+  })
+  it('a flag-prompt agent passes the substitution through its prompt flag', () => {
+    expect(assembleLaunchCommand({ agentId: 'opencode', promptFile: '/tmp/b.md' }, ENV).command).toBe(
+      'opencode --prompt "$(cat \'/tmp/b.md\')"'
+    )
+  })
+  it('promptFile wins over initialPrompt', () => {
+    expect(
+      assembleLaunchCommand(
+        { agentId: 'claude', initialPrompt: 'ignored', promptFile: '/tmp/brief.md' },
+        ENV
+      ).command
+    ).toBe('claude "$(cat \'/tmp/brief.md\')"')
+  })
+  it('a path with a quote in it cannot break out of the quoting', () => {
+    // shellSingleQuote's '\'' dance — the path stays ONE argument to cat and nothing in it
+    // reaches the shell as syntax.
+    const cmd = assembleLaunchCommand(
+      { agentId: 'claude', promptFile: "/tmp/my brief's.md" },
+      ENV
+    ).command
+    expect(cmd.startsWith('claude "$(cat ')).toBe(true)
+    expect(cmd).toContain("'/tmp/my brief'\\''s.md'")
+  })
+  it('the --prompt literal is still collapsed to one line (unchanged behavior)', () => {
+    expect(
+      assembleLaunchCommand({ agentId: 'claude', initialPrompt: 'a\nb\n\n  c' }, ENV).command
+    ).toBe("claude 'a b c'")
+  })
+})
+
+/**
+ * Issue #601, at the layer the reporter actually read it off — the assembled command line, the one
+ * that shows up in the process table. `withPermissionMode` has its own unit tests; these two pin
+ * that the composition does not put the flag back.
+ */
+describe('assembleLaunchCommand / assembleResumeCommand — override already carries the flag (#601)', () => {
+  it('does not duplicate --permission-mode on a fresh launch', () => {
+    expect(
+      assembleLaunchCommand(
+        {
+          agentId: 'claude',
+          launchCmdOverride: 'claude --permission-mode bypassPermissions',
+          permissionMode: 'auto'
+        },
+        ENV
+      ).command
+    ).toBe('claude --permission-mode bypassPermissions')
+  })
+
+  it('does not duplicate it on the resume path either', () => {
+    // The cold-restore / restart leg. It resumes through the same wrapper, so it inherits the same
+    // duplicate if this is fixed in only one assembler.
+    expect(
+      assembleResumeCommand(
+        {
+          agentId: 'claude',
+          launchCmdOverride: 'claude --permission-mode=plan',
+          sessionId: 'abc-123',
+          permissionMode: 'auto'
+        },
+        ENV
+      ).command
+    ).toBe('claude --permission-mode=plan --resume abc-123')
+  })
+
+  it('still appends to an override that says nothing about permissions', () => {
+    expect(
+      assembleLaunchCommand(
+        { agentId: 'claude', launchCmdOverride: 'my-wrapper', permissionMode: 'auto' },
+        ENV
+      ).command
+    ).toBe('my-wrapper --permission-mode auto')
+  })
+})
+
+describe('promptFilePathError', () => {
+  it('accepts an absolute POSIX path', () => {
+    expect(promptFilePathError('/tmp/brief.md')).toBeNull()
+  })
+  it('accepts a Windows drive path', () => {
+    expect(promptFilePathError('C:\\briefs\\x.md')).toBeNull()
+  })
+  it('refuses a relative path', () => {
+    expect(promptFilePathError('brief.md')).toMatch(/absolute/)
+  })
+  it('refuses an empty path', () => {
+    expect(promptFilePathError('  ')).toMatch(/needs a path/)
+  })
+  it('refuses a newline in the path — it would break the single-line typed delivery', () => {
+    expect(promptFilePathError('/tmp/a\nb')).toMatch(/newlines/)
   })
 })

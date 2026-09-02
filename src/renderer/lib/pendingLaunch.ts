@@ -13,7 +13,10 @@ export interface ArmedNode {
 }
 
 /** The subset of the agentStatus store this module reads. */
-export type StatusById = Record<string, { state?: AgentState } | undefined>
+export type StatusById = Record<
+  string,
+  { state?: AgentState; lastTurnError?: { at: number } } | undefined
+>
 
 /**
  * May a freshly-mounted agent node run its cold-restore `--resume` (or any in-place relaunch)?
@@ -52,10 +55,33 @@ export interface LaunchToFire {
  * exists but has reported nothing yet) is deliberately NOT satisfied: right after a fan-out the
  * upstream stations have not emitted a hook event yet, and reading "no news" as "finished"
  * would fire every dependent immediately — the exact bug that makes a dependency edge useless.
+ *
+ * A dep that is `done` **with a live `lastTurnError`** is refused (issue #521). An errored station
+ * reaches idle IMMEDIATELY and looked healthy from every surface an orchestrator can read, so a
+ * whole dependency chain launched against an upstream that had produced nothing. Firing with a
+ * warning instead was considered and dropped: a dependent that has already launched cannot
+ * un-launch, so the warning would arrive after the damage. The armed node keeps its manual ▶
+ * run-now escape, so the human — or the orchestrator, after a retry — is never stuck.
+ *
+ * The refusal ends by itself: `lastTurnError` is cleared by the upstream's next genuine new turn,
+ * so a station that is nudged and answers successfully satisfies its dependents on that turn.
  */
 function depSatisfied(depId: string, status: StatusById, live: ReadonlySet<string>): boolean {
   if (!live.has(depId)) return true
-  return status[depId]?.state === 'done'
+  const st = status[depId]
+  return st?.state === 'done' && !st.lastTurnError
+}
+
+/** Of the deps this node is still waiting on, which are held because they ERRORED rather than
+ *  because they have not finished? What the QUEUED tooltip names (issue #521). */
+export function erroredDeps(
+  node: ArmedNode,
+  status: StatusById,
+  live: ReadonlySet<string>
+): string[] {
+  return (node.data.pendingLaunch?.after ?? []).filter(
+    (d) => live.has(d) && status[d]?.state === 'done' && !!status[d]?.lastTurnError
+  )
 }
 
 /**
@@ -165,4 +191,90 @@ export function dependencyEdges(
     }
   }
   return out
+}
+
+/**
+ * The backoff between delivery attempts, in milliseconds, indexed by the number of attempts
+ * ALREADY made. `null` = the schedule is exhausted; the launch has failed for good.
+ *
+ * This replaces a flat 5 × 400 ms budget (2 s from the moment the canvas mounted the node) that
+ * measured the wrong thing entirely: it started when the CANVAS decided the node was ready to
+ * launch, and spent itself while the terminal was still being spawned. A cold project switch —
+ * load the canvas, mount the node, spawn tmux, settle the shell — routinely costs more than two
+ * seconds, so the launch was abandoned before the session it was meant for existed. That is
+ * issue #569 item 1: a node that says QUEUED forever with no way to tell it apart from one that
+ * is simply waiting on a dependency.
+ *
+ * The fix is mostly NOT here: delivery is now gated on the node reporting its session ready
+ * (`isSessionReady`), so the schedule below only has to cover the residual race between "the
+ * shell settled" and "tmux will accept a paste for this session". It is nevertheless generous
+ * and bounded — roughly 12 s across five attempts — because the alternative to a bound is a
+ * retry loop nobody can see the end of.
+ */
+const LAUNCH_RETRY_SCHEDULE_MS = [400, 800, 1600, 3200, 6400] as const
+
+export function launchRetryDelay(attemptsMade: number): number | null {
+  return LAUNCH_RETRY_SCHEDULE_MS[attemptsMade - 1] ?? null
+}
+
+/** Total attempts a refused delivery gets before it is reported as failed. */
+export const LAUNCH_DELIVERY_ATTEMPTS = LAUNCH_RETRY_SCHEDULE_MS.length
+
+/**
+ * How long an armed node whose gate is OPEN may sit with no terminal to deliver into before the
+ * badge says so. It is a WARNING, not a deadline: the launch is still held and still fires the
+ * moment the session comes up (an SSH host that reconnects, a spawn behind a slow `npm ci`).
+ *
+ * Chosen well past a cold project switch on a loaded canvas, so an ordinary open never trips it.
+ */
+export const LAUNCH_STALL_MS = 45_000
+
+/**
+ * What the delivery loop has to say about ONE armed node's held launch — the visible half of the
+ * two failure modes that used to be a `console.warn` nobody reads. Declared here rather than in
+ * the store so the rendering below stays pure and testable; the store only holds it.
+ */
+export type LaunchDelivery =
+  | { kind: 'stalled'; since: number }
+  | { kind: 'failed'; attempts: number; at: number }
+
+/**
+ * The QUEUED badge's tooltip. One function for all three cases so the sentences cannot drift, and
+ * so the two warnings are held to the same standard as the ordinary one: say what is true, name
+ * what would fix it, and never claim a cause that was not measured.
+ *
+ * `stalled` is careful about that last point. We know the terminal has not come up; we do NOT know
+ * why (a host that is down, a spawn that failed, a machine under load all look identical from
+ * here), so the text says what we observed and leaves the diagnosis to the node's own overlay,
+ * which does know.
+ */
+export function launchTooltip(
+  delivery: LaunchDelivery | undefined,
+  waitingOn: string,
+  command: string,
+  erroredOn?: string
+): string {
+  const runs = `Runs:\n${command}`
+  // Issue #521: an errored upstream is idle, so without this the tooltip would say "waiting for X
+  // to finish" about a station that finished twenty minutes ago. Named first, because it is the
+  // one case where waiting will not end on its own.
+  if (erroredOn)
+    return (
+      `${erroredOn} ended its last turn on an error, so this is held rather than started on ` +
+      'what it did not produce.\n' +
+      `Retry or nudge it — a successful turn releases this — or press ▶ to run it now.\n${runs}`
+    )
+  if (delivery?.kind === 'failed')
+    return (
+      `This session did not accept its launch — ${delivery.attempts} ` +
+      `attempt${delivery.attempts === 1 ? ' was' : 's were'} refused, and nothing will retry it.\n` +
+      `Press \u25b6 to run it now.\n${runs}`
+    )
+  if (delivery?.kind === 'stalled')
+    return (
+      'Ready to run, but this terminal has not started yet — the launch is still held and ' +
+      'fires as soon as it does.\n' +
+      `Press \u25b6 to try it now.\n${runs}`
+    )
+  return `Waiting for ${waitingOn} to finish, then runs:\n${command}`
 }

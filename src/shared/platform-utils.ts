@@ -18,7 +18,9 @@ export function isMacPlatform(): boolean {
  *  `isMacPlatform`, so it is correct in both the desktop app and a Server Edition browser tab). */
 export function isWindowsPlatform(): boolean {
   if (typeof navigator === 'undefined') return false
-  return /Win/i.test(navigator.platform || navigator.userAgent)
+  // Word-bounded: jsdom's user agent on a Mac reads "Mozilla/5.0 (darwin) …", and a bare /Win/
+  // matches the tail of "darwin", so every jsdom test on a Mac used to look like Windows.
+  return /\bWin/i.test(navigator.platform || navigator.userAgent)
 }
 
 /** Rewrite mac chord notation in a hint string for the current platform. */

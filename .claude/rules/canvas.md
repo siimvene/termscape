@@ -8,7 +8,7 @@ paths:
   - "src/renderer/components/SessionsSidebar.tsx"
   - "src/renderer/components/SessionRow.tsx"
   - "src/renderer/components/WelcomeScreen.tsx"
-  - "src/renderer/components/ShortcutsPanel.tsx"
+  - "src/renderer/components/ShortcutsPanel*.tsx"
   - "src/renderer/components/ConfirmDialog.tsx"
   - "src/renderer/components/settings/**"
   - "src/renderer/lib/breadcrumbs.ts"
@@ -18,6 +18,13 @@ paths:
   - "src/renderer/lib/explorerPin.ts"
   - "src/renderer/state/explorer.ts"
   - "src/renderer/styles.css"
+  - "src/renderer/canvas/zoom-limits.ts"
+  - "src/renderer/lib/gridSnap.ts"
+  - "src/renderer/lib/resizeSnap.ts"
+  - "src/renderer/lib/pinnedInsets.ts"
+  - "src/renderer/lib/sidebarFilter.ts"
+  - "src/renderer/lib/explorerCreate.ts"
+  - "src/renderer/bridge/dialog-picker*.tsx"
 ---
 # Canvas interaction & panels: menus, undo, zoom, goToNode, breadcrumbs, palette, sidebar, explorer, settings, theme
 
@@ -153,6 +160,7 @@ self-correcting on the next render; guarding it would mean threading ownership t
   pan-hover delay, double-click focus, accent, tmux on/scrollback, commit agent,
   `seenShortcuts`.
 - **Shortcuts** (`ShortcutsPanel.tsx`, ? / ⌘/): shown once on first launch (`seenShortcuts`).
+  **Derived from the registry, never hand-listed** — see the Keybindings invariant below.
 - **Welcome** (`WelcomeScreen.tsx`): shown when no projects exist.
 
 - **Theme**: macOS dark palette as CSS tokens in `styles.css` `:root` (`--accent` = systemBlue,

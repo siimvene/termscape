@@ -9,6 +9,7 @@ paths:
   - "src/renderer/state/worktrees.ts"
   - "src/renderer/state/scmCache.ts"
   - "src/renderer/state/scmDraft.ts"
+  - "src/core/git-env.ts"
 ---
 # Source Control panel, AI commit messages, git worktrees bound to group frames
 

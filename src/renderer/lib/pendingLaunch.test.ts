@@ -2,10 +2,19 @@ import { describe, it, expect } from 'vitest'
 import {
   dependencyEdges,
   launchesToFire,
+  forgetArmed,
+  launchRetryDelay,
+  launchTooltip,
+  markArmedThisSession,
   mayRelaunchAgent,
+  resetArmedThisSession,
   unmetDeps,
+  wasArmedThisSession,
+  LAUNCH_DELIVERY_ATTEMPTS,
+  LAUNCH_STALL_MS,
   type ArmedNode,
-  type StatusById, markArmedThisSession, resetArmedThisSession, wasArmedThisSession, forgetArmed } from './pendingLaunch'
+  type StatusById
+} from './pendingLaunch'
 
 const armed = (id: string, after: string[], command = `echo ${id}`): ArmedNode => ({
   id,
@@ -53,6 +62,37 @@ describe('launchesToFire', () => {
 
   it('fires immediately when there are no deps left to wait on', () => {
     expect(launchesToFire([armed('c', [])], {}, live)).toEqual([{ id: 'c', command: 'echo c' }])
+  })
+
+  it('walks a chain A → B → C one station at a time', () => {
+    const chain = [armed('b', ['a']), armed('c', ['b'])]
+    // Nothing has reported: nothing fires.
+    expect(launchesToFire(chain, {}, live)).toEqual([])
+    // A done releases B only — C waits on B, which has not even started.
+    expect(launchesToFire(chain, { a: { state: 'done' } }, live)).toEqual([{ id: 'b', command: 'echo b' }])
+    // B running is still not B done.
+    expect(launchesToFire(chain, { a: { state: 'done' }, b: { state: 'working' } }, live)).toEqual([
+      { id: 'b', command: 'echo b' }
+    ])
+    // B done releases C. (B is still listed here because the caller, not this function, retires a
+    // delivered launch by clearing its pendingLaunch — exactly-once lives in `launchInFlight`.)
+    expect(launchesToFire(chain, { a: { state: 'done' }, b: { state: 'done' } }, live)).toEqual([
+      { id: 'b', command: 'echo b' },
+      { id: 'c', command: 'echo c' }
+    ])
+  })
+
+  it('after a restart (empty status map) a persisted arming holds — nothing will report, ▶ is the escape', () => {
+    // Agent state is transient; a live dep that reported `done` before the restart is unknown now,
+    // and unknown is NOT satisfied. The manual run-now on the badge exists for exactly this.
+    expect(launchesToFire([armed('c', ['a'])], {}, live)).toEqual([])
+    expect(unmetDeps(armed('c', ['a']), {}, live)).toEqual(['a'])
+  })
+
+  it('a dep deleted mid-chain releases what waited on it, but not what waits further down', () => {
+    const chain = [armed('b', ['a']), armed('c', ['b'])]
+    const liveWithoutA = new Set(['b', 'c'])
+    expect(launchesToFire(chain, {}, liveWithoutA)).toEqual([{ id: 'b', command: 'echo b' }])
   })
 })
 
@@ -190,5 +230,104 @@ describe('consent registry — only launches armed by THIS process, with THIS co
     resetArmedThisSession()
     markArmedThisSession('x', undefined)
     expect(fire([node('x')])).toEqual([])
+  })
+})
+
+/**
+ * Issue #569 item 1 — the delivery policy behind an armed node's held launch.
+ *
+ * The bug these pin: delivery used to be a flat 5 × 400 ms = 2 s budget started when the CANVAS
+ * decided a node was ready to launch, not when the node's terminal existed. A cold project switch
+ * spends that budget on loading the canvas, mounting the node and spawning tmux, so the launch was
+ * abandoned before there was anything to deliver into — and abandoned into a `console.warn`, which
+ * left a node reading QUEUED forever with no way to tell it apart from one still waiting on a
+ * dependency.
+ */
+describe('launch delivery policy (#569 item 1)', () => {
+  it('the schedule backs off and is bounded — exhaustion is reachable, so "gave up" can be told', () => {
+    const delays: number[] = []
+    for (let attempt = 1; ; attempt++) {
+      const d = launchRetryDelay(attempt)
+      if (d === null) break
+      delays.push(d)
+      expect(attempt).toBeLessThan(20) // guard: a schedule that never ends is the bug, not a fix
+    }
+    expect(delays.length).toBe(LAUNCH_DELIVERY_ATTEMPTS)
+    // Strictly increasing: a flat schedule is what made the old budget a fixed 2 s wall.
+    for (let i = 1; i < delays.length; i++) expect(delays[i]).toBeGreaterThan(delays[i - 1])
+    // And the whole window is comfortably wider than the old one, measured from READINESS.
+    expect(delays.reduce((a, b) => a + b, 0)).toBeGreaterThan(10_000)
+  })
+
+  it('an attempt past the end has no delay — nothing silently retries forever', () => {
+    expect(launchRetryDelay(LAUNCH_DELIVERY_ATTEMPTS)).not.toBeNull()
+    expect(launchRetryDelay(LAUNCH_DELIVERY_ATTEMPTS + 1)).toBeNull()
+  })
+
+  it('the stall warning waits longer than a cold project switch could plausibly take', () => {
+    expect(LAUNCH_STALL_MS).toBeGreaterThanOrEqual(30_000)
+  })
+})
+
+describe('launchTooltip — the QUEUED badge never goes silent (#569 item 1)', () => {
+  const cmd = 'claude "review the diff"'
+
+  it('with nothing to report it names the dependencies, exactly as before', () => {
+    const t = launchTooltip(undefined, 'Builder, Tests', cmd)
+    expect(t).toContain('Waiting for Builder, Tests to finish')
+    expect(t).toContain(cmd)
+    expect(t).not.toContain('▶')
+  })
+
+  it('a stalled launch says it is still held, and does NOT claim a cause it never measured', () => {
+    const t = launchTooltip({ kind: 'stalled', since: 1 }, 'Builder', cmd)
+    expect(t).toContain('has not started yet')
+    expect(t).toContain('still held')
+    expect(t).toContain('▶')
+    // We know the terminal is not up; we do not know why. Naming a cause here would be the
+    // misleading-error failure this feature exists to avoid.
+    expect(t.toLowerCase()).not.toMatch(/ssh|host is down|crash/)
+  })
+
+  it('a failed launch reports the attempt count and that nothing will retry it', () => {
+    const t = launchTooltip({ kind: 'failed', attempts: 5, at: 1 }, 'Builder', cmd)
+    expect(t).toContain('5 attempts')
+    expect(t).toContain('nothing will retry it')
+    expect(t).toContain('▶')
+    expect(t).toContain(cmd)
+  })
+
+  it('singularises one attempt (the manual ▶ reports exactly one refusal)', () => {
+    expect(launchTooltip({ kind: 'failed', attempts: 1, at: 1 }, 'Builder', cmd)).toContain(
+      '1 attempt was refused'
+    )
+  })
+
+  it('failed outranks the dependency sentence — the warning is never buried', () => {
+    const t = launchTooltip({ kind: 'failed', attempts: 5, at: 1 }, 'Builder', cmd)
+    expect(t).not.toContain('Waiting for Builder')
+  })
+})
+
+describe('▶ Run now × the fire effect — revoking consent before the manual send closes the race', () => {
+  // TerminalNode's ▶ handler calls forgetArmed(id) synchronously BEFORE api.pty.sendText and drops
+  // `pendingLaunch` only on a delivery that landed (session-ready-signal.test pins that shape). This
+  // pins the half that lives here: once consent is gone, the fire effect's consent filter yields
+  // nothing for that node even though its deps are satisfied and its launch is still on the node —
+  // so a retry tick (launchNudge) arriving while the manual delivery is in flight cannot submit the
+  // same command a second time.
+  const launch = { after: [] as string[], command: 'echo hi' }
+  it('a consented, ready launch stops auto-firing the moment ▶ revokes its consent', () => {
+    resetArmedThisSession()
+    markArmedThisSession('n', launch)
+    const nodes = [{ id: 'n', data: { pendingLaunch: launch } }]
+    const fire = () =>
+      launchesToFire(nodes, {}, new Set(['n'])).filter((f) =>
+        wasArmedThisSession(f.id, nodes.find((n) => n.id === f.id)?.data.pendingLaunch)
+      )
+    expect(fire()).toEqual([{ id: 'n', command: 'echo hi' }])
+    forgetArmed('n') // what ▶ does first
+    expect(fire()).toEqual([]) // launch still held on the node, but no longer auto-fires
+    expect(nodes[0].data.pendingLaunch).toBe(launch) // …and it was not dropped
   })
 })

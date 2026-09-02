@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { WORKING_STALE_MS } from '@shared/agents/stale'
 
 /**
  * Transient visualization of subagents a Claude node spawns (Task/Agent tool), keyed by the
@@ -67,8 +68,49 @@ interface AgentNodesState {
   finish(toolUseId: string, result: SubagentResult): void
   /** Append a chunk of the subagent's live transcript. */
   appendActivity(toolUseId: string, chunk: string): void
-  /** Remove all subagents spawned by a given parent node (turn/session ended, or node closed). */
+  /**
+   * Remove ALL subagents spawned by a given parent node, finished or not.
+   *
+   * For the paths where the parent itself is gone or its session has ended — node deleted, project
+   * deleted, cross-project close, orphan-session kill, `SessionEnd`. A node that no longer exists
+   * has no work left to represent, so there is nothing to preserve.
+   *
+   * **NOT for a turn boundary** — see `clearFinishedForParent` and issue #547.
+   */
   clearForParent(parentNodeId: string): void
+  /**
+   * Drop only the FINISHED subagent cards of a parent. The turn-boundary clear.
+   *
+   * Issue #547: `clearForParent` ran on every new turn on the assumption that the previous fan-out
+   * is stale by definition. That holds for a card whose subagent has finished and is false for one
+   * that has not — Claude launches subagents async, and "waiting for N background agents to finish"
+   * is exactly the state in which the user types the next prompt. The card vanished permanently
+   * (nothing rehydrates `byId`: `start()` fires only from a live `PreToolUse`, and a subagent past
+   * that emits no second one) while the agent kept working. Same permanent loss as #402, different
+   * trigger.
+   *
+   * The more expensive half is not the missing card. Eco's hibernation guard derives `liveSubagents`
+   * from this same store, so a wiped card let a parent with live background agents read as idle and
+   * get its CLI `/exit`ed — the regression #402 was raised to close.
+   *
+   * `state` already draws the line the fix needs (`'working' | 'done'`, `finish()` idempotent), so
+   * this needs no new concept. What it does need is the decay: see `sweepStaleWorking`.
+   */
+  clearFinishedForParent(parentNodeId: string): void
+  /**
+   * Mark every card still `working` past `staleMs` as done — the decay `clearFinishedForParent`
+   * depends on.
+   *
+   * Without it a subagent whose `finish()` never arrives (crashed CLI, killed pane, slept machine)
+   * pins its card forever AND pins its parent against Eco forever, which is a worse bug than the
+   * one being fixed. The number is `WORKING_STALE_MS`, imported rather than chosen: that module
+   * exists because three surfaces each invented their own timeout, and a subagent card inventing a
+   * fourth would be the same mistake in a new place.
+   *
+   * It marks done rather than deleting, so the card stays readable and the next turn boundary takes
+   * it; `finish()` landing late is a no-op on an entry that is already done.
+   */
+  sweepStaleWorking(now?: number, staleMs?: number): void
   /**
    * Drop every dragged position/size/expanded override for a parent's subagent cards, snapping
    * them back to the default packed grid (`offsetFrom`'s fallback in Canvas) at base dims — an
@@ -105,6 +147,57 @@ function loadLoopOverrides(): Overrides {
   } catch {
     return { positions: {}, sizes: {}, expanded: {} }
   }
+}
+
+/** Card ids belonging to one parent. */
+function cardsOf(s: AgentNodesState, parentNodeId: string): string[] {
+  return Object.keys(s.byId).filter((id) => s.byId[id].parentNodeId === parentNodeId)
+}
+
+/**
+ * Drop the given cards and everything keyed by their ids. The one removal body, so the
+ * unconditional clear and the turn-boundary clear cannot drift in what they take with them.
+ *
+ * `fanoutParentId` additionally takes the parent's aggregate fan-out card (`fanout-<pid>`, the ONE
+ * card a large fan-out collapses to): it is as per-turn as the cards it stands in for, so its
+ * dragged position/size/expanded override and its selection go with them. It is passed only when
+ * the parent's WHOLE fan-out is going away — a turn boundary that keeps live cards keeps the
+ * aggregate that represents them, and snapping a live card's placement back is the same class of
+ * loss issue #547 closed. The aggregate never has a `byId`/`activityById` entry (Canvas derives
+ * it), so only the override maps and the selection can carry its id.
+ */
+function dropCards(
+  s: AgentNodesState,
+  ids: string[],
+  fanoutParentId?: string
+): Partial<AgentNodesState> | AgentNodesState {
+  const fanoutId = fanoutParentId ? `fanout-${fanoutParentId}` : undefined
+  const hasFanoutState =
+    !!fanoutId &&
+    (fanoutId in s.positions ||
+      fanoutId in s.sizes ||
+      fanoutId in s.expanded ||
+      s.selectedId === fanoutId)
+  if (!ids.length && !hasFanoutState) return s
+  const drop = fanoutId ? [...ids, fanoutId] : ids
+  const byId = { ...s.byId }
+  const activityById = { ...s.activityById }
+  const positions = { ...s.positions }
+  const sizes = { ...s.sizes }
+  const expanded = { ...s.expanded }
+  // Loop-card overrides (`loop-<pid>`) are deliberately NOT dropped here — the card outlives turns;
+  // its overrides go via clearLoop when the loop itself ends.
+  for (const id of drop) {
+    delete byId[id]
+    delete activityById[id]
+    delete positions[id]
+    delete sizes[id]
+    delete expanded[id]
+  }
+  // A card that just vanished must not stay "selected" — a later card reusing the id would come
+  // back pre-selected.
+  const selectedId = s.selectedId && drop.includes(s.selectedId) ? null : s.selectedId
+  return { byId, activityById, positions, sizes, expanded, selectedId }
 }
 
 function saveLoopOverrides(s: Overrides): void {
@@ -184,30 +277,33 @@ export const useAgentNodes = create<AgentNodesState>((set) => ({
     }),
 
   clearForParent: (parentNodeId) =>
+    // The parent (or its session) is gone, so the aggregate card goes too.
+    set((s) => dropCards(s, cardsOf(s, parentNodeId), parentNodeId)),
+
+  clearFinishedForParent: (parentNodeId) =>
     set((s) => {
-      const ids = Object.keys(s.byId).filter((id) => s.byId[id].parentNodeId === parentNodeId)
+      const cards = cardsOf(s, parentNodeId)
+      const finished = cards.filter((id) => s.byId[id].state === 'done')
+      // The aggregate only follows when the fan-out it stands for is entirely finished; while any
+      // card is still working the aggregate is still on screen, where the user left it.
+      const wholeFanout = finished.length === cards.length
+      return dropCards(s, finished, wholeFanout ? parentNodeId : undefined)
+    }),
+
+  sweepStaleWorking: (now = Date.now(), staleMs = WORKING_STALE_MS) =>
+    set((s) => {
+      const stale = Object.keys(s.byId).filter(
+        (id) => s.byId[id].state === 'working' && now - s.byId[id].startedAt > staleMs
+      )
+      if (!stale.length) return s
       const byId = { ...s.byId }
-      const activityById = { ...s.activityById }
-      const positions = { ...s.positions }
-      const sizes = { ...s.sizes }
-      const expanded = { ...s.expanded }
-      // Loop-card overrides (`loop-<pid>`) are deliberately NOT dropped here — the card
-      // outlives turns; its overrides go via clearLoop when the loop itself ends.
-      // The aggregate fan-out card (`fanout-<pid>`) IS per-turn, like the cards it replaces, so
-      // its overrides are dropped here alongside them.
-      const fanoutId = `fanout-${parentNodeId}`
-      for (const id of [...ids, fanoutId]) {
-        delete byId[id]
-        delete activityById[id]
-        delete positions[id]
-        delete sizes[id]
-        delete expanded[id]
+      for (const id of stale) {
+        const prev = byId[id]
+        // No result to report — the completion signal is what went missing. The elapsed time is
+        // still true, and it is `finish()`'s own fallback for the async case.
+        byId[id] = { ...prev, state: 'done', durationMs: prev.durationMs ?? now - prev.startedAt }
       }
-      // A card that just vanished must not stay "selected" — a later card reusing the id would
-      // come back pre-selected.
-      const gone = s.selectedId && (ids.includes(s.selectedId) || s.selectedId === fanoutId)
-      const selectedId = gone ? null : s.selectedId
-      return { byId, activityById, positions, sizes, expanded, selectedId }
+      return { byId }
     }),
 
   tidyFanout: (parentNodeId) =>

@@ -15,6 +15,8 @@ paths:
   - "src/renderer/glyphgrid/**"
   - "src/renderer/nodes/TerminalNode.tsx"
   - "src/renderer/components/kanban/ModalTerminal.tsx"
+  - "src/session-host/**"
+  - "src/shared/ssh-server.ts"
 ---
 # Terminal sessions: tmux continuity, PTY lifecycle, cold restore, xterm seeding, TerminalNode
 
@@ -105,6 +107,14 @@ Lifecycle, by intent:
   landed. The predicate is deliberately the narrowest one that closes it — a tmux-backed session is
   never protected (the kill costs a redraw), and neither is a plain terminal, a finished agent or
   an unknown state (nothing is running to lose). **A fifth lever owes the same gate.**
+  The fifth is the offscreen release of an ARMED node (`--after`, `shouldDeferReleaseForHeldLaunch`,
+  2026-09-02): the held launch is delivered by session NAME, so with tmux underneath the release is
+  harmless and the node stays `sessionReady` (the teardown keeps the flag for an offscreen release
+  of a tmux-backed session); on the plain-shell fallback the release would destroy the very pane
+  the launch is typed into, so it is deferred while armed. MEASURED before the fix: a released
+  QUEUED node held its launch through its dependency going `done`, the badge claimed the terminal
+  "has not started yet", and only a camera travel (revive) ever fired it — "the chain works when I
+  look at it" was this.
 - **Node unmount (project switch)** → the RENDERER **parks** the terminal (`TerminalNode.tsx`
   `parkedTerminals`): the xterm instance + its attached PTY stay alive with the `.xterm` element
   detached from the DOM, so a remount within `TERM_PARK_MS` (5 min) re-adopts them — instant, and
@@ -141,6 +151,16 @@ Lifecycle, by intent:
   and `handle.dispose()`s on unmount (which releases + cancels timers). A parked terminal is
   off-screen so it holds no context. Permanent-delete paths call `disposeTerminalOnUnmount(id)` so a
   deleted node disposes instead of parking.
+  **A renderer released while the node is unmeasurable mismeasures its own row spacing**
+  (`terminal/dom-renderer-spacing.ts`): `WebglAddon.dispose()` is also the back-to-DOM-renderer
+  path, and it runs from the lifecycle effect's CLEANUP — after React detached the element — so the
+  fresh DOM renderer derives `letter-spacing` from a width cache whose `offsetWidth` is **0** and
+  bakes in a whole extra cell per character. That is the "letters drift apart for a split second
+  after a project switch": the adopting mount paints wide until the WebGL grant lands 150 ms later.
+  Focus mode's `display:none` wrapper is the same shape. xterm re-derives the spacing on a char-size
+  / dpr / options change and **not on a resize**, so nothing in the reattach path heals it —
+  `applyFit` calls the change-gated `resyncDomRendererSpacing(term)`, which bails while the
+  measurement is still 0 rather than re-baking the wrong number.
   **Which renderer a terminal uses** is `settings.terminalGpuRendering`, resolved by the single
   resolver `resolveTerminalRenderer(value)` (`src/shared/webgl.ts`) to `dom | webgl | shared`:
   `'off'` = xterm's DOM renderer, `'on'` = one budgeted WebGL context per terminal (everything the
@@ -212,12 +232,39 @@ Lifecycle, by intent:
   process. (2) **Fire-time re-asks**: still-offscreen, remote, eligibility — a plan-time verdict
   is stale by seconds. (3) `hibernated` **self-heals** on live hook states + SessionStart (never
   on `done` — a late Stop POST must not undo a just-performed hibernate); cold restore (`fresh`)
-  clears it and lets the normal auto-resume own the node. (4) **Ordering with offscreen release**:
+  clears `hibernated` UNCONDITIONALLY and normally lets auto-resume own the node — **`paused` (see
+  below) is what makes that auto-resume itself conditional**, the one deliberate exception: the
+  flag it gates is still cleared, only the relaunch is skipped. (4) **Ordering with offscreen
+  release**:
   Eco defers the Phase-2 viewer release until the node hibernates (hard cap idle+offscreen), but
   ONLY when the idle clock is known (`idleKnown` — `lastEventAt` is transient, so after an app
   restart nothing can hibernate and deferring would make Eco a memory regression). Eco is
   structurally inert for sessions with no turn in the current app run — documented follow-up.
+  The deferral is also unaware of `paused`: a deep-paused node's freshly recycled shell keeps its
+  xterm alive until the hard cap, waiting for a hibernation that (being already exited, or having
+  no CLI to exit) can never come — a second documented follow-up.
   Device checklist (8 items) in PR #130 — owed before recommending Eco to anyone.
+- **"Pause session"** (manual, or via Eco when `settings.agentHibernationPersistAcrossRestart` is
+  on) → `agentStatus.paused`, a persisted flag alongside `hibernated` with ONE job: stop a node
+  from coming back on its own. Two depths, chosen per node: shallow — identical to an Eco exit
+  (`registerAgentPause`'s `pause` closure reuses `performExitPhase`), plus `paused` — or "pause &
+  end session" — the same recycle `restartAgentNode(…, restartShell: true)` uses
+  (`transport.recycle` + a `respawnNonce` bump), so the node comes back `fresh` next time, with no
+  live tmux session to hold memory. Two pure predicates in `terminal/hibernation-policy.ts` pin the
+  contract: `shouldColdResume` (a `fresh` mount must not auto-relaunch a paused node — see Cold
+  restore above) and `shouldAutoWake` (the mount-timer, visibility-edge, and kanban-card-modal-open
+  auto-wake triggers must not fire for a paused node, hibernated or not — only an explicit Resume,
+  which reuses the SAME `wakeHibernatedNode` trigger the SLEEPING/PAUSED chip's click uses, so it
+  gets the same `WakeInputBuffer` splice protection and retry budget). Pausing an already-hibernated
+  node skips the exit phase entirely (`alreadyExited` in the closure) — asking an idle CLI-less
+  shell to quit would type `/exit` into it as a real command. `paused` is ALSO excluded from Eco's
+  own candidate plan and its exit closure's fire-time re-ask (`HibernationCandidate.paused`,
+  `hibernationCandidates.ts`) — a deep-paused node has `hibernated` unset (its tmux was recycled,
+  not exited), so `!hibernated` alone would still admit it to a sweep whose dropped SessionEnd hook
+  POST left a stale `done` behind: the same `/exit`-into-a-bare-shell mistake `alreadyExited` closes
+  on the manual path, closed here on the automatic one. Node menu only today (canvas right-click +
+  the sessions sidebar row menu, which shares the same `selectionItems` builder, plus a read-only
+  kanban card badge and a clickable one in the card modal); no command palette entry.
 
 The node id is the `persistKey` (passed to `transport.create`), so it must stay stable.
 If tmux is unavailable, `PtyManager` falls back to a plain shell (no cross-restart
@@ -293,7 +340,11 @@ session (you can't keep a live OS process across a reboot):
   renderer re-launches the agent CLI: `resumeCommand(agentId, sessionId)` (from the session id
   persisted in `agentStatus` localStorage — `claude --resume`, `codex resume`, `gemini
   --resume`) when known, else the bare `launchCmd`. The one-shot `data.initialCommand` still wins
-  on the very first open, so the agent is never double-launched.
+  on the very first open, so the agent is never double-launched. **The one exception: a `paused`
+  node** (see "Pause session" below) skips this auto-relaunch — that is the entire point of the
+  flag — and instead records the pane its fresh shell settled on (`agentStatus.hibernatedPane`),
+  so a later explicit Resume can recognize it even for a default shell outside the wake's
+  `isShellCommand` allowlist.
 - **An ARMED node must not auto-resume before its held launch has been delivered.** A node opened
   with a `pendingLaunch` (canvas-control `--after`, or a cold-opened node — see
   `.claude/rules/agents-canvas-control.md`) mints its `agentSessionId` at CREATION and holds a

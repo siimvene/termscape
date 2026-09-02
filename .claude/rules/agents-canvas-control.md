@@ -9,6 +9,13 @@ paths:
   - "src/renderer/lib/pendingLaunch.ts"
   - "src/renderer/lib/verifyPanel.ts"
   - "docs/ssh-agent-skills.md"
+  - "src/shared/control-verbs.ts"
+  - "src/core/handoff/**"
+  - "src/main/handoff/**"
+  - "src/renderer/state/launchDelivery.ts"
+  - "src/renderer/canvas/pending-launch-delivery*.ts"
+  - "src/renderer/lib/erroredTurn*.ts"
+  - "src/renderer/lib/teamSpec.ts"
 ---
 # Canvas control (nodeterm.sh shim, verbs, fan-in, --after, verify panel) and Context Link
 
@@ -95,7 +102,8 @@ paths:
   every dep reports `done`. This is what makes the canvas a DAG instead of a fan-out. Load-bearing
   details: (1) **an unknown agent state is NOT "satisfied"** — right after a fan-out no upstream has
   emitted a hook event yet, and reading "no news" as "finished" would fire every dependent
-  instantly; a **deleted** dep IS satisfied (it can never report). (2) Only `hasHooks` agents may be
+  instantly; a **deleted** dep IS satisfied (it can never report); and a dep that is `done` with a
+  live **`lastTurnError`** is NOT (issue #521, below). (2) Only `hasHooks` agents may be
   waited on — a plain terminal never reports done, so `resolveAfter` **refuses** it rather than
   letting `launchesToFire` (which cannot tell "never will" from "not yet") hang the node forever.
   (3) If the deps are **already satisfied at creation**, the node is NOT armed: the command stays
@@ -103,14 +111,76 @@ paths:
   arming would hand delivery to the canvas effect, which races the node's PTY into existence.
   (4) Delivery is **exactly-once via `launchInFlight`** (an id stays in the set forever once
   `sendText` resolved true — clearing `pendingLaunch` is a state update that can lag a re-render),
-  and a **refused** `sendText` retries (`LAUNCH_DELIVERY_ATTEMPTS`) instead of vanishing.
+  and a **refused** `sendText` retries (`launchRetryDelay`'s backoff) instead of vanishing.
   (5) `pendingLaunch` **is persisted** (unlike `initialCommand`), but agent state is not — so after
   a restart nothing will ever report `done` and the node carries a manual ▶ **run-now** escape in
-  its QUEUED badge. (6) Canvas subscribes to `armedDepSig`, NOT `useAgentStatus(s => s.byId)` —
+  its QUEUED badge (which disarms only on a delivery that LANDED — dropping it unconditionally
+  threw the command away in exactly the state the button exists to rescue). (6) Canvas subscribes
+  to `armedDepSig`, NOT `useAgentStatus(s => s.byId)` —
   the same discipline as `loopSig`; the full map re-renders the canvas on every hook event.
   Pure logic + refusal matrix in `renderer/lib/pendingLaunch.ts` (unit-tested); the dashed dep→node
   edges are **derived, never persisted** (a pending dependency is a state that ends when the launch
   fires — the durable relation is the context bridge `--after` also draws).
+  **(7) Delivery waits for the node's PTY, and never fails silently** (issue #569 item 1, 2026-09).
+  A satisfied dependency says nothing about whether there is a terminal to type into, and the
+  original loop conflated the two: a flat 5 × 400 ms budget started when the CANVAS held the node
+  and was spent on loading the canvas, mounting it and spawning tmux — so on a cold project switch
+  the launch was abandoned before its session existed, in a `console.warn`, and the node read
+  QUEUED forever with only the manual ▶ left. `TerminalNode` therefore publishes a **session-ready**
+  signal (`isSessionReady` / `subscribeSessionReady`, module-level like `offscreenNodes`): true for
+  an ADOPTED park (already typeable, and its create continuation ran on a previous mount) and, for
+  a fresh spawn, at the SAME `whenShellSettled` moment `writeWhenShellReady` delivers an
+  `initialCommand` — both write a CLI command line, and a line delivered across zsh's rc-file tty
+  flush comes out mangled. A **park keeps it** (a parked tmux session is still addressable by name);
+  only a real teardown clears it. The loop then WAITS instead of burning attempts, and the backoff
+  (`launchRetryDelay`, ~12 s over five attempts) covers only the residual race after readiness.
+  Because a wait with no end is the failure mode this replaces, both give-up states are **visible**
+  in the transient `state/launchDelivery.ts` and rendered by the QUEUED badge's amber ⚠ + tooltip
+  (`launchTooltip`, pure): `stalled` = gate open, no terminal yet, **still held** (raised by a
+  `LAUNCH_STALL_MS` timer with a fire-time re-ask; the launch still fires whenever the session
+  finally comes up — an SSH host reconnecting takes this path) and `failed` = the session came up
+  and refused every attempt, so nothing will retry it. Neither is ever inferred from silence, and
+  the tooltip names no cause it did not measure (the node's own overlay owns the diagnosis).
+  The open verbs' replies carry the same fact for callers OUTSIDE the app: `result.queued` +
+  `result.queuedIds` on `open-terminal`/`open-claude`/`open-agent`, always true for the
+  `--project` cold-open branch — an orchestrator was previously told "opened" either way and
+  routed work to a session that did not exist. Agent-facing copy is generated in
+  `canvas-control-core.ts` and pinned in its test, per the sync rule above.
+  **(8) An armed node must not cold-start its own agent** (found while fixing (7)). The mount-time
+  cold-restore relaunch (`fresh && agentId && canResume(...)`) carries a second, independent
+  refusal beside the `paused` one (`shouldColdResume`): `!data.pendingLaunch`. A first open is
+  `fresh` by definition, so every `--after` / `verify` node
+  was launching a bare CLI on mount — the session the hold exists to prevent — and the held launch
+  then arrived as TEXT typed into it rather than as the command it is. The delivery race used to
+  mask it; gating delivery on the shell settling would have made it deterministic.
+  **(9) An ERRORED upstream does not release its dependents** (issue #521, 2026-09).
+  `--after` fires on idle, and a station whose turn dies on an API/model error reaches idle
+  **immediately** — so a malformed-prompt station looked healthy from every surface an
+  orchestrator can read, and the whole chain armed behind it launched on what it had not
+  produced. The signal was already there and was being thrown away: claude and grok both fire
+  **`StopFailure`** instead of `Stop` on an errored turn (already in `CLAUDE_HOOK_EVENTS` /
+  `GROK_HOOK_EVENTS` — without the subscription the badge sticks on RUNNING), and both
+  normalizers collapsed it to a plain `done`. It now carries **`errored`** on
+  `NormalizedAgentEvent`, which `agentStatus` keeps as **`lastTurnError: {at}`**.
+  Three things about the shape, each deliberate: (a) it is an **annotation, not a fifth
+  `AgentState`** — an errored station IS idle, the two facts coexist, and a fifth state would
+  ripple through both raw listeners, the parity test and the mobile mirror for a fact that is
+  not a state; (b) it is set in `src/shared`'s normalizers, so **both shells change by
+  construction** — there is nothing to keep in parity; (c) it is **TRANSIENT** like `state`,
+  because after a relaunch nothing armed can fire anyway and a restored verdict would describe
+  another app run's turn. It is **cleared by the next genuine new turn** — not by any
+  intermediate transition, which says nothing about whether that turn produced something — so
+  the refusal ends by itself when the station answers successfully. Firing with a WARNING was
+  considered and dropped: a dependent that has launched cannot un-launch. Surfaces: a
+  **TURN FAILED** chip on the node (red, no pulse — a verdict on a turn that is over, not
+  something being waited for), the QUEUED tooltip naming the errored upstream instead of
+  promising a wait, and a **`LAST TURN ERRORED` marker on the `list` rows** — on the ROW
+  because a seven-station fan-out should cost one call to learn this, not seven. **No error
+  TEXT is claimed**: whether the hook payload carries the failure message has not been
+  measured, and `last_assistant_message` is the previous assistant turn rather than the error,
+  so reporting it as "the error" would be a confident wrong fact. Reading the text, and the
+  *failed-to-start* watchdog (a station that never emits ANY hook event — the opposite failure,
+  which hangs dependents honestly rather than firing them wrongly), stay open.
   **Review panel (`verify`, 2026-07):** `verify --node <id> [--lenses …] [--focus …] [--agent …]
   [--synthesis off]` opens one reviewer per LENS, each armed behind the target (`--after`) and
   bridged to it, wrapped in a `Verify: <title>` group, plus a judge armed behind the whole panel.
@@ -172,11 +242,19 @@ paths:
   (canvas-control `--after`/`verify` arming, `armForColdOpen`) fire; a launch loaded from disk or a
   peer keeps its QUEUED badge and ▶ Run now, and the CLICK is the consent. Both boundaries also
   shape-check it (`sanitizePendingLaunch`, @shared/pending-launch — malformed ⇒ inert node, never a
-  crash in `p.after.every`). ▶ Run now clears the launch FIRST (so neither a double-click nor the fire effect can submit it
-  twice) and restores it if `sendText` refused, so a failed delivery never discards the only copy. Do not "simplify" the gate into a per-node
+  crash in `p.after.every`). ▶ Run now takes an in-flight latch and `forgetArmed(id)` synchronously
+  BEFORE the send (so neither a double-click nor a fire-effect re-run can submit it twice), drops
+  `pendingLaunch` only once the delivery LANDED, and on refusal calls `useLaunchDelivery.markFailed`
+  and keeps the launch, so a failed delivery never discards the only copy (upstream's #569 delivery
+  policy + the fork's consent model, merged 2026-09-02). Do not "simplify" the gate into a per-node
   flag stored in project.json — a flag in the hostile file is not consent.
-- **Context Link** — a node action gated by `CONTEXT_LINK_CAPABLE` (claude/codex/gemini/opencode;
-  **grok**, custom agents + plain terminals excluded — grok's `updates.jsonl` parser is unbuilt): drawing an edge between two builtin-agent nodes lets each
+- **Context Link** — a node action gated by `CONTEXT_LINK_CAPABLE` (claude/codex/gemini/opencode/grok;
+  custom agents + plain terminals excluded). **grok joined in 2026-09, and the file matters:** its
+  readable conversation is `chat_history.jsonl`, NOT the `updates.jsonl` its own hook payloads
+  advertise and this line used to name. Routing through the advertised path does not error — it opens
+  a real file, parses nothing, and hands the linked agent an EMPTY transcript with no diagnostic, so
+  a reader who trusts the old wording will build the silent failure this note exists to prevent
+  (`core/handoff/locate.ts` pins it): drawing an edge between two builtin-agent nodes lets each
   READ the other's context on demand (pull, not push). Architecture (2026-07, SSH-capable — see
   docs/ssh-agent-skills.md): the **desktop does the reading AND the parsing**; the CLI the agent
   runs (`context.sh`) is a thin POSIX **sh+curl** shim that POSTs to the hook server's
