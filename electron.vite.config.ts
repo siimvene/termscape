@@ -7,6 +7,12 @@ export default defineConfig({
   main: {
     // node-pty is a native module; keep it external so it is required from node_modules at runtime.
     plugins: [externalizeDepsPlugin()],
+    // SELF-HOST UNGATE (src/core/license.ts): the Pro gate bypass is a build-time opt-in, baked
+    // into the main bundle here so a runtime env var cannot flip a shipped build. Default OFF —
+    // a build without TERMSCAPE_UNGATE=1 in the build environment gates Pro exactly like upstream.
+    define: {
+      'process.env.TERMSCAPE_UNGATE': JSON.stringify(process.env.TERMSCAPE_UNGATE === '1' ? '1' : '')
+    },
     resolve: {
       alias: {
         '@shared': resolve(__dirname, 'src/shared')
