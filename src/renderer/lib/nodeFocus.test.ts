@@ -4,8 +4,10 @@ import {
   FIT_NODE_OPTIONS,
   absolutePosition,
   isMeasured,
+  measuredFitRect,
   nodeFitRect,
-  viewportForRect
+  viewportForRect,
+  viewportForRectPadded
 } from './nodeFocus'
 import type { FocusableNode } from './nodeFocus'
 
@@ -179,5 +181,210 @@ describe('isMeasured', () => {
     expect(isMeasured({ measured: { width: 600 } })).toBe(false)
     expect(isMeasured({ measured: { width: 0, height: 0 } })).toBe(false)
     expect(isMeasured(undefined)).toBe(false)
+  })
+})
+
+describe('measuredFitRect (the measured focus path, which no longer goes through fitView)', () => {
+  // Canvas.frameNode drops React Flow's DEFERRED fitView entirely and frames BOTH cases itself:
+  // measured ⇒ this rect, unmeasured ⇒ nodeFitRect. These pin that the swap cannot drift.
+  const internal = (over: Record<string, unknown> = {}) => ({
+    measured: { width: 600, height: 400 },
+    internals: { positionAbsolute: { x: 4000, y: 3000 } },
+    ...over
+  })
+
+  it('frames a measured node identically to the persisted-rect path for the same geometry', () => {
+    const fromStore = measuredFitRect(internal())
+    const fromPersisted = nodeFitRect(term(), [term()])
+    expect(fromStore).toEqual(fromPersisted)
+    // …and therefore lands the exact same camera, with and without a chrome-free region.
+    const region = { offsetX: 400, offsetY: 0, width: 880, height: 900 }
+    expect(viewportForRect(fromStore!, 1280, 900)).toEqual(viewportForRect(fromPersisted!, 1280, 900))
+    expect(viewportForRect(fromStore!, 1280, 900, region)).toEqual(
+      viewportForRect(fromPersisted!, 1280, 900, region)
+    )
+  })
+
+  it('uses the absolute position React Flow already resolved (no parent walk needed)', () => {
+    // The store hands out positionAbsolute with the group chain applied, which is why the measured
+    // branch needs neither the node list nor absolutePosition().
+    expect(measuredFitRect(internal({ internals: { positionAbsolute: { x: 5050, y: 260 } } }))).toEqual(
+      { x: 5050, y: 260, width: 600, height: 400 }
+    )
+  })
+
+  it('gives up rather than framing a half-known rect — the caller then stands still', () => {
+    expect(measuredFitRect(internal({ measured: { width: 0, height: 0 } }))).toBeNull()
+    expect(measuredFitRect(internal({ measured: { width: 600 } }))).toBeNull()
+    expect(measuredFitRect({ measured: { width: 600, height: 400 } })).toBeNull()
+    expect(measuredFitRect(internal({ internals: { positionAbsolute: { x: 10 } } }))).toBeNull()
+    expect(measuredFitRect(null)).toBeNull()
+    expect(measuredFitRect(undefined)).toBeNull()
+    // frameNode's rule, end to end: no rect from either source ⇒ no viewport ⇒ setViewport is
+    // never called and the camera stays put. Teleporting to the origin is the bug being fixed.
+    const sizeless: FocusableNode = { id: 'ghost', position: { x: 0, y: 0 } }
+    const rect = measuredFitRect({ measured: {} }) ?? nodeFitRect(sizeless, [sizeless])
+    expect(rect).toBeNull()
+  })
+
+  it('documents the failure mode it replaces: an empty fit set centres the ORIGIN at maxZoom', () => {
+    // What a DEFERRED fitView resolved after a project switch computes: the target has left
+    // nodeLookup, the filtered fit set is empty, getInternalNodesBounds collapses to zeroes and
+    // the zoom divides by 0 ⇒ maxZoom. This is the number to compare a bug report against (138%,
+    // empty canvas, node in the far minimap corner).
+    expect(
+      getViewportForBounds(
+        { x: 0, y: 0, width: 0, height: 0 },
+        1600,
+        900,
+        FIT_NODE_OPTIONS.minZoom,
+        FIT_NODE_OPTIONS.maxZoom,
+        FIT_NODE_OPTIONS.padding
+      )
+    ).toEqual({ x: 800, y: 450, zoom: FIT_NODE_OPTIONS.maxZoom })
+  })
+})
+
+describe('viewportForRectPadded — the measured focus path and fitAll, both imperative now', () => {
+  /*
+   * The asymmetric-chrome fixture: 1280×900 pane, a 400px pinned sidebar on the left, 12px
+   * FIT_VIEW_GAP elsewhere, i.e. exactly what solveFitPadding/rectToPadding hand over. Derivation
+   * of the expected viewport, straight out of xyflow's getViewportForBounds:
+   *   parsePaddings ⇒ left 400, right 12, top 12, bottom 12 ⇒ p.x = 412, p.y = 24
+   *   xZoom = (1280 − 412)/600 = 1.4467, yZoom = (900 − 24)/400 = 2.19 ⇒ 1.4467, clamped to
+   *     maxZoom 1.38
+   *   x = 1280/2 − (5050 + 300)·1.38 = 640 − 7383 = −6743, y = 900/2 − (260 + 200)·1.38 = −184.8
+   *   the applied left padding at that x is 226 < the required 400, so xyflow's asymmetric
+   *     correction shifts by 226 − 400 = −174 ⇒ x = −6743 + 174 = −6569 (the node ends up FLUSH
+   *     against the sidebar's inset, not centred in what is left); top/bottom already exceed 12.
+   */
+  const asymmetric = { top: '12px', left: '400px', right: '12px', bottom: '12px' } as const
+  const grouped = { x: 5050, y: 260, width: 600, height: 400 }
+
+  it('reproduces the old fitView framing of a MEASURED node under asymmetric chrome', () => {
+    const vp = viewportForRectPadded(grouped, 1280, 900, asymmetric)!
+    expect(vp.zoom).toBeCloseTo(1.38, 9)
+    expect(vp.x).toBeCloseTo(-6569, 9)
+    expect(vp.y).toBeCloseTo(-184.8, 9)
+    // Identical to what xyflow computes from the same arguments — which is precisely what
+    // `fitView({nodes:[{id}], ...FIT_NODE_OPTIONS, padding: solveFitPadding(…)})` used to do.
+    expect(vp).toEqual(
+      getViewportForBounds(
+        grouped,
+        1280,
+        900,
+        FIT_NODE_OPTIONS.minZoom,
+        FIT_NODE_OPTIONS.maxZoom,
+        asymmetric
+      )
+    )
+    // The regression this guards: reducing the pane to the free region AND paying the 0.2 ratio
+    // inside it applies both, framing the node ~12% smaller and 20px off centre.
+    const region = { offsetX: 400, offsetY: 12, width: 868, height: 876 }
+    const viaRegion = viewportForRect(grouped, 1280, 900, region)!
+    expect(viaRegion.zoom).toBeCloseTo(1.2067, 4)
+    expect(viaRegion.x).toBeCloseTo(-5621.67, 2)
+    expect(vp).not.toEqual(viaRegion)
+  })
+
+  it('honours the caller\'s zoom limits — a fit-ALL must out-zoom the single-node clamp', () => {
+    const tiny = { x: 0, y: 0, width: 100, height: 100 }
+    // fitAll passes the canvas's own <ReactFlow minZoom/maxZoom> (0.01 / 2).
+    expect(viewportForRectPadded(tiny, 1280, 900, 0.1, { minZoom: 0.01, maxZoom: 2 })).toEqual({
+      x: 540,
+      y: 350,
+      zoom: 2
+    })
+    // The default is the single-node pair, which clamps the same rect at 1.38.
+    expect(viewportForRectPadded(tiny, 1280, 900, 0.1)!.zoom).toBe(FIT_NODE_OPTIONS.maxZoom)
+  })
+
+  it('frames a whole-canvas bounds rect the way fitAll asks for it', () => {
+    // What fitAll now computes instead of queueing a fitView: the non-ghost bounds, the same
+    // solveFitPadding insets, the canvas zoom limits.
+    const all = { x: -500, y: -200, width: 4000, height: 2000 }
+    const limits = { minZoom: 0.01, maxZoom: 2 }
+    const vp = viewportForRectPadded(all, 1280, 900, asymmetric, limits)!
+    expect(vp.zoom).toBeCloseTo(0.217, 9)
+    expect(vp.x).toBeCloseTo(508.5, 9)
+    expect(vp.y).toBeCloseTo(276.4, 9)
+    // …and fitAll's fallback ratio for when the chrome solve gives up (0.1, not the node's 0.2).
+    expect(viewportForRectPadded(all, 1280, 900, 0.1, limits)!.zoom).toBeCloseTo(0.291, 9)
+  })
+
+  it('refuses a pane it cannot size', () => {
+    expect(viewportForRectPadded(grouped, 0, 900, 0.2)).toBeNull()
+    expect(viewportForRectPadded(grouped, 1280, 0, 0.2)).toBeNull()
+  })
+})
+
+describe('absurd geometry can never install a viewport (project.json and peers are untrusted)', () => {
+  // setViewport({x: NaN, …}) is accepted without complaint: the canvas goes blank and unpannable,
+  // and onMove persists that camera into the project. Node positions arrive from a git-shared
+  // .nodeterm/project.json and from canvas peers, neither of which validates them, so the refusal
+  // lives here — at the one boundary every framing path crosses.
+  const rect = { x: 4000, y: 3000, width: 600, height: 400 }
+  const region = { offsetX: 400, offsetY: 0, width: 880, height: 900 }
+
+  it('refuses a NaN / Infinity rect, with and without a region', () => {
+    for (const bad of [NaN, Infinity, -Infinity]) {
+      expect(viewportForRect({ ...rect, x: bad }, 1280, 900)).toBeNull()
+      expect(viewportForRect({ ...rect, y: bad }, 1280, 900)).toBeNull()
+      expect(viewportForRect({ ...rect, x: bad }, 1280, 900, region)).toBeNull()
+      expect(viewportForRectPadded({ ...rect, x: bad, y: bad }, 1280, 900, 0.2)).toBeNull()
+      expect(viewportForRect({ ...rect, width: bad }, 1280, 900)).toBeNull()
+      expect(viewportForRect({ ...rect, height: bad }, 1280, 900)).toBeNull()
+    }
+  })
+
+  it('refuses a FINITE but absurd position — the overflow happens at the zoom multiply', () => {
+    // Number.MAX_VALUE passes every isFinite check going in (and 1e309 in a shared project.json
+    // parses to Infinity, which the rect guard catches instead). It is the viewport check that
+    // catches this one, which is why both ends are guarded.
+    expect(viewportForRect({ ...rect, x: Number.MAX_VALUE }, 1280, 900)).toBeNull()
+    expect(viewportForRect({ ...rect, y: -Number.MAX_VALUE }, 1280, 900)).toBeNull()
+    expect(viewportForRect({ ...rect, x: Number.MAX_VALUE }, 1280, 900, region)).toBeNull()
+    expect(viewportForRectPadded({ ...rect, x: Number.MAX_VALUE }, 1280, 900, 0.2)).toBeNull()
+  })
+
+  it('is NOT over-broad: ordinary (including negative) geometry frames exactly as before', () => {
+    expect(viewportForRect(rect, 1280, 900)).toEqual(
+      getViewportForBounds(
+        rect,
+        1280,
+        900,
+        FIT_NODE_OPTIONS.minZoom,
+        FIT_NODE_OPTIONS.maxZoom,
+        FIT_NODE_OPTIONS.padding
+      )
+    )
+    expect(viewportForRect(rect, 1280, 900, region)).not.toBeNull()
+    expect(viewportForRect({ x: -9e6, y: -7e6, width: 600, height: 400 }, 1280, 900)).not.toBeNull()
+  })
+
+  it('nodeFitRect refuses a non-finite position, including one SUMMED from a parent chain', () => {
+    const bad: FocusableNode = { id: 'n', position: { x: NaN, y: 0 }, width: 600, height: 400 }
+    expect(nodeFitRect(bad, [bad])).toBeNull()
+    const inf: FocusableNode = { id: 'n', position: { x: 0, y: Infinity }, width: 600, height: 400 }
+    expect(nodeFitRect(inf, [inf])).toBeNull()
+    // Every term finite, the sum not: the group and the child each carry Number.MAX_VALUE.
+    const g: FocusableNode = { id: 'g', position: { x: Number.MAX_VALUE, y: 0 } }
+    const child: FocusableNode = {
+      id: 'c',
+      position: { x: Number.MAX_VALUE, y: 0 },
+      width: 600,
+      height: 400,
+      parentId: 'g'
+    }
+    expect(absolutePosition(child, [g, child]).x).toBe(Infinity)
+    expect(nodeFitRect(child, [g, child])).toBeNull()
+  })
+
+  it('measuredFitRect refuses a non-finite absolute position', () => {
+    const m = { width: 600, height: 400 }
+    expect(measuredFitRect({ measured: m, internals: { positionAbsolute: { x: NaN, y: 0 } } })).toBeNull()
+    expect(
+      measuredFitRect({ measured: m, internals: { positionAbsolute: { x: 0, y: Infinity } } })
+    ).toBeNull()
   })
 })

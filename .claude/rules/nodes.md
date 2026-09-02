@@ -241,6 +241,19 @@ the wire never see any of it):
   pool (`updateGhostData`) instead of `updateNodeData`. On return the SAME element goes live
   again; `overlayKeepAliveData` folds ghost-time navigations into the loaded nodes inside the one
   `setNodes`, so the `url` prop never moves under the surviving surface (which would navigate it).
+- **Second-order cost of that shape, and it is canvas-wide: a ghost holds React Flow's
+  `nodesInitialized` at `false` FOREVER.** `adoptUserNodes` flips it false for any node in the
+  `nodes` prop that is not `hidden` and has no `measured` width/height — a display:none node is
+  never measured and cannot be `hidden` (that unmounts the guest), so one parked page is enough.
+  React Flow 12's `fitView` is deferred behind exactly that flag (`fitViewQueued` resolves on the
+  next `setNodes` only when `nodesInitialized`), so **a queued `fitView` never resolves on time
+  while any ghost exists**; it lands on some later `updateNodeInternals` instead, overriding
+  whatever moved the camera since — and after a project switch its ids are gone from the lookup, so
+  the fit set is empty and the camera goes to the world origin at maxZoom. There is only ONE global
+  queue slot and nothing cancels it, which is why **no** camera path in `Canvas.tsx` may call
+  `fitView` (frameNode AND fitAll compute their own framing and call `setViewport`; see the "Go to
+  node" bullet in `.claude/rules/canvas.md`), and why anything else that waits on
+  `nodesInitialized` / `useNodesInitialized` here is waiting forever.
 - **The merge is keyed on the MOUNTED project (`keepAliveFromRef`), never `activeProjectId`, and a
   mounted entry whose node is missing falls back to its ghost.** Both exist because the pool store
   (zustand/useSyncExternalStore), the ref and `setNodes` do not land in one commit: a switch renders

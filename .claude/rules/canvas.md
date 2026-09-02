@@ -79,20 +79,64 @@ paths:
   `main/index.ts` intercepts it in `before-input-event` and forwards `app:zoom-actual-size`, which
   re-asks the same refusals. Server Edition needs no intercept (no menu; Chrome/Firefox hand ⌘0 to
   the page) and stubs the subscription.
-- **"Go to node" (`goToNode`)** — the one camera-travel path (notification click, sessions
-  sidebar, ⌘K jump, presence travel, minimap double-click, double-click focus). It frames the node
-  with `fitView({nodes:[{id}]})` **only when React Flow has MEASURED it**: `getFitViewNodes` filters
-  the fit set by `measured` (no `width`/`height` fallback in there), so an unmeasured node leaves the
-  set EMPTY, its bounds collapse to `{0,0,0,0}` and the camera lands on the canvas **ORIGIN** at max
-  zoom — empty canvas, node off-screen. That is the state every node is in for the first tick after
-  its project loads, which is why **cross-project** focus (the load and the focus happen in the same
-  tick, and measuring can lose the race — heavier canvas = more likely) used to land on nothing and
-  only work on a second try. `renderer/lib/nodeFocus.ts` computes the identical framing from the
-  node's PERSISTED size for that window (`nodeFitRect` resolves the group-parent chain →
-  `viewportForRect` → `setViewport`), and the measured check reads React Flow's **store**
-  (`getInternalNode`), not our node object — `measured` reaches our state one render later (via
-  `onNodesChange`), so our copy lies about nodes the store has long sized. Unknowable size ⇒ the
-  camera **stands still**; never fall back to a bare `fitView` there, that IS the origin jump.
+- **"Go to node" (`goToNode` → the single `frameNode`)** — the one camera-travel path (notification
+  click, sessions sidebar, ⌘K jump, presence travel, minimap double-click, double-click focus).
+  **`frameNode` NEVER calls `fitView`**; both its cases compute the framing themselves and drive the
+  camera imperatively with `setViewport`, and "simplifying" it back to `fitView({nodes:[{id}]})`
+  reintroduces the origin jump. Why: in `@xyflow/react` 12 `fitView` is **DEFERRED** — it only parks
+  `fitViewQueued` + `fitViewOptions` in the store and resolves on a later `setNodes`, and **only
+  while `nodesInitialized === true`**, which this canvas can never be relied on to be: the **webview
+  keep-alive ghosts** sit in the `<ReactFlow nodes>` prop with `display:none`, no width/height and
+  deliberately not `hidden` (a hidden node unmounts the guest — see `.claude/rules/nodes.md`), so
+  React Flow's ResizeObserver never measures them and `adoptUserNodes` keeps `nodesInitialized`
+  false forever. [MEASURED 2026-09-02, while `frameNode` used `fitView`] the click moved the camera
+  **not at all** ("I have to scroll to the node myself"), and the fit stayed queued until some
+  unrelated `updateNodeInternals` — frequently after a project switch, by which point the target id
+  has left `nodeLookup`, so `getFitViewNodes` returns an **EMPTY** set (it filters by `measured` and
+  by the option ids), `getInternalNodesBounds` collapses to `{0,0,0,0}` and `getViewportForBounds`
+  divides by zero ⇒ **maxZoom (138%) centred on the world ORIGIN**: empty canvas, the node alone in
+  the far minimap corner — which `onMove` then **persists** into the project's machine-local
+  `viewport`, so every later activation of that project re-lands there. So `frameNode` picks the
+  rect (React Flow's own measurement when the store has one — `measuredFitRect`, whose
+  `internals.positionAbsolute` already has the group chain resolved — otherwise the node's PERSISTED
+  size via `nodeFitRect`, which walks the parent chain itself) and runs ONE path from there:
+  `solveFreeRegion` → `viewportForRect` → `setViewport(…, {duration:300})`, which is synchronous and
+  has no call→resolve window the target can vanish from. The measured check still reads React Flow's
+  **store** (`getInternalNode`), not our node object — `measured` reaches our state one render later
+  (via `onNodesChange`), so our copy lies about nodes the store has long sized; the persisted case is
+  the first tick after a project loads, i.e. every **cross-project** focus (load and focus in the
+  same tick). Unknowable size / no pane yet ⇒ the camera **stands still**; never fall back to a bare
+  `fitView` there, that IS the origin jump.
+  - **The two rect sources consume the chrome solve DIFFERENTLY, and that is not a wart.** The
+    measured case passes `solveFitPadding`'s **directional pixel insets** against the **full pane**
+    to `getViewportForBounds` — byte-identical to the fit it replaced, because that is exactly what
+    the old `fitView` call did (`...FIT_NODE_OPTIONS` with `padding` overridden). The persisted case
+    frames inside the **free region** with the flat 0.2 ratio, as it always did. They are NOT
+    interchangeable: xyflow's numeric padding is a proportional inset applied **on top of** the
+    bounds, so reducing the pane to the region AND passing 0.2 pays both, and its asymmetric path
+    pushes the rect flush against the reserved edge rather than centring it in the remainder.
+    [MEASURED: a 600×400 node at abs {5050,260}, 1280×900 pane, 400px pinned sidebar — old/correct
+    `{x:-6569, y:-184.8, zoom:1.38}` vs region+ratio `{x:-5621.67, y:-105.07, zoom:1.2067}`, i.e.
+    12% smaller and 20px off.] Pinned numerically, with the derivation, in `nodeFocus.test.ts`.
+  - **Every rect and every computed viewport is finite-checked in `viewportForRectPadded`** (and the
+    absolute position in `nodeFitRect`), because `setViewport({x: NaN, …})` is accepted without
+    complaint — a blank, unpannable canvas that `onMove` then persists. Node positions arrive from a
+    git-shared `.nodeterm/project.json` and from canvas peers, and neither is validated upstream;
+    `Number.MAX_VALUE` is *finite* going in and only overflows at the zoom multiply, which is why
+    both ends are checked. No rect / no viewport ⇒ stand still.
+- **`fitAll` is imperative for the same reason, so NOTHING in Canvas queues a fit.** xyflow keeps
+  **one global `fitViewQueued` slot** and nothing cancels it, so a fit-all queued while a ghost
+  holds `nodesInitialized` false outlives the gesture: it resolves on some later
+  `updateNodeInternals` and overrides a node focus that had already landed — and across a project
+  switch its explicit old-project ids leave an empty fit set, i.e. the same origin jump, persisted
+  by `onMove`. It now takes the bounds of the non-ghost nodes (`getNodesBounds`, which also counts a
+  real node React Flow has not measured yet — the old explicit-ids fit set dropped those),
+  `solveFitPadding` insets or the 0.1 ratio, and the canvas's own `CANVAS_MIN_ZOOM`/`CANVAS_MAX_ZOOM`
+  (a fit-all must out-zoom the single-node clamp) → `setViewport(…, {duration:300})`. A canvas with
+  no non-ghost node **stands still**: the old bare-`fitView` fall-through was a no-op only when
+  React Flow's WHOLE lookup was empty, and with a ghost parked at the origin it fit an *empty
+  filtered* set instead. `canvas-wiring.test.tsx` scans the WHOLE file for `fitView(` — prose there
+  and here writes it without the paren on purpose.
 - **Breadcrumb trail** (`renderer/lib/breadcrumbs.ts` — all the pure logic lives there) — every
   deliberate `goToNode` landing records a `NavStop` ({nodeId, at, note}) for the ACTIVE project, and
   **Cmd+[ / Cmd+]** (`canvas.goBack` / `canvas.goForward`, bound in `shared/keybindings.ts`) plus the

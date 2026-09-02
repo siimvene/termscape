@@ -1,21 +1,26 @@
-import { getViewportForBounds, type Rect, type Viewport } from '@xyflow/system'
+import { getViewportForBounds, type Padding, type Rect, type Viewport } from '@xyflow/system'
 
 /**
- * "Zoom to this node" geometry, computed WITHOUT React Flow's measurements.
+ * "Zoom to this node" geometry, computed OURSELVES — the whole of it, measured or not.
  *
  * Why this exists: `fitView({ nodes: [{ id }] })` is the natural way to frame one node, and it is
- * what `Canvas.goToNode` uses — but React Flow filters the fit set down to nodes it has already
- * MEASURED (`getFitViewNodes` keys off `measured.width && measured.height`; there is no
- * `width`/`height` fallback there). A node that was handed to React Flow a tick ago has no
- * measurement yet, so the fit set comes out EMPTY, its bounds collapse to `{0,0,0,0}` and the
- * camera flies to the canvas ORIGIN at max zoom — an empty stretch of canvas, nowhere near the
- * node. That is exactly the window a cross-project focus lands in: switch project → load its nodes
- * → focus the target, all before React Flow's mount-time measuring has run. (Clicking an OS
- * notification for a session in another project is the everyday path into it; the same node focuses
- * correctly on a second try, once it is measured.)
+ * what `Canvas.goToNode` used to do. Two independent ways it lands on nothing:
  *
- * So for the unmeasured case we do the same maths ourselves from the size the node was persisted
- * with — which needs no layout — and drive the camera with `setViewport`.
+ * 1. React Flow filters the fit set down to nodes it has already MEASURED (`getFitViewNodes` keys
+ *    off `measured.width && measured.height`; there is no `width`/`height` fallback there). A node
+ *    handed to React Flow a tick ago has no measurement, so the fit set comes out EMPTY, its bounds
+ *    collapse to `{0,0,0,0}` and the camera flies to the canvas ORIGIN at max zoom. That is exactly
+ *    the window a cross-project focus lands in: switch project → load its nodes → focus the target,
+ *    all before mount-time measuring has run.
+ * 2. In `@xyflow/react` 12 `fitView` is DEFERRED — it parks `fitViewQueued`/`fitViewOptions` and
+ *    resolves on a later `setNodes`, and only while `nodesInitialized === true`, which this canvas
+ *    never is (the webview keep-alive ghosts are unmeasurable and cannot be `hidden`). So even a
+ *    fully MEASURED node did not move the camera on the click, and the stale queued fit resolved
+ *    later — often after a project switch, i.e. against case 1's empty set.
+ *
+ * So we do the maths ourselves and drive the camera with `setViewport`: from React Flow's own
+ * measurement when it has one (`measuredFitRect`), otherwise from the size the node was persisted
+ * with (`nodeFitRect`), which needs no layout. Same padding/zoom clamp `fitView` would have used.
  */
 
 /** The subset of a React Flow node this module needs. Loose on purpose: it must accept both a
@@ -30,9 +35,10 @@ export interface FocusableNode {
   style?: { width?: number | string | null; height?: number | string | null }
 }
 
-/** Zoom/padding for framing a single node. Kept beside the maths so the fallback path and
- *  `fitView` cannot drift apart: the clamp keeps a small node from filling the screen and a
- *  huge one from being fit microscopic. */
+/** Zoom/padding for framing a single node — the same numbers `fitView` would have applied, kept
+ *  beside the maths: the clamp keeps a small node from filling the screen and a huge one from
+ *  being fit microscopic. (`maxZoom` 1.38 is the 138% a correct terminal focus lands on, which is
+ *  why 138% alone never proved the degenerate empty-fit jump.) */
 export const FIT_NODE_OPTIONS = { padding: 0.2, minZoom: 0.25, maxZoom: 1.38 } as const
 
 /** A `parentId` chain longer than this is a data bug (or a cycle) — stop walking. */
@@ -81,12 +87,46 @@ export function absolutePosition(
 export function nodeFitRect(node: FocusableNode, all: readonly FocusableNode[]): Rect | null {
   const size = sizeOf(node)
   if (!size) return null
-  return { ...absolutePosition(node, all), ...size }
+  const at = absolutePosition(node, all)
+  // The parent chain SUMS positions, and every term comes from a git-shared `project.json` or a
+  // canvas peer — neither validated here. A NaN or an overflow to ±Infinity would reach
+  // `setViewport` as a blank, unpannable canvas that `onMove` then persists, so it is refused
+  // where it is first knowable: no rect ⇒ the caller stands still.
+  if (!Number.isFinite(at.x) || !Number.isFinite(at.y)) return null
+  return { ...at, ...size }
+}
+
+/** The subset of React Flow's OWN internal node this module needs: the store's measurement plus
+ *  the absolute position React Flow has already resolved for it (group chains included). Loose on
+ *  purpose so a plain object can stand in for one in a test. */
+export interface MeasuredNode {
+  measured?: { width?: number | null; height?: number | null }
+  internals?: { positionAbsolute?: { x?: number | null; y?: number | null } }
+}
+
+/**
+ * The rect React Flow's own measurement implies, in ABSOLUTE canvas coordinates — the framing
+ * input for a node the store has already sized. Null when there is no usable measurement or no
+ * absolute position, in which case the caller falls back to `nodeFitRect` (or stands still).
+ *
+ * Why the caller computes the rect at all instead of handing the id to `fitView`: in
+ * `@xyflow/react` 12 `fitView` is DEFERRED (it parks `fitViewQueued`/`fitViewOptions` and resolves
+ * on a later `setNodes`, only while `nodesInitialized === true`), so the camera does not move on
+ * the click and the queued fit can later resolve against a node list the target has left — an
+ * empty fit set, bounds `{0,0,0,0}`, the world origin at maxZoom. See `Canvas.frameNode`.
+ */
+export function measuredFitRect(node: MeasuredNode | null | undefined): Rect | null {
+  const width = numeric(node?.measured?.width)
+  const height = numeric(node?.measured?.height)
+  if (!width || !height) return null
+  const { x, y } = node?.internals?.positionAbsolute ?? {}
+  if (!Number.isFinite(x as number) || !Number.isFinite(y as number)) return null
+  return { x: x as number, y: y as number, width, height }
 }
 
 /** A chrome-free sub-rectangle of the pane to frame within, offset from the pane's top-left (all in
- *  screen px). Lets the unmeasured focus path reserve the same space around the sidebar/dock/etc.
- *  that the measured `fitView` path gets from `solveFitPadding`, instead of centering under them. */
+ *  screen px). Lets the focus path reserve the same space around the sidebar/dock/etc. that
+ *  `fitAll` gets from `solveFitPadding`, instead of centering the node underneath them. */
 export interface FocusRegion {
   offsetX: number
   offsetY: number
@@ -94,8 +134,56 @@ export interface FocusRegion {
   height: number
 }
 
+/** The zoom clamp a fit is solved under. `FIT_NODE_OPTIONS` supplies the single-node pair; a
+ *  fit-ALL passes the canvas's own `<ReactFlow minZoom/maxZoom>` instead, because it must be able
+ *  to zoom out far enough to hold the whole content. */
+export interface FitLimits {
+  minZoom: number
+  maxZoom: number
+}
+
+/** Geometry that reached us from a git-shared `project.json` or a canvas peer is not validated
+ *  anywhere upstream, and `Number.MAX_VALUE` is FINITE — it only becomes Infinity once multiplied
+ *  by the zoom. So both ends are checked: the rect going in, and the viewport coming out. */
+const finiteRect = (r: Rect): boolean =>
+  Number.isFinite(r.x) && Number.isFinite(r.y) && r.width > 0 && r.height > 0
+
+const finiteViewport = (v: Viewport): Viewport | null =>
+  Number.isFinite(v.x) && Number.isFinite(v.y) && Number.isFinite(v.zoom) && v.zoom > 0 ? v : null
+
+/**
+ * The viewport that frames `rect` in a `containerWidth × containerHeight` pane with `padding` —
+ * xyflow's own fit maths (`getViewportForBounds`), i.e. exactly what a `fitView` with the same
+ * arguments would have computed, minus its deferral.
+ *
+ * `padding` takes every shape `fitView` accepts, and the shapes are NOT interchangeable: a NUMBER
+ * is a proportional ratio applied on top of the bounds, while the DIRECTIONAL pixel insets
+ * `solveFitPadding` produces reserve exactly those edges of the full pane (xyflow's own asymmetric
+ * path, which also pushes the rect flush against the reserved edge rather than centring it in what
+ * is left). Reducing the pane to the free region AND passing a ratio applies both, which frames
+ * the node visibly smaller — see `Canvas.frameNode`.
+ *
+ * Null when the container has no size, or when the rect or the resulting viewport is not finite:
+ * `setViewport({x: NaN, …})` is accepted without complaint, leaves the canvas blank and
+ * unpannable, and `onMove` then persists it. Callers read null as "stand still".
+ */
+export function viewportForRectPadded(
+  rect: Rect,
+  containerWidth: number,
+  containerHeight: number,
+  padding: Padding,
+  limits: FitLimits = FIT_NODE_OPTIONS
+): Viewport | null {
+  if (!(containerWidth > 0) || !(containerHeight > 0)) return null
+  if (!finiteRect(rect)) return null
+  return finiteViewport(
+    getViewportForBounds(rect, containerWidth, containerHeight, limits.minZoom, limits.maxZoom, padding)
+  )
+}
+
 /** The viewport that frames `rect` in a `containerWidth × containerHeight` pane, with the same
- *  padding/zoom clamp `fitView` would have applied. Null when the container has no size yet.
+ *  ratio padding / zoom clamp `fitView({...FIT_NODE_OPTIONS})` would have applied. Null when the
+ *  container has no size yet, or the geometry is not finite (see `viewportForRectPadded`).
  *
  *  With a `region`, `rect` is framed inside that sub-rectangle instead of the whole pane: the fit
  *  is solved for the region's size and the resulting translation shifted by the region's offset, so
@@ -106,23 +194,20 @@ export function viewportForRect(
   containerHeight: number,
   region?: FocusRegion
 ): Viewport | null {
-  const w = region ? region.width : containerWidth
-  const h = region ? region.height : containerHeight
-  if (!(w > 0) || !(h > 0)) return null
-  const vp = getViewportForBounds(
+  const vp = viewportForRectPadded(
     rect,
-    w,
-    h,
-    FIT_NODE_OPTIONS.minZoom,
-    FIT_NODE_OPTIONS.maxZoom,
+    region ? region.width : containerWidth,
+    region ? region.height : containerHeight,
     FIT_NODE_OPTIONS.padding
   )
-  return region ? { x: vp.x + region.offsetX, y: vp.y + region.offsetY, zoom: vp.zoom } : vp
+  if (!vp || !region) return vp
+  return finiteViewport({ x: vp.x + region.offsetX, y: vp.y + region.offsetY, zoom: vp.zoom })
 }
 
-/** Whether React Flow already knows this node's on-screen size — i.e. whether `fitView` will
- *  actually include it in its fit set. Takes the minimal shape so it reads either a user-land
- *  node or React Flow's own internal node (the authoritative one; see Canvas.goToNode). */
+/** Whether React Flow already knows this node's on-screen size — i.e. whether its measurement can
+ *  be framed from (`measuredFitRect`) or the persisted size has to stand in. Takes the minimal
+ *  shape so it reads either a user-land node or React Flow's own internal node (the authoritative
+ *  one; see Canvas.frameNode). */
 export function isMeasured(
   node: { measured?: { width?: number | null; height?: number | null } } | null | undefined
 ): boolean {
