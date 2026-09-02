@@ -135,7 +135,8 @@ paths:
   `initialCommand` — both write a CLI command line, and a line delivered across zsh's rc-file tty
   flush comes out mangled. A **park keeps it** (a parked tmux session is still addressable by name);
   only a real teardown clears it. The loop then WAITS instead of burning attempts, and the backoff
-  (`launchRetryDelay`, ~12 s over five attempts) covers only the residual race after readiness.
+  (`launchRetryDelay`, ~12 s: six sends over five backoff gaps, `LAUNCH_DELIVERY_ATTEMPTS`) covers
+  only the residual race after readiness.
   Because a wait with no end is the failure mode this replaces, both give-up states are **visible**
   in the transient `state/launchDelivery.ts` and rendered by the QUEUED badge's amber ⚠ + tooltip
   (`launchTooltip`, pure): `stalled` = gate open, no terminal yet, **still held** (raised by a
@@ -257,8 +258,15 @@ paths:
   findings on that merge). The consent ends with the node: `deleteNodes`, the peer `remove`
   mutation (both branches), React Flow's remove change and `performCloseProject` all `forgetArmed`,
   so a peer that removes an armed node and re-adds the same id with an identical launch does not
-  inherit this process's consent; and the fire effect consumes the consent when the backoff is
-  exhausted, so "nothing will retry it" is true rather than merely displayed. Do not "simplify" the
+  inherit this process's consent — each of them also `abandonLaunch`es the in-flight claim, so a
+  send into the destroyed session settles `stale` and cannot clear a launch restored under the same
+  id/content (delete + undo); wholesale replacements of the ACTIVE list (external-change reload,
+  the conflict bar's reload, the legacy phone mutation) call `pruneArmed(nodes)` instead, which
+  drops every consent/claim absent from the new list or differing in content (never on a project
+  switch — cold-open `--project` needs its consent to survive one); a LANDED send forgets the consent
+  even when its settle is stale (switched projects before it landed ⇒ the node reads QUEUED with ▶,
+  never an auto-replay); and the fire effect consumes the consent when the backoff is exhausted,
+  so "nothing will retry it" is true rather than merely displayed. Do not "simplify" the
   gate into a per-node flag stored in project.json — a flag in the hostile file is not consent.
 - **Context Link** — a node action gated by `CONTEXT_LINK_CAPABLE` (claude/codex/gemini/opencode/grok;
   custom agents + plain terminals excluded). **grok joined in 2026-09, and the file matters:** its

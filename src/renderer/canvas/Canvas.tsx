@@ -414,10 +414,12 @@ import {
 } from '../session/relay-tab'
 import { buildBackgroundLinkMaps, buildContextLinkNote, buildLinkMap, buildNotePushMessage, classifyLink, hiddenLinkIds, linkIdsCoveredByRopes, pairKey, planBridges, type LinkEndpoint } from '../lib/noteLink'
 import {
+  abandonLaunch,
   beginLaunch,
   dependencyEdges,
   forgetArmed,
   isLaunchInFlight,
+  pruneArmed,
   launchesToFire,
   launchRetryDelay,
   markArmedThisSession,
@@ -2761,6 +2763,9 @@ export function Canvas() {
         // Active but no unsaved local edits: reload in place (the incoming file already carries any
         // added nodes, so nothing extra to adopt).
         useProjects.getState().replaceProject(project)
+        // The live list is about to be swapped for the file's: consents and in-flight claims for
+        // nodes the file no longer has (or has with another launch) end here — see pruneArmed.
+        pruneArmed(project.nodes)
         reloadActiveProject()
         return
       }
@@ -2887,6 +2892,9 @@ export function Canvas() {
     return window.nodeTerminal.remoteHost.onApplyMutation((mutation) => {
       setNodes((ns) => {
         const next = applyCanvasMutation(flowToNodeStates(ns), mutation)
+        // A phone mutation can remove nodes; consents / claims for what it removed end with them
+        // (idempotent, so a re-run of this updater is harmless). See pruneArmed.
+        pruneArmed(next)
         return nodeStatesToFlow(next)
       })
       markDirty()
@@ -3094,6 +3102,7 @@ export function Canvas() {
           // ...and this process's consent for its held launch (a cold-open arming lives in exactly
           // this kind of background project) — a re-add under the same id needs its own.
           forgetArmed(mutation.id)
+          abandonLaunch(mutation.id)
         }
         if (useProjects.getState().applyNodeMutation(projectId, mutation)) markDirty()
         return
@@ -3117,6 +3126,7 @@ export function Canvas() {
         // the same id with an identical `pendingLaunch` must not auto-fire on inherited consent
         // (the local twin is in deleteNodes).
         forgetArmed(mutation.id)
+        abandonLaunch(mutation.id)
       }
       // Keep the ref in step immediately: a burst (a peer's bulk delete) arrives within one tick,
       // before React re-renders, and each mutation must build on the previous one.
@@ -3222,6 +3232,7 @@ export function Canvas() {
         if (c.type === 'remove') {
           useWebviewKeepAlive.getState().drop(c.id)
           forgetArmed(c.id) // a removed node's held-launch consent ends with it (see deleteNodes)
+          abandonLaunch(c.id)
         }
         if ('id' in c && isEph(c.id)) {
           const store = useAgentNodes.getState()
@@ -4996,6 +5007,7 @@ export function Canvas() {
         autoCloseArmedRef.current.delete(id)
         autoCloseReadRef.current.delete(id)
         forgetArmed(id)
+        abandonLaunch(id) // a send still in flight for it now belongs to a destroyed session
       }
       if (opts?.record !== false) {
         const deletedAt = Date.now()
@@ -12217,7 +12229,10 @@ export function Canvas() {
       // The consent registry (lib/pendingLaunch) outlives the project: a closed project's nodes are
       // reloaded from its git-shared project.json on reopen, and that is a LOADED launch — it gets
       // the QUEUED badge and ▶, never this process's old consent (blind security pass, 2026-09-02).
-      for (const n of store.getProject(id)?.nodes ?? []) forgetArmed(n.id)
+      for (const n of store.getProject(id)?.nodes ?? []) {
+        forgetArmed(n.id)
+        abandonLaunch(n.id)
+      }
       useReopenHistory.getState().push({ kind: 'project', projectId: id, closedAt: Date.now() })
       disposeRelayTabForProject(id)
       store.closeProject(id)
@@ -12817,6 +12832,7 @@ export function Canvas() {
             addedCount={conflict.added}
             onReload={() => {
               useProjects.getState().replaceProject(conflict.project)
+              pruneArmed(conflict.project.nodes) // the disk side wins: see pruneArmed
               // The canvas now matches disk exactly → no local unsaved edits. Clear dirty so the
               // re-armed autosave (conflict just went null) can't turn around and overwrite the
               // just-reloaded disk version.

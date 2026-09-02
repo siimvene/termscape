@@ -10,9 +10,11 @@ import {
   resetArmedThisSession,
   unmetDeps,
   wasArmedThisSession,
+  abandonLaunch,
   beginLaunch,
   isLaunchInFlight,
   launchKey,
+  pruneArmed,
   resetLaunchesInFlight,
   settleLaunch,
   LAUNCH_DELIVERY_ATTEMPTS,
@@ -431,5 +433,112 @@ describe('settleLaunch — a settle speaks about the launch it SENT, never about
     expect(settleLaunch('n', key, false, A)).toBe('refused')
     expect(isLaunchInFlight('n')).toBe(false)
     expect(beginLaunch('n', A)).toBe(key) // ▶ works again
+  })
+})
+
+describe('a LANDED send consumes the consent wherever it landed — even when its settle is stale', () => {
+  // P sends A; the user switches to Q before it lands; the settle reads Q's list, finds no A ⇒ stale.
+  // Leaving the consent in place made switching back to P auto-type A a second time (consort
+  // re-review SERIOUS, 2026-09-03). P's node keeps QUEUED + ▶ instead: no replay, no loss.
+  const A = { after: [] as string[], command: 'echo A' }
+  const B = { after: [] as string[], command: 'echo B' }
+  beforeEach(() => {
+    resetArmedThisSession()
+    resetLaunchesInFlight()
+  })
+
+  it('landed-but-stale (node not in the visible list) ⇒ no consent left for it', () => {
+    markArmedThisSession('n', A)
+    const key = beginLaunch('n', A)!
+    expect(settleLaunch('n', key, true, undefined)).toBe('stale')
+    expect(wasArmedThisSession('n', A)).toBe(false)
+  })
+
+  it('landed-but-stale (peer replaced A with B) ⇒ no consent left for the id either', () => {
+    markArmedThisSession('n', B) // this process re-armed the id with B while A was in flight
+    const key = beginLaunch('n', A)!
+    expect(settleLaunch('n', key, true, B)).toBe('stale')
+    expect(wasArmedThisSession('n', B)).toBe(false) // B now needs ▶ — the safe direction
+  })
+
+  it('a refused stale settle leaves the consent alone (nothing was typed)', () => {
+    markArmedThisSession('n', B)
+    const key = beginLaunch('n', A)!
+    expect(settleLaunch('n', key, false, B)).toBe('stale')
+    expect(wasArmedThisSession('n', B)).toBe(true)
+  })
+})
+
+describe('abandonLaunch — a removed node’s outstanding send settles as stale, whatever the node holds now', () => {
+  // Two node lifetimes can carry the same launchKey: A in flight, delete + undo restores the same
+  // id/content, old A lands in the session the delete destroyed. A content match alone would have
+  // cleared the RESTORED launch (consort re-review SERIOUS, 2026-09-03).
+  const A = { after: [] as string[], command: 'echo A' }
+  beforeEach(() => resetLaunchesInFlight())
+
+  it('begin → abandon → settle(ok) ⇒ stale; the node is untouched and free for a new claim', () => {
+    const key = beginLaunch('n', A)!
+    abandonLaunch('n')
+    expect(isLaunchInFlight('n')).toBe(false)
+    expect(settleLaunch('n', key, true, A)).toBe('stale') // same content on the node — still stale
+    expect(settleLaunch('n', key, false, A)).toBe('stale')
+    expect(beginLaunch('n', A)).toBe(key) // the restored node can be sent on its own terms
+  })
+
+  it('a settle with no claim never touches a newer claim', () => {
+    const keyA = beginLaunch('n', A)!
+    abandonLaunch('n')
+    const keyB = beginLaunch('n', { after: [], command: 'echo B' })!
+    expect(settleLaunch('n', keyA, true, A)).toBe('stale')
+    expect(isLaunchInFlight('n')).toBe(true)
+    expect(settleLaunch('n', keyB, true, { after: [], command: 'echo B' })).toBe('landed')
+  })
+})
+
+describe('pruneArmed — a wholesale replacement of the live list drops what it no longer carries', () => {
+  // External-change reload, the conflict bar's reload and the legacy phone mutation swap the node
+  // list underneath the per-node removal paths, so none of them ran forgetArmed; a node the file
+  // dropped and later restored with the same id/content inherited this process's consent (consort
+  // re-review, 2026-09-03).
+  const A = { after: [] as string[], command: 'echo A' }
+  const B = { after: [] as string[], command: 'echo B' }
+  beforeEach(() => {
+    resetArmedThisSession()
+    resetLaunchesInFlight()
+  })
+
+  it('forgets a consent whose node is absent from the new list', () => {
+    markArmedThisSession('gone', A)
+    markArmedThisSession('kept', A)
+    pruneArmed([{ id: 'kept', pendingLaunch: A }, { id: 'other' }])
+    expect(wasArmedThisSession('gone', A)).toBe(false)
+    expect(wasArmedThisSession('kept', A)).toBe(true)
+  })
+
+  it('forgets a consent whose node now carries another launch, or none', () => {
+    markArmedThisSession('swapped', A)
+    markArmedThisSession('disarmed', A)
+    pruneArmed([{ id: 'swapped', pendingLaunch: B }, { id: 'disarmed' }])
+    expect(wasArmedThisSession('swapped', A)).toBe(false)
+    expect(wasArmedThisSession('swapped', B)).toBe(false)
+    expect(wasArmedThisSession('disarmed', A)).toBe(false)
+  })
+
+  it('abandons in-flight claims the same way, and leaves a matching one alone', () => {
+    const kept = beginLaunch('kept', A)!
+    beginLaunch('gone', A)
+    beginLaunch('swapped', A)
+    pruneArmed([{ id: 'kept', pendingLaunch: A }, { id: 'swapped', pendingLaunch: B }])
+    expect(isLaunchInFlight('kept')).toBe(true)
+    expect(isLaunchInFlight('gone')).toBe(false)
+    expect(isLaunchInFlight('swapped')).toBe(false)
+    expect(settleLaunch('kept', kept, true, A)).toBe('landed')
+  })
+
+  it('is idempotent and safe on an empty list', () => {
+    markArmedThisSession('n', A)
+    pruneArmed([])
+    pruneArmed([])
+    expect(wasArmedThisSession('n', A)).toBe(false)
   })
 })

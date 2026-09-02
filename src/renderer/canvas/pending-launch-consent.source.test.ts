@@ -70,7 +70,42 @@ describe('consent ends with the node — every removal path calls forgetArmed', 
 
   it('closing a project (its nodes come back from the git-shared file as LOADED launches)', () => {
     expect(canvas).toMatch(
-      /const performCloseProject = useCallback\([\s\S]{0,900}?for \(const n of store\.getProject\(id\)\?\.nodes \?\? \[\]\) forgetArmed\(n\.id\)/
+      /const performCloseProject = useCallback\([\s\S]{0,900}?for \(const n of store\.getProject\(id\)\?\.nodes \?\? \[\]\) \{\s*\n\s*forgetArmed\(n\.id\)\s*\n\s*abandonLaunch\(n\.id\)/
     )
+  })
+
+  it('every forgetArmed on a removal path is paired with abandonLaunch — the outstanding send is orphaned too', () => {
+    // Delete + undo restores the same id/content; a send into the destroyed session must settle
+    // stale rather than clear the restored launch (consort re-review SERIOUS, 2026-09-03).
+    expect(canvas).toMatch(/forgetArmed\(id\)\s*\n\s*abandonLaunch\(id\)/)
+    expect(canvas).toMatch(/forgetArmed\(c\.id\)[^\n]*\n\s*abandonLaunch\(c\.id\)/)
+    expect(canvas.match(/forgetArmed\(mutation\.id\)\s*\n\s*abandonLaunch\(mutation\.id\)/g)?.length).toBe(2)
+  })
+})
+
+describe('wholesale replacements of the ACTIVE list prune consents and claims (pruneArmed)', () => {
+  // These swap the node list underneath the per-node removal paths, so none of them ran
+  // forgetArmed; a node the file dropped and later restored with the same id/content inherited this
+  // process's consent (consort re-review, 2026-09-03). A project SWITCH is deliberately NOT here.
+  it('external-change reload of the active project', () => {
+    expect(canvas).toMatch(
+      /if \(decision\.kind === 'reload'\) \{[\s\S]{0,600}?replaceProject\(project\)\s*\n[\s\S]{0,300}?pruneArmed\(project\.nodes\)\s*\n\s*reloadActiveProject\(\)/
+    )
+  })
+
+  it('the conflict bar’s reload', () => {
+    expect(canvas).toMatch(
+      /onReload=\{\(\) => \{\s*\n\s*useProjects\.getState\(\)\.replaceProject\(conflict\.project\)\s*\n\s*pruneArmed\(conflict\.project\.nodes\)/
+    )
+  })
+
+  it('the legacy phone mutation result', () => {
+    expect(canvas).toMatch(
+      /const next = applyCanvasMutation\(flowToNodeStates\(ns\), mutation\)[\s\S]{0,400}?pruneArmed\(next\)\s*\n\s*return nodeStatesToFlow\(next\)/
+    )
+  })
+
+  it('never on a project switch — the cold-open `--project` arming must survive one', () => {
+    expect(canvas.match(/pruneArmed\(/g)?.length).toBe(3)
   })
 })

@@ -194,9 +194,51 @@ export function settleLaunch(
   ok: boolean,
   current: PendingLaunch | undefined
 ): LaunchVerdict {
-  if (launchesInFlight.get(id) === sentKey) launchesInFlight.delete(id)
+  // A landed send consumed the consent WHEREVER it landed: the command was typed into a shell, so
+  // even a stale settle (the node's launch changed, or the user switched projects before it
+  // landed and this canvas cannot see the node) must not leave a consent that would auto-type it
+  // AGAIN when that node is next on screen (consort re-review SERIOUS, 2026-09-03). The node then
+  // shows QUEUED with ▶ as the manual way onward — no replay, no loss.
+  if (ok) forgetArmed(id)
+  // No claim, or not OUR claim ⇒ this settle belongs to a send that was abandoned (the node was
+  // removed / replaced wholesale while it was in flight — see abandonLaunch) or already settled.
+  // Two node lifetimes can carry the same launchKey (delete + undo, peer remove + re-add), so the
+  // content match alone must not be allowed to clear the RESTORED launch on the strength of a send
+  // that went into the session the removal destroyed.
+  if (launchesInFlight.get(id) !== sentKey) return 'stale'
+  launchesInFlight.delete(id)
   if (!current || launchKey(current) !== sentKey) return 'stale'
   return ok ? 'landed' : 'refused'
+}
+
+/**
+ * The node is gone (deleted, removed by a peer or the phone, dropped by a whole-project reload):
+ * whatever send is outstanding for it now belongs to a session that no longer exists, so its settle
+ * must find no claim and touch nothing. Called beside `forgetArmed` on every removal path.
+ */
+export function abandonLaunch(id: string): void {
+  launchesInFlight.delete(id)
+}
+
+/**
+ * After a WHOLESALE replacement of the active project's node list (an external-change reload of
+ * the .nodeterm file, the conflict bar's "reload", the legacy phone mutation result): every consent
+ * and every in-flight claim whose node is no longer in the list, or whose launch content differs
+ * from what was consented to / sent, is dropped. The per-node removal paths cannot see these — the
+ * list is swapped underneath them — and without this a node removed by a reload and restored later
+ * with the same id and content inherited this process's consent (consort re-review, 2026-09-03).
+ * NOT called on a project switch: a cold-open `--project` arming relies on its consent surviving the
+ * interval in which its nodes are not the live list.
+ */
+export function pruneArmed(nodes: readonly { id: string; pendingLaunch?: PendingLaunch }[]): void {
+  const current = new Map<string, PendingLaunch | undefined>()
+  for (const n of nodes) current.set(n.id, n.pendingLaunch)
+  const keep = (id: string, key: string): boolean => {
+    const p = current.get(id)
+    return !!p && launchKey(p) === key
+  }
+  for (const [id, key] of armedThisSession) if (!keep(id, key)) armedThisSession.delete(id)
+  for (const [id, key] of launchesInFlight) if (!keep(id, key)) launchesInFlight.delete(id)
 }
 
 /** Test hook only. */

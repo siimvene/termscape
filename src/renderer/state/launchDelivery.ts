@@ -49,7 +49,8 @@ export const useLaunchDelivery = create<LaunchDeliveryStore>((set) => ({
   markFailed: (nodeId, attempts) =>
     set((s) => {
       // Never let a later, smaller count shrink the record: the manual ▶ reports its own single
-      // refusal, and it must not rewrite "5 attempts were refused" as "1 was".
+      // refusal, and it must not rewrite "6 attempts were refused" (the loop's six sends over five
+      // backoff gaps, LAUNCH_DELIVERY_ATTEMPTS) as "1 was".
       const prev = s.byId[nodeId]
       const total = Math.max(attempts, prev?.kind === 'failed' ? prev.attempts : 0)
       return { byId: { ...s.byId, [nodeId]: { kind: 'failed', attempts: total, at: Date.now() } } }
