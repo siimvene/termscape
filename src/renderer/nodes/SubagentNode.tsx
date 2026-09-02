@@ -194,7 +194,7 @@ function AggregateNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const meta = [
     counts.working ? `${counts.working} working` : null,
     counts.done ? `${counts.done} done` : null,
-    counts.errored ? `${counts.errored} errored` : null,
+    // `errored` is not sourced yet (the store only knows working|done) — never shown as 0.
     elapsed
   ]
     .filter(Boolean)

@@ -129,8 +129,8 @@ paths:
   **Panel placement (2026-09-02):** the finished panel frame is dropped ADJACENT to the target's
   container — immediately RIGHT of the target's OUTERMOST (top-level) group frame when the target
   sits in one, else right of the target node — with a fixed `VERIFY_PANEL_GUTTER` (48px), then
-  pushed further right/down only as far as needed to clear other top-level nodes/frames. The push
-  reuses `freeSpot`'s ring search (one layout engine, not two); the pure origin math is
+  pushed to the nearest free cell only when that spot is occupied — `freeSpot`'s ring search, so the
+  push can land in ANY direction, not only right/down (one layout engine, not two); the pure origin math is
   `verifyPanelOrigin` in `renderer/lib/verifyPanel.ts` (unit-tested: loose→right of node,
   framed→right of frame, occupied→pushed, sibling-not-child). It used to arrange at `placeBelow(0)`
   — below the CALLER — so a panel verifying a node inside its own frame landed overlapping that
@@ -161,6 +161,18 @@ paths:
   leaking the wrong id, it does not make the gate forgiving. When the refusal does fire, TerminalNode
   surfaces it by name ("Codex refused: managed account <id> has no Codex home") instead of the SSH
   "not connected to the host" overlay.
+- **A held launch auto-fires only if THIS process armed it** (2026-09-02, consort security
+  CRITICAL): `pendingLaunch` is persisted in `.nodeterm/project.json`, which is git-shared and
+  therefore hostile input, and it is also carried by canvas-sync peers. Before this rule the fire
+  effect typed any node's `pendingLaunch.command` into its shell the moment `after` was satisfied, so
+  a cloned project with `{after:[],command:"curl … | sh"}` ran on canvas open. Now `launchesToFire`
+  consults `wasArmedThisSession(id)` (renderer/lib/pendingLaunch): only ids armed by this process
+  (canvas-control `--after`/`verify` arming, `armForColdOpen`) fire; a launch loaded from disk or a
+  peer keeps its QUEUED badge and ▶ Run now, and the CLICK is the consent. Both boundaries also
+  shape-check it (`sanitizePendingLaunch`, @shared/pending-launch — malformed ⇒ inert node, never a
+  crash in `p.after.every`). ▶ Run now clears the launch only when `sendText` succeeded, so a refused
+  delivery never discards the only copy of the command. Do not "simplify" the gate into a per-node
+  flag stored in project.json — a flag in the hostile file is not consent.
 - **Context Link** — a node action gated by `CONTEXT_LINK_CAPABLE` (claude/codex/gemini/opencode;
   **grok**, custom agents + plain terminals excluded — grok's `updates.jsonl` parser is unbuilt): drawing an edge between two builtin-agent nodes lets each
   READ the other's context on demand (pull, not push). Architecture (2026-07, SSH-capable — see

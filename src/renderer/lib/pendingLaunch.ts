@@ -74,6 +74,29 @@ function depSatisfied(depId: string, status: StatusById, live: ReadonlySet<strin
  * "still running" would strand it forever — the same reasoning as a deleted dependency counting
  * as satisfied. (The caller's probe applies the same rule to a group with no entry.)
  */
+/**
+ * Node ids whose `pendingLaunch` was armed BY THIS PROCESS (canvas-control `--after`, `verify`,
+ * `armForColdOpen`). Only these may auto-fire. A `pendingLaunch` that arrived from disk
+ * (`.nodeterm/project.json` is git-shared, hostile input) or from a canvas-sync peer is displayed —
+ * QUEUED badge, ▶ Run now — but never typed into a shell without a click: before this gate a cloned
+ * project.json carrying `{after:[],command:"curl … | sh"}` executed the moment the canvas opened
+ * (consort security CRITICAL, 2026-09-02). Module-level and in-memory on purpose: forgetting on
+ * reload is exactly what "loaded launches need consent" means. Applied at the ONE fire site in
+ * Canvas (`launchesToFire(...).filter(f => wasArmedThisSession(f.id))`), so `launchesToFire` itself
+ * stays a pure dependency-satisfaction function.
+ */
+const armedThisSession = new Set<string>()
+export function markArmedThisSession(id: string): void {
+  armedThisSession.add(id)
+}
+export function wasArmedThisSession(id: string): boolean {
+  return armedThisSession.has(id)
+}
+/** Test hook only. */
+export function resetArmedThisSession(): void {
+  armedThisSession.clear()
+}
+
 export function launchesToFire(
   nodes: readonly ArmedNode[],
   status: StatusById,

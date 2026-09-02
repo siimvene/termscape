@@ -387,7 +387,7 @@ import {
   type RelayTab,
 } from '../session/relay-tab'
 import { buildBackgroundLinkMaps, buildContextLinkNote, buildLinkMap, buildNotePushMessage, classifyLink, hiddenLinkIds, linkIdsCoveredByRopes, pairKey, planBridges, type LinkEndpoint } from '../lib/noteLink'
-import { dependencyEdges, launchesToFire, unmetDeps, type ArmedNode } from '../lib/pendingLaunch'
+import { dependencyEdges, launchesToFire, markArmedThisSession, unmetDeps, wasArmedThisSession, type ArmedNode } from '../lib/pendingLaunch'
 import { freeSpot } from '../lib/placement'
 import { pushSessionRename } from '../lib/sessionRename'
 import { useReopenHistory } from '../state/reopenHistory'
@@ -1553,7 +1553,12 @@ export function Canvas() {
       useAgentStatus.getState().byId,
       live,
       setupDoneForGroup
-    ).filter((f) => !launchInFlight.current.has(f.id))
+    )
+      // CONSENT GATE: only a launch armed by THIS process may be typed into a shell. A pendingLaunch
+      // loaded from .nodeterm/project.json (git-shared, hostile) or received from a canvas-sync peer
+      // keeps its QUEUED badge and ▶ Run now — the click is the consent. See wasArmedThisSession.
+      .filter((f) => wasArmedThisSession(f.id))
+      .filter((f) => !launchInFlight.current.has(f.id))
     for (const f of ready) {
       launchInFlight.current.add(f.id)
       const attempt = (launchAttempts.current.get(f.id) ?? 0) + 1
@@ -6357,7 +6362,9 @@ export function Canvas() {
               .getState()
               .applyNodeMutation(plan.projectId, {
                 op: 'upsert',
-                node: flowToNodeStates([armForColdOpen(node)])[0]
+                // Cold-open arming happens HERE, by this process: consent to auto-fire (see
+                // wasArmedThisSession) is recorded at the call site, not in the pure helper.
+                node: flowToNodeStates([(markArmedThisSession(node.id), armForColdOpen(node))])[0]
               })
           }
           void writeDisk()
@@ -8279,9 +8286,13 @@ export function Canvas() {
           // must not silently cross a project boundary, so the source node's account is NOT
           // consulted); permission mode and launch-command overrides are the target's too.
           const tgCwd = args.cwd || target.cwd
-          const tgAccount = tgIsTerminal
-            ? undefined
-            : resolveNewNodeAccount(undefined, target, useSettings.getState().settings.claudeAccounts)
+          // `defaultAccountId` is a Claude concept: for any other provider the project default must
+          // NOT be applied, or a `--project` codex spawn inherits a Claude id and the fail-closed
+          // Codex scope gate refuses it (same bug class as accountForSpawn; consort SERIOUS 2026-09-02).
+          const tgAccount =
+            tgIsTerminal || capabilityAgentId(tgAgentId) !== 'claude'
+              ? undefined
+              : resolveNewNodeAccount(undefined, target, useSettings.getState().settings.claudeAccounts)
           const tgMode = tgIsTerminal ? undefined : projectPermissionMode(target, tgAgentId)
           const tgActive = target.id === tgStore.activeProjectId
           // Placement: below the lowest existing node in the TARGET (placeBelow(src) is
@@ -8691,6 +8702,9 @@ export function Canvas() {
           live
         )
         if (!unmet.length && !awaitSetupGroup) return node
+        // Armed HERE, by this process, on the user's own canvas-control call — the one provenance
+        // that may auto-fire (see `wasArmedThisSession`; a loaded/peer launch needs ▶ Run now).
+        markArmedThisSession(node.id)
         return {
           ...node,
           data: {

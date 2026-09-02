@@ -5,8 +5,7 @@ import {
   mayRelaunchAgent,
   unmetDeps,
   type ArmedNode,
-  type StatusById
-} from './pendingLaunch'
+  type StatusById, markArmedThisSession, resetArmedThisSession, wasArmedThisSession } from './pendingLaunch'
 
 const armed = (id: string, after: string[], command = `echo ${id}`): ArmedNode => ({
   id,
@@ -157,5 +156,20 @@ describe('mayRelaunchAgent — an armed node must not cold-restore/resume before
 
   it('plain restore (never armed) ⇒ unchanged, resume allowed', () => {
     expect(mayRelaunchAgent({})).toBe(true)
+  })
+})
+
+describe('consent registry — only launches armed by THIS process may auto-fire', () => {
+  const node = (id: string) => ({ id, data: { pendingLaunch: { after: [], command: 'echo hi' } } })
+  const fire = (ns: ReturnType<typeof node>[]) =>
+    launchesToFire(ns, {}, new Set(ns.map((n) => n.id))).filter((f) => wasArmedThisSession(f.id))
+  it('a launch loaded from project.json / a peer is never fired without consent', () => {
+    resetArmedThisSession()
+    expect(fire([node('loaded')])).toEqual([])
+  })
+  it('a launch armed in this session fires; a loaded one beside it still does not', () => {
+    resetArmedThisSession()
+    markArmedThisSession('mine')
+    expect(fire([node('mine'), node('loaded')])).toEqual([{ id: 'mine', command: 'echo hi' }])
   })
 })

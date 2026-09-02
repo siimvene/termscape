@@ -1,4 +1,5 @@
 import type { Node } from '@xyflow/react'
+import { sanitizePendingLaunch } from '@shared/pending-launch'
 import type {
   CanvasMutation,
   CanvasNodeState,
@@ -1718,7 +1719,9 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
         agentModel: n.agentModel,
         accountId: n.accountId,
         agentSessionId: n.agentSessionId,
-        pendingLaunch: n.pendingLaunch,
+        // Hostile input (git-shared file): shape-checked here; and never auto-fired — see
+        // `wasArmedThisSession` in renderer/lib/pendingLaunch.
+        pendingLaunch: sanitizePendingLaunch(n.pendingLaunch),
         ssh: n.ssh,
         sshRemoteTmux: n.sshRemoteTmux,
         sshFs: n.sshFs,
@@ -1853,6 +1856,11 @@ export function applyMutationToFlow(nodes: CanvasNode[], m: CanvasMutation): Can
       ...prev.data,
       ...incoming.data,
       shell: prev.data.shell,
+      // A peer's `pendingLaunch` is hostile input too: shape-checked, and (like a loaded one) never
+      // auto-fired by this process — `wasArmedThisSession` only knows launches WE armed.
+      ...('pendingLaunch' in incoming.data
+        ? { pendingLaunch: sanitizePendingLaunch(incoming.data.pendingLaunch) }
+        : {}),
       ...(incoming.data.ssh && prev.data.ssh?.extraArgs
         ? {
             ssh: {
