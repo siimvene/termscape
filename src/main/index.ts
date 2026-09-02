@@ -215,7 +215,7 @@ import { planRemoteWorkspacePoll } from './remote-workspace-poll'
 import { sessionName } from '../core/tmux-naming'
 import { posixQuote, type SshConnection } from '../shared/ssh'
 import { buildHandoff, type HandoffRemote } from './handoff'
-import { initContextLink, setNodeTranscript } from '../core/context-link'
+import { initContextLink, onLinkedRead, setNodeTranscript } from '../core/context-link'
 import { transcriptPathOf } from '../core/context-link-core'
 import { initCanvasControl, installCanvasSkillInto } from './canvas-control'
 import { initTranscriptIndex, searchTranscripts } from '../core/transcript-index'
@@ -3274,6 +3274,12 @@ app.whenReady().then(async () => {
   })
   initMediaProtocol()
 
+  // A content read over a context link is the consume signal `--auto-close` waits for
+  // (renderer/lib/spawnedAlerts.ts). Forwarded as-is; the renderer decides whether it closes anything.
+  onLinkedRead((e) => {
+    const w = getMainWindow()
+    if (w && !w.isDestroyed()) w.webContents.send(IPC.agentLinkedRead, e)
+  })
   // Context Link reads happen HERE, on the desktop, which is what lets a remote (SSH-project)
   // node's transcript be read at all: it lives on the host, behind the project's ControlMaster.
   // These three deps are the whole of what `src/core` cannot answer for itself. Fail-open

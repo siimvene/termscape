@@ -193,7 +193,10 @@ export function parseControlRequest(
 ): ControlCommand | { error: string } {
   if (!VERBS.includes(verb as ControlVerb)) return { error: `Unknown verb: ${verb}` }
   const v = verb as ControlVerb
-  if (v === 'close' && !args.node) return { error: 'close requires --node <id>' }
+  // `--spawned yes` is an alternative target set (every node the caller opened); `--node` may be a
+  // comma list. The renderer resolves both against the live canvas.
+  if (v === 'close' && !args.node && !args.spawned)
+    return { error: 'close requires --node <id,id> and/or --spawned yes' }
   if (v === 'write' && !args.node) return { error: 'write requires --node <id>' }
   if (v === 'write' && !args.text) return { error: 'write requires --text' }
   if ((v === 'show-image' || v === 'show-video') && !args.path) {
@@ -290,8 +293,8 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '- `list` — current nodes (id, kind, title). Start here when you need a node id.',
     '- `help` — print the verb list. Answered by the shim itself, so it works even if the app is down.',
     '- `open-terminal [--count N] [--cwd P] [--cmd C] [--group <id>] [--after <id,id>] [--project <id>]` — open N plain terminals.',
-    '- `open-claude [--count N] [--cwd P] [--prompt T] [--model M] [--group <id>] [--after <id,id>] [--project <id>]` — open N Claude sessions.',
-    `- \`open-agent --agent ${agentChoices} [--count N] [--cwd P] [--prompt T] [--model M] [--group <id>] [--after <id,id>] [--project <id>]\` — open`,
+    '- `open-claude [--count N] [--cwd P] [--prompt T] [--model M] [--group <id>] [--after <id,id>] [--project <id>] [--auto-close yes]` — open N Claude sessions.',
+    `- \`open-agent --agent ${agentChoices} [--count N] [--cwd P] [--prompt T] [--model M] [--group <id>] [--after <id,id>] [--project <id>] [--auto-close yes]\` — open`,
     '  any agent CLI. `--group` parents the node(s) into a group frame; a worktree-bound group also',
     '  hands its worktree path down as the cwd. `--after <id,id>` opens the node ARMED: it does not',
     '  start until every listed station has gone idle, and is context-linked to them so it can read',
@@ -352,7 +355,12 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '  the user to confirm deletion.',
     '- `branch --node <id>` — branch a Claude node\'s conversation (Claude nodes only).',
     '- `rename --node <id> --title "New Name"` — rename any node (terminals, groups, stickies…).',
-    '- `write --node <id> --text "..."` / `close --node <id>` — type into / close a node.',
+    '- `write --node <id> --text "..."` / `close --node <id,id>` — type into a node / close node(s).',
+    '  `close --spawned yes` closes every node YOU opened that is still on the canvas (add --node for',
+    '  extras); one dialog for the whole set. Close your stations once you have read their results.',
+    '  `--auto-close yes` on open-claude/open-agent makes a station close ITSELF once it is done AND',
+    '  you have read it with the linked-context CLI (no dialog; agents that report status only).',
+    '  Nodes you open alert the USER only once, when the last of them finishes — you read the rest.',
     '  Both ask the user to confirm a dialog and may be denied. Read WHICH answer came back:',
     '  `denied by user` is a decision and is FINAL — never re-ask — while `no answer within 120s`',
     '  means nobody reached the dialog, which is worth one retry when the user is back.',
@@ -675,8 +683,8 @@ Verbs:
 - \`help\` — print the verb list. The shim answers this itself, without reaching the app, so it
   is also what to run when you are unsure whether the control endpoint is alive.
 - \`open-terminal [--count N] [--cwd P] [--cmd C] [--group <id>] [--after <id,id>] [--project <id>]\` — open N plain terminals (default 1).
-- \`open-claude [--count N] [--cwd P] [--prompt T] [--model M] [--group <id>] [--after <id,id>] [--project <id>]\` — open N Claude sessions (default 1).
-- \`open-agent --agent ${agentChoices} [--count N] [--cwd P] [--prompt T] [--model M] [--group <id>] [--after <id,id>] [--project <id>]\` — open N sessions of any agent CLI.
+- \`open-claude [--count N] [--cwd P] [--prompt T] [--model M] [--group <id>] [--after <id,id>] [--project <id>] [--auto-close yes]\` — open N Claude sessions (default 1).
+- \`open-agent --agent ${agentChoices} [--count N] [--cwd P] [--prompt T] [--model M] [--group <id>] [--after <id,id>] [--project <id>] [--auto-close yes]\` — open N sessions of any agent CLI.
   \`--group\` parents the node(s) into an existing group frame; a worktree-bound group also
   hands its worktree path down as the cwd.
   \`--after <id,id>\` opens the node **armed**: it does NOT start yet, and launches itself once
@@ -775,7 +783,19 @@ Verbs:
   branch and a new node opens resuming the original. Target must be a Claude agent node.
 - \`rename --node <id> --title "New Name"\` — rename any node (terminals, groups, stickies…).
 - \`write --node <id> --text "..."\` — type text into a terminal node. (Asks the user to confirm.)
-- \`close --node <id>\` — close a node. (Asks the user to confirm.)
+- \`close --node <id,id>\` / \`close --spawned yes [--node <id,id>]\` — close one or more nodes. (Asks the
+  user to confirm — ONE dialog for the whole set.) \`--spawned yes\` means every node YOU opened
+  (open-claude / open-agent / spawn-team / verify) that is still on the canvas; \`--node\` adds
+  others. Nodes you open are yours to take down: once you have read a station's result through
+  the linked context, close it — a finished station left open is a live process the user has to
+  find and close by hand, and a fan-out of them was measured as the dominant clutter on a canvas.
+  \`--auto-close yes\` on \`open-claude\`/\`open-agent\` does this for you: the station closes ITSELF (no
+  dialog) once it is done AND you have read it with the linked-context CLI (summary/transcript/
+  terminal — \`list\` does not count), in that order. Refused for agents that never report status
+  (a plain terminal could never become "done"). Its transcript stays on disk; only the node goes.
+  Alerts: a node YOU opened does not chirp/badge/notify the user when it finishes — you are its
+  reader. The user hears ONE aggregate alert when the last of your open stations finishes. A
+  station that needs input (permission, question) still alerts the user immediately.
 - \`send --node <id> --text "..."\` — deliver a message INTO another agent node's session, in this
   project only. No confirm dialog; instead it is verified-only, gated by the project's
   agent-messaging switch (Settings → Agents, OFF by default), and rate-limited. Delivery lands when

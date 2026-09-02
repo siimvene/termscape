@@ -16,6 +16,10 @@ const ROWS = {
     title: 'Play a sound when a turn finishes or needs you',
     keywords: ['sound', 'audio', 'sfx', 'effect', 'chime', 'beep', 'retro', '8-bit', 'chiptune', 'volume', 'mute', 'finished', 'needs you']
   },
+  quietSpawned: {
+    title: 'Quiet nodes opened by an agent',
+    keywords: ['quiet', 'spawned', 'agent', 'orchestrator', 'conductor', 'fan-out', 'team', 'spawn-team', 'verify', 'workers', 'stations', 'aggregate', 'notification', 'sound', 'unread']
+  },
   mobilePush: {
     title: 'Send push notifications to your paired phone',
     keywords: ['push', 'phone', 'mobile', 'apns', 'ios', 'notification', 'approval', 'question', 'done', 'completed', 'needs you', 'live activity', 'live activities', 'dynamic island', 'lock screen', 'presence', 'idle', 'hold', 'defer', 'at this computer']
@@ -27,6 +31,7 @@ export function NotificationsSection({ isActive }: { isActive: boolean }): React
   const notifyOnClaudeDone = useSettings((s) => s.settings.notifyOnClaudeDone)
   const soundEffects = useSettings((s) => s.settings.soundEffects)
   const soundVolume = useSettings((s) => s.settings.soundVolume)
+  const quietSpawnedNodes = useSettings((s) => s.settings.quietSpawnedNodes)
   const mobilePushEnabled = useSettings((s) => s.settings.mobilePushEnabled)
   const mobilePushNeedsYou = useSettings((s) => s.settings.mobilePushNeedsYou)
   const mobilePushDone = useSettings((s) => s.settings.mobilePushDone)
@@ -134,6 +139,19 @@ export function NotificationsSection({ isActive }: { isActive: boolean }): React
             }
           />
         </div>
+      </SearchableRow>
+      <SearchableRow {...ROWS.quietSpawned}>
+        <FieldRow
+          label="Quiet nodes opened by an agent"
+          description="Sessions an orchestrating agent opened (spawn-team, open-agent, verify panels) report to that agent, not to you: no chirp, unread badge or notification per station. You get one alert when the last station of a fan-out finishes. Sessions that need your input always alert."
+          control={
+            <Switch
+              checked={quietSpawnedNodes}
+              ariaLabel="Quiet nodes opened by an agent"
+              onChange={(on) => update({ quietSpawnedNodes: on })}
+            />
+          }
+        />
       </SearchableRow>
       <SearchableRow {...ROWS.mobilePush}>
         <FieldRow

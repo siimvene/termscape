@@ -33,6 +33,7 @@ import {
 } from './context-link-core'
 import {
   CONTEXT_LINK_VERBS,
+  pickLinkNode,
   renderContextLink,
   type ContextLinkFetch,
   type ContextLinkVerb
@@ -232,6 +233,26 @@ const fetchers: ContextLinkFetch = {
   opencodeExport: fetchOpencodeExport
 }
 
+/** One linked node's content was read by another node through the context-link CLI. */
+export interface LinkedReadEvent {
+  /** The node that asked (the shim's caller). */
+  readerId: string
+  /** The node whose transcript/summary/terminal was rendered. */
+  nodeId: string
+  verb: string
+}
+
+const linkedReadListeners = new Set<(e: LinkedReadEvent) => void>()
+
+/** Subscribe to content reads over context links (main forwards these to the renderer as
+ *  `agent:linked-read`). Returns unsubscribe. */
+export function onLinkedRead(cb: (e: LinkedReadEvent) => void): () => void {
+  linkedReadListeners.add(cb)
+  return () => {
+    linkedReadListeners.delete(cb)
+  }
+}
+
 /**
  * Answer one /context-link/ request. AUTHORIZATION: the document is chosen by the REQUESTER's
  * node id and `pickLinkNode` (inside renderContextLink) will only ever return a node listed in
@@ -252,7 +273,25 @@ export async function handleContextLinkRequest(req: {
     return 'No linked nodes. Draw a context-link edge from this node to another on the canvas.'
   }
   try {
-    return await renderContextLink(doc, req.verb as ContextLinkVerb, req.args, fetchers)
+    const out = await renderContextLink(doc, req.verb as ContextLinkVerb, req.args, fetchers)
+    // A CONTENT read (not `list`) of one linked node is the "the conductor has consumed this
+    // station's output" signal `--auto-close` waits for (renderer/lib/spawnedAlerts.ts). Resolved
+    // with the same picker the render used, so the id reported is the node actually read; fired
+    // after the render so a failed read never counts as consumed.
+    if (req.verb !== 'list') {
+      const picked = pickLinkNode(doc, req.args.node)
+      if ('node' in picked) {
+        const ev: LinkedReadEvent = { readerId: req.nodeId, nodeId: picked.node.id, verb: req.verb }
+        for (const cb of linkedReadListeners) {
+          try {
+            cb(ev)
+          } catch (e) {
+            console.warn('[context-link] linked-read listener threw', e)
+          }
+        }
+      }
+    }
+    return out
   } catch (e) {
     console.warn('[context-link] read failed', e)
     return 'Could not read linked context.'

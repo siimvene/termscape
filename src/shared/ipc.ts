@@ -146,6 +146,11 @@ export const IPC = {
    *  `external` opt). See core/ack-sweep.ts. */
   agentUnreadClear: 'agent:unread-clear',
   agentSubagentActivity: 'agent:subagent-activity',
+  /** main → renderer: an agent node READ another node's content over a context link (summary /
+   *  transcript / terminal — never `list`). Arg: `LinkedRead`. Drives `--auto-close` for nodes a
+   *  conductor opened (renderer/lib/spawnedAlerts.ts). Not emitted by the Server Edition (canvas
+   *  control is not wired there). */
+  agentLinkedRead: 'agent:linked-read',
   /** macOS Notch HUD (docs/notch-hud.md). main → hud: push the current row array. */
   hudRows: 'hud:rows',
   /** hud → main: toggle window click-through on hotspot enter/leave. Arg: `ignore: boolean`. */

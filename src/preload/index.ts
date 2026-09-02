@@ -764,6 +764,11 @@ const api: NodeTerminalApi = {
     ipcRenderer.on(IPC.agentSubagentActivity, handler)
     return () => ipcRenderer.removeListener(IPC.agentSubagentActivity, handler)
   },
+  onLinkedRead: (listener) => {
+    const handler = (_e: unknown, payload: Parameters<typeof listener>[0]) => listener(payload)
+    ipcRenderer.on(IPC.agentLinkedRead, handler)
+    return () => ipcRenderer.removeListener(IPC.agentLinkedRead, handler)
+  },
   onAgentControl: (listener) => {
     const handler = (_e: unknown, cmd: unknown) => listener(cmd as never)
     ipcRenderer.on(IPC.agentControl, handler)

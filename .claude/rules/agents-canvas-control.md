@@ -211,3 +211,31 @@ paths:
   the link file (`ContextLinkInfo.note`), so Claude reads the current text via the
   get-linked-context CLI (`summary`/`transcript` print it; `list` marks `(note)`). Pure
   edge/push/map logic in `renderer/lib/noteLink.ts`.
+- **Spawned nodes report to their conductor, not to the human** (2026-09-02,
+  `renderer/lib/spawnedAlerts.ts`, unit-tested; setting `quietSpawnedNodes`, default ON). Every node
+  an agent opens via canvas control is a first-class agent node, so each one's Stop used to fire the
+  full "finished" alert (chirp + unread + OS notification) — a release-gate run left 15 such nodes
+  on the canvas, every one having alerted [screenshot-measured], and the user read it as a subagent
+  notification storm. Lineage is the existing **"spawned by" ROPES** (`project.ropes`, drawn by
+  `connect()` in the control effect) — no new node field; a rope counts only when its source is a
+  live hook-reporting agent node (a browser popup's rope to its opener is nobody's worker). On a
+  spawned node's `done`, Canvas asks `decideDoneAlert`: **quiet** while any sibling (same spawner)
+  is explicitly `working`/`blocked`/`waiting`; **one aggregate** alert addressed to the CONDUCTOR
+  (its own sfx/notify cooldown key `fanout-<spawner>`, no unread flag) when the last live sibling
+  finishes. A sibling with NO known state is not outstanding — "no news" as "still running" would let
+  one dead station hold the aggregate hostage, the same trap `--after` documents. **Only `done` is
+  routed**: blocked/waiting on a spawned node always alerts (a station that needs a human needs a
+  human). Ropes are git-shared and forgeable; the worst a forged rope buys is one suppressed
+  done-chirp. Not yet mirrored to the phone/notch (`agent-status-mirror` has no lineage) — follow-up.
+  **`close --node <id,id>` / `close --spawned yes`**: one confirm dialog for a whole set, `--spawned`
+  = the caller's outgoing ropes to live nodes. Serial single closes measured as `no answer within
+  120s` ×1 then `a confirmation is already pending` ×14 — the shape that made agents abandon their
+  stations. **`--auto-close yes`** (open-claude/open-agent, refused for non-hook agents): the station
+  closes itself, WITHOUT a dialog, once it is `done` AND its own spawner has read it over a context
+  link since (`core/context-link.ts` emits `onLinkedRead` for summary/transcript/terminal — never
+  `list` — main forwards it as `agent:linked-read`). The consent is `autoCloseArmedRef`, an
+  in-memory set filled only by this process's own `open-*` dispatch and never persisted: a flag from
+  the project file or a peer must not close anyone's session — the same rule as
+  `wasArmedThisSession` for held launches. Order matters (a read while still working consumed
+  partial output; `done` alone would destroy the result unread), and the reader must be the spawner
+  (a verify reviewer reading the same node is not its consumer).

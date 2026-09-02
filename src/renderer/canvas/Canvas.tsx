@@ -318,7 +318,8 @@ import { useAgentNodes } from '../state/agentNodes'
 import { SubagentNode } from '../nodes/SubagentNode'
 import { LoopNode } from '../nodes/LoopNode'
 import { buildFanoutChildren, isCompactFanout } from '../lib/fanoutGroup'
-import type { NormalizedAgentEvent } from '@shared/agents/normalize'
+import type { AgentState, NormalizedAgentEvent } from '@shared/agents/normalize'
+import { decideDoneAlert, shouldAutoClose } from '../lib/spawnedAlerts'
 import {
   computeWorktreePath,
   resolveWorktreePath,
@@ -822,6 +823,12 @@ export function Canvas() {
   const [controlEdges, setControlEdges] = useState<Edge[]>([])
   const controlEdgesRef = useRef<Edge[]>([])
   controlEdgesRef.current = controlEdges
+  // Nodes opened with `--auto-close yes` BY THIS PROCESS. In memory on purpose, never persisted:
+  // the flag authorizes closing a session without a confirm dialog, and a flag loaded from the
+  // git-shared project file (or a canvas-sync peer) would be consent nobody here gave — the same
+  // rule `wasArmedThisSession` applies to held launches. The consume signal is the spawner's
+  // context-link read after the node is done (renderer/lib/spawnedAlerts.ts `shouldAutoClose`).
+  const autoCloseArmedRef = useRef<Set<string>>(new Set())
   const [dirty, setDirty] = useState(false)
   // Bumped only when a save finished with `dirty` still set (an edit raced it). It exists purely to
   // give the debounced-autosave effect a dependency that CHANGES in that case — `dirty` stays true
@@ -8829,6 +8836,19 @@ export function Canvas() {
             const account = accountForSpawn(agentId, src.data.accountId as string | undefined)
             const after = resolveAfter()
             if (after === null) return // bad --after, already replied
+            // `--auto-close yes`: the station closes itself once done AND read by its opener over
+            // the context link (spawnedAlerts.ts `shouldAutoClose`). Only hook-reporting agents can
+            // ever be `done`, so for anything else the node would simply never close — refuse up
+            // front, like `--after` refuses a plain-terminal dependency.
+            const autoCloseRaw = args['auto-close']
+            const wantAutoClose = !!autoCloseRaw && autoCloseRaw !== 'no' && autoCloseRaw !== 'false'
+            if (wantAutoClose && !hasHooks(agentId)) {
+              reply({
+                ok: false,
+                error: `--auto-close needs an agent that reports status; "${agentId}" never reports done, so it could never close`
+              })
+              return
+            }
             const agentCwd = args.cwd || groupCwd || srcCwd
             const make = (i: number): CanvasNode =>
               armAfter(
@@ -8856,6 +8876,9 @@ export function Canvas() {
             const ids = intoGroupId
               ? addGrouped(intoGroupId, count, make)
               : Array.from({ length: count }, (_, i) => addAndConnect(make(i)))
+            // Armed in THIS process only (see autoCloseArmedRef) — this is the consent to close
+            // without a dialog, and it is never written to the project file.
+            if (wantAutoClose) for (const id of ids) autoCloseArmedRef.current.add(id)
             // Context-link the new session(s) back to the opener (same rationale as spawn-team:
             // the fan-out needs a fan-in). The nodes were added via setNodes in this tick, so
             // resolve their endpoints from `agentId` rather than the not-yet-updated canvas.
@@ -9712,8 +9735,34 @@ export function Canvas() {
             return
           }
           case 'close': {
-            if (!args.node) {
-              reply({ ok: false, error: 'close requires --node' })
+            // Targets: `--node <id,id>` (one or many) and/or `--spawned yes` = every node this
+            // caller opened via canvas control that still exists (its outgoing ropes — the same
+            // lineage the alert routing reads). ONE confirm dialog for the whole set: a 15-node
+            // teardown as 15 serial dialogs measured as "no answer within 120s" ×1 + "a confirmation
+            // is already pending" ×14 — the shape that made agents leave their stations behind.
+            const wantSpawned = !!args.spawned && args.spawned !== 'no' && args.spawned !== 'false'
+            const listed = (args.node ?? '')
+              .split(',')
+              .map((s) => s.trim())
+              .filter(Boolean)
+            if (!listed.length && !wantSpawned) {
+              reply({ ok: false, error: 'close requires --node <id,id> and/or --spawned yes' })
+              return
+            }
+            const live = new Set(nodesRef.current.map((n) => n.id))
+            const spawned = wantSpawned
+              ? controlEdgesRef.current
+                  .filter((r) => r.source === sourceNodeId && r.target !== sourceNodeId)
+                  .map((r) => r.target)
+              : []
+            const targets = Array.from(new Set([...listed, ...spawned])).filter(
+              (id) => live.has(id) && id !== sourceNodeId
+            )
+            if (!targets.length) {
+              reply({
+                ok: true,
+                message: wantSpawned && !listed.length ? 'nothing to close — no open nodes spawned by you' : 'nothing to close — no such node(s)'
+              })
               return
             }
             // One confirm dialog at a time (see `write`): reject rather than orphan a pending one —
@@ -9723,21 +9772,29 @@ export function Canvas() {
               reply({ ok: false, error: 'a confirmation is already pending — try again' })
               return
             }
+            const titleOf = (id: string): string =>
+              ((nodesRef.current.find((n) => n.id === id)?.data.title as string | undefined) || id)
+            const shown = targets.slice(0, 6).map((id) => `"${titleOf(id)}"`)
+            const more = targets.length > shown.length ? ` and ${targets.length - shown.length} more` : ''
+            const what =
+              targets.length === 1
+                ? `node ${shown[0]}`
+                : `${targets.length} nodes${wantSpawned ? ' it opened' : ''}: ${shown.join(', ')}${more}`
             // Destructive → confirm. Replies on confirm AND cancel.
             setConfirm({
-              message: `Agent "${srcTitle}" wants to close node ${args.node}. Close it?`,
+              message: `Agent "${srcTitle}" wants to close ${what}. Close ${targets.length === 1 ? 'it' : 'them'}?`,
               requestedBy: srcTitle,
-              confirmLabel: 'Close',
+              confirmLabel: targets.length === 1 ? 'Close' : `Close ${targets.length}`,
               danger: true,
               onConfirm: () => {
                 setConfirm(null)
                 // Canonical teardown: deleteNodes() destroys the local tmux session (remote-guarded),
                 // drops persisted agentStatus, and reparents any group children. Don't hand-roll it.
-                deleteNodes([args.node])
-                setControlEdges((es) =>
-                  es.filter((e) => e.source !== args.node && e.target !== args.node)
-                )
-                reply({ ok: true, message: `closed ${args.node}` })
+                const gone = new Set(targets)
+                deleteNodes(targets)
+                for (const id of targets) autoCloseArmedRef.current.delete(id)
+                setControlEdges((es) => es.filter((e) => !gone.has(e.source) && !gone.has(e.target)))
+                reply({ ok: true, message: `closed ${targets.length}: ${targets.join(', ')}` })
               },
               onCancel: () => reply({ ok: false, error: 'denied by user' })
             })
@@ -10303,6 +10360,46 @@ export function Canvas() {
           nodeId: e.nodeId
         })
       }
+      // Lineage for spawned-node alert routing: the "spawned by" ropes, with only live AGENT nodes
+      // (hook-reporting) counting as conductor or station — a plain terminal never reports done.
+      const isAgentNode = (id: string): boolean => {
+        const n = nodesRef.current.find((x) => x.id === id)
+        const a = n?.type === 'terminal' ? (n.data.agentId as AgentId | undefined) : undefined
+        return !!a && hasHooks(a)
+      }
+      const stateOf = (id: string): AgentState | undefined => cs.byId[id]?.state
+      // ONE alert for a whole fan-out, addressed to the CONDUCTOR: chirp (own cooldown key, so a
+      // second team finishing right after is still heard) + OS notification that lands on the
+      // conductor node. No unread flag: the conductor is the one still working, and its stations
+      // were read by it, not by the user.
+      const aggregateAlert = (spawner: string, finished: number, total: number): void => {
+        const spawnerAgent = cs.byId[spawner]?.agentId
+        const spawnerLabel = (spawnerAgent && agentConfig(spawnerAgent)?.label) || 'Agent'
+        const body =
+          total === 1
+            ? `The station ${spawnerLabel} opened has finished.`
+            : `${finished} of ${total} stations ${spawnerLabel} opened have finished.`
+        const snd = useSettings.getState().settings
+        if (snd.soundEffects) {
+          const key = `fanout-${spawner}`
+          const t = Date.now()
+          if (t - (sfxCooldownRef.current[key] ?? 0) >= 5000) {
+            sfxCooldownRef.current[key] = t
+            playSfx('done', snd.soundVolume)
+          }
+        }
+        if (document.hasFocus()) return
+        if (!(snd.notifyOnClaudeDone && snd.notifyConsentAsked)) return
+        const key = `fanout-${spawner}`
+        const now = Date.now()
+        if (now - (notifyCooldownRef.current[key] ?? 0) < 5000) return
+        notifyCooldownRef.current[key] = now
+        void window.nodeTerminal.notify({
+          title: `${contextFor(spawner)} — ${spawnerLabel}'s stations finished`,
+          body,
+          nodeId: spawner
+        })
+      }
       const an = useAgentNodes.getState()
       switch (e.kind) {
         case 'state': {
@@ -10334,7 +10431,21 @@ export function Canvas() {
             // a renderer reload. Gating the badge but not the sound/notification would half-enforce
             // the flag and leave the expensive error — a false completion — fully reachable.
             cs.bumpLoop(e.nodeId, e.lastMessage) // count loop iterations + summary (no-op if not looping)
-            alert('finished', `${agentLabel} finished its turn.`, 'done')
+            // A node an AGENT opened reports to that agent, not to the human: quiet while its
+            // siblings still run, ONE aggregate alert on the conductor when the last one lands.
+            // Only `done` is routed here — blocked/waiting below always alert (a station that
+            // needs a human needs a human). Setting off ⇒ the old per-node alert.
+            const decision = useSettings.getState().settings.quietSpawnedNodes
+              ? decideDoneAlert({
+                  nodeId: e.nodeId,
+                  ropes: controlEdgesRef.current,
+                  stateOf,
+                  isAgentNode
+                })
+              : ({ kind: 'alert' } as const)
+            if (decision.kind === 'alert') alert('finished', `${agentLabel} finished its turn.`, 'done')
+            else if (decision.kind === 'aggregate')
+              aggregateAlert(decision.spawner, decision.finished, decision.total)
           }
           if (e.state === 'blocked')
             alert('needs input', `${agentLabel} needs permission to continue.`, 'needsYou')
@@ -10405,6 +10516,38 @@ export function Canvas() {
       }
     })
   }, [])
+
+  // `--auto-close yes`: a station a conductor opened closes itself once it is DONE and its own
+  // spawner has read it over a context link since (both, in that order — spawnedAlerts.ts
+  // `shouldAutoClose`). No confirm dialog: the flag was armed by this process when the conductor
+  // opened the node (autoCloseArmedRef), which is the consent; a flag from disk never arms.
+  // Canonical teardown via deleteNodes (tmux kill, status drop, group reparent), ropes pruned
+  // the same way the `close` verb prunes them.
+  useEffect(() => {
+    return api.onLinkedRead((e) => {
+      const armed = autoCloseArmedRef.current
+      if (!armed.has(e.nodeId)) return
+      const cs = useAgentStatus.getState()
+      const isAgentNode = (id: string): boolean => {
+        const n = nodesRef.current.find((x) => x.id === id)
+        const a = n?.type === 'terminal' ? (n.data.agentId as AgentId | undefined) : undefined
+        return !!a && hasHooks(a)
+      }
+      const ok = shouldAutoClose({
+        nodeId: e.nodeId,
+        readerId: e.readerId,
+        armed,
+        ropes: controlEdgesRef.current,
+        stateOf: (id) => cs.byId[id]?.state,
+        isAgentNode
+      })
+      if (!ok) return
+      armed.delete(e.nodeId)
+      if (!nodesRef.current.some((n) => n.id === e.nodeId)) return
+      deleteNodes([e.nodeId])
+      setControlEdges((es) => es.filter((r) => r.source !== e.nodeId && r.target !== e.nodeId))
+    })
+  }, [deleteNodes])
 
   // Safety net for a lost Stop POST / crashed CLI: decay working entries that saw no hook
   // event at all for STALE_WORKING_MS (the sweep itself is cheap; see agentStatus.ts).

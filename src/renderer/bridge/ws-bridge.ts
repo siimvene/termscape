@@ -631,7 +631,7 @@ export function buildAgentApi(
   client: RpcClient
 ): Pick<
   NodeTerminalApi,
-  'onAgentStatus' | 'onSubagentActivity' | 'onUnreadClear' | 'answerPermission' | 'ackDone'
+  'onAgentStatus' | 'onSubagentActivity' | 'onLinkedRead' | 'onUnreadClear' | 'answerPermission' | 'ackDone'
 > {
   return {
     onAgentStatus: (listener) => client.subscribe(IPC.agentStatus, listener as Listener),
@@ -639,6 +639,9 @@ export function buildAgentApi(
     onUnreadClear: (listener) => client.subscribe(IPC.agentUnreadClear, listener as Listener),
     onSubagentActivity: (listener) =>
       client.subscribe(IPC.agentSubagentActivity, listener as Listener),
+    // Never emitted by the server (canvas control — and so `--auto-close` — is desktop-only), but a
+    // real subscription rather than a noop so the day the server emits it, nothing here changes.
+    onLinkedRead: (listener) => client.subscribe(IPC.agentLinkedRead, listener as Listener),
     // Deterministic hook-reply approvals: a real request over the bridge — the Server Edition runs
     // ON the host, so a local project's answer file is written right there (SSH-from-server is v1
     // unsupported and the handler returns false). See docs/hook-reply-approvals.md.

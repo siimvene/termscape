@@ -1349,6 +1349,11 @@ export interface Settings {
   soundEffects: boolean
   /** Sound-effect volume, 0..1. */
   soundVolume: number
+  /** Nodes an AGENT opened via canvas control (open-agent / spawn-team / verify — the "spawned
+   *  by" ropes are the record) do not alert on `done` individually; the human gets ONE aggregate
+   *  alert when the conductor's last live station finishes. Needs-you alerts are never quieted.
+   *  Off = every node alerts as before (renderer/lib/spawnedAlerts.ts). */
+  quietSpawnedNodes: boolean
   /** User-defined agents (BYO CLI) appended to the Add menus. */
   customAgents: CustomAgent[]
   /** One gateway root + non-secret credential reference used by model-switch-capable harnesses. */
@@ -1551,6 +1556,7 @@ export const DEFAULT_SETTINGS: Settings = {
   notifyConsentAsked: false,
   soundEffects: true,
   soundVolume: 0.5,
+  quietSpawnedNodes: true,
   customAgents: [],
   modelGateway: { baseUrl: '', apiKey: '' },
   agentLaunchCommands: {},
@@ -1968,6 +1974,15 @@ export interface NotifyPayload {
 export interface SubagentActivity {
   toolUseId: string
   chunk: string
+}
+
+/** An agent node read another node's content over a context link (`agent:linked-read`). */
+export interface LinkedRead {
+  /** The node that asked (the context-link shim's caller). */
+  readerId: string
+  /** The node whose summary / transcript / terminal was rendered. */
+  nodeId: string
+  verb: string
 }
 
 /** One linked node, as the context-link CLI sees it. */
@@ -2999,6 +3014,9 @@ export interface NodeTerminalApi {
   onAgentStatus(listener: (e: NormalizedAgentEvent) => void): () => void
   /** Fires with live subagent transcript chunks while a subagent runs. Returns unsubscribe. */
   onSubagentActivity(listener: (e: SubagentActivity) => void): () => void
+  /** Fires when an agent node reads another node's CONTENT over a context link (get-linked-context
+   *  summary/transcript/terminal). `readerId` asked, `nodeId` was read. Returns unsubscribe. */
+  onLinkedRead(listener: (e: LinkedRead) => void): () => void
   /** Fires when an agent's `nodeterm` CLI requests a canvas action. Returns unsubscribe. */
   onAgentControl(
     listener: (cmd: {

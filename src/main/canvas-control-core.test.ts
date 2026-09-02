@@ -50,7 +50,9 @@ describe('parseControlRequest', () => {
   })
 
   it('requires a target for write/close', () => {
-    expect(parseControlRequest('close', {})).toEqual({ error: 'close requires --node <id>' })
+    expect(parseControlRequest('close', {})).toEqual({
+      error: 'close requires --node <id,id> and/or --spawned yes'
+    })
     expect(parseControlRequest('write', { node: 'n1' })).toEqual({ error: 'write requires --text' })
     expect(parseControlRequest('write', { node: 'n1', text: 'hi' })).toEqual({
       verb: 'write',
