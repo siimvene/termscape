@@ -45,3 +45,4 @@ build/icon.icns
 /canvas-tour.mp4
 /hero-tour.mp4
 nodeterm.worktrees/
+.pnpm-store/
