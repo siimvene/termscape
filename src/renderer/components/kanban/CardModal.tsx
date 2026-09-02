@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { isTopDialog, nextDialogId, popDialog, pushDialog } from '../dialog-stack'
-import { IconChat, IconMic, IconSearch } from '../icons'
+import { IconChat, IconMic, IconSearch, IconSmiley } from '../icons'
+import { NodeIconView } from '../NodeIcon'
+import { nodeIconDialog } from '../NodeIconPicker'
+import { applyIconChoice } from '../../lib/nodeIconChoice'
+import type { NodeIcon } from '@shared/node-icon'
 import { ContextMeter } from '../ContextMeter'
 import { useAgentStatus } from '../../state/agentStatus'
 import { useCardPanel } from '../../state/cardPanel'
@@ -14,6 +18,11 @@ import {
   CARD_MODAL_MIN_H
 } from '../../state/cardModalSize'
 import { useSession } from '../../session/session'
+// The same wake trigger the canvas node's SLEEPING/PAUSED chip and mount/visibility auto-wakes
+// use — NOT a bespoke resume path, so a click here gets the same WakeInputBuffer protection and
+// retries. Importing one function out of the canvas node module is safe: TerminalNode.tsx already
+// imports from `components/kanban/*`, and none of those re-import CardModal.
+import { wakeHibernatedNode } from '../../nodes/TerminalNode'
 import type { ProjectKanban } from '@shared/types'
 import type { KanbanSession } from './KanbanView'
 import { BoardLogPanel } from './BoardLogPanel'
@@ -40,12 +49,14 @@ interface CardModalProps {
   onEditSticky: (text: string) => void
   /** Browser navigation write-through (only called for kind 'browser'). */
   onBrowserNav: (patch: { url?: string; title?: string }) => void
+  /** Icon write-through. `undefined` clears it — the dialog's cancel never reaches here. */
+  onSetIcon: (icon: NodeIcon | undefined) => void
 }
 
 /** Trello-style card popup over the board. Scrim click / Esc close it; the board (and the
  *  canvas under it) stay mounted. Terminal cards carry the node header's actions too:
  *  search / dictate / AI-name / markdown view (the node itself is hidden under the board). */
-export function CardModal({ session, columnTitle, board, onChangeBoard, onClose, onOpenCanvas, onRename, onEditSticky, onBrowserNav }: CardModalProps) {
+export function CardModal({ session, columnTitle, board, onChangeBoard, onClose, onOpenCanvas, onRename, onEditSticky, onBrowserNav, onSetIcon }: CardModalProps) {
   const { api } = useSession()
   const idRef = useRef<string>()
   if (!idRef.current) idRef.current = nextDialogId()
@@ -57,6 +68,7 @@ export function CardModal({ session, columnTitle, board, onChangeBoard, onClose,
   // StickyNode's toggle, so the canvas and the card can't disagree about how a note reads).
   const [editingNote, setEditingNote] = useState(false)
   const agentSessionId = useAgentStatus((st) => st.byId[session.id]?.sessionId)
+  const paused = useAgentStatus((st) => !!st.byId[session.id]?.paused)
   const [naming, setNaming] = useState(false)
   // Comments & activity panel: OPEN by default in the modal; the header 💬 collapses it. The
   // choice is remembered (localStorage) — once collapsed, later cards open collapsed too.
@@ -224,6 +236,19 @@ export function CardModal({ session, columnTitle, board, onChangeBoard, onClose,
           }}
         >
           <span className="kanban-card__nodedot" style={{ background: session.color }} />
+          <button
+            className={`kanban-modal__icon${session.icon ? '' : ' kanban-modal__icon--empty'}`}
+            title={session.icon ? 'Change icon' : 'Set icon'}
+            onClick={() =>
+              void nodeIconDialog({
+                nodeId: session.id,
+                title: session.title,
+                icon: session.icon
+              }).then((choice) => applyIconChoice(choice, onSetIcon))
+            }
+          >
+            {session.icon ? <NodeIconView icon={session.icon} size={16} /> : <IconSmiley />}
+          </button>
           {editingTitle ? (
             <input
               className="kanban-modal__rename"
@@ -254,6 +279,20 @@ export function CardModal({ session, columnTitle, board, onChangeBoard, onClose,
               when the node is being driven even though the drive lands on the CANVAS webview, not
               this modal's — which is what the user needs to know (Task 6.3). */}
           {isBrowser && <BrowserDrivingIndicator nodeId={session.id} />}
+          {isTerminal && paused && (
+            // Opening the card is one of the modal-open wake triggers `TerminalNode` publishes
+            // (see `setKanbanModalNode`), and it deliberately skips a PAUSED node — so the modal
+            // must say why the session is a bare shell instead of showing nothing. Clickable via
+            // the same wake trigger the canvas chip uses.
+            <button
+              className="kanban-badge kanban-badge--sleeping"
+              style={{ cursor: 'pointer', border: 'none' }}
+              title="Session paused — click to resume"
+              onClick={() => wakeHibernatedNode(session.id)}
+            >
+              PAUSED
+            </button>
+          )}
           {isTerminal && (
             <>
               {/* Same context-window pill + popover as the node header (null until usage data). */}

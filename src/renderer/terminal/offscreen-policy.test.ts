@@ -9,6 +9,7 @@ import {
   offscreenCoreIsRemote,
   planOffscreenVisibility,
   shouldDeferReleaseForEco,
+  shouldDeferReleaseForHeldLaunch,
   shouldDeferReleaseForLiveWork
 } from './offscreen-policy'
 
@@ -191,7 +192,9 @@ describe('shouldDeferReleaseForLiveWork — the fourth kill lever behind issue #
    * invariants no call can express — and it fails the moment someone threads a clock through.
    */
   it('is UNCAPPED: no clock reaches the predicate, so no caller can grow a cap', () => {
-    const src = fs.readFileSync(path.resolve(__dirname, 'offscreen-policy.ts'), 'utf8')
+    // Normalized at the read: `indexOf('\n}')` below cannot match CRLF bytes, and a Windows
+    // clone has them (issue #578).
+    const src = fs.readFileSync(path.resolve(__dirname, 'offscreen-policy.ts'), 'utf8').replace(/\r\n/g, '\n')
     const start = src.indexOf('export function shouldDeferReleaseForLiveWork')
     expect(start, 'the predicate must still exist').toBeGreaterThan(-1)
     const body = src.slice(start, src.indexOf('\n}', start))
@@ -200,7 +203,7 @@ describe('shouldDeferReleaseForLiveWork — the fourth kill lever behind issue #
     expect(body).toMatch(/shouldDeferReleaseForLiveWork\(\s*i: LiveWorkInput\s*\)/)
     expect(body).not.toMatch(/elapsed|Ms\b|Date\.now|cap|minutes/i)
     // …and the shared input type itself carries no clock either (the other end of the same claim).
-    const live = fs.readFileSync(path.resolve(__dirname, 'live-work.ts'), 'utf8')
+    const live = fs.readFileSync(path.resolve(__dirname, 'live-work.ts'), 'utf8').replace(/\r\n/g, '\n')
     const iface = live.slice(live.indexOf('export interface LiveWorkInput'))
     expect(iface.slice(0, iface.indexOf('\n}'))).not.toMatch(/elapsed|Date\.now|cap|minutes/i)
   })
@@ -215,5 +218,20 @@ describe('releaseStillEnabled — the fire-time re-ask of the setting itself', (
     expect(releaseStillEnabled(undefined)).toBe(true) // unset = the default window, still on
     expect(releaseStillEnabled(0)).toBe(false)
     expect(releaseStillEnabled(-5)).toBe(false)
+  })
+})
+
+describe('shouldDeferReleaseForHeldLaunch — the fifth kill lever: an armed node holds a launch', () => {
+  it('defers a PLAIN-SHELL node that is still armed — the release would kill the shell the launch needs', () => {
+    expect(shouldDeferReleaseForHeldLaunch({ tmuxBacked: false, armed: true })).toBe(true)
+  })
+
+  it('never defers a TMUX-BACKED armed node — its session stays typeable by name through a release', () => {
+    expect(shouldDeferReleaseForHeldLaunch({ tmuxBacked: true, armed: true })).toBe(false)
+  })
+
+  it('never defers a node that is not armed, on either backend', () => {
+    expect(shouldDeferReleaseForHeldLaunch({ tmuxBacked: false, armed: false })).toBe(false)
+    expect(shouldDeferReleaseForHeldLaunch({ tmuxBacked: true, armed: false })).toBe(false)
   })
 })

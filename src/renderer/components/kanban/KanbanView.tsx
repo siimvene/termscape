@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { KanbanLabel, ProjectKanban } from '@shared/types'
+import type { NodeIcon } from '@shared/node-icon'
 import { AGENT_CONFIG, BUILTIN_AGENT_IDS, type AgentId } from '@shared/agents/config'
 import { useViewMode } from '../../state/viewMode'
 import { useProjects } from '../../state/projects'
@@ -14,6 +15,7 @@ import { CardModal } from './CardModal'
 import { KanbanColumn, type KanbanLane } from './KanbanColumn'
 import { SessionCard } from './SessionCard'
 import { GitHubIssueCard } from './GitHubIssueCard'
+import { GitHubPullCard } from './GitHubPullCard'
 import { kanbanSource, sourceVisible } from '../../lib/kanbanSources'
 import type { ModalSpawn } from './ModalTerminal'
 import { ContextMenu, type MenuItem } from '../ContextMenu'
@@ -49,6 +51,11 @@ export interface KanbanSession {
   /** Browser node session partition (kind 'browser' only) — threaded to the modal webview so it
    *  shares the canvas node's jar (`browser-partition-parity.test.tsx`). Absent = default session. */
   partition?: string
+  /** The node's user-chosen icon (see @shared/node-icon). The board is the canvas's other view of
+   *  the same session, so a session the user marked with an icon carries it here too. Terminal
+   *  cards only in v1 — that is the only kind whose canvas node offers the action, and a card
+   *  showing an icon its node cannot set would be a dead end on the board. */
+  icon?: NodeIcon
   /** The subset of the node's `data` the card modal's co-attach terminal needs to spawn/join the
    *  same session (kind 'terminal' only; sticky passes `{}`). */
   spawn: ModalSpawn
@@ -88,6 +95,8 @@ export interface KanbanViewProps {
   onModalNodeChange: (nodeId: string | null) => void
   /** Persist a browser card's navigation (url/title) from the modal webview to the node. */
   onBrowserNav: (nodeId: string, patch: { url?: string; title?: string }) => void
+  /** Set (or clear, with `undefined`) a node's icon — the card modal's icon button. */
+  onSetIcon: (nodeId: string, icon: NodeIcon | undefined) => void
 }
 
 type Drag =
@@ -116,7 +125,7 @@ const NO_CARDS: KanbanSession[] = []
  *  renders stop at this boundary. */
 export const KanbanView = memo(function KanbanView({
   board, sessions, onChange, onOpenNode, onCreateNode, onRenameNode, onEditSticky, onDeleteNode,
-  onModalNodeChange, onBrowserNav
+  onModalNodeChange, onBrowserNav, onSetIcon
 }: KanbanViewProps) {
   const { api } = useSession()
   const dragRef = useRef<Drag>(null)
@@ -129,7 +138,10 @@ export const KanbanView = memo(function KanbanView({
   const [labelFilter, setLabelFilter] = useState<string[]>([])
   const [filterOpen, setFilterOpen] = useState(false)
   const [source, setSource] = useState<KanbanSource>('all')
-  const [modalIssue, setModalIssue] = useState<GitHubIssueCardView | null>(null)
+  // One GitHub summary modal for both kinds; the kind decides whether it offers a move.
+  const [modalIssue, setModalIssue] = useState<
+    { item: GitHubIssueCardView; kind: 'issue' | 'pull' } | null
+  >(null)
   const [githubRetry, setGitHubRetry] = useState(0)
   // A move that would close or reopen the issue on GitHub waits here for an explicit confirmation.
   const [pendingGitHubMove, setPendingGitHubMove] = useState<
@@ -141,6 +153,9 @@ export const KanbanView = memo(function KanbanView({
   const projectColor = useProjects((s) => s.projects.find((p) => p.id === s.activeProjectId)?.color)
   const github = useGitHubIssues((state) => state.projects[projectId])
   const githubReadOnly = Object.values(github?.pages ?? {}).some((page) => page.readOnly)
+  // Pull requests are evicted first when a repository outgrows the cache bounds, so the lane can
+  // legitimately be a subset. Say so — a silently short list reads as "this repo has few PRs".
+  const pullsTruncated = Object.values(github?.pullPages ?? {}).some((page) => page.partial)
   const connectGitHub = useGitHubIssues((state) => state.connect)
   const moveGitHubState = useGitHubIssues((state) => state.move)
   const loadMoreGitHub = useGitHubIssues((state) => state.loadMore)
@@ -148,7 +163,10 @@ export const KanbanView = memo(function KanbanView({
   const paletteLabels = useMemo(() => boardLabels(board), [board])
   const githubLabels = useMemo(() => {
     const labels = new Map<string, { name: string; color: string }>()
-    for (const page of Object.values(github?.pages ?? {})) {
+    for (const page of [
+      ...Object.values(github?.pages ?? {}),
+      ...Object.values(github?.pullPages ?? {})
+    ]) {
       for (const issue of page.items) {
         for (const label of issue.labels) {
           const key = label.name.normalize('NFKC').toLocaleLowerCase('en-US')
@@ -157,7 +175,7 @@ export const KanbanView = memo(function KanbanView({
       }
     }
     return [...labels.values()].sort((a, b) => a.name.localeCompare(b.name))
-  }, [github?.pages])
+  }, [github?.pages, github?.pullPages])
   const localFilterKeys = useMemo(() => new Set(paletteLabels.map((label) => `local:${label.id}`)), [paletteLabels])
   const activeFilter = useMemo(
     () => labelFilter.filter((id) => localFilterKeys.has(id) || id.startsWith('github:')),
@@ -214,10 +232,13 @@ export const KanbanView = memo(function KanbanView({
   }, [projectId])
   useEffect(() => {
     if (!modalIssue || !github) return
-    const latest = Object.values(github.pages)
+    const source = modalIssue.kind === 'pull' ? github.pullPages : github.pages
+    const latest = Object.values(source)
       .flatMap((page) => page.items)
-      .find((issue) => issue.number === modalIssue.number)
-    if (latest && latest.updatedAt !== modalIssue.updatedAt) setModalIssue(latest)
+      .find((item) => item.number === modalIssue.item.number)
+    if (latest && latest.updatedAt !== modalIssue.item.updatedAt) {
+      setModalIssue({ item: latest, kind: modalIssue.kind })
+    }
   }, [github, modalIssue])
   const customAgents = useSettings((s) => s.settings.customAgents)
   const disabledAgents = useSettings((s) => s.settings.disabledAgents)
@@ -384,6 +405,12 @@ export const KanbanView = memo(function KanbanView({
   const handleMoveGitHub = requestGitHubMove
   const githubPage = useCallback((columnId: string | null) =>
     github?.pages[columnId ?? 'ungrouped'], [github])
+  const githubPullPage = useCallback((columnId: string | null) =>
+    github?.pullPages[columnId ?? 'ungrouped'], [github])
+  const openIssueModal = useCallback(
+    (item: GitHubIssueCardView) => setModalIssue({ item, kind: 'issue' }), [])
+  const openPullModal = useCallback(
+    (item: GitHubIssueCardView) => setModalIssue({ item, kind: 'pull' }), [])
 
   // One bound card-drop handler per column, cached by column id: SessionCard is memoized on its
   // props, so a fresh closure per render would defeat it. (The column used to bind this itself,
@@ -443,7 +470,7 @@ export const KanbanView = memo(function KanbanView({
             moving={!!github?.moving[issue.number]}
             readOnly={githubReadOnly}
             status={github?.issueStatus[issue.number]}
-            onOpen={setModalIssue}
+            onOpen={openIssueModal}
             onMove={handleMoveGitHub}
             onDragStart={handleGitHubDragStart}
             onDragEnd={handleDragEnd}
@@ -453,9 +480,29 @@ export const KanbanView = memo(function KanbanView({
           ? (
             <button
               className="kanban-github-more"
-              onClick={() => void loadMoreGitHub(api.githubIssues, projectId, columnId)}
+              onClick={() => void loadMoreGitHub(api.githubIssues, projectId, columnId, 'issue')}
             >
               Show more issues
+            </button>
+          )
+          : undefined
+      })
+    }
+    if (sourceVisible(source, 'pulls') && kanbanSource('pulls').configured(board)) {
+      const page = githubPullPage(columnId)
+      lanes.push({
+        sourceId: 'pulls',
+        count: (columnId === null ? page?.counts.ungrouped : page?.counts[columnId]) ?? 0,
+        cards: (page?.items ?? []).map((pull) => (
+          <GitHubPullCard key={`pull:${pull.id}`} pull={pull} onOpen={openPullModal} />
+        )),
+        footer: page?.nextCursor
+          ? (
+            <button
+              className="kanban-github-more"
+              onClick={() => void loadMoreGitHub(api.githubIssues, projectId, columnId, 'pull')}
+            >
+              Show more pull requests
             </button>
           )
           : undefined
@@ -509,6 +556,11 @@ export const KanbanView = memo(function KanbanView({
         {board.github && githubReadOnly && (
           <span className="kanban-github-status kanban-github-status--error">
             GitHub issues are read only until configuration and refresh are complete.
+          </span>
+        )}
+        {board.github && pullsTruncated && (
+          <span className="kanban-github-status">
+            Showing the most recently updated pull requests only.
           </span>
         )}
         {(paletteLabels.length > 0 || githubLabels.length > 0 || activeFilter.length > 0) && (
@@ -619,16 +671,18 @@ export const KanbanView = memo(function KanbanView({
           onRename={(t) => onRenameNode(modalNodeId, t)}
           onEditSticky={(t) => onEditSticky(modalNodeId, t)}
           onBrowserNav={(patch) => onBrowserNav(modalNodeId, patch)}
+          onSetIcon={(icon) => onSetIcon(modalNodeId, icon)}
         />
       )}
       {modalIssue && (
         <GitHubIssueSummaryModal
-          issue={modalIssue}
+          issue={modalIssue.item}
+          kind={modalIssue.kind}
           columns={board.columns}
-          moving={!!github?.moving[modalIssue.number]}
+          moving={!!github?.moving[modalIssue.item.number]}
           readOnly={githubReadOnly}
-          status={github?.issueStatus[modalIssue.number]}
-          onMove={(columnId) => handleMoveGitHub(modalIssue, columnId)}
+          status={github?.issueStatus[modalIssue.item.number]}
+          onMove={(columnId) => handleMoveGitHub(modalIssue.item, columnId)}
           onClose={() => setModalIssue(null)}
         />
       )}

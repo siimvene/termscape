@@ -112,6 +112,19 @@ export interface MirrorEntry {
    * describe a state it did not arrive with.
    */
   idleInferred?: true
+  /**
+   * Eco hibernation: this node's CLI was `/exit`ed while nobody was looking; its tmux session and
+   * pane live on and the conversation comes back with the provider's `--resume`. The RENDERER owns
+   * the flag (`agentStatus.setHibernated`, persisted in its localStorage) and reports every change
+   * over `agent:hibernated` — the mirror only carries it, so an external reader (the phone) can
+   * render SLEEPING instead of an unexplained idle shell (`setNodeHibernated`). Present = true,
+   * absent = not hibernated — like `restored`/`idleInferred`, so old files keep their shape.
+   *
+   * A hibernated entry is EXEMPT from the expiry sweep: hibernation is precisely "idle for hours",
+   * so the 6 h staleness rule would erase the one durable fact this field exists to carry. The
+   * renderer re-reports its persisted set at boot, and a wake (or `clearNode`) drops the flag.
+   */
+  hibernated?: true
 }
 
 /** This host's Server-Edition install metadata (spec: server-update). Written by the installer
@@ -155,6 +168,8 @@ export interface MirrorFile {
       sessionId?: string
       /** The agent's own session name (see MirrorEntry.name). Absent until resolved. */
       name?: string
+      /** Eco hibernation (see MirrorEntry.hibernated). Present = true; absent on old files. */
+      hibernated?: true
       updatedAt: number
     }
   >
@@ -495,7 +510,9 @@ export function buildFile(
 ): MirrorFile {
   const out: MirrorFile = { v: 1, updatedAt: now, nodes: {} }
   for (const [id, e] of Object.entries(nodes)) {
-    if (now - e.updatedAt > expireMs) continue
+    // A hibernated entry never expires: hibernation IS long idleness, so the staleness rule would
+    // erase exactly the durable fact the flag carries (see MirrorEntry.hibernated).
+    if (now - e.updatedAt > expireMs && !e.hibernated) continue
     // Undefined fields drop out of JSON.stringify — an idle node keeps agentId/sessionId
     // without a `state` key.
     out.nodes[id] = {
@@ -503,6 +520,7 @@ export function buildFile(
       agentId: e.agentId,
       sessionId: e.sessionId,
       ...(e.name ? { name: e.name } : {}),
+      ...(e.hibernated ? { hibernated: true as const } : {}),
       updatedAt: e.updatedAt
     }
   }
@@ -538,12 +556,74 @@ function basename(p: string): string {
 /**
  * Map a raw hook tool invocation to a human "what it's doing now" line (spec: mobile-usage-inbox).
  * Pure; clipped to INBOX_ACTIVITY_MAX. Unknown tools fall back to "Using <tool>".
+ *
+ * TWO VOCABULARIES, one function. Claude's names are PascalCase (`Read`, `Bash`) and grok's are
+ * snake_case (`read_file`, `run_terminal_command`), so they cannot collide and no agent id is needed
+ * to tell them apart — but only while the match stays EXACT. Do not add case-folding here: `grep`
+ * and `Grep`, `write` and `Write` differ by case alone, and folding them would silently read grok's
+ * argument keys out of a claude payload.
+ *
+ * The grok names are MEASURED, not derived from the docs: `signals.json.toolsUsed` across 22 real
+ * sessions (grok 1.0.13, 2026-09-02) yields exactly fifteen. Their ARGUMENT keys are a separate
+ * question and only two were seen in captured hook payloads — `read_file.target_file` and
+ * `run_terminal_command.command`. Every other grok case below therefore names the action and stops,
+ * rather than reading a key nobody has observed: a phrase with no detail is honest, a phrase built
+ * on a guessed key renders "Editing file" forever the day the guess is wrong.
  */
 export function toolActivity(toolName: string, toolInput: Record<string, unknown> | undefined): string {
   const ti = toolInput ?? {}
   const str = (v: unknown): string => (typeof v === 'string' ? v : '')
   let out: string
   switch (toolName) {
+    // ---- grok (snake_case). MEASURED argument keys only. ----
+    case 'read_file':
+      out = `Reading ${basename(str(ti.target_file)) || 'file'}`
+      break
+    case 'run_terminal_command': {
+      const cmd = str(ti.command).replace(/\s+/g, ' ').trim()
+      out = `Running ${cmd ? clip(cmd, 60) : 'command'}`
+      break
+    }
+    case 'search_replace':
+      out = 'Editing a file'
+      break
+    case 'write':
+      out = 'Writing a file'
+      break
+    case 'list_dir':
+      out = 'Listing a directory'
+      break
+    case 'grep':
+      out = 'Searching the code'
+      break
+    case 'web_search':
+      out = 'Searching the web'
+      break
+    case 'web_fetch':
+      out = 'Fetching a page'
+      break
+    case 'todo_write':
+      out = 'Updating its plan'
+      break
+    case 'spawn_subagent':
+      out = 'Delegating to a subagent'
+      break
+    case 'get_command_or_subagent_output':
+      out = 'Checking a background task'
+      break
+    case 'kill_command_or_subagent':
+      out = 'Stopping a background task'
+      break
+    case 'search_tool':
+      out = 'Looking up an MCP tool'
+      break
+    case 'ask_user_question':
+      out = 'Asking you a question'
+      break
+    case 'exit_plan_mode':
+      out = 'Presenting a plan'
+      break
+    // ---- claude (PascalCase) ----
     case 'Edit':
     case 'Write':
     case 'MultiEdit':
@@ -582,7 +662,14 @@ export function toolActivity(toolName: string, toolInput: Record<string, unknown
       out = `Fetching ${str(ti.query) || '…'}`
       break
     default:
-      out = `Using ${toolName}`
+      // A qualified MCP name is `server__tool` — grok's own dispatcher (`use_tool`) never appears in
+      // a payload, the resolved call does (10-hooks.md). Naming the tool and its server is more use
+      // than either half alone, and it is derived from the string itself, so no vocabulary can go
+      // stale. Everything else keeps the historical "Using <tool>".
+      {
+        const mcp = /^([A-Za-z0-9_.-]+)__([A-Za-z0-9_.-]+)$/.exec(toolName)
+        out = mcp ? `Using ${mcp[2]} (${mcp[1]})` : `Using ${toolName}`
+      }
   }
   return clip(out, INBOX_ACTIVITY_MAX)
 }
@@ -1115,12 +1202,16 @@ function loadPersisted(file: string): void {
       for (const [id, e] of Object.entries(doc.nodes)) {
         if (!e || typeof e !== 'object') continue
         const updatedAt = typeof e.updatedAt === 'number' ? e.updatedAt : 0
-        if (now - updatedAt > EXPIRE_MS) continue
+        // Hibernated entries survive the expiry, as in buildFile: hours of idleness is what the
+        // flag MEANS. (The renderer also re-reports its persisted set at boot — this restore just
+        // keeps the file honest in the window before that report lands.)
+        if (now - updatedAt > EXPIRE_MS && e.hibernated !== true) continue
         state.set(id, {
           state: e.state,
           agentId: e.agentId,
           sessionId: e.sessionId,
           ...(e.name ? { name: e.name } : {}),
+          ...(e.hibernated === true ? { hibernated: true as const } : {}),
           updatedAt,
           // Marked, and FORCED unverified whatever the file said. `buildFile` writes neither field
           // — it is an allowlist, which is what keeps `stateVerified` off disk — but a file this
@@ -1601,6 +1692,29 @@ export function setNodeSessionName(nodeId: string, name: string): boolean {
   state.set(nodeId, { ...e, name })
   scheduleWrite()
   return true
+}
+
+/**
+ * Record (or clear) a node's Eco hibernation flag — the `agent:hibernated` cast's only writer.
+ * The renderer owns the flag; this is a mirror of it, like `terminalFocused` in main (see
+ * MirrorEntry.hibernated). Unlike `setNodeSessionName`, an UNKNOWN node id creates a minimal
+ * entry: a hibernated session is typically one the mirror has expired (hibernation is hours of
+ * idleness) or one reported at boot before any hook event of this run — exactly when the flag
+ * matters most. Clearing an unknown id stays a no-op.
+ */
+export function setNodeHibernated(nodeId: string, on: boolean): void {
+  if (typeof nodeId !== 'string' || !nodeId || nodeId.length > 128) return
+  const e = state.get(nodeId)
+  if (on) {
+    if (e?.hibernated) return
+    state.set(nodeId, e ? { ...e, hibernated: true } : { updatedAt: Date.now(), hibernated: true })
+  } else {
+    if (!e?.hibernated) return
+    const next = { ...e }
+    delete next.hibernated
+    state.set(nodeId, next)
+  }
+  scheduleWrite()
 }
 
 /** A node's published session name (see MirrorEntry.name), or undefined. */

@@ -8,6 +8,7 @@ import {
   disposalAction,
   forgetNodeTermState,
   isCopyShortcut,
+  isPasteShortcut,
   isLetterboxed,
   letterboxFor,
   markRecycled,
@@ -494,6 +495,36 @@ describe('copyKeyAction', () => {
   })
 })
 
+describe('isPasteShortcut (issue #562 — Ctrl+V did nothing on Windows)', () => {
+  const v = (p: Partial<CopyShortcutEvent> = {}): CopyShortcutEvent =>
+    ev({ key: 'v', code: 'KeyV', ...p })
+
+  it('claims Ctrl+V on Windows', () => {
+    expect(isPasteShortcut(v({ ctrlKey: true }), true)).toBe(true)
+    // Non-Latin layout: the physical KeyV position still counts, like isCopyShortcut's KeyC.
+    expect(isPasteShortcut(ev({ key: 'м', code: 'KeyV', ctrlKey: true }), true)).toBe(true)
+  })
+
+  it('claims NOTHING off Windows — there Ctrl+V is a pty control byte and paste is Cmd+V / Ctrl+Shift+V', () => {
+    // vim's blockwise-visual and readline's literal-next live on this chord.
+    expect(isPasteShortcut(v({ ctrlKey: true }), false)).toBe(false)
+  })
+
+  it('leaves the chords xterm already passes through alone', () => {
+    // Measured in @xterm/xterm's evaluateKeyboardEvent: Ctrl+Shift+V and Shift+Insert produce
+    // neither a key nor a cancel, so the platform paste already runs for them.
+    expect(isPasteShortcut(v({ ctrlKey: true, shiftKey: true }), true)).toBe(false)
+    expect(isPasteShortcut(ev({ key: 'Insert', code: 'Insert', shiftKey: true }), true)).toBe(false)
+  })
+
+  it('ignores keyup, plain V, AltGr (ctrl+alt) and Cmd+V', () => {
+    expect(isPasteShortcut(v({ ctrlKey: true, type: 'keyup' }), true)).toBe(false)
+    expect(isPasteShortcut(v(), true)).toBe(false)
+    expect(isPasteShortcut(v({ ctrlKey: true, altKey: true }), true)).toBe(false)
+    expect(isPasteShortcut(v({ metaKey: true }), true)).toBe(false)
+  })
+})
+
 describe('terminalKeyAction', () => {
   it('maps Shift+Enter keydown to shift-enter', () => {
     expect(terminalKeyAction(ev({ key: 'Enter', code: 'Enter', shiftKey: true }), false)).toBe(
@@ -550,9 +581,10 @@ describe('terminalKeyAction', () => {
     expect(
       terminalKeyAction(ev({ key: 'Enter', code: 'Enter', shiftKey: true }), false, false, true)
     ).toBe('shift-enter')
-    // project-jump swallow wins over bubble
+    // project-jump bubbles to the dispatcher (which performs the switch) — it must
+    // still beat a registry bubble's reason but reach the window as a bubble, not a swallow
     expect(terminalKeyAction(ev({ key: '1', code: 'Digit1', metaKey: true }), false, true, true)).toBe(
-      'swallow'
+      'bubble'
     )
     // keyup never bubbles — the dispatcher only acts on keydown
     expect(
@@ -569,11 +601,45 @@ describe('terminalKeyAction', () => {
     expect(SHIFT_ENTER_SEQ).toBe('\x1b\r')
   })
 
+  // Issue #562: xterm maps Ctrl+V to \x16 AND cancels the keydown, which suppresses both
+  // Chromium's paste command and the Edit menu's Ctrl+V accelerator — so nothing pasted at all.
+  // 'native' = return false from the xterm handler WITHOUT preventDefault, so the platform pastes.
+  it('hands Windows Ctrl+V to the platform paste', () => {
+    const ctrlV = ev({ key: 'v', code: 'KeyV', ctrlKey: true })
+    expect(terminalKeyAction(ctrlV, false, false, false, true)).toBe('native')
+    expect(terminalKeyAction(ctrlV, true, false, false, true)).toBe('native')
+  })
+
+  it('leaves Ctrl+V as a pty control byte off Windows', () => {
+    const ctrlV = ev({ key: 'v', code: 'KeyV', ctrlKey: true })
+    expect(terminalKeyAction(ctrlV, false, false, false, false)).toBe('pass')
+    // The default reads the live platform; under vitest's node env that is not Windows, so every
+    // existing call site keeps its byte-identical behavior.
+    expect(terminalKeyAction(ctrlV, false)).toBe('pass')
+  })
+
+  it('never lets the paste claim shadow a copy chord or Shift+Enter', () => {
+    expect(terminalKeyAction(ev({ ctrlKey: true, shiftKey: true }), true, false, false, true)).toBe(
+      'copy'
+    )
+    expect(
+      terminalKeyAction(
+        ev({ key: 'Enter', code: 'Enter', shiftKey: true }),
+        false,
+        false,
+        false,
+        true
+      )
+    ).toBe('shift-enter')
+  })
+
   // The jump-to-project chord: WHICH events are the chord is decided once, in lib/projectJump.ts
   // (and tested there — layout, AltGr, keyup, digit range). This module only obeys the answer.
-  it('swallows the jump-to-project chord so the PTY never sees the control byte', () => {
+  // It bubbles (not swallow) so the window dispatcher can perform the switch while still
+  // preventing the PTY control byte — see terminal-config.ts.
+  it('bubbles the jump-to-project chord so the PTY never sees the control byte', () => {
     expect(terminalKeyAction(ev({ key: '1', code: 'Digit1', ctrlKey: true }), false, true)).toBe(
-      'swallow'
+      'bubble'
     )
   })
 

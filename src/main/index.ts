@@ -1,5 +1,7 @@
+import { grokHomeDir } from '../core/agents/grok-paths'
 import { join, resolve, posix } from 'path'
 import { startSessionNameSweep, displayNodeTitle } from '../core/session-name-sweep'
+import { startTriggerService } from '../core/trigger-service'
 import { readAgentSessionName, type AgentSessionNameDeps } from '../core/agent-session-name'
 import { readFile, realpath as fsRealpath, lstat as fsLstat, writeFile as fsWriteFile } from 'fs/promises'
 import { existsSync, statSync, openSync, fstatSync, readFileSync, closeSync } from 'fs'
@@ -16,6 +18,9 @@ installLogSink(logBuffer)
 import { writeFilesToClipboard } from './clipboard-files'
 import { pickProjectIcon } from './project-icon-upload'
 import { allowGuestNavigation } from './webview-nav'
+import { hostOsFromPlatform, sshServerCopy } from '../shared/ssh-server'
+import { macTitleBarOptions } from './window-chrome'
+import { guestContextMenuTemplate } from './webview-context-menu'
 import { BrowserControlLedger } from './browser-control-ledger'
 import {
   recordOpenProjectGrant,
@@ -156,6 +161,7 @@ import {
   isEventUnresolved,
   type MirrorSettings,
   setNodeSessionName,
+  setNodeHibernated,
   sessionNameSweepEntries,
   nodeState,
   nodeSessionName,
@@ -181,11 +187,13 @@ import { installManagedAgentHooks } from '../core/agents/hooks'
 import { createSubagentTail } from '../core/subagent-tail'
 import { createWorkflowAgentsTail } from '../core/workflow-agents-tail'
 import { createContextTail, type TaskNotification } from '../core/context-tail'
+import { grokContextParse, GROK_SIGNALS_FILE } from '../core/grok-signals'
 import { geminiContextParse } from '../core/gemini-session'
 import { codexContextParse } from '../core/codex-session'
 import { createCodexSubagentFormatter } from '../core/codex-subagent-format'
 import { codexHome } from '../core/usage/codex-usage'
 import { grokRawFields, isAsyncSubagentLaunch, type NormalizedAgentEvent } from '../shared/agents/normalize'
+import { agentAccountColor } from '../shared/agents/account-color'
 import { grokSessionDir, grokSessionsDir } from '../core/agents/grok-paths'
 import { forgetGrokSession, rememberGrokSessionDir } from '../core/grok-session'
 import {
@@ -218,6 +226,7 @@ import { buildHandoff, type HandoffRemote } from './handoff'
 import { initContextLink, onLinkedRead, setNodeTranscript } from '../core/context-link'
 import { transcriptPathOf } from '../core/context-link-core'
 import { initCanvasControl, installCanvasSkillInto } from './canvas-control'
+import { DRY_RUN_VERBS, dryRunRequested, dryRunRefusal } from '../shared/control-verbs'
 import { initTranscriptIndex, searchTranscripts } from '../core/transcript-index'
 import { initTelemetry } from './telemetry'
 import { initClaudeUsage } from './claude-usage'
@@ -229,6 +238,7 @@ import { registerSpeechIpc } from '../core/speech/register-ipc'
 import { initClaudeAccounts } from './claude-accounts'
 import { initCodexAccounts } from './codex-accounts'
 import { claudeCliCaps, registerClaudeCliIpc, type ClaudeCliCaps } from '../core/claude-cli'
+import { registerGrokCliIpc } from '../core/grok-cli'
 import { refreshCodexIdentityCaps, registerCodexIdentityIpc } from '../core/codex-identity-caps'
 import {
   bindCodexThreadIdentity,
@@ -275,7 +285,7 @@ import {
   allowMediaPath,
   writeAgentHtml
 } from './media-protocol'
-import { initPlatform } from '../core/platform'
+import { initPlatform, platform } from '../core/platform'
 import { electronPlatform } from './platform-electron'
 import { wirePeerRegistry } from './peer-registry'
 import { WEBGL_CONTEXT_CAP_DESKTOP } from '../shared/webgl'
@@ -928,9 +938,11 @@ function createWindow(): BrowserWindow {
     // never mistaken for the real one (the dock already shows the Electron icon in dev).
     title: NT_MULTI ? 'Termscape (test instance)' : 'Termscape',
     icon: linuxIcon,
-    // Integrate the macOS traffic lights into our top bar (modern Mac app look).
-    titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: 16, y: 15 },
+    // Integrate the macOS traffic lights into our top bar (modern Mac app look). Both options are
+    // macOS-only in Electron, and the renderer's tab bar reserves its 86px of left padding for
+    // exactly this window shape — so state the platform here rather than leaving it to Electron to
+    // ignore the values elsewhere (issue #564). Windows/Linux keep their native frame, unchanged.
+    ...macTitleBarOptions(process.platform),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
@@ -982,17 +994,32 @@ function createWindow(): BrowserWindow {
   // Trackpad-vs-mouse ground truth for the canvas wheel router: macOS wraps trackpad scrolls and
   // pinches in gesture begin/end events a wheel mouse never emits, visible only here in main.
   // The ledger reduces the raw stream (which includes every ~120Hz pointer packet — observe() is
-  // one Set lookup on the hot path) to edge transitions, so the renderer hears a few messages per
-  // physical gesture. Attached unconditionally: on non-mac these events simply never fire, and
-  // the renderer's router ignores the flag off macOS anyway. See main/trackpad-gesture.ts and
-  // canvas/wheel-gesture.ts for the two halves of the contract.
-  const trackpadLedger = new TrackpadGestureLedger()
-  win.webContents.on('input-event', (_event, input) => {
-    const active = trackpadLedger.observe(input.type)
-    if (active !== null && !win.isDestroyed()) {
-      win.webContents.send(IPC.canvasTrackpadGesture, active)
+  // one prefix test on the hot path) to edge transitions, so the renderer hears a few messages per
+  // physical gesture. See main/trackpad-gesture.ts and canvas/wheel-gesture.ts for the two halves
+  // of the contract.
+  //
+  // Attached on macOS ONLY (issue #535). It used to be unconditional on the grounds that these
+  // events never fire elsewhere — but Chromium synthesizes gesture scroll events for TOUCHSCREEN
+  // scrolling on Windows and Linux too, so a touch-enabled non-mac machine paid per-gesture IPC
+  // for a flag the renderer's router discards off macOS. Gating the attach makes the "desktop
+  // macOS only" contract true by construction rather than by the consumer's good manners.
+  if (process.platform === 'darwin') {
+    const trackpadLedger = new TrackpadGestureLedger()
+    const sendGesture = (active: boolean): void => {
+      if (!win.isDestroyed()) win.webContents.send(IPC.canvasTrackpadGesture, active)
     }
-  })
+    win.webContents.on('input-event', (_event, input) => {
+      const active = trackpadLedger.observe(input.type)
+      if (active !== null) sendGesture(active)
+    })
+    // A gesture cannot survive a focus loss, and an End that never arrives (⌘Tab / hide / minimize
+    // mid-scroll) would otherwise leave the ledger stuck open for the life of the window — with
+    // wheel zoom silently dead until restart. `reset()` reports whether anything was actually
+    // open, so an ordinary blur between gestures sends nothing.
+    win.on('blur', () => {
+      if (trackpadLedger.reset()) sendGesture(false)
+    })
+  }
   const crashReload = createCrashReloadPolicy()
   win.webContents.on('render-process-gone', (_event, details) => {
     ptyManager.dropClient(presenceId)
@@ -1157,6 +1184,44 @@ app.whenReady().then(async () => {
       }
       return { action: 'deny' }
     })
+    // Electron ships no context menu for web content, so a right-click inside a guest page did
+    // nothing at all. Passing `frame` is what turns on macOS's own AutoFill, Writing Tools and
+    // Services submenus (off by default in Electron): that is the "AutoFill > Passwords..." row
+    // on a password field. Template and its refusals: webview-context-menu.ts.
+    contents.on('context-menu', (_e, params) => {
+      const template = guestContextMenuTemplate(
+        {
+          linkURL: params.linkURL,
+          srcURL: params.srcURL,
+          mediaType: params.mediaType,
+          hasImageContents: params.hasImageContents,
+          isEditable: params.isEditable,
+          selectionText: params.selectionText,
+          misspelledWord: params.misspelledWord,
+          dictionarySuggestions: params.dictionarySuggestions,
+          editFlags: params.editFlags,
+          canGoBack: contents.navigationHistory.canGoBack(),
+          canGoForward: contents.navigationHistory.canGoForward()
+        },
+        {
+          back: () => contents.navigationHistory.goBack(),
+          forward: () => contents.navigationHistory.goForward(),
+          reload: () => contents.reload(),
+          // Same route a popup takes: a new browser node, never a real window.
+          openLinkInNode: (url) => {
+            const sourceNodeId = browserGuests.get(contents.id)?.nodeId
+            if (sourceNodeId) sendToMain(IPC.browserNewWindow, { url, sourceNodeId })
+          },
+          copyText: (text) => clipboard.writeText(text),
+          copyImage: () => contents.copyImageAt(params.x, params.y),
+          replaceMisspelling: (word) => contents.replaceMisspelling(word),
+          inspect: () => contents.inspectElement(params.x, params.y)
+        }
+      )
+      // `frame` is null once the frame navigated away or died; the menu still opens, just without
+      // the AppKit additions.
+      Menu.buildFromTemplate(template).popup(params.frame ? { frame: params.frame } : {})
+    })
   })
 
   settingsStore.init()
@@ -1217,6 +1282,9 @@ app.whenReady().then(async () => {
     process.platform === 'darwin' ? systemPreferences.askForMediaAccess('microphone') : true
   )
   registerClaudeCliIpc()
+  // Invariant 11 for probes: registered in BOTH shells, or session-id minting silently works on
+  // the desktop and not in the browser, with nothing to say which.
+  registerGrokCliIpc()
   registerCodexIdentityIpc()
   // Warm the `claude --version` probe now (it spawns a login shell + node, ~sub-second) so the
   // renderer's first `claude.cliCaps()` — awaited on the launch path of a cold-restored agent
@@ -1462,15 +1530,14 @@ app.whenReady().then(async () => {
   ipcMain.handle(IPC.pairingStop, () => pairingService.stop())
   ipcMain.handle(IPC.pairingProbeSsh, () => pairingService.probeSsh())
   // Same pattern as appOpenNotificationSettings: a main-side constant deep link, NOT routed
-  // through shellOpenExternal's http(s)-only allowlist (which silently drops x-apple.* URLs —
+  // through shellOpenExternal's http(s)-only allowlist (which silently drops non-http URLs —
   // the "Open System Settings" button did nothing when it sent the URL from the renderer).
-  // The `Services_RemoteLogin` query selected the service in the pre-Ventura prefpane and is
-  // harmless on newer macOS, which opens the Sharing pane either way.
+  // The URL comes from `sshServerCopy`, the SAME table the renderer prints its copy from, so the
+  // button can never appear on a platform this handler opens nothing for (issue #572: on Windows
+  // it offered a macOS `x-apple.systempreferences:` link that is inert there).
   ipcMain.handle(IPC.pairingOpenRemoteLoginSettings, () => {
-    if (process.platform !== 'darwin') return
-    void shell.openExternal(
-      'x-apple.systempreferences:com.apple.preferences.sharing?Services_RemoteLogin'
-    )
+    const url = sshServerCopy(hostOsFromPlatform(process.platform)).settingsUrl
+    if (url) void shell.openExternal(url)
   })
   ipcMain.handle(IPC.pairingListDevices, () => pairingService.listDevices())
   ipcMain.handle(IPC.pairingRevokeDevice, (_e, id: string) => pairingService.revokeDevice(id))
@@ -1778,6 +1845,18 @@ app.whenReady().then(async () => {
     // READS a name) is core's default, `supportsTitleRead`. A copy here would be a second place to
     // get it wrong, and getting it wrong is invisible — the wrong list silently skips an agent's
     // nodes with every test still green.
+  })
+  // Trigger nodes (issue #493): the whole host-side machine — arm store, scheduler, delivery with
+  // its deliver-on-idle queue, and the mirror's idle signal — composed ONCE in core
+  // (`startTriggerService`); this shell only supplies its seams. Identical call in
+  // src/server/index.ts. Arming still has no IPC/UI (phase 4), so nothing fires in production yet.
+  startTriggerService({
+    userDataDir: app.getPath('userData'),
+    listCanvases: () => workspaceStore.persistedCanvases(),
+    getNode: (nodeId) => workspaceStore.getNode(nodeId),
+    sendText: (nodeId, text) => ptyManager.sendText(nodeId, text),
+    paneCommand: (nodeId) => ptyManager.paneCommand(nodeId),
+    handle: (channel, handler) => platform().handle(channel, handler)
   })
   // macOS Notch HUD (docs/notch-hud.md): walking agent mascots by the notch. darwin + setting only;
   // reads the same agent-status seams the mirror does. Live-toggled via settings below.
@@ -2145,6 +2224,14 @@ app.whenReady().then(async () => {
   // it, assigned here where the tail exists).
   geminiTranscriptPathFor = (sessionId) => geminiContextTail.pathFor(sessionId)
   const codexContextTail = createContextTail(pushContextUpdate, { parse: codexContextParse })
+  // grok's third tail. `wholeFile` is not a tuning knob: signals.json is a whole JSON document
+  // rewritten in place, so an offset read yields a fragment that never parses and the meter
+  // would freeze after its first fill with nothing to say so. Invariant 11 — the Server
+  // Edition creates the same tail the same way in src/server/agent-status.ts.
+  const grokContextTail = createContextTail(pushContextUpdate, {
+    parse: grokContextParse,
+    wholeFile: true
+  })
   // Remote (SSH-project) counterparts: a node whose pty runs on a remote host has its Claude
   // transcript on that host, so its meter / subagent transcript / search must read over the
   // project's ControlMaster. One RemoteFile bound to the SSH-project manager's own ssh runner
@@ -2602,7 +2689,11 @@ app.whenReady().then(async () => {
     const abs = resolve(tp)
     // codexHome() honors $CODEX_HOME — a relocated codex (the snap-codex case this project has hit
     // before) would otherwise fail the jail and its meter would silently never fill.
-    return isSafeLocalTranscriptPath(abs, homedir(), app.getPath('userData'), codexHome())
+    // grokHomeDir() honors $GROK_HOME for the same reason and with the same failure shape: closed,
+    // so a relocated grok home would silently never resolve a context link. BOTH shells pass it
+    // (invariant 11) — a jail widened in one shell only is a feature the Server Edition lacks with
+    // nothing to say so.
+    return isSafeLocalTranscriptPath(abs, homedir(), app.getPath('userData'), codexHome(), grokHomeDir())
       ? abs
       : undefined
   }
@@ -2645,14 +2736,46 @@ app.whenReady().then(async () => {
           cwd: g.cwd,
           sessionId: g.sessionId
         })
-        if (dir) rememberGrokSessionDir(g.sessionId, dir)
+        if (dir) {
+          rememberGrokSessionDir(g.sessionId, dir)
+          // Context meter: grok's numbers are NOT in the transcript, so there is nothing for
+          // `transcript_path` to point at. They live in `signals.json`, the sibling of
+          // `chat_history.jsonl`, so the tail is tracked from the DERIVED directory.
+          grokContextTail.track(g.sessionId, join(dir, GROK_SIGNALS_FILE))
+        }
+      }
+      // 3. node → what it is doing NOW (the phone's per-node activity line).
+      //
+      // §8.3 of docs/grok-agent.md said grok's file hooks "never send PreToolUse", so calling this
+      // was a no-op and it was deleted. MEASURED on 1.0.13 (2026-09-02), that is wrong in wording
+      // and right in effect: grok DOES publish the event, spelled `pre_tool_use` — its own
+      // snake_case — and `recordRawToolEvent` gates on the exact string `PreToolUse`, so the gate
+      // never matched. The blocker was a SPELLING, not an absence, which is why deleting the call
+      // looked correct and closed the door on a working feature.
+      //
+      // Translated here rather than by loosening that gate: the mirror is claude-shaped on purpose,
+      // and grok's dialect is decoded in exactly one place (`grokRawFields`). `toolActivity` knows
+      // grok's fifteen tool names, so the line reads "Reading fichero.txt", never a claude phrase.
+      if (nodeId && g.event === 'pretooluse' && g.toolName) {
+        recordRawToolEvent(nodeId, {
+          hook_event_name: 'PreToolUse',
+          tool_name: g.toolName,
+          tool_input: g.toolInput
+        })
+      }
+      // The turn is over: clear the activity line the same way the claude path does.
+      if (nodeId && (g.event === 'stop' || g.event === 'sessionend')) {
+        recordRawToolEvent(nodeId, { hook_event_name: 'Stop' })
       }
       // The session is over, so nothing will read its directory again — and forgetting costs
       // nothing even though grok IS resumable and `grok --resume <id>` reuses BOTH the id and the
       // directory: a resumed session fires its own hooks, whose (cwd, sessionId) re-derive and
       // re-remember the very same path. The map is bounded, so dropping now beats waiting for
       // eviction to reach an entry nobody is asking about.
-      if (g.event === 'sessionend') forgetGrokSession(g.sessionId)
+      if (g.event === 'sessionend') {
+        forgetGrokSession(g.sessionId)
+        grokContextTail.untrack(g.sessionId)
+      }
       return
     }
     // gemini and codex both carry `transcript_path` in their hook envelope (gemini: the base input
@@ -2853,6 +2976,7 @@ app.whenReady().then(async () => {
       contextTail.untrack(sessionId)
       geminiContextTail.untrack(sessionId)
       codexContextTail.untrack(sessionId)
+      grokContextTail.untrack(sessionId)
       remoteContextTail.untrack(sessionId)
       remoteTranscriptBySession.delete(sessionId)
       locatedTranscriptSessions.delete(sessionId)
@@ -3159,6 +3283,15 @@ app.whenReady().then(async () => {
   const projectIdOfNode = (id: string): string | undefined =>
     workspaceStore.persistedCanvases().find((c) => c.nodes.some((n) => n.id === id))?.id
   hookServer.setControlHandler(async ({ verb, nodeId, args, verified }) => {
+    // `--dry-run` (issue #532) is honoured by the spawn verbs only, and this gate runs FIRST —
+    // before the browser intercept, the open-project gates and the renderer forward — because a
+    // verb that cannot dry-run must REFUSE rather than silently perform: a `close --dry-run`
+    // that closes is worse than no flag at all. Supported verbs pass through with the flag
+    // intact; their renderer dispatch case stops before the mutation.
+    if (dryRunRequested(args) && !DRY_RUN_VERBS.has(verb)) {
+      const msg = dryRunRefusal(verb)
+      return { ok: false, error: msg, message: msg }
+    }
     // `browser` is answered in MAIN and never forwarded to the renderer's agent-control dispatch:
     // the debugger handle and the CDP allowlist are main-side, and the renderer is the more
     // attackable half. Every other verb still round-trips to the renderer below.
@@ -3385,22 +3518,103 @@ app.whenReady().then(async () => {
     registerNode: (
       projectId: string,
       node: { id: string; title?: string; agentId?: string; accountId?: string }
-    ) => workspaceStore.appendRemoteNode(projectId, node),
+    ) =>
+      workspaceStore.appendRemoteNode(
+        projectId,
+        node,
+        new Date(),
+        // Host-derived, exactly as on the canvas: the account's default color beats the agent's,
+        // so a phone-started session under a colored account is recognizable in the same way. The
+        // agent decides WHICH account list answers (agentAccountColor) — the phone supplies both
+        // ids, and the two lists are keyed independently. Resolved off the RAW account id: whether
+        // this node is account-bound at all is `boundAccountId`'s call, made once inside the
+        // registrar, which ignores this color when it refuses the binding. Re-deriving that rule
+        // here would be the second copy that drifts.
+        agentAccountColor(node.agentId, node.accountId, {
+          claude: settingsStore.get().claudeAccounts ?? [],
+          codex: settingsStore.get().codexAccounts ?? []
+        })
+      ),
     // "End session" from the phone (`pty.destroy`): the SAME two steps the desktop × performs —
     // kill the tmux session on every socket it could live on (the sweep may have seen it on either
     // — see the session-memory panel's kill rule), then take the node off its project's canvas
     // (written as an outside edit, so the watcher broadcasts it and the canvas drops the node
     // live). Node removal is best-effort by design: an unregistered phone session or an inline
     // project has no file entry to remove, and that must not fail a destroy that already landed.
+    //
+    // The kill is VERIFIED before the node comes off the canvas (issue #581): destroySession
+    // swallows its per-step failures by design, so it can resolve having ended nothing — and
+    // removing the node then would strand a live session with no canvas entry pointing at it.
+    // The throw also rides back to the phone as the verb's honest error.
     destroyNode: async (nodeId: string) => {
       await ptyManager.destroySession(null, nodeId, { everySocket: true })
+      if (await ptyManager.sessionExists(nodeId).catch(() => true)) {
+        throw new Error('The session is still running — the host could not end it.')
+      }
       await workspaceStore.removeRemoteNode(nodeId).catch(() => false)
     },
+    // Relay-viewer presence (Eco × phone): a COUNT per node id, shared by the interactive host and
+    // every standing-host pool session (several phones can watch at once, and one phone switching
+    // sessions overlaps its old and new streams). Two consumers, both renderer-side:
+    //  - `agent:remote-viewers` carries the full watched SET each change, so Eco's `isNodeWatched`
+    //    stops hibernating a session someone is watching from a phone (the phone viewer used to be
+    //    invisible to every attention predicate — the kanban-modal gap, one surface further out);
+    //  - `agent:wake` fires on each attach, so a hibernated node someone just opened on their
+    //    phone resumes its CLI — the same nudge contract as `wakeHibernatedNode` (re-reads the
+    //    flag, no-ops when not hibernated or not mounted).
+    remoteViewer: (() => {
+      const counts = new Map<string, number>()
+      const toRenderer = (channel: string, payload: unknown): void => {
+        if (!win.isDestroyed()) win.webContents.send(channel, payload)
+      }
+      const broadcast = (): void => toRenderer(IPC.agentRemoteViewers, [...counts.keys()])
+      return {
+        attached(nodeId: string) {
+          counts.set(nodeId, (counts.get(nodeId) ?? 0) + 1)
+          broadcast()
+          toRenderer(IPC.agentWake, nodeId)
+        },
+        detached(nodeId: string) {
+          const n = (counts.get(nodeId) ?? 0) - 1
+          if (n <= 0) counts.delete(nodeId)
+          else counts.set(nodeId, n)
+          broadcast()
+        }
+      }
+    })(),
+    // Renderer-nudge node actions for the phone's session-LIST long-press menu (`node.wake` /
+    // `node.refresh` / `node.rename`). Each returns whether it reached a LIVE window — the verb
+    // answers ok only on delivery, never on outcome (nudge contract: the renderer re-reads its
+    // own state and no-ops for a node it cannot resolve). `wake` reuses the exact `agent:wake`
+    // channel the attach path fires, so the renderer needs no new wiring for it; `rename` rides
+    // `agent:rename-node` into the renderer's `renameSession` funnel (titleAuto:false + `/rename`
+    // push) — deliberately NOT canvas:mutate's raw title write, which the session-name poll would
+    // overwrite on the next tick.
+    nodeActions: (() => {
+      const deliver = (channel: string, payload: unknown): boolean => {
+        if (win.isDestroyed()) return false
+        win.webContents.send(channel, payload)
+        return true
+      }
+      return {
+        wake: (nodeId: string) => deliver(IPC.agentWake, nodeId),
+        refresh: (nodeId: string) => deliver(IPC.agentRefreshNode, nodeId),
+        rename: (nodeId: string, title: string) => deliver(IPC.agentRenameNode, { nodeId, title })
+      }
+    })(),
     // Jail roots beyond the active canvas: the phone browses EVERY project (projects.list), so
     // its fs/git access spans every local project root — not just the tab the desktop happens
     // to have focused (that gap read as "cwd is outside the shared project roots" on the phone).
     workspaceRoots: () => workspaceStore.localProjectCwds()
   }
+  // The renderer owns the Eco hibernation flag (persisted in ITS localStorage) and main only
+  // mirrors it — same direction as `terminalFocused`. Feeds the agent-status mirror so the phone
+  // renders SLEEPING (and re-fed at renderer boot from the persisted store, so a desktop restart
+  // does not blank the phone's view of a still-hibernated session).
+  ipcMain.on(IPC.agentHibernated, (_e, msg: { nodeId?: unknown; on?: unknown } = {}) => {
+    if (typeof msg?.nodeId !== 'string' || !msg.nodeId) return
+    setNodeHibernated(msg.nodeId, msg.on === true)
+  })
   initRemoteHost(win, ptyManager, listProjectsOutput, hostBridge)
   // NEW interactive relay host (Stage 4): a connecting peer desktop becomes a first-class
   // CorePlatform client of this desktop after mutual SAS approval. Runs BESIDE initRemoteHost (the

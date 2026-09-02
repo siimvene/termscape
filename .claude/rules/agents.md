@@ -32,6 +32,8 @@ paths:
   - "src/renderer/lib/transcriptGates.ts"
   - "src/renderer/lib/claudeBranch.ts"
   - "docs/*-agent.md"
+  - "src/core/grok-*.ts"
+  - "src/renderer/state/grokSessionIds.ts"
 ---
 # Agent support: registry + capabilities, hooks, permission mode, transcripts, subagent/workflow viz, adding a new agent
 
@@ -60,17 +62,24 @@ else, and its context links must keep classifying across restarts).
   `TRANSFER_SOURCE_CAPABLE`, `RENAME_CAPABLE`, `TITLE_READ_CAPABLE`, `CANVAS_CONTROL_CAPABLE`,
   `PERMISSION_MODE_CAPABLE`, `MODEL_SWITCH_CAPABLE`, with helpers (`hasHooks`,
   `canBranch`, `canContextLink`, `canChat`, `canRename`, `canReadTitle`, `hasPermissionMode`, …).
-  Branch and the ⌘M **ChatPanel** transcript view (`CHAT_CAPABLE` / `canChat` — since the SDK chat
-  node was removed, 2026-07, this is all `canChat` now gates) stay **Claude-only** purely by
-  being in only `BRANCH_CAPABLE` / `CHAT_CAPABLE`. The other lists span more agents, and the
-  memberships below are the ones to check before assuming "claude-only" (all verified against
-  `config.ts`, 2026-08-09): the per-node **context meter** is `USAGE_CAPABLE = claude/codex/gemini`;
+  Branch stays **Claude-only** purely by being in only `BRANCH_CAPABLE`. The ⌘M **ChatPanel**
+  transcript view (`CHAT_CAPABLE` / `canChat`) is **claude + grok** since 2026-09: grok's
+  `chat_history.jsonl` gets its own reader, and `chat:read-transcript` routes by agent. That list had
+  to be SPLIT to do it — `CHAT_CAPABLE` carried two facts that coincided while claude was its only
+  member ("we can render this" and "claude's resolver can locate and parse this file"), and the
+  second now lives in `CLAUDE_TRANSCRIPT_READABLE` (claude only). Merging them back is a
+  cross-session read of someone else's transcript; `config.capabilities.test.ts` pins the pair.
+  The other lists span more agents, and the memberships below are the ones to check before assuming
+  "claude-only" (all verified against `config.ts`, 2026-09-02): the per-node **context meter** is
+  `USAGE_CAPABLE = claude/codex/gemini/grok` — grok states BOTH numbers, and its own percentage, in
+  `signals.json`;
   the **permission mode** is `PERMISSION_MODE_CAPABLE = claude/grok/gemini/codex`; the session-name
   sync is **split in two** — `TITLE_READ_CAPABLE = claude/codex/grok/gemini` (read) ⊇
   `RENAME_CAPABLE = claude/grok` (write), because gemini and codex name their own sessions but have
   no rename command (codex's read leg is `readCodexSessionName`);
-  **Context Link** spans four builtins
-  (`CONTEXT_LINK_CAPABLE = claude/codex/gemini/opencode`, NOT grok/copilot). UI gates
+  **Context Link** spans five builtins
+  (`CONTEXT_LINK_CAPABLE = claude/codex/gemini/opencode/grok`; the one builtin outside it is
+  copilot). UI gates
   on these helpers — no hardcoded `=== 'claude'`. **Custom agents** (user-defined in Settings,
   `customAgents`) inherit the declared `baseAgent` harness through `capabilityAgentId`; a custom
   agent with no base remains spawn + terminal-title + process status only. Per-agent write-ups:
@@ -103,10 +112,13 @@ else, and its context links must keep classifying across restarts).
   do not apply this machine's gateway to another core. Mobile needs a settings/model-picker surface
   before it can expose the feature.
 - **Grok** (`@xai-official/grok` 1.0.0, builtin since 2026-08) — in `AGENT_HOOK_TARGETS`,
-  `RESUMABLE_AGENTS`, `RENAME_CAPABLE`, `PERMISSION_MODE_CAPABLE` and `CANVAS_CONTROL_CAPABLE`; NOT in
-  `USAGE_CAPABLE` / `CONTEXT_LINK_CAPABLE` / `SUBAGENT_CAPABLE` (each blocked on a fixture that needs a
-  logged-in grok session — the context meter, context links and subagent cards are **not implemented**
-  for grok). Its hook config is a **directory** (`$GROK_HOME/hooks/*.json`, all merged), so nodeterm
+  `RESUMABLE_AGENTS`, `RENAME_CAPABLE`, `PERMISSION_MODE_CAPABLE`, `CANVAS_CONTROL_CAPABLE`,
+  `CONTEXT_LINK_CAPABLE`, `CHAT_CAPABLE`, `TRANSFER_SOURCE_CAPABLE`, `USAGE_CAPABLE` and
+  `SESSION_ID_CAPABLE`; NOT in `SUBAGENT_CAPABLE` — subagent cards still need the `spawn_subagent`
+  PreToolUse/PostToolUse payload, which nobody has captured. The other four came off the blocked list
+  in 2026-09, once a machine with a logged-in grok session produced real fixtures: context links and
+  the ⌘M panel read `chat_history.jsonl` (NOT `updates.jsonl` — see below), and the meter reads
+  `signals.json`. Its hook config is a **directory** (`$GROK_HOME/hooks/*.json`, all merged), so nodeterm
   **owns one file outright** (`nodeterm-status.json`) instead of merging into a shared settings file —
   which is also why a malformed copy of it is *healed* rather than preserved, locally and on an SSH
   host (`RemoteHooks.installGrokRemote`, under the host's own `$GROK_HOME`). Its dialect is
@@ -282,6 +294,33 @@ else, and its context links must keep classifying across restarts).
   installer needs is why events are typed `ManagedHookEvent` (`string | {event, matcher}`): grok's
   tool matcher is a REGEX and must be `.*` — a bare `*` is invalid and silently stops tool events
   firing. Plain-string events keep their byte-identical output for every other agent.
+  **Codex is the one agent whose hook command is NOT a POSIX one-liner on Windows** (issue #567):
+  it builds the command as `cmd.exe /C <string>` (`codex-rs/hooks/src/engine/command_runner.rs`,
+  rust-v0.151.0) unless the session has a shell configured, which a default Windows install has
+  not — so `if [ -x '…' ]; then …; fi` answered `-x was unexpected at this time.` and **exit 1 on
+  every event**, for the life of the node. Claude is fine there only because Claude Code runs its
+  hooks through Git Bash. The fix is a batch entry point (`codex-hook.cmd`,
+  `codex-windows-wrapper.ts`) written beside `codex.sh` and named by `buildManagedCommand`'s win32
+  branch; it **locates a POSIX shell and runs the same script** — deliberately not a second
+  implementation of the hook protocol, which would be two copies of the POST/failover/token/
+  permission-poll to drift. Three rules it must keep: pass stdin through, DRAIN stdin on every bail
+  (codex writes the payload there; #186/#187), and exit 0 when there is no shell or no script.
+  Two traps around it: `buildManagedCommand`'s `platform` is the platform of the machine that will
+  RUN codex, so `RemoteHooks.installCodexRemote` passes POSIX explicitly (a Windows desktop must not
+  put a `.cmd` command on a Linux host); and `isManagedCommand` matches **both** leaves
+  (`codex.sh` AND `codex-hook.cmd`) on every platform — matching only the local one would leave a
+  pre-fix entry unrecognized, so the fresh one is appended beside it, which is #558 on a second
+  file. Matching both is what REPAIRS an existing Windows install at the next launch. **Both
+  sides of the managed-entry match go through `normalizeHookCommand`** — the marker used to be
+  folded to `/` while the stored command was compared raw, so on Windows nodeterm never recognized
+  its OWN entry and appended a fresh set every launch (#558: nine copies of nine events, nine
+  `claude.sh` processes per Stop, nine 45 s `PermissionRequest` waits racing one prompt). Because
+  `mergeManagedHook` drops every managed entry before pushing one fresh, the corrected match IS the
+  repair for a file already ruined — it runs at boot via `installManagedAgentHooks` and, being the
+  ONE shared merge, heals claude/gemini/grok, every managed Claude account dir and all three SSH
+  remote installers at once; a second repair mechanism would be exactly the duplicated rule this
+  file warns about. It strips only OUR handler out of a definition, so a hook a user hand-merged
+  beside ours survives.
 - **Per-node hook identity** (`src/core/agents/node-auth-*.ts`, `node-token-*.ts`,
   `node-identity-policy.ts` — full write-up in **`docs/node-identity.md`**) — the shared bearer proves
   "a session on this machine", never *which* session, so every node also gets a capability derived
@@ -449,8 +488,24 @@ else, and its context links must keep classifying across restarts).
   as an **ephemeral** `SubagentNode` (display-only card: type + task + working/done) connected by
   an **edge** to its parent agent node. These ephemeral nodes/edges live outside the React Flow
   `nodes` state (merged only at the `<ReactFlow>` prop), so they're never persisted
-  (`flowToNodeStates`) nor in undo/dirty. Fan-out is cleared on the next new turn / session-end /
-  node close. (Subagents share the parent's process — no PTY.) Each card shows
+  (`flowToNodeStates`) nor in undo/dirty. **Two different clears, and the difference is
+  load-bearing (issue #547):** the removal paths (node delete, project delete, the cross-project
+  close, the orphan-session kill, `SessionEnd`) call `clearForParent`, which drops everything —
+  a node that is gone has no work left to represent. A **new turn** calls
+  `clearFinishedForParent`, which drops only `state === 'done'`. "The previous fan-out is stale by
+  definition" is true of a finished card and false of a working one: Claude launches subagents
+  **async**, so *"waiting for N background agents to finish"* is exactly the state in which the
+  next prompt gets typed, and nothing rehydrates `byId` afterwards (`start()` fires only from a
+  live `PreToolUse`; a subagent past that emits no second one) — the card was gone for the rest of
+  the run while the agent kept working. The expensive half is not the missing card: Eco's
+  hibernation guard derives `liveSubagents` from this same store, so the wipe let a parent with
+  live background agents read as idle and get its CLI `/exit`ed. Keeping an unfinished card then
+  **owes a decay** — `useAgentNodes.sweepStaleWorking`, on the same 60 s tick and the same
+  `WORKING_STALE_MS` as `agentStatus`'s (imported, never re-chosen: `shared/agents/stale.ts` exists
+  because three surfaces each invented their own timeout) — or a subagent whose end never arrives
+  pins its card, and its parent, forever. It marks the card **done** rather than deleting it, so a
+  late `finish()` is the no-op it already was and the next turn boundary takes it.
+  (Subagents share the parent's process — no PTY.) Each card shows
   duration/tokens/tool-uses and **expands** (click) to a **live transcript**:
   `core/subagent-tail.ts` resolves the subagent's own transcript file
   (`<…>/<sessionId>/subagents/agent-<id>.jsonl`, matched by `tool_use_id` via the sibling
@@ -606,8 +661,12 @@ principle. Per-agent write-ups: `docs/grok-agent.md`, `docs/gemini-agent.md`.
    resolver rather than building a per-model allowlist: gemini's `tokenLimit()` is a family rule with
    a **1M catch-all default**, so an unreleased model gets the *right* answer where an allowlist would
    be confidently wrong, silently. **And if you cannot establish a trustworthy denominator, ship no
-   meter** — a percentage over a guessed window is a wrong number presented as a fact (this is exactly
-   why grok has no meter).
+   meter** — a percentage over a guessed window is a wrong number presented as a fact. This used to
+   cite grok as the example of having no meter; grok turned out to be the BEST case for this rule,
+   stating `contextTokensUsed`, `contextWindowTokens` **and** the resulting `contextWindowUsage` in
+   `signals.json` (all three present in 22 of 22 measured sessions, and the stated percentage agrees
+   with the division in all 22 — an oracle pinned as a test). What was missing was never the number:
+   it was a comment nobody could check, naming the wrong file.
 7. **A closed set beats a substring, for notification/event types.** Grok's
    `type.includes('permission')` matched a notification grok fires before *every* tool call, so a
    working node strobed NEEDS YOU: unread dot + chime + OS notification + phone inbox card, per tool

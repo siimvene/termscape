@@ -22,8 +22,10 @@ npm test           # vitest, unit + integration
 
 **If `src/main/node-pty-patch.test.ts` is red, your `node_modules` is unpatched — not your code.**
 Run `npm run rebuild`. node-pty 1.1.0 leaks a pty device per spawn on macOS
-([node-pty#950](https://github.com/microsoft/node-pty/issues/950)); we patch its source before
-`electron-rebuild` compiles it, and that test guards the patch surviving upgrades.
+([node-pty#950](https://github.com/microsoft/node-pty/issues/950)) and, on Windows, leaves a
+conhost alive per killed session (its exit thread deletes the ConPTY baton without closing the
+HPCON); we patch both sources before `electron-rebuild` compiles them, and that test guards the
+patches surviving upgrades.
 
 ## Where code goes
 
@@ -68,10 +70,18 @@ need it too, and wire it in the same change.
 A board card's **source** is a registry entry, not a branch you add at a call site
 (`renderer/lib/kanbanSources.ts`). Declare the source once — filter label, `placement`
 (`assignment` = the board's own persisted assignments, `provider` = the provider owns the column),
-in-column `lane` order, whether it is `configured` for a board — and give it its one leaf (a card
-component and the list path feeding it). Columns take lanes and name no source; the drag path
-branches on `placement`. If you find yourself writing `=== 'github'` outside the registry, the
-registry is missing a field.
+in-column `lane` order, whether it is `configured` for a board, whether it is `readOnly` (the
+board never writes it: no drag, no move control) — and give it its one leaf (a card component and
+the list path feeding it). Columns take lanes and name no source; the drag path branches on
+`placement`. If you find yourself writing `=== 'github'` outside the registry, the registry is
+missing a field.
+
+Before adding a GitHub read, check what the existing poll already fetches. Pull request cards
+needed no new request at all: `/repos/{repo}/issues` returns pull requests, and the client used to
+discard them. `/repos/{repo}/pulls` looks like the obvious endpoint and is the expensive one — it
+**ignores `since`**, so it can reuse none of the incremental machinery, and its items are ~3.5× the
+bytes. CLAUDE.md's kanban section has the measurements and the eviction rule that keeps the issue
+lane unaffected.
 
 ## House rules
 
@@ -82,6 +92,16 @@ registry is missing a field.
   consent to this fork being public rests on that. `license.test.ts` (upstream's, verbatim) and
   `license.ungate.test.ts` cover both halves.
 
+- **Never call the user's machine a Mac in user-visible copy.** Use `thisMachine()` /
+  `thisMachineCap()` / `machineNoun()` from `src/renderer/lib/machineName.ts` — "this Mac" on
+  macOS, "this PC" on Windows, "this computer" elsewhere and in any Server Edition browser tab
+  (where the machine being described is the SERVER, whose OS the viewer cannot know). Issue #563:
+  ~30 strings said "this Mac", including *"This Mac is not authorized on this license"* and *"a
+  teammate on a seat can run commands on this Mac"* — the one sentence a user has to trust before
+  handing out shell access. `machineName.guard.test.ts` scans non-comment lines and will fail your
+  PR; copy that really is macOS-specific (the ptmx-limit banner, the notch step) is exempt by name
+  with its reason. Comments are not scanned.
+
 - **Anything path-shaped: Windows is a delivery target.** Most of this was written on
   macOS/Linux, so the recurring defect is code that is genuinely correct on POSIX —
   `split('/')`, `startsWith('/')` as an is-absolute test, a bare `fs.rename`. Use
@@ -91,6 +111,14 @@ registry is missing a field.
   core that owns the files, and keep an unobserved host unknown rather than guessing. Conversely,
   on POSIX a backslash is legal filename text — do not treat both separators as interchangeable
   unless the owning filesystem is known to be Windows.
+
+- **Normalize BOTH sides of a path comparison, through one function.** A marker normalized where
+  it is built and matched raw where it is used is a no-op on the machine you wrote it on and a
+  silent defect on Windows. That is issue #558: the managed-hook marker was folded to `/` while
+  the stored command still carried `\`, so nodeterm stopped recognizing its own hook entries and
+  appended a fresh copy of all nine on every launch — nine hook processes per event, nine
+  concurrent 45 s permission waits racing one prompt. Write the normalizer once, use it on both
+  sides, and pin it with a `C:\`-shaped test.
 
 - **Never publish a file with a bare `fs.rename`.** Use `renameAtomic` or `writeFileAtomic` from
   `src/core/fs-atomic.ts`. On Windows a rename fails with `EPERM` whenever anything has the
@@ -152,6 +180,15 @@ feature, and the boundary tests can only tell you an import is wrong, never that
 The same applies to any hook-server signature change; this repo has shipped one to a single shell
 three times.
 
+**A rule enforced at one mint site is enforced nowhere.** Nodes are created on two surfaces — the
+canvas (`createAgentNode`) and the phone's `projects.registerNode` (`appendProjectNode`) — and a
+constraint spelled out inline at one of them silently does not exist at the other. "Which agents
+bind a managed account" lived as a ternary in the renderer while the phone leg wrote whatever the
+wire sent.
+Put the rule in one predicate under `src/shared` and have every mint site ask it, and derive the
+things that follow from it (a node's color, say) from that same call rather than re-deriving the
+condition per caller.
+
 **Do not take scrolling away from tmux.** It owns the mouse, the scrollback and the alternate
 screen. A previous design moved that into the emulator and failed structurally; `.claude/rules/terminal.md`
 explains why in detail.
@@ -176,6 +213,14 @@ its accelerator) — and Reload (⌘R / ⌘⇧R) is the named exception that alw
 because it is the crash-recovery lever. Browsers own a different set. And any chord that reaches the canvas needs the two refusals every canvas shortcut
 here has: not while the kanban board covers it, not while the user is typing.
 
+**A new chord needs no edit to the shortcuts panel — and must not get one.** `ShortcutsPanel`
+derives its whole inventory from `COMMAND_DEFINITIONS` (section per `CommandGroup`, label from
+`def.title`, chord from the EFFECTIVE binding), so adding a registry command is all it takes to
+make it show up; a command with no effective binding is omitted rather than listed chord-less.
+`ShortcutsPanel.test.tsx` is the watchdog and reds if a command fails to surface. The panel it
+replaced hand-listed 24 ids against a 45-command registry and had drifted four live chords behind
+— if you find yourself typing a command id into that file, that is the bug reappearing.
+
 **Comments explain WHY, and name the failure they prevent.** The codebase is deliberately dense with
 reasoning. A comment that restates the code is noise; one that says "do not simplify this back,
 here is what broke" is the point.
@@ -197,10 +242,64 @@ happened synchronously at your `console.log`, and wrapping that call in `try/cat
 (measured on node 22). If you write to a stream that can go away, attach an `'error'` listener and
 latch the writer off — `installLogSink` (`src/core/log-sink.ts`) is the worked example. Issue #382.
 
+**A retry budget must measure the thing it is waiting for, and running out must be VISIBLE.** The
+armed-launch loop (canvas-control `--after`, and the cold open a `--project` node gets) delivered its
+held command on a flat 5 × 400 ms budget started when the *canvas* held the node — so on a cold
+project switch it was spent loading the canvas, mounting the node and spawning tmux, and the launch
+was abandoned before the session it was for existed. Two rules came out of issue #569: wait on a
+real signal (`isSessionReady`, published by the node when its shell settles) rather than on a
+stopwatch aimed at the wrong start, and never let "we gave up" live only in a `console.warn` — the
+node shows it (`state/launchDelivery.ts` → the QUEUED badge's ⚠ + tooltip) and the canvas-control
+reply carries it (`queued` / `queuedIds`), because a user who cannot see the failure and an
+orchestrator that is told "opened" both act on a session that is not there. If you add a bounded
+retry anywhere, ask what the clock actually starts on and where its exhaustion becomes visible.
+
+**Pointing a project at a folder is a WRITE — probe before you bind.** A project's canvas is
+written to `<cwd>/.nodeterm/project.json`, so the moment a project gains a `cwd` the next autosave
+owns that file. "Open folder…" always probed and adopted; "Set folder…" (tab ⌄) used to bind
+unconditionally, which overwrote a canvas a teammate had committed to that repo — their nodes gone,
+no backup, nothing on screen. Both entrances now share the rule (`renderer/lib/setProjectFolder.ts`):
+an occupied *or unreadable* project file refuses the bind and says why. The store's "never
+blind-write" guard will not save you — it only refuses an EMPTY canvas over a populated file.
+
+**Every workspace entry is a REF — content in a file, machine-local state on the entry.** There are
+three kinds and they now share one shape: a folder ref (`<cwd>/.nodeterm/project.json`, git-shared),
+an SSH ref (the same file on the host, with an offline `cache`), and a cwd-less canvas
+(`userData/inline-projects/<id>.json`, with the entry's `project` field kept as a cache for one
+release so an older build still reads it). Two habits follow. **Content goes in the file; anything
+this machine would legitimately disagree with another machine about — project id, viewport, default
+account, breadcrumbs, closed-session history, per-node `shell` — goes on the index entry**
+(`IndexEntryV3`), or a `git worktree add` / a second instance hands one machine's state to another.
+And **`workspace.json` is one file with last-writer-wins semantics, so it may not be the only home
+of any content**: that is precisely what let a second app instance erase a cwd-less canvas. Between
+two instances the arbiter is the file's `rev` — a lower rev never overwrites a higher one — and
+there is no merge; if you add a fourth kind, give it a file and say which rev wins.
+
+**A project with no folder is a real project — degrade explicitly, never silently.** "New project"
+creates a cwd-less canvas, so every folder-shaped feature meets one. Keep the affordance and
+disable it with its reason (`NEW_FILE_NO_CWD_HINT`,
+`WORKTREE_NO_CWD_HINT`, the Explorer/Source Control notes); a row that simply vanishes teaches
+nothing, and a message that names the wrong cause ("not a git repository" for a project that has no
+folder to be one) sends the user hunting a problem that does not exist.
+
 **Agent features attach to base harness capabilities, not frontend allowlists.** A custom agent can
 inherit a builtin harness, so add the capability and its one shared leaf (`src/shared/agents`) and
 let every UI ask the helper. Repeating Claude/Codex/etc. cases in menus breaks that inheritance and
 eventually drifts.
+
+**Never put a raw NUL byte in a source file — write `\x00`.** Git classifies a file containing one
+as *binary*, so it renders as "Binary files differ" in every diff surface (the PR page, `git diff`,
+`git log -p`) and `git grep` skips it. It still compiles and its tests still pass, so nothing fails
+— the file just becomes invisible to review, which is the worst way for this to go wrong. A
+separator or sentinel is a fine reason to want the byte; the escape is the same byte and keeps the
+file text. `src/shared/source-hygiene.test.ts` enforces this across every tracked `.ts`/`.tsx`.
+
+**Paths cross machines, so treat `\` as a separator wherever you split one.** A value persisted in
+`.nodeterm/project.json` is written by one machine and validated on another, so a guard that reads
+`\` as an ordinary filename character is simply wrong about the machine that will resolve it. This
+has already produced a real hole: a traversal check that split on `/` alone saw `./a\..\..\x.png`
+as a single harmless segment on *every* platform. Split on `[\\/]`, and prefer accepting both
+dialects while storing only one (see **Node icons** in CLAUDE.md for the worked example).
 
 ## Testing
 
@@ -235,6 +334,26 @@ decision into a pure function next to it (`keydown-intercept.ts`, `main-window.t
 Where a behaviour can only be verified on hardware we do not have in CI (a Mac, a real SSH host, a
 GPU), say so explicitly rather than implying coverage. Several docs carry numbered device
 checklists for exactly this.
+
+**A test that reads a checked-in file must not care how git checked it out.** `.gitattributes`
+declares `* text=auto eol=lf`, so every working tree is LF — but attributes only take effect on a
+re-checkout, so if you cloned before it landed, run `git add --renormalize .` (or re-clone) and your
+tree catches up. Windows is where this bites: Git for Windows defaults to `core.autocrlf=true`, so
+without the attributes file a fresh clone had CRLF working files and `CSS.indexOf('}\n}')` matched
+nothing — two suites failed on a checkout with zero local changes, and one of them reported 25 theme
+tokens missing that were all present. Normalize at the read
+(`readFileSync(f, 'utf8').replace(/\r\n/g, '\n')`); `src/shared/line-endings.guard.test.ts` fails on
+a read that slices a `\n`-bearing literal without it.
+
+**A test never touches a live tmux server.** You will most likely run `npm test` from inside a
+nodeterm terminal, where `-L node-terminal` and `-L nodeterm-rmt` are the servers holding every
+node you have open — one stray `kill-server` there ends your whole canvas, not your test. Every run
+therefore gets a private `TMUX_TMPDIR` (`test/setup/tmux-sandbox.ts`), which re-points every socket
+name at once. Write real-tmux suites the normal way — pick your own socket name, and use
+`makeTmuxTmpdir` if you also want your own directory — and do not build an `env` object for a real
+tmux without carrying `TMUX_TMPDIR` into it, which is the one way left to escape the sandbox.
+`src/core/tmux-socket-isolation.guard.test.ts` holds the short allowlist of suites that name a
+production socket on purpose; adding a third is a review conversation, not a checkbox.
 
 ## Pull requests
 

@@ -6,7 +6,7 @@ import { sshHostKey } from '@shared/ssh'
 import { useSettings } from '../../../state/settings'
 import { useSystemAccount } from '../../../state/systemAccount'
 import { useSystemCodexAccount } from '../../../state/systemCodexAccount'
-import { isAccountLoginNode } from '../../../state/workspace'
+import { isAccountLoginNode, NODE_COLORS } from '../../../state/workspace'
 import { useProjects } from '../../../state/projects'
 import { useSshConn } from '../../../state/sshConn'
 import { useSshServers } from '../../../state/sshServers'
@@ -29,6 +29,8 @@ import { AgentIcon } from '@renderer/lib/agentIcons'
 import { SearchableRow } from '../SearchableRow'
 import { Button } from '@renderer/ui/Button'
 import { Input } from '@renderer/ui/Input'
+import { cn } from '@renderer/ui/cn'
+import { thisMachine, thisMachineCap } from '../../../lib/machineName'
 
 const ROWS = {
   accounts: {
@@ -133,6 +135,62 @@ function applyCodexAccounts(fn: (accs: CodexAccount[]) => CodexAccount[]): void 
   s.update({ codexAccounts: fn(s.settings.codexAccounts) })
 }
 
+/**
+ * The per-account default node color picker. ONE definition for both managed-account kinds: a
+ * Claude and a Codex account carry the same optional `color` and feed the same `agentAccountColor`
+ * read at node creation, so two copies of these swatches could only drift. `label` names the group
+ * for assistive tech (and for the tests) — account labels are user-typed, so it is the only handle
+ * a row reliably has.
+ */
+function AccountColorSwatches({
+  label,
+  color,
+  onPick
+}: {
+  label: string
+  color?: string
+  onPick: (color?: string) => void
+}): React.JSX.Element {
+  return (
+    <div
+      role="group"
+      aria-label={`Default node color for ${label}`}
+      className="flex flex-wrap items-center gap-2 pt-1"
+    >
+      <span className="text-[12px] text-muted">Node color</span>
+      <button
+        type="button"
+        aria-label="Default"
+        aria-pressed={!color}
+        title="Use the agent's own color"
+        onClick={() => onPick(undefined)}
+        className={cn(
+          'flex size-5 items-center justify-center rounded-full border-2 text-[11px] text-muted',
+          color ? 'border-transparent bg-fill-weak' : 'border-text bg-fill-weak'
+        )}
+      >
+        ✕
+      </button>
+      {NODE_COLORS.map((c) => (
+        <button
+          key={c}
+          type="button"
+          // "<what> <hex>", the convention the Appearance accent picker set — a bare hex is not a
+          // name a screen reader can do anything with.
+          aria-label={`Node color ${c}`}
+          aria-pressed={color === c}
+          onClick={() => onPick(c)}
+          style={{ background: c }}
+          className={cn(
+            'size-5 rounded-full border-2',
+            color === c ? 'border-text' : 'border-transparent'
+          )}
+        />
+      ))}
+    </div>
+  )
+}
+
 /** Counts nodes bound to an account across every project's SERIALIZED nodes. The active
  *  project's live React Flow edits since the last commit aren't reflected here, so the count
  *  can be slightly stale for the active canvas — acceptable for a confirmation warning. */
@@ -184,6 +242,9 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
   const setLabel = (id: string, label: string): void =>
     applyAccounts((accs) => accs.map((a) => (a.id === id ? { ...a, label } : a)))
 
+  const setColor = (id: string, color?: string): void =>
+    applyAccounts((accs) => accs.map((a) => (a.id === id ? { ...a, color } : a)))
+
   // The open project whose SSH host matches a remote account (needed for the ssh context of
   // waitLogin / remove). Undefined for local accounts, or when no such project is open.
   const projectIdForHost = (host?: string): string | undefined => {
@@ -212,7 +273,7 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
   const [addingCodex, setAddingCodex] = useState(false)
   const [codexAddError, setCodexAddError] = useState<string | null>(null)
 
-  // The reachable machines: this Mac first, then every saved SSH server unioned with the active
+  // The reachable machines: this machine first, then every saved SSH server unioned with the active
   // project's own server (deduped by host key). Accounts partition onto them by `host`.
   const remoteTargets = codexRemoteTargets(sshServers, activeProject?.ssh?.server)
   const codexGroups = groupCodexAccountsByMachine(codexAccounts, remoteTargets)
@@ -263,6 +324,9 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
 
   const setCodexLabel = (id: string, label: string): void =>
     applyCodexAccounts((accs) => accs.map((a) => (a.id === id ? { ...a, label } : a)))
+
+  const setCodexColor = (id: string, color?: string): void =>
+    applyCodexAccounts((accs) => accs.map((a) => (a.id === id ? { ...a, color } : a)))
 
   // Add a LOCAL managed Codex account and open its device-login node. Remote Codex account creation
   // is fail-closed here: the base `codexAccounts.add()` mints on THIS Mac, so offering it under a
@@ -367,19 +431,26 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
               className="flex items-center justify-between gap-3 rounded-md border border-border/60 p-2"
               title={blockedReason}
             >
-              <div className="flex min-w-0 flex-1 items-center gap-2">
-                <Input
-                  className="w-48"
-                  placeholder="Codex account label"
-                  value={account.label}
-                  onChange={(e) => setCodexLabel(account.id, e.target.value)}
+              <div className="min-w-0 flex-1 space-y-1">
+                <div className="flex min-w-0 items-center gap-2">
+                  <Input
+                    className="w-48"
+                    placeholder="Codex account label"
+                    value={account.label}
+                    onChange={(e) => setCodexLabel(account.id, e.target.value)}
+                  />
+                  <AccountIdentityPills account={presentCodex(account)} warning={!selectable.ok} />
+                  {account.pending ? (
+                    <span className="rounded-full bg-[color:var(--warn)]/15 px-2 py-0.5 text-[11px] font-medium text-[color:var(--warn)]">
+                      pending
+                    </span>
+                  ) : null}
+                </div>
+                <AccountColorSwatches
+                  label={account.label}
+                  color={account.color}
+                  onPick={(c) => setCodexColor(account.id, c)}
                 />
-                <AccountIdentityPills account={presentCodex(account)} warning={!selectable.ok} />
-                {account.pending ? (
-                  <span className="rounded-full bg-[color:var(--warn)]/15 px-2 py-0.5 text-[11px] font-medium text-[color:var(--warn)]">
-                    pending
-                  </span>
-                ) : null}
               </div>
               <Button
                 variant="ghost"
@@ -623,6 +694,11 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
                   {account.email && !account.pending ? (
                     <p className="text-[12px] text-muted">{account.email}</p>
                   ) : null}
+                  <AccountColorSwatches
+                    label={account.label}
+                    color={account.color}
+                    onPick={(c) => setColor(account.id, c)}
+                  />
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
                   {account.pending
@@ -660,8 +736,8 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
           )}
 
           {activeHostKey ? (
-            // Inside an SSH project: choose where the new account lives. "On this Mac" is a normal
-            // local account; "On <host>" creates it on the remote host (usable only there).
+            // Inside an SSH project: choose where the new account lives. "On this machine" is a
+            // normal local account; "On <host>" creates it on the remote host (usable only there).
             <div className="space-y-2">
               <div className="flex flex-wrap items-center gap-2">
                 <Button
@@ -670,9 +746,9 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
                   onClick={() => void onAddAccount()}
                 >
                   {addingOn === LOCAL_TARGET ? (
-                    <AddingLabel where="this Mac" />
+                    <AddingLabel where={thisMachine()} />
                   ) : (
-                    'Add account — On this Mac'
+                    `Add account — On ${thisMachine()}`
                   )}
                 </Button>
                 <Button
@@ -706,7 +782,7 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
                 disabled={addingOn !== null}
                 onClick={() => void onAddAccount()}
               >
-                {addingOn === LOCAL_TARGET ? <AddingLabel where="this Mac" /> : 'Add account'}
+                {addingOn === LOCAL_TARGET ? <AddingLabel where={thisMachine()} /> : 'Add account'}
               </Button>
               {addingOn !== null ? (
                 <p className="text-[12px] leading-relaxed text-muted">
@@ -719,8 +795,9 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
 
           <p className="text-[12px] leading-relaxed text-muted">
             Accounts are isolated Claude logins. New Claude nodes pick an account from the add
-            menus; each node keeps its account for life. Remote accounts live on an SSH host and are
-            only offered in that host&apos;s projects.
+            menus; each node keeps its account for life. A node color applies to nodes opened under
+            that account from then on — existing ones keep the color they have. Remote accounts live
+            on an SSH host and are only offered in that host&apos;s projects.
           </p>
         </div>
       </SearchableRow>
@@ -738,7 +815,7 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
           {codexGroups.map((group) => (
             <MachinePanel
               key={group.host || 'local'}
-              label={group.remote ? (group.server?.label ?? group.host) : 'This Mac'}
+              label={group.remote ? (group.server?.label ?? group.host) : thisMachineCap()}
               remote={group.remote}
               hostKey={group.host || undefined}
               connected={group.remote ? !!connectedProjectIdForHost(group.host) : true}
@@ -750,7 +827,7 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
                     {addingCodex ? (
                       <span className="inline-flex items-center gap-2">
                         <span className="ui-spinner" aria-hidden />
-                        Setting up on this Mac…
+                        Setting up on {thisMachine()}…
                       </span>
                     ) : (
                       'Add Codex account'
@@ -781,6 +858,8 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
           <p className="text-[12px] leading-relaxed text-muted">
             Codex accounts are isolated logins, grouped by the machine their credentials live on.
             New Codex nodes pick an account from the add menus; each node keeps its account for life.
+            A node color applies to nodes opened under that account from then on — existing ones
+            keep the color they have.
           </p>
         </div>
       </SearchableRow>

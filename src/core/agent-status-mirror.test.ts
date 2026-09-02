@@ -17,6 +17,7 @@ import {
   flush,
   initAgentStatusMirror,
   setMirrorSettingsProvider,
+  setNodeHibernated,
   setMirrorServerProvider,
   setMirrorUsageProvider,
   buildMirrorUsage,
@@ -846,12 +847,72 @@ describe('activity mapping (toolActivity + recordRawToolEvent)', () => {
     expect(toolActivity('CustomThing', {})).toBe('Using CustomThing')
   })
 
+  it("maps grok's OWN tool names, which are measured and not claude's", () => {
+    // The fifteen names come from `signals.json.toolsUsed` across 22 real sessions, not from the
+    // docs. Only two argument keys were ever seen in a captured payload, so only two lines carry a
+    // detail — the rest name the action and stop rather than read a key nobody has observed.
+    expect(toolActivity('read_file', { target_file: 'src/app/fichero.txt' })).toBe('Reading fichero.txt')
+    expect(toolActivity('run_terminal_command', { command: 'echo hola' })).toBe('Running echo hola')
+    expect(toolActivity('search_replace', {})).toBe('Editing a file')
+    expect(toolActivity('write', {})).toBe('Writing a file')
+    expect(toolActivity('list_dir', {})).toBe('Listing a directory')
+    expect(toolActivity('grep', {})).toBe('Searching the code')
+    expect(toolActivity('web_search', {})).toBe('Searching the web')
+    expect(toolActivity('web_fetch', {})).toBe('Fetching a page')
+    expect(toolActivity('todo_write', {})).toBe('Updating its plan')
+    expect(toolActivity('spawn_subagent', {})).toBe('Delegating to a subagent')
+    expect(toolActivity('get_command_or_subagent_output', {})).toBe('Checking a background task')
+    expect(toolActivity('kill_command_or_subagent', {})).toBe('Stopping a background task')
+    expect(toolActivity('search_tool', {})).toBe('Looking up an MCP tool')
+    expect(toolActivity('ask_user_question', {})).toBe('Asking you a question')
+    expect(toolActivity('exit_plan_mode', {})).toBe('Presenting a plan')
+  })
+
+  it('never confuses the two vocabularies, which differ only by case in three places', () => {
+    // `grep`/`Grep` and `write`/`Write` are the same word. If anyone adds case-folding to that
+    // switch, these four expectations disagree — which is the point: folding them would read grok's
+    // argument keys out of a claude payload and vice versa.
+    expect(toolActivity('grep', { pattern: 'foo' })).toBe('Searching the code')
+    expect(toolActivity('Grep', { pattern: 'foo' })).toBe('Searching foo')
+    expect(toolActivity('write', { file_path: '/a/b.ts' })).toBe('Writing a file')
+    expect(toolActivity('Write', { file_path: '/a/b.ts' })).toBe('Editing b.ts')
+  })
+
+  it('names an MCP call by its tool AND its server, from the string itself', () => {
+    // grok resolves an MCP call to `server__tool` before the hook fires; its own dispatcher never
+    // appears. Deriving this from the name means no vocabulary to keep in sync with any server.
+    expect(toolActivity('linear__save_issue', {})).toBe('Using save_issue (linear)')
+    expect(toolActivity('iria-corpus__search', {})).toBe('Using search (iria-corpus)')
+    // Not an MCP shape: unchanged.
+    expect(toolActivity('CustomThing', {})).toBe('Using CustomThing')
+    expect(toolActivity('__weird', {})).toBe('Using __weird')
+  })
+
   it('truncates a long Bash command', () => {
     const long = 'echo ' + 'a'.repeat(200)
     const out = toolActivity('Bash', { command: long })
     expect(out.startsWith('Running ')).toBe(true)
     expect(out.length).toBeLessThanOrEqual('Running '.length + 60)
     expect(out.endsWith('…')).toBe(true)
+  })
+
+  it("shows a grok node's activity, translated at the shell boundary", () => {
+    // The shells translate grok's `pre_tool_use` into the string this gate wants. What this pins is
+    // the OTHER half: given that translation, the line is grok's own phrase and grok's own tool
+    // name, never a claude one. §8.3 of docs/grok-agent.md claimed grok never sends the event; it
+    // does, spelled `pre_tool_use`, and the gate below wants `PreToolUse` — a spelling, not an
+    // absence, which is why the original call looked like dead code and was deleted.
+    recordRawToolEvent('n-grok', {
+      hook_event_name: 'PreToolUse',
+      tool_name: 'read_file',
+      tool_input: { target_file: '/w/src/fichero.txt' }
+    })
+    expect(_inboxSnapshot().nodes['n-grok']).toMatchObject({
+      activity: 'Reading fichero.txt',
+      tool: 'read_file'
+    })
+    recordRawToolEvent('n-grok', { hook_event_name: 'Stop' })
+    expect(_inboxSnapshot().nodes['n-grok']?.activity ?? '').toBe('')
   })
 
   it('records activity on PreToolUse and clears it on Stop/SessionEnd', () => {
@@ -2201,5 +2262,67 @@ describe('inbox event age prune (flush)', () => {
 
     expect(_inboxSnapshot().events).toHaveLength(1)
     expect(_inboxSnapshot().events[0].resolved).toBeUndefined()
+  })
+})
+
+describe('hibernated flag (Eco × phone — SLEEPING on external readers)', () => {
+  let dir: string
+  let file: string
+
+  beforeEach(() => {
+    _resetForTest()
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-status-hib-'))
+    file = path.join(dir, 'agent-status.json')
+    initAgentStatusMirror(file)
+  })
+  afterEach(() => {
+    _resetForTest()
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('buildFile carries hibernated and EXEMPTS a hibernated entry from expiry', () => {
+    const now = EXPIRE_MS + 100_000
+    const doc = buildFile(
+      {
+        // Hibernation IS hours of idleness — the staleness rule must not erase the flag.
+        sleeping: { agentId: 'claude', hibernated: true, updatedAt: now - EXPIRE_MS - 1 },
+        stale: { state: 'working', updatedAt: now - EXPIRE_MS - 1 }
+      },
+      now
+    )
+    expect(Object.keys(doc.nodes)).toEqual(['sleeping'])
+    expect(doc.nodes.sleeping.hibernated).toBe(true)
+  })
+
+  it('setNodeHibernated sets on an EXISTING entry, creates a minimal one for an unknown id, and clears', async () => {
+    recordAgentEvent(ev({ nodeId: 'known', state: 'done' }))
+    setNodeHibernated('known', true)
+    // Unknown id: a hibernated session is typically one the mirror expired (or one reported at
+    // boot before any hook event of this run) — exactly when the flag matters most.
+    setNodeHibernated('fresh-boot', true)
+    expect(_snapshot().known.hibernated).toBe(true)
+    expect(_snapshot()['fresh-boot'].hibernated).toBe(true)
+    await flush()
+    const doc = JSON.parse(fs.readFileSync(file, 'utf-8'))
+    expect(doc.nodes.known.hibernated).toBe(true)
+    expect(doc.nodes['fresh-boot'].hibernated).toBe(true)
+
+    setNodeHibernated('known', false)
+    expect(_snapshot().known.hibernated).toBeUndefined()
+    await flush()
+    const woken = JSON.parse(fs.readFileSync(file, 'utf-8'))
+    expect('hibernated' in woken.nodes.known).toBe(false)
+    // Clearing an unknown id stays a no-op (no phantom entry minted).
+    setNodeHibernated('never-seen', false)
+    expect(_snapshot()['never-seen']).toBeUndefined()
+  })
+
+  it('the flag survives the SessionEnd reset the /exit itself fires', () => {
+    recordAgentEvent(ev({ nodeId: 'n1', state: 'done', sessionId: 's1' }))
+    setNodeHibernated('n1', true)
+    // Eco types /exit → the CLI's SessionEnd hook resets the node to idle — the flag must ride.
+    recordAgentEvent(ev({ nodeId: 'n1', kind: 'session' }))
+    expect(_snapshot().n1.state).toBeUndefined()
+    expect(_snapshot().n1.hibernated).toBe(true)
   })
 })

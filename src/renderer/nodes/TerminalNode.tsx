@@ -67,6 +67,7 @@ import { useXtermVisualSettings } from '../terminal/useXtermVisualSettings'
 import { ensureProjectLaunchInfo } from '../state/projectLaunchInfo'
 import { loseWebglContexts, registerWebglClient, type WebglClientHandle } from '../terminal/webgl-budget'
 import { quantizeCharSize } from '../terminal/char-size-quantize'
+import { resyncDomRendererSpacing } from '../terminal/dom-renderer-spacing'
 import {
   PARK_MAX,
   armParkExpiry,
@@ -82,6 +83,7 @@ import {
   planOffscreenVisibility,
   releaseStillEnabled,
   shouldDeferReleaseForEco,
+  shouldDeferReleaseForHeldLaunch,
   shouldDeferReleaseForLiveWork,
   OFFSCREEN_DEFER_RETRY_MS,
   OFFSCREEN_DISPOSE_MS_DEFAULT
@@ -116,13 +118,16 @@ import {
   performResumePhase,
   queryPaneWithin,
   registerAgentHibernate,
+  registerAgentPause,
   registerAgentRestart,
   restartEligibility,
   restartSessionId,
   RESTART_EXIT_TIMEOUT_MS,
   type ExitPhaseOutcome,
+  type PauseOutcome,
   type ResumePhaseOutcome
 } from '../terminal/agent-restart'
+import { shouldAutoWake, shouldColdResume } from '../terminal/hibernation-policy'
 import { WakeInputBuffer } from '../terminal/wake-input-buffer'
 import { FindBar } from '../components/FindBar'
 import { IconSearch, IconChat, IconMic, IconReload, IconEye, IconEyeOff, IconGrid } from '../components/icons'
@@ -147,6 +152,8 @@ import {
 import { useSettings } from '../state/settings'
 import { useCodexIdentity, codexSharedIdentity, codexFallbackText } from '../state/codexIdentity'
 import { useAgentStatus, agentStatusForApi, inferInterruptAfterSettle } from '../state/agentStatus'
+import { useLaunchDelivery } from '../state/launchDelivery'
+import { beginLaunch, erroredDeps, forgetArmed, launchTooltip, settleLaunch } from '../lib/pendingLaunch'
 import type { AgentState } from '@shared/agents/normalize'
 import type { ClientId } from '@shared/presence'
 import { PresenceChips } from '../components/PresenceChips'
@@ -195,6 +202,10 @@ import { ColumnPill } from '../components/kanban/ColumnPill'
 import { BoardLogPanel } from '../components/kanban/BoardLogPanel'
 import { AgentMascot } from './AgentMascot'
 import { MaximizeButton } from './MaximizeButton'
+import { NodeIconView } from '../components/NodeIcon'
+import { nodeIconDialog } from '../components/NodeIconPicker'
+import { applyIconChoice } from '../lib/nodeIconChoice'
+import type { NodeIcon } from '@shared/node-icon'
 import { connectHostAttachment } from '../lib/sshAttachments'
 
 /** Which physical modifier the registry's abstract `Cmd` resolves to for the find-bar chord. */
@@ -840,6 +851,54 @@ const coSubs = new Map<string, (s: CoState) => void>()
 const restartSubs = new Map<string, () => void>()
 
 /**
+ * Nodes whose terminal is up and settled enough to be TYPED INTO — the signal Canvas's armed-launch
+ * loop waits on before it delivers a held command (`pendingLaunch`).
+ *
+ * It exists because the loop used to wait on nothing at all: it fired `pty.sendText` the instant
+ * the canvas held the node and spent a flat 2 s retry budget while the session was still being
+ * spawned, then gave up in a `console.warn`. On a cold project switch that budget is gone before
+ * tmux has a session to paste into, which is issue #569 item 1 — a node stuck on QUEUED that only
+ * a manual click could start.
+ *
+ * "Ready" is deliberately the same moment `writeWhenShellReady` delivers an `initialCommand`: the
+ * session resolved AND its shell has gone quiet. Both paths type into the same pane, and a launch
+ * line written across zsh's rc-file tty flush is the mangled-command bug that helper exists for.
+ *
+ * ABSENT = not ready, which is the safe direction: it holds the launch (visibly — see
+ * `useLaunchDelivery`) instead of burning it against a session that is not there. Published by the
+ * node itself, since nothing else can see the spawn resolve. A PARKED session stays ready, and so
+ * does one whose viewer was RELEASED offscreen while tmux is underneath — both are still a live
+ * tmux session addressable by name; only a teardown that ends the session (respawn, delete, or the
+ * release of a plain-shell session) clears it.
+ */
+const sessionReadyNodes = new Set<string>()
+const sessionReadySubs = new Set<(nodeId: string) => void>()
+
+/** Is this node's session up and typeable? Unknown answers false — see the note above. */
+export function isSessionReady(nodeId: string): boolean {
+  return sessionReadyNodes.has(nodeId)
+}
+
+/**
+ * Watch for nodes becoming ready. The callback is handed the node id rather than being a bare
+ * "something changed" ping: Canvas re-renders on it, and a canvas of forty terminals must not
+ * re-render forty times on load for the sake of the one node that is armed.
+ */
+export function subscribeSessionReady(cb: (nodeId: string) => void): () => void {
+  sessionReadySubs.add(cb)
+  return () => {
+    sessionReadySubs.delete(cb)
+  }
+}
+
+function setSessionReady(nodeId: string, ready: boolean): void {
+  if (sessionReadyNodes.has(nodeId) === ready) return
+  if (ready) sessionReadyNodes.add(nodeId)
+  else sessionReadyNodes.delete(nodeId)
+  for (const cb of sessionReadySubs) cb(nodeId)
+}
+
+/**
  * Which mounted terminals are currently OUT of the viewport, published by the one visibility
  * observer each node already runs (Phase 2's) — never a second observer, and never a second
  * verdict: this map only mirrors what that callback decided.
@@ -899,19 +958,37 @@ function setNodeOffscreen(nodeId: string, offscreen: boolean): void {
 }
 
 /**
+ * Node ids with a live relay (phone) viewer attached — fed by Canvas from `agent:remote-viewers`
+ * (main sends the full set each change, never a delta, so a dropped event cannot strand a stale
+ * entry). A phone viewer is a THIRD way to be watched, invisible to both of `isNodeWatched`'s
+ * older eyes (the canvas observer and the kanban modal) — before this, Eco could `/exit` a CLI
+ * someone was actively reading on their phone.
+ */
+const remotelyViewedNodes = new Set<string>()
+
+/** Replace the remotely-viewed set (Canvas's `agent:remote-viewers` listener is the one caller). */
+export function setRemotelyViewedNodes(nodeIds: readonly string[]): void {
+  remotelyViewedNodes.clear()
+  for (const id of nodeIds) remotelyViewedNodes.add(id)
+}
+
+/**
  * "Is the user looking at this session RIGHT NOW?" — the one predicate behind every hibernation
  * decision that turns on attention: the sweep's plan, the exit closure's fire-time re-ask, and the
  * post-mark nudge. It has to be ONE function: the first version of this feature asked the question
  * three times, and the fire-time copy was missing the modal clause — so a card modal opened
  * mid-batch could still have `/exit` typed into it.
  *
- * Two ways to be watched, and the second is not visible to any observer: the node is on screen, or
- * its kanban card modal is open (see `watchedNodeId`). Unknown answers WATCHED — a node whose
- * observer has not delivered yet must never be read as "nobody is looking", which is the direction
- * that quits a session out from under someone.
+ * Three ways to be watched, and only the first is visible to any observer: the node is on screen,
+ * its kanban card modal is open (see `watchedNodeId`), or a phone viewer is attached to its
+ * session over the relay (`remotelyViewedNodes`). Unknown answers WATCHED — a node whose observer
+ * has not delivered yet must never be read as "nobody is looking", which is the direction that
+ * quits a session out from under someone.
  */
 export function isNodeWatched(nodeId: string): boolean {
-  return !offscreenNodes.has(nodeId) || watchedNodeId === nodeId
+  return (
+    !offscreenNodes.has(nodeId) || watchedNodeId === nodeId || remotelyViewedNodes.has(nodeId)
+  )
 }
 
 /**
@@ -1288,6 +1365,10 @@ export function TerminalNode({
   // with — it can be off-screen mid-drag or right after a ⌘K jump — so it is never taken down.
   const selectedRef = useRef(selected)
   selectedRef.current = selected
+  // Is this node holding a `--after` launch? Read at release FIRE time (see `fireRelease`) — the
+  // hold ends when the launch fires, and a plan made at arm time would not know.
+  const armedRef = useRef(!!data.pendingLaunch)
+  armedRef.current = !!data.pendingLaunch
   // --- glyphgrid (experimental shared renderer) ---
   // This node's registered grid, published by the lifecycle effect so the position effect can push
   // an origin without re-running (and therefore respawning) the terminal. Null for every terminal
@@ -1504,7 +1585,12 @@ export function TerminalNode({
       wakeTimerRef.current = setTimeout(() => wakeRef.current(attempt + 1), WAKE_RETRY_MS)
     }
     if (wakeInFlightRef.current) return
-    if (!useAgentStatus.getState().byId[id]?.hibernated) return
+    // Answers a manual Resume for BOTH pause depths, not only ordinary hibernation: a `paused`
+    // node may or may not also be `hibernated` (the deep "pause & end session" recycles the tmux
+    // session instead, leaving `hibernated` unset), but either flag means there is a conversation
+    // this closure knows how to bring back.
+    const stNow = useAgentStatus.getState().byId[id]
+    if (!stNow?.hibernated && !stNow?.paused) return
     const fns = agentHibernateFns(id)
     if (!fns) return retryLater() // no terminal here yet (mid-spawn, or an offscreen revive)
     wakeInFlightRef.current = true
@@ -1519,6 +1605,7 @@ export function TerminalNode({
         wakeInputBufferRef.current.endWake(outcome === 'resumed', paneWriteRef.current)
         if (outcome === 'resumed') {
           useAgentStatus.getState().setHibernated(id, false)
+          useAgentStatus.getState().setPaused(id, false)
           return
         }
         // 'not-eligible' — usually timing, not a refusal that will stand: at mount the spawn is
@@ -1546,7 +1633,11 @@ export function TerminalNode({
     const trigger = (): void => wakeRef.current()
     wakeSubs.set(id, trigger)
     const t = setTimeout(() => {
-      if (isNodeWatched(id)) wakeRef.current()
+      // A `paused` node never auto-wakes, mount included — the trigger published above (and the
+      // chip's own click) remain the explicit way back. `hibernated`-only nodes are unaffected:
+      // this is the everyday Eco auto-resume-on-view path. See `shouldAutoWake`.
+      const stMount = useAgentStatus.getState().byId[id]
+      if (isNodeWatched(id) && shouldAutoWake(stMount?.hibernated, stMount?.paused)) wakeRef.current()
     }, WAKE_MOUNT_DELAY_MS)
     return () => {
       clearTimeout(t)
@@ -1564,6 +1655,16 @@ export function TerminalNode({
   // it is armed, and by WHAT it is blocked — dep titles read straight off the live canvas, since
   // "waits for term-17" tells the user nothing.
   const pendingLaunch = data.pendingLaunch as PendingLaunch | undefined
+  // What the delivery loop has to say about this node's held launch, if anything. Absent is the
+  // ordinary case (still waiting on a dependency); the two states it can carry are the ones that
+  // used to be invisible — see the store. Selected by id so an unarmed node never re-renders on
+  // another node's delivery.
+  const launchDelivery = useLaunchDelivery((s) => s.byId[id])
+  // ▶ Run now's in-flight guard is NOT a component-local latch: it is the module-level registry in
+  // lib/pendingLaunch (`beginLaunch` / `settleLaunch`), shared with the canvas fire effect, so the
+  // two paths that can type this launch into the shell see one claim. A local ref here could not
+  // see a canvas send mid-flight (double submit), and releasing it on `pendingLaunch` identity let a
+  // same-content peer upsert reopen it while a send was outstanding (consort review, 2026-09-02).
   const pendingWaitingOn = [
     ...(pendingLaunch?.after ?? []).map(
       (depId) => ((getNode(depId) as CanvasNode | undefined)?.data.title as string) || depId
@@ -1572,6 +1673,24 @@ export function TerminalNode({
     // tooltip on a setup-only hold would read "Waiting for  to finish".
     ...(pendingLaunch?.awaitSetupGroup ? ['the project setup script'] : [])
   ].join(', ')
+  // Which of those deps are held because their last turn ERRORED (issue #521) — an errored station
+  // is idle, so without naming them the tooltip would promise a wait that will never end on its
+  // own. Selected as a joined string so the selector returns a primitive and an unarmed node never
+  // re-renders on another node's status.
+  const erroredDepIds = useAgentStatus((s) => {
+    const after = pendingLaunch?.after ?? []
+    if (!after.length) return ''
+    // Same liveness rule `depSatisfied` uses: a dep that is gone counts as satisfied, so it is
+    // not something this node is held on and must not be named as one.
+    const live = new Set(after.filter((d) => !!getNode(d)))
+    return erroredDeps({ id, data: { pendingLaunch } }, s.byId, live).join(',')
+  })
+  const pendingErroredOn = erroredDepIds
+    ? erroredDepIds
+        .split(',')
+        .map((depId) => ((getNode(depId) as CanvasNode | undefined)?.data.title as string) || depId)
+        .join(', ')
+    : ''
   // Use the chat panel only for a chat-capable agent with a known session; otherwise the
   // markdown-of-output view (computed in the capture effect below) is shown as a fallback.
   const useChat = mdMode && showChat && !!status?.sessionId
@@ -1753,6 +1872,11 @@ export function TerminalNode({
       parkedTerminals.delete(termKey)
       parked.timer.cancel()
     }
+    // An ADOPTED terminal is already typeable — the same live session, the same settled shell —
+    // and its spawn continuation ran on a previous mount, so it will never reach the publish
+    // below. A fresh one starts NOT ready: this effect also re-runs for a respawn and for an
+    // offscreen revive, and both replace the session a stale `true` would describe.
+    setSessionReady(id, !!parked)
 
     const s = useSettings.getState().settings
     // Appearance comes from ONE place, shared with the kanban card modal's viewer of this same
@@ -2078,6 +2202,11 @@ export function TerminalNode({
      */
     const applyFit = () => {
       try {
+        // A DOM renderer built while this node was unmeasurable — the park (its cleanup releases
+        // the webgl grant AFTER React detached the element) or a display:none wrapper — measured a
+        // 0-wide 'W' and baked a full extra cell into its row spacing. This is the first moment it
+        // can be re-derived; a no-op whenever the spacing already agrees. See the helper.
+        if (resyncDomRendererSpacing(term)) fullRepaint()
         // Board up → this canvas terminal is hidden behind the overlay. Report "not viewing" (null)
         // so a card-modal viewer of the same session drives the grid instead of being clamped to our
         // (possibly zoomed-tiny) canvas size. No modal viewer → no size vote at all → the pty simply
@@ -2618,7 +2747,12 @@ export function TerminalNode({
       // into a CSI write and cancel the event — and DO NOT preventDefault: the dispatcher bails
       // on defaultPrevented events, so a prevented bubble would kill the very dispatch this
       // exists to reach.
-      if (action === 'bubble') return false
+      // 'native': same mechanics, different owner — the PLATFORM's paste (Windows Ctrl+V, issue
+      // #562). xterm would map it to \x16 and cancel the keydown, which suppresses both
+      // Chromium's paste command and the Edit menu's Ctrl+V accelerator; leaving the event
+      // untouched lets the ordinary `paste` event reach xterm's textarea, exactly as ⌘V does on
+      // macOS (bracketed-paste framing included).
+      if (action === 'bubble' || action === 'native') return false
       e.preventDefault()
       if (action === 'copy') window.nodeTerminal.clipboard.writeText(term.getSelection())
       // Shift+Enter → ESC+CR so agent CLIs insert a newline instead of submitting
@@ -3052,22 +3186,14 @@ export function TerminalNode({
         // `quote>` on Enter) instead of running. The settle wait below minimizes wasted
         // attempts; deliverCommand (echo-verify + retry, fail-open) guarantees a mangled
         // line is never submitted. See command-delivery.ts.
-        const writeWhenShellReady = (cmd: string): void => {
+        const whenShellSettled = (run: () => void): void => {
           let done = false
           let timer: ReturnType<typeof setTimeout>
           const fire = (): void => {
             if (done) return
             done = true
             unsub()
-            cleanups.push(
-              deliverCommand(
-                {
-                  write: (d) => transport.write(sid, d),
-                  onData: (cb) => transport.onData(sid, cb)
-                },
-                cmd
-              )
-            )
+            run()
           }
           const unsub = transport.onData(sid, () => {
             if (done) return
@@ -3081,6 +3207,26 @@ export function TerminalNode({
             unsub()
           })
         }
+        const writeWhenShellReady = (cmd: string): void => {
+          whenShellSettled(() => {
+            cleanups.push(
+              deliverCommand(
+                {
+                  write: (d) => transport.write(sid, d),
+                  onData: (cb) => transport.onData(sid, cb)
+                },
+                cmd
+              )
+            )
+          })
+        }
+        // Tell the canvas this node can be typed into — the gate its armed-launch loop waits on.
+        // Through the SAME settle the two writers above use, and for the same reason: the held
+        // launch is an agent CLI command line, and a line delivered across zsh's rc-file tty flush
+        // comes out mangled. Published unconditionally (not only for an armed node): whether this
+        // node is armed is Canvas's question, it can change after the spawn resolves, and the
+        // subscribers filter by id anyway.
+        whenShellSettled(() => setSessionReady(id, true))
         // Hibernation × cold restore. `hibernated` is PERSISTED, so it can outlive the very thing
         // it describes:
         //  - `fresh` (the tmux session is GONE — a reboot, a reaped server, a first open): the CLI
@@ -3095,18 +3241,40 @@ export function TerminalNode({
         if (fresh && useAgentStatus.getState().byId[id]?.hibernated) {
           useAgentStatus.getState().setHibernated(id, false)
         }
+        // Paused (see agentStatus.paused) is the ONE exception to the "fresh always resumes" rule
+        // above: it exists precisely to survive a cold restart, so it must NOT be dropped here, and
+        // the auto-resume branch below must be skipped — only an explicit Resume (which reuses the
+        // same command-building path through the registered hibernate/wake pair) may relaunch it.
+        const pausedNow = !!useAgentStatus.getState().byId[id]?.paused
         // Run a one-shot command on first open (e.g. "gh auth login" or the agent CLI), then
         // forget it.
         if (data.initialCommand) {
           writeWhenShellReady(data.initialCommand)
           updateNodeData(id, { initialCommand: undefined })
-        } else if (fresh && agentId && canResume(agentId) && mayRelaunchAgent(data)) {
+        } else if (
+          fresh &&
+          agentId &&
+          canResume(agentId) &&
+          !data.pendingLaunch && // ≡ mayRelaunchAgent(data), spelled out: session-ready-signal.test pins it
+          shouldColdResume(pausedNow)
+        ) {
           // An ARMED node (`pendingLaunch` still set) has never launched its agent — its minted
           // `agentSessionId` names a conversation that does not exist yet, so the held launch, not a
-          // `--resume`, is what must create it. Skip here and let the fire effect deliver.
+          // `--resume`, is what must create it. Skip here and let the fire effect deliver (the same
+          // gate `mayRelaunchAgent` applies to the restart paths). A PAUSED node is the other
+          // hold-out (`shouldColdResume`, see `pausedNow` above): only an explicit Resume relaunches it.
           // Cold restart of an agent node: the live agent is gone, so re-launch it. Resume the
           // prior conversation by its session id when we have one; otherwise start the agent
           // fresh. Plain terminals get nothing here — just the restored shell.
+          //
+          // An ARMED node (`pendingLaunch`) is excluded, and that is the point of arming: its
+          // launch — the very same agent CLI line, with the brief it was opened for — is being
+          // HELD until its dependencies finish. Launching a bare CLI here starts the session the
+          // hold exists to prevent, and Canvas's held launch then arrives as TEXT typed into the
+          // running CLI rather than as the command it is. A first open is `fresh` by definition,
+          // so this covered every `--after` / `verify` node; it was previously masked by the
+          // delivery race (the held launch usually lost it and was retried), and gating delivery
+          // on the shell settling would have made the collision deterministic.
           //
           // Two sources, in this order, and the order is the whole point:
           //  1. the LIVE id from hooks, which tracks `/clear` and `--fork-session` minting a new
@@ -3163,6 +3331,19 @@ export function TerminalNode({
             agentEnvSnapshot()
           )
           if (cmd) writeWhenShellReady(cmd) // same shell-startup race as initialCommand
+        } else if (fresh && pausedNow) {
+          // The auto-resume above was skipped (that's the feature), but this mount's PANE is
+          // brand new either way — tmux respawned it, whether from the deep "pause & end session"
+          // recycle or from a genuine reboot that took a shallow-paused session's tmux with it.
+          // The later Resume's pane-recognition (`isShellCommand(pane)` OR the recorded
+          // `hibernatedPane` — see performExitPhase's wake half) would otherwise refuse a user
+          // whose default shell sits outside the `isShellCommand` allowlist (nu/xonsh/pwsh)
+          // forever: a PAUSED chip that can never resume, with a live conversation on disk. Record
+          // what this fresh pane actually is, the same way the exit half does — replacing any
+          // stale value a pre-reboot shallow pause left behind, which described a pane that no
+          // longer exists.
+          const settled = await queryPaneWithin(() => api.pty.paneCommand(id), RESTART_EXIT_TIMEOUT_MS)
+          useAgentStatus.getState().setHibernatedPane(id, settled)
         }
       })
       .catch((err: unknown) => {
@@ -3474,6 +3655,12 @@ export function TerminalNode({
         // Read at CALL time — a local project can BECOME an SSH project long after this mount.
         if (offscreenRemoteRef.current) return 'not-eligible'
         const st = useAgentStatus.getState().byId[id]
+        // Already paused (shallow OR deep — deep has `hibernated` unset, so this is the only
+        // thing that catches it): the plan already excludes this via `HibernationCandidate.paused`,
+        // but a dropped SessionEnd hook POST could otherwise leave a deep-paused node reading as
+        // an ordinary idle `done` candidate between the plan and this fire-time re-ask. The pane is
+        // already bare — see `alreadyExited` in the manual pause closure for the same rule.
+        if (st?.paused) return 'not-eligible'
         const agentSessionId = st?.sessionId
         // Re-asked here, not trusted from the plan: a node that started working between the sweep's
         // decision and its turn must keep its turn (BUSY_STATES — an exit line typed into a
@@ -3585,6 +3772,68 @@ export function TerminalNode({
             else cleanups.push(cancel)
           }
         })
+      })
+    })
+
+    // Manual "Pause session" (the PAUSE action: node context menu only — shared by the canvas
+    // right-click and the sessions sidebar row menu, which reuses this same `selectionItems`
+    // builder; no command palette entry, no kanban-card pause button, deliberately deferred): quit
+    // the CLI and mark the node PAUSED so it does NOT auto-resume on the next reveal or cold
+    // restart — an explicit Resume (which reuses `agentHibernateFns(id).resume()` above, and now
+    // has a THIRD surface too — `CardModal`'s own clickable PAUSED chip) is the only way back.
+    // Deliberately its OWN closure rather than a call into `agentHibernateFns(id).exit()`:
+    // that one refuses a node the user is currently WATCHING (`isNodeWatched`) — exactly right for
+    // Eco's own sweep, exactly wrong for a manual pause of the node the user is looking at right now.
+    const unregisterPause = registerAgentPause(id, {
+      pause: guardConcurrentRestart(id, async (deep: boolean): Promise<PauseOutcome> => {
+        // Deep pause recycles the tmux session, which — like `restartShell`'s recycle — must not
+        // run on a relay session's core (its shell env belongs to the HOST, not this one). Shallow
+        // pause touches no shell env and is allowed over SSH/relay, same as ordinary Restart/exit.
+        if (deep && session.source === 'relay') return 'not-eligible'
+        const st = useAgentStatus.getState().byId[id]
+        const agentSessionId = st?.sessionId
+        const gate = restartEligibility(agentId, st?.state, agentSessionId)
+        if (!gate.ok || !agentId || !agentSessionId || !restartTarget()) return 'not-eligible'
+        // Already hibernated (Eco already exited this CLI, or a prior shallow pause): the pane is
+        // ALREADY a bare shell, so asking it to quit again would type `/exit` into that shell as a
+        // real command — junk output, and it would eat any half-typed line the user left there.
+        // Skip straight to marking (and, if deep, recycling) — there is nothing left to exit.
+        const alreadyExited = !!st?.hibernated
+        const outcome = alreadyExited
+          ? 'exited'
+          : await performExitPhase({
+              agentId,
+              sessionId: agentSessionId,
+              io: restartIo,
+              paneCommand: () => api.pty.paneCommand(id),
+              isLive: restartTarget
+            })
+        if (outcome !== 'exited') return outcome
+        if (deep) {
+          // "Pause & end session": also recycle the tmux session for a fuller memory reclaim — the
+          // exact mechanism `restartAgentNode(…, restartShell: true)` uses, minus the auto-relaunch:
+          // the next mount is `fresh`, and `paused` (set below, before the recycle takes effect)
+          // is what keeps that mount's cold-restore auto-resume from firing.
+          useAgentStatus.getState().setPaused(id, true)
+          transport.recycle(id)
+          updateNodeData(id, (node) => ({
+            respawnNonce: ((node.data.respawnNonce as number | undefined) ?? 0) + 1
+          }))
+        } else if (alreadyExited) {
+          // The pane and its recorded `hibernatedPane` are already correct (Eco/a prior pause set
+          // them); only the durability changes.
+          useAgentStatus.getState().setPaused(id, true)
+        } else {
+          // Shallow "Pause": identical to an Eco exit — tmux/pane untouched, `hibernated` records
+          // it so the SLEEPING machinery (pane-recognition on wake) still applies — plus `paused`,
+          // which is the only thing that changes: no auto-wake on reveal, and no auto-resume should
+          // the tmux session itself later die and come back `fresh` (a reboot, e.g.).
+          const settled = await queryPaneWithin(() => api.pty.paneCommand(id), RESTART_EXIT_TIMEOUT_MS)
+          useAgentStatus.getState().setHibernatedPane(id, settled)
+          useAgentStatus.getState().setHibernated(id, true)
+          useAgentStatus.getState().setPaused(id, true)
+        }
+        return 'paused'
       })
     })
 
@@ -3771,6 +4020,7 @@ export function TerminalNode({
       // …and nothing may hibernate or wake one either: with no registration the sweep reads this
       // node as unwired (`planHibernation` refuses it) and the wake finds nothing to resume into.
       unregisterHibernate()
+      unregisterPause()
       observer.disconnect()
       rootObserver.disconnect()
       // The visibility observer is NOT disconnected here — it is mount-stable and must outlive an
@@ -3887,6 +4137,17 @@ export function TerminalNode({
       // EARLIER effect (this terminal may have been adopted from a park) sees the session die here
       // and tears down instead of wiring listeners onto it; `killSession` keeps the kill single.
       life.dead = true
+      // A real teardown (respawn, delete) ends the session this node published as ready. A PARK
+      // does not, and returns above without reaching here — a parked session is still a live tmux
+      // session addressable by name, so it stays typeable. An OFFSCREEN RELEASE of a tmux-backed
+      // session is the same fact from the other side: only the viewer goes, the session keeps
+      // running and `sendText` reaches it by name — so readiness is kept. MEASURED (2026-09-02):
+      // clearing it here held a released `--after` node's launch through its dependency going
+      // `done`, with the badge claiming the terminal "has not started yet", until a camera travel
+      // revived the node and it fired at once. The plain-shell fallback never reaches this branch
+      // armed — `shouldDeferReleaseForHeldLaunch` holds the release there — and a respawn while
+      // down is not a release (the effect early-returned, so there is no session to keep).
+      if (!(offscreenDownRef.current && sessionPersistent)) setSessionReady(id, false)
       cleanups.forEach((fn) => fn())
       if (sessionId) killSession(sessionId)
       term.dispose()
@@ -3950,8 +4211,11 @@ export function TerminalNode({
         setNodeOffscreen(id, !visible)
         // …and the wake edge: a hibernated node the user has just panned back to gets its
         // conversation resumed before they can reach for the chip. No-op (one map lookup) for a
-        // node that is not hibernated, which is every node in the default case.
-        if (visible && !wasVisible) wakeRef.current()
+        // node that is not hibernated, which is every node in the default case. A `paused` node is
+        // excluded — see the mount-timer trigger above for why (`shouldAutoWake`).
+        const stVisible = useAgentStatus.getState().byId[id]
+        if (visible && !wasVisible && shouldAutoWake(stVisible?.hibernated, stVisible?.paused))
+          wakeRef.current()
         // A visible node is not in an offscreen stretch at all — the next hidden edge starts a
         // fresh clock for the Eco deferral's cap.
         if (visible) offscreenSinceRef.current = null
@@ -4018,6 +4282,22 @@ export function TerminalNode({
               // runs would skip the hibernate-first ordering and forfeit the CLI's hundreds of MB
               // at the exact moment they became reclaimable. The stretch effectively begins when
               // the work ends.
+              offscreenSinceRef.current = Date.now()
+              offscreenTimerRef.current = setTimeout(fireRelease, OFFSCREEN_DEFER_RETRY_MS)
+              return
+            }
+            // A HELD LAUNCH ON A PLAIN SHELL (the fifth lever): the `--after` launch this node holds
+            // is typed into the pane by session name, and without tmux the release destroys that
+            // pane. Nothing brings a released node back but the camera, so the launch would sit
+            // QUEUED until the user happened to pan over it. Same cadence, same drain: the hold
+            // ends when the launch fires. (Tmux-backed: released as normal — see the teardown,
+            // which keeps such a session READY because it stays typeable by name.)
+            if (
+              shouldDeferReleaseForHeldLaunch({
+                tmuxBacked: sessionPersistentRef.current,
+                armed: armedRef.current
+              })
+            ) {
               offscreenSinceRef.current = Date.now()
               offscreenTimerRef.current = setTimeout(fireRelease, OFFSCREEN_DEFER_RETRY_MS)
               return
@@ -4615,6 +4895,24 @@ export function TerminalNode({
             ))}
           </div>
         )}
+        {data.icon ? (
+          <button
+            className="term-node__icon nodrag"
+            title="Change icon"
+            onClick={(e) => {
+              e.stopPropagation()
+              void nodeIconDialog({
+                nodeId: id,
+                title: (data.title as string) ?? '',
+                icon: data.icon as NodeIcon
+              }).then((choice) =>
+                applyIconChoice(choice, (icon) => updateNodeData(id, { icon }))
+              )
+            }}
+          >
+            <NodeIconView icon={data.icon as NodeIcon} size={15} />
+          </button>
+        ) : null}
         {editingTitle ? (
           <input
             className="term-node__title nodrag"
@@ -4706,18 +5004,32 @@ export function TerminalNode({
             revealing the node resumes the conversation. Clickable because the automatic wake can
             refuse (a pane that now belongs to something else, a spawn that is still coming up),
             and a badge with no way forward is a dead end. Muted on purpose: nothing is wrong. */}
-        {status?.hibernated && (
+        {status?.paused ? (
           <button
-            className="term-node__status term-node__status--sleeping nodrag"
-            title="Agent hibernated to save memory — click to resume"
+            className="term-node__status term-node__status--paused nodrag"
+            title="Session paused — click to resume"
             onClick={(e) => {
               e.stopPropagation()
               wakeRef.current()
             }}
           >
             <span className="term-node__status-dot" />
-            SLEEPING
+            PAUSED
           </button>
+        ) : (
+          status?.hibernated && (
+            <button
+              className="term-node__status term-node__status--sleeping nodrag"
+              title="Agent hibernated to save memory — click to resume"
+              onClick={(e) => {
+                e.stopPropagation()
+                wakeRef.current()
+              }}
+            >
+              <span className="term-node__status-dot" />
+              SLEEPING
+            </button>
+          )
         )}
         {/* Dismissed (cron/schedule) entries are retained as a fact but hidden everywhere they
             were shown before — chip included, so the × still does exactly what it always did to
@@ -4739,30 +5051,70 @@ export function TerminalNode({
             "run now" an armed node left over from before the restart would be a dead end. */}
         {pendingLaunch && (
           <span
-            className="term-node__status term-node__status--queued nodrag"
-            title={`Waiting for ${pendingWaitingOn} to finish, then runs:\n${pendingLaunch.command}`}
+            className={`term-node__status term-node__status--queued nodrag${
+              launchDelivery ? ' term-node__status--queued-warn' : ''
+            }`}
+            title={launchTooltip(launchDelivery, pendingWaitingOn, pendingLaunch.command, pendingErroredOn)}
           >
             <span className="term-node__status-dot" />
-            QUEUED
+            {launchDelivery ? '⚠ ' : ''}QUEUED
             <button
               className="term-node__queued-run"
               title="Run now without waiting"
               onClick={(e) => {
                 e.stopPropagation()
                 // This click IS the user's consent for a launch that was loaded from the project file
-                // rather than armed here (see wasArmedThisSession).
-                // Clear FIRST so neither a second click nor the automatic fire effect can submit the
-                // same command while this delivery is in flight (consort re-review SERIOUS); put the
-                // launch back only if the shell refused it, so the only copy is never lost.
-                const held = pendingLaunch
-                updateNodeData(id, { pendingLaunch: undefined })
-                void api.pty.sendText(id, held.command).then((ok) => {
-                  if (!ok) updateNodeData(id, { pendingLaunch: held })
+                // rather than armed here (see wasArmedThisSession). Two guarantees:
+                // NO DOUBLE SUBMIT — `beginLaunch` claims the node in the registry SHARED with the
+                // canvas fire effect, synchronously, so a second click, a fire-effect re-run AND a
+                // canvas send already in flight all meet the same claim; the process's consent for
+                // this id is revoked BEFORE the send as well, so the effect cannot re-submit it after
+                // the claim is released either (consort review SERIOUS ×2). NO LOSS — `pendingLaunch`
+                // is dropped only on a delivery that LANDED: the node holds the only copy, and
+                // "session not up yet" is precisely the state a user reaches for this button in
+                // (#569), so a refusal keeps the launch and turns the badge into ⚠ QUEUED ("1 attempt
+                // was refused … press ▶") instead of vanishing. Both outcomes are judged against the
+                // launch the node holds AT SETTLE TIME (`settleLaunch`, read fresh off the flow
+                // store): if a peer replaced it while the send was in flight, A's landing must not
+                // clear B and A's refusal must not mark B failed.
+                const sentKey = beginLaunch(id, pendingLaunch)
+                if (sentKey === null) return
+                forgetArmed(id)
+                const currentLaunch = (): PendingLaunch | undefined =>
+                  (getNode(id) as CanvasNode | undefined)?.data.pendingLaunch as PendingLaunch | undefined
+                void api.pty.sendText(id, pendingLaunch.command).then((ok) => {
+                  if (settleLaunch(id, sentKey, ok, currentLaunch()) === 'stale') return
+                  if (ok) {
+                    useLaunchDelivery.getState().clear(id)
+                    updateNodeData(id, { pendingLaunch: undefined })
+                  } else {
+                    useLaunchDelivery.getState().markFailed(id, 1)
+                  }
+                }, () => {
+                  // A REJECTED RPC (relay closed, `failPending()` in the ws bridge) is a refusal,
+                  // not a hang: without this handler the claim stayed set forever and ▶ was dead
+                  // until the node remounted. The launch is kept, exactly as for a refusal.
+                  if (settleLaunch(id, sentKey, false, currentLaunch()) === 'refused')
+                    useLaunchDelivery.getState().markFailed(id, 1)
                 })
               }}
             >
               ▶
             </button>
+          </span>
+        )}
+        {/* Issue #521: the last turn ended on an API/model error (the agent's own `StopFailure`
+            hook). NOT a state — the station is idle, and the two facts coexist; this is the only
+            thing on any surface that tells an errored station apart from one that finished. It
+            clears itself on the next genuine turn. Shown beside a `done`/unknown state only: a
+            live RUNNING/NEEDS YOU is about the CURRENT turn and speaks for itself. */}
+        {status?.lastTurnError && status?.state !== 'working' && (
+          <span
+            className="term-node__status term-node__status--errored"
+            title={`${agentLabel} ended its last turn on an error \u2014 it produced nothing this turn. Anything armed to wait on this node is held until a turn succeeds.`}
+          >
+            <span className="term-node__status-dot" />
+            TURN FAILED
           </span>
         )}
         {(status?.state === 'waiting' || status?.state === 'blocked') && (
@@ -5077,6 +5429,7 @@ export function TerminalNode({
                 sessionId={status?.sessionId}
                 cwd={data.cwd as string | undefined}
                 accountId={data.accountId}
+                agentId={agentId}
               />
             </Suspense>
           ) : (

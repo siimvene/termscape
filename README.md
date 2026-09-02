@@ -52,7 +52,7 @@ Stacked terminal tabs hide context — you lose track of what's running where. n
 turns that into a **map**: every shell is a node you can place, group, label, and zoom
 into. Sessions are spatial and persistent, so your mental model stays intact across
 restarts. And because the app is built around a clean service seam, the same canvas runs
-three ways — as the **desktop app for macOS and Linux**, as a **self-hosted browser app**
+three ways — as the **desktop app for macOS, Linux and Windows (beta)**, as a **self-hosted browser app**
 you reach from anywhere (Server Edition), and an **iOS companion** that attaches to the
 same live sessions.
 
@@ -333,7 +333,10 @@ The full inventory of what nodeterm writes where (and what the script keeps, lik
 Requires Node.js 20+ on macOS or Linux (tmux recommended — it's what makes sessions
 survive restarts). A source checkout does **not** carry the bundled tmux: run
 `node scripts/build-tmux.mjs` once on macOS to build it into `resources/bin/tmux` (the
-release job does this automatically), or just install tmux yourself.
+release job does this automatically), or just install tmux yourself. On **Windows**, run
+`bootstrap-windows.bat` from a fresh checkout first — it checks for Node, the Visual Studio
+C++ build tools and Python 3 (needed to compile node-pty) and points you at the exact
+`winget` commands for anything missing, then runs `npm ci`.
 
 ```bash
 npm install        # deps + rebuilds node-pty against Electron's ABI (postinstall)
@@ -344,6 +347,7 @@ npm run typecheck  # fastest correctness gate
 npm test           # vitest unit + integration suite
 npm run dist       # local UNSIGNED .dmg into dist/ (smoke test)
 npm run dist:linux # AppImage + .deb into dist/ (on a Linux host)
+npm run dist:win   # unsigned NSIS installer + zip into dist/ (on a Windows host)
 npm run server:dev # build + run the browser Server Edition (needs Node 22 + tmux)
 ```
 

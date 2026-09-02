@@ -16,6 +16,7 @@
 
 import {
   UNKNOWN_CLAUDE_CLI_CAPS,
+  UNKNOWN_GROK_CLI_CAPS,
   UNKNOWN_CODEX_IDENTITY_CAPS,
   type ClaudeUsage,
   type NodeTerminalApi,
@@ -123,6 +124,11 @@ export function buildStubApi(): Omit<
   | 'onUnreadClear'
   | 'answerPermission'
   | 'ackDone'
+  | 'reportHibernated'
+  | 'onAgentWake'
+  | 'onRemoteViewers'
+  | 'onAgentRefreshNode'
+  | 'onAgentRenameNode'
   // Real over the bridge (IPC.appUserDataDir): the worktree dialog's default path is derived from
   // it, and a '' stub would propose `/worktrees/…` at the filesystem root.
   | 'userDataDir'
@@ -274,6 +280,17 @@ export function buildStubApi(): Omit<
       read: () => Promise.resolve({ ok: false, rows: [], mem: null }),
       host: () => Promise.resolve(null)
     },
+    triggers: {
+      // Superseded by the real WS-backed namespace in ws-bridge (startTriggerService registers the
+      // handlers in the server shell). On the RELAY tab this stub stays in force and REFUSES: the
+      // arm store, the scheduler and the sessions all live on the host — arming from the guest
+      // would write another machine's execution consent. The card catches the rejection and says
+      // triggers are managed on the host machine.
+      arm: U('triggers.arm'),
+      disarm: U('triggers.disarm'),
+      status: U('triggers.status'),
+      runNow: U('triggers.runNow')
+    },
     codex: {
       // Overridden by the real WS-backed namespace in ws-bridge. The stub's answer is the same
       // one the Server Edition gives on purpose (see server/handlers/index.ts): no shared
@@ -287,6 +304,14 @@ export function buildStubApi(): Omit<
       cliCaps: () => Promise.resolve(UNKNOWN_CLAUDE_CLI_CAPS),
       readTranscript: U('claude.readTranscript'),
       copySessionTranscript: U('claude.copySessionTranscript')
+    },
+    grok: {
+      // Same shape and same reason as claude's above: the launch path reads this synchronously, so
+      // it must resolve rather than reject. Unprobed ⇒ no `--session-id` ⇒ today's command line.
+      cliCaps: () => Promise.resolve(UNKNOWN_GROK_CLI_CAPS),
+      // Nothing taken is the honest answer where no shell can look, and it degrades to today's
+      // behaviour: mint freely. Overridden by the real WS-backed namespace in ws-bridge.
+      takenSessionIds: () => Promise.resolve([])
     },
     agent: {
       // No env snapshot outside the desktop window: the stub (and ws-bridge, identically) answers
@@ -513,6 +538,11 @@ export function buildStubApi(): Omit<
     | 'onUnreadClear'
     | 'answerPermission'
   | 'ackDone'
+  | 'reportHibernated'
+  | 'onAgentWake'
+  | 'onRemoteViewers'
+  | 'onAgentRefreshNode'
+  | 'onAgentRenameNode'
     | 'userDataDir'
     | 'presence'
     | 'speech'

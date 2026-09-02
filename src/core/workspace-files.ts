@@ -1,4 +1,5 @@
 import path from 'path'
+import { healPathAsName } from '../shared/project-name'
 import type { AgentPermissionMode } from '../shared/agents/config'
 import { collisionSeed, derivedProjectId, legacyFileId } from '../shared/project-id'
 import {
@@ -7,7 +8,8 @@ import {
   stripSharedNodeExec,
   type LocalNodeExecMap
 } from '../shared/node-exec'
-import type { BridgeLink, CanvasNodeState, NavStop, Project, ProjectKanban, Viewport, Workspace } from '../shared/types'
+import { CLOSED_SESSIONS_CAP } from '../shared/types'
+import type { BridgeLink, CanvasNodeState, ClosedSessionEntry, NavStop, Project, ProjectKanban, Viewport, Workspace } from '../shared/types'
 import { projectCapabilityFields, readProjectCapabilities } from '../shared/project-capabilities'
 import { loadedAgentBrowserPartition } from '../shared/browser-partition'
 import { sanitizeProjectIcon, type ProjectIcon } from '../shared/project-icon'
@@ -54,6 +56,28 @@ export function sanitizeNodeTriggers(nodes: CanvasNodeState[]): CanvasNodeState[
 
 export const PROJECT_DIR = '.nodeterm'
 export const PROJECT_FILE = 'project.json'
+
+/** Where a cwd-less ("inline") project's content lives, under userData: the twin of a folder
+ *  project's `<cwd>/.nodeterm/project.json`. One file per project, named by the project id. */
+export const INLINE_PROJECT_DIR = 'inline-projects'
+
+/**
+ * May this project id name a file in `userData/inline-projects/`?
+ *
+ * workspace.json is hand-editable (and on Server Edition it sits next to other users' reach), so an
+ * id read back out of it is INPUT, not something we wrote. Minted ids are `project-<base36>-<hex>`
+ * (`freshProjectId` / `derivedProjectId`), well inside this charset; anything else — a separator, a
+ * `..` segment, a leading dot, an empty or absurdly long string — is refused, and its entry simply
+ * keeps the pre-file inline shape (content in the index) instead of naming a path we did not mean.
+ */
+export function isInlineProjectFileId(id: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(id) && !id.includes('..')
+}
+
+/** The data file for one inline project, relative to userData. */
+export function inlineProjectFileRelPath(id: string): string {
+  return path.join(INLINE_PROJECT_DIR, `${id}.json`)
+}
 
 /**
  * On-disk shape of <cwd>/.nodeterm/project.json — a GIT-SHARED document (users are asked to
@@ -123,12 +147,32 @@ export interface ProjectFileV1 {
   agentMessaging?: boolean
   dinoHighScore?: number
   kanban?: ProjectKanban
+  // NOTE: closedSessions is deliberately NOT here — see `Project.closedSessions` /
+  // `IndexEntryV3.closedSessions`. It is machine-local, like `viewport`/`breadcrumbs`.
 }
 
-/** One workspace.json v3 entry. Exactly one of: `cwd` (local ref), `ssh` (remote ref),
- *  `project` (inline, cwd-less canvas). name/color are a cached header so an
- *  unavailable ref still renders a labeled grey tab. `cache` (ssh only) is the last
- *  ProjectFileV1 seen/written — used while the server is unreachable. */
+/**
+ * One workspace.json v3 entry — a REF, in one of three kinds. name/color are a cached header so an
+ * unavailable ref still renders a labeled grey tab.
+ *
+ *   kind           | source of truth for the content       | what the index entry carries
+ *   ---------------|---------------------------------------|--------------------------------------
+ *   folder-ref     | `<cwd>/.nodeterm/project.json` (git)   | `cwd` + header + machine-local half
+ *   ssh-ref        | the same file on the host              | `ssh` + header + `cache` (offline)
+ *   local-data-ref | `userData/inline-projects/<id>.json`   | `dataFile` + header + `project` (cache)
+ *
+ * The third kind is the cwd-less canvas ("New project", no folder). It used to have no file at
+ * all — the whole `Project` rode `project` inside this index, which is ONE file with
+ * last-writer-wins semantics: a second instance sharing this userData could erase a canvas that
+ * existed nowhere else (measured in #621). It now has its own atomically written file like the
+ * other two, and `project` stays beside it as a cache, so a build older than this one still finds
+ * the canvas where it expects it.
+ *
+ * In all three kinds the file carries CONTENT and the entry carries the machine-local half
+ * (id, viewport, defaultAccountId, breadcrumbs, closedSessions, localApprovalId, localExec) — the
+ * #510 rule. That uniformity is the point: it is also what makes a future "Set folder…" a MOVE of
+ * the data file into `<cwd>/.nodeterm/project.json` rather than a reshaping of the project.
+ */
 export interface IndexEntryV3 {
   /**
    * THE project id — this machine's, and the only authority for it. It is minted here (a new
@@ -141,6 +185,8 @@ export interface IndexEntryV3 {
   name: string
   color: string
   closed?: boolean
+  /** Set alongside `closed: true` — see `Project.closedAt`. */
+  closedAt?: number
   /** MACHINE-LOCAL camera for a ref'd project (local folder or ssh). Where this user is looking is
    *  not something a repo shares — the file's copy churned the git diff on every pan. */
   viewport?: Viewport
@@ -157,9 +203,35 @@ export interface IndexEntryV3 {
   /** MACHINE-LOCAL camera navigation history for a ref'd project. Same rule as `viewport`: this
    *  user's "where was I" is not something a repo shares. See NavStop. */
   breadcrumbs?: NavStop[]
+  /**
+   * MACHINE-LOCAL closed-session history for a ref'd project (folder or ssh) — see
+   * `Project.closedSessions`. Whose trash can holds what deleted nodes is a per-machine fact, not
+   * shared content: a delete's full node-state blob would otherwise churn a committed,
+   * teammate-visible `.nodeterm/project.json` on every one. Validated/capped/trigger-sanitized on
+   * every load (`sanitizeLoadedClosedSessions`) exactly like an inline project's embedded
+   * `closedSessions` — this file is hand-editable input too.
+   */
+  closedSessions?: ClosedSessionEntry[]
   cwd?: string
   ssh?: Project['ssh']
   cache?: ProjectFileV1
+  /**
+   * This entry is a LOCAL-DATA ref: its content lives in `userData/inline-projects/<id>.json` and
+   * THAT FILE is the source of truth. Absent = the pre-file shape, where `project` below IS the
+   * content. Never set together with `cwd`/`ssh`.
+   *
+   * A build that predates this field ignores it and reads `project`, which is why the two are
+   * written together for one release (the downgrade contract).
+   */
+  dataFile?: boolean
+  /**
+   * The cwd-less canvas.
+   *
+   * Before `dataFile` this WAS the storage. Beside a `dataFile` entry it is a CACHE — the local
+   * twin of the ssh `cache` above — doing two jobs: an older build still finds the canvas here,
+   * and a data file that is missing or corrupt right now falls back to it instead of opening an
+   * empty canvas. The file wins whenever it reads.
+   */
   project?: Project
   /** MACHINE-LOCAL per-node exec values (`shell`, `ssh.extraArgs`) for a ref'd project. They are
    *  stripped from the shared project file precisely so a cloned/hostile one cannot run code
@@ -289,6 +361,72 @@ export function validKanban(k: unknown): k is ProjectKanban {
   )
 }
 
+/** A `{x, y}` point, checked at the boundary because the file is hostile input. */
+function validPoint(p: unknown): p is { x: number; y: number } {
+  return (
+    !!p &&
+    typeof p === 'object' &&
+    typeof (p as { x: unknown }).x === 'number' &&
+    typeof (p as { y: unknown }).y === 'number'
+  )
+}
+
+/**
+ * Tolerant-reader guard for `closedSessions`, same "drop it rather than trust it" rule as
+ * `validKanban`: a legacy/hand-edited/hostile file degrades to no history instead of crashing.
+ *
+ * The POSITION fields are not optional politeness — they are the crash. `recreateNodeFromSnapshot`
+ * assigns `node.position = reattach ? snapshot.position : snapshot.absolutePosition` UNGUARDED, so
+ * an entry missing either one hands React Flow a node with `position: undefined`, and
+ * `adoptUserNodes` dereferences `position.x` — a white-screen renderer crash from a file anyone can
+ * commit. `kind` is checked for the sibling failure: a garbage kind reaches `buildBase`'s switch,
+ * returns null, and the row silently consumes itself and vanishes (`buildBase` already `return
+ * null`s for anything unknown, so a non-empty string is enough here — no NodeKind enum copy).
+ */
+export function validClosedSessions(x: unknown): x is ClosedSessionEntry[] {
+  return (
+    Array.isArray(x) &&
+    x.every((e) => {
+      if (!e || typeof e !== 'object') return false
+      const entry = e as ClosedSessionEntry
+      if (typeof entry.id !== 'string' || typeof entry.closedAt !== 'number') return false
+      if (!validPoint(entry.absolutePosition)) return false
+      const node = entry.node as CanvasNodeState | undefined
+      if (!node || typeof node !== 'object') return false
+      return typeof node.kind === 'string' && node.kind.length > 0 && validPoint(node.position)
+    })
+  )
+}
+
+/**
+ * The tolerant reader for closed-session history wherever it is admitted from disk: an
+ * `IndexEntryV3.closedSessions` (ref'd project) or an inline `IndexEntryV3.project.closedSessions`
+ * — both live in workspace.json, which is hand-editable input exactly like a git-shared
+ * `.nodeterm/project.json`. Validates shape (`validClosedSessions`), caps at `CLOSED_SESSIONS_CAP`
+ * (newest-first — the cap drops the tail), and re-normalizes each snapshot's trigger spec, same as
+ * a live node. No exec-strip / browser-partition treatment here: unlike the shared project file,
+ * this data never leaves this machine, so a node's own `shell`/`ssh.extraArgs` survive a reopen
+ * intact — there is nothing to re-attach from a separate machine-local map. Returns `undefined`
+ * for anything that fails the shape guard or has nothing to admit, never `[]`.
+ */
+export function sanitizeLoadedClosedSessions(x: unknown): ClosedSessionEntry[] | undefined {
+  if (!validClosedSessions(x)) return undefined
+  const capped = x.slice(0, CLOSED_SESSIONS_CAP)
+  if (!capped.length) return undefined
+  return capped.map((e) => {
+    // `sessionId` (issue #531) is handed straight to the transcript readers, so it is re-checked
+    // as a STRING here rather than trusted from the type — workspace.json is hand-editable, and a
+    // number or object would ride the IPC into a resolver that expects to call `.test()` on it.
+    // Core's own `SESSION_ID_RE` still gates the value's SHAPE; this only gates its kind.
+    const { sessionId, ...rest } = e
+    return {
+      ...rest,
+      ...(typeof sessionId === 'string' && sessionId ? { sessionId } : {}),
+      node: sanitizeNodeTriggers([e.node])[0]
+    }
+  })
+}
+
 /**
  * The shared file plus this machine's own half of the project.
  *
@@ -305,6 +443,7 @@ export function fileToProject(
     cwd?: string
     ssh?: Project['ssh']
     closed?: boolean
+    closedAt?: number
     /** This machine's camera. Falls back to the file's legacy one (a pre-change file, or a
      *  teammate's) and then to a frame that puts the canvas on screen. */
     viewport?: Viewport
@@ -314,6 +453,9 @@ export function fileToProject(
     capabilityAck?: import('../shared/project-capability-consent').CapabilityAckMap
     /** This machine's navigation history for this entry (never from the file). */
     breadcrumbs?: NavStop[]
+    /** This machine's closed-session history for this entry (never from the file) — already
+     *  validated/capped/trigger-sanitized by the caller (`sanitizeLoadedClosedSessions`). */
+    closedSessions?: ClosedSessionEntry[]
     /** This machine's own exec values for these nodes (from the local index entry). A file read
      *  WITHOUT them — an adopted/cloned folder, a probe — gets the safe defaults, never the file's
      *  own `shell`/`ssh.extraArgs`. */
@@ -324,7 +466,12 @@ export function fileToProject(
   const icon = sanitizeProjectIcon(f.icon)
   return {
     id: base.id,
-    name: f.name,
+    // A project whose stored name IS its own path is one this machine (or a teammate's) created
+    // before the basename fix, when a Windows cwd yielded the whole path instead of the folder.
+    // Heal it on read: a name equal to the cwd carries no information the cwd does not already
+    // carry, so re-deriving it cannot lose a name the user chose. Anything else is left ALONE —
+    // a deliberate rename that happens to look path-ish stays exactly as typed.
+    name: healPathAsName(f.name, base.cwd),
     color: f.color,
     ...(icon ? { icon } : {}),
     viewport: base.viewport ?? f.viewport ?? framingViewport(f.nodes),
@@ -352,12 +499,16 @@ export function fileToProject(
     ...(base.cwd ? { cwd: base.cwd } : {}),
     ...(base.ssh ? { ssh: base.ssh } : {}),
     ...(base.closed ? { closed: true } : {}),
+    ...(base.closedAt ? { closedAt: base.closedAt } : {}),
     // Machine-local, from the index entry ONLY: a file field named `capabilityAck` is a forgery
     // attempt (the shared file cannot carry this machine's consent) and is simply never read.
     ...(base.capabilityAck ? { capabilityAck: base.capabilityAck } : {}),
     // Machine-local, from the index entry ONLY: a file field named `breadcrumbs` is a forgery
     // attempt (the shared file cannot carry this machine's navigation history) and is never read.
-    ...(base.breadcrumbs?.length ? { breadcrumbs: base.breadcrumbs } : {})
+    ...(base.breadcrumbs?.length ? { breadcrumbs: base.breadcrumbs } : {}),
+    // Machine-local, from the index entry ONLY, same rule as `breadcrumbs`: a file field named
+    // `closedSessions` is never read here — the shared file cannot carry this machine's trash can.
+    ...(base.closedSessions?.length ? { closedSessions: base.closedSessions } : {})
   }
 }
 
@@ -408,14 +559,26 @@ export function sameProjectContent(a: ProjectFileV1, b: ProjectFileV1): boolean 
   return JSON.stringify(strip(a)) === JSON.stringify(strip(b))
 }
 
-/** Splits an in-memory workspace into the v3 index + the local project files to write. */
+/**
+ * Splits an in-memory workspace into the v3 index + the project files to write.
+ *
+ * `files` is keyed by CWD (folder refs, written into the user's own repo); `dataFiles` is keyed by
+ * PROJECT ID (cwd-less canvases, written under `userData/inline-projects`). Both hold a
+ * `ProjectFileV1` — one shape, which is what lets a future "Set folder…" MOVE the second into the
+ * first instead of converting it.
+ */
 export function splitWorkspace(
   ws: Workspace,
   revOf: (projectId: string) => number,
   savedAt: string
-): { index: WorkspaceIndexV3; files: Map<string, ProjectFileV1> } {
+): {
+  index: WorkspaceIndexV3
+  files: Map<string, ProjectFileV1>
+  dataFiles: Map<string, ProjectFileV1>
+} {
   const entries: IndexEntryV3[] = []
   const files = new Map<string, ProjectFileV1>()
+  const dataFiles = new Map<string, ProjectFileV1>()
   const seenIds = new Set<string>()
   for (const incoming of ws.projects) {
     // A relay tab is a LIVE connection to another machine's project, not a workspace on this
@@ -434,7 +597,11 @@ export function splitWorkspace(
       : incoming.id
     seenIds.add(id)
     const p = id === incoming.id ? incoming : { ...incoming, id }
-    const header = { id: p.id, name: p.name, color: p.color, ...(p.closed ? { closed: true } : {}) }
+    const header = {
+      id: p.id, name: p.name, color: p.color,
+      ...(p.closed ? { closed: true } : {}),
+      ...(p.closedAt ? { closedAt: p.closedAt } : {})
+    }
     // The machine-local half of a REF'd project (a folder or an ssh endpoint), which used to ride
     // the shared file: this user's camera and this machine's default managed account. Deliberately
     // NOT added to the `unavailable` branch below — a placeholder's viewport is the {0,0,1} of an
@@ -447,7 +614,13 @@ export function splitWorkspace(
       // The clone-notice acknowledgment rides the machine-local entry, never the shared file
       // (projectToFile does not emit it — pinned by project-capability-consent.test.ts).
       ...(p.capabilityAck ? { capabilityAck: p.capabilityAck } : {}),
-      ...(p.breadcrumbs?.length ? { breadcrumbs: p.breadcrumbs } : {})
+      ...(p.breadcrumbs?.length ? { breadcrumbs: p.breadcrumbs } : {}),
+      // Same rule: whose trash can holds what is machine-local, capped on the way OUT as well as
+      // in (see CLOSED_SESSIONS_CAP) — an in-memory list inflated some other way must not be
+      // written back uncapped.
+      ...(p.closedSessions?.length
+        ? { closedSessions: p.closedSessions.slice(0, CLOSED_SESSIONS_CAP) }
+        : {})
     }
     if (p.unavailable) {
       // Placeholder (folder missing / server unreachable at load): its nodes:[] is not real
@@ -489,11 +662,28 @@ export function splitWorkspace(
       const { unavailable: _u, ...inline } = p
       entries.push({ ...header, project: inline })
     } else {
+      // The cwd-less canvas: a LOCAL-DATA ref (see IndexEntryV3). The file is the source of truth
+      // and `project` rides along as the cache — the dual-write that lets an older build open this
+      // canvas, and that keeps a half-done migration (file written, index write lost, or the
+      // reverse) readable either way round.
+      //
+      // It is otherwise treated exactly like the other two refs: content in the file, the
+      // machine-local half on the entry (`localState`), exec-enabling node fields hoisted into
+      // `localExec` and STRIPPED from the file by `projectToFile`. That last part costs nothing
+      // today — the file sits in userData, as machine-local as the index it replaces — and it is
+      // what makes the file safe to move into a repo the day "Set folder…" moves it.
       const { unavailable: _u, ...inline } = p
-      entries.push({ ...header, project: inline })
+      if (!isInlineProjectFileId(p.id)) {
+        // A hand-edited id we will not turn into a path: keep the pre-file shape, where the index
+        // IS the storage for this one entry.
+        entries.push({ ...header, project: inline })
+        continue
+      }
+      dataFiles.set(p.id, projectToFile(p, revOf(p.id), savedAt))
+      entries.push({ ...header, ...localState, ...localRef, dataFile: true, project: inline })
     }
   }
-  return { index: { version: 3, activeProjectId: ws.activeProjectId, entries }, files }
+  return { index: { version: 3, activeProjectId: ws.activeProjectId, entries }, files, dataFiles }
 }
 
 /** Pretty, stable-order JSON for the project file (git-diffable; the index stays compact). */
