@@ -210,6 +210,12 @@ export function codexAccountsHandlers(
     },
 
     [IPC.codexAccountsCancelWait]: (id: string) => {
+      // Symmetry, not a hole being closed: this id only ever indexes a Map whose keys were created
+      // by an already-validated `wait-login`, and it never reaches a path. But it was the ONE verb
+      // of the six that took an id without checking it (blind security review, 2026-09-04), and a
+      // validated-everywhere rule is worth more than the line it costs — the next person to reach
+      // for `id` here should find the guard already standing.
+      assertCodexAccountId(id)
       const waiter = waiters.get(id)
       if (waiter) waiter.cancelled = true
     },
