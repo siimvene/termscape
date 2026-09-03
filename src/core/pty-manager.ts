@@ -64,6 +64,7 @@ import {
   runPasteDelivery
 } from './tmux-naming'
 import { encodeSendKeysHex } from './tmux-control'
+import { posixQuote } from '../shared/ssh'
 import { releasePty, type ReleasablePty } from './pty-release'
 import { terminateWindowsProcessTree } from '../session-host/windows-process-tree'
 import { effectiveSize, type PtySize } from './pty-size'
@@ -178,6 +179,14 @@ const PROJECT_OVERRIDES_TIMEOUT_MS = 2_000
  * that appears frozen for that whole time.
  */
 const PROBE_TIMEOUT_MS = 6_000
+
+/**
+ * Foreground commands a stale-cwd heal is allowed to type into (see `repairPaneCwd`). Only an
+ * interactive shell at a prompt may receive the `cd` keystrokes; a foreground TUI (an editor, a
+ * live agent that outlived its cwd's deletion) would treat them as its own input. tmux answers
+ * `#{pane_current_command}` as a bare command name; a login shell can carry a leading `-`.
+ */
+const HEAL_SHELL_COMMANDS = new Set(['zsh', 'bash', 'sh', 'dash', 'fish', 'ksh', 'tcsh', 'csh'])
 
 /**
  * `execFile`, bounded. Wrapped HERE rather than at the call sites so a new one cannot forget: the
@@ -2290,6 +2299,17 @@ export class PtyManager {
     const staleCwdProbe = probeStaleCwd
       ? await this.paneCwdStale(options.persistKey as string)
       : false
+    // Auto-heal (issue #464 + scratchpad-drift): the pane sits on a DELETED working directory and
+    // the `new-session -A` below would reattach it verbatim (the `-c` cwd is ignored on a reattach)
+    // — the shell then prints `getcwd: cannot access parent directories` and a relaunched `claude`
+    // refuses to start ("current working directory was deleted"). Repair the cwd IN PLACE first:
+    // no client is attached yet, so the send-keys cannot collide with the renderer's later agent
+    // launch, and it stays BEFORE the spawn (a post-spawn await reintroduces the 5-second blank-
+    // terminal race documented above). Non-destructive — nothing is killed, so "recycle + respawn"
+    // stays the manual escape hatch. On a clean send the stale banner is suppressed; on a failed
+    // send it is left up as the backstop.
+    const staleCwdHealed =
+      staleCwdProbe && (await this.repairPaneCwd(options.persistKey as string, options.cwd))
     // Re-ask the tombstone question HERE, after every await above (has-session, PATH, project
     // overrides, the cwd probe) and immediately before the spawn. `create()` checked it before
     // calling us, but a delete can land during those round trips, and `spawnSession` CLEARS the
@@ -2379,7 +2399,7 @@ export class PtyManager {
     // cwd lives on the host (its probe would need a remote round trip — deliberately out of v1).
     // Failure/unknowable ⇒ absent ⇒ no banner: the flag is only ever raised on tmux's own answer.
     // The probe itself ran BEFORE the spawn (see there); a session-host shim is not a tmux pane.
-    const staleCwd = staleCwdProbe && !spawned?.sessionHost
+    const staleCwd = staleCwdProbe && !staleCwdHealed && !spawned?.sessionHost
     return {
       sessionId,
       fresh,
@@ -2493,6 +2513,85 @@ export class PtyManager {
       return true
     } catch (e) {
       return !probeSaysAbsent(e)
+    }
+  }
+
+  /**
+   * Repair a warm tmux session whose active pane sits on a DELETED working directory (issue #464
+   * and its scratchpad-drift sibling: a node cd'd into an ephemeral dir — a git worktree, or a
+   * per-session Claude scratchpad under /private/tmp — that was later removed). Sends a `cd`
+   * to the node's intended cwd into the DETACHED session so the pane the reattach lands on holds
+   * a live directory instead of erroring `getcwd: cannot access parent directories` and refusing
+   * to launch `claude`.
+   *
+   * Called BEFORE `spawnSession` reattaches, for two reasons that both matter: `tmux new-session
+   * -A` ignores the `-c` cwd it is passed on a reattach (so the heal cannot ride the spawn), and
+   * there must be NO await between `spawnSession` and `create()`'s return on the local tmux path
+   * (a post-spawn await reintroduces the measured 5-second blank-terminal race — see the probe
+   * docblock). No client is attached at this point, so the keystrokes cannot collide with the
+   * renderer's later agent-launch line.
+   *
+   * The command falls back to `$HOME` so a node whose intended cwd is ALSO gone (a pruned
+   * worktree, a cleaned scratchpad) still lands on a live directory rather than the same dead
+   * one. Best-effort: returns true only when the keys were sent into a healable pane, and any
+   * decline or failure leaves the caller's stale-cwd banner up as the manual "recycle + respawn"
+   * backstop. The `-l` (literal) send types the command verbatim — quotes, `||` and `$HOME` are
+   * interpreted by the shell in the pane, never by tmux — and a separate `send-keys Enter` runs
+   * it. Two invocations rather than one `\;`-joined list: under `-l`, tmux would type a literal
+   * `;` into the pane instead of treating it as a command separator.
+   *
+   * Three guards keep the send safe, since a stale cwd proves nothing about what is in the pane
+   * (consort review, 2026-09-03):
+   *  1. Only a real interactive SHELL at a prompt is typed into — a foreground TUI or a live
+   *     agent that outlived its cwd's deletion would swallow the `cd` as its own input. Gated on
+   *     `#{pane_current_command}` (`HEAL_SHELL_COMMANDS`).
+   *  2. A pane in copy-mode (`#{pane_in_mode}`) discards send-keys while tmux still reports
+   *     success — that would suppress the banner without healing anything. Decline instead.
+   *  3. The cwd is refused unless it is a clean absolute path with NO terminal control bytes:
+   *     `send-keys -l` types raw bytes, so a crafted directory name carrying Ctrl-U / newline
+   *     could erase the quoted prefix and run the rest as a command (single-quoting defends the
+   *     shell parser, not the tty line discipline). An untrusted path falls back to `$HOME`.
+   * Windows tmux (MSYS/Cygwin) is excluded outright: its native `C:\…` cwds and shell semantics
+   * are out of scope for this POSIX heal.
+   *
+   * Residual (accepted): a shell with partially-typed, unsubmitted input will merge that text with
+   * the `cd` line and error once — strictly better than the pre-heal hard `getcwd` failure, and
+   * clearing the line first (Ctrl-U) would itself misbehave under vi-mode / bracketed paste.
+   */
+  private async repairPaneCwd(persistKey: string, intendedCwd: string | undefined): Promise<boolean> {
+    if (!this.tmuxPath || process.platform === 'win32') return false
+    const target = `=${sessionName(persistKey)}:`
+    try {
+      // One probe answers both foreground-command and copy-mode guards. A tab separates them: a
+      // command name never contains one, and the field order is fixed by the format string.
+      const { stdout } = await runAsync(
+        this.tmuxPath,
+        ['-L', TMUX_SOCKET, 'display-message', '-p', '-t', target, '#{pane_in_mode}\t#{pane_current_command}'],
+        { timeout: PROBE_TIMEOUT_MS }
+      )
+      const [inMode, rawCmd = ''] = stdout.replace(/\r?\n$/, '').split('\t')
+      if (inMode !== '0') return false
+      if (!HEAL_SHELL_COMMANDS.has(path.basename(rawCmd).replace(/^-/, ''))) return false
+      // A path is trusted for a literal send only if it is absolute and carries no C0/DEL control
+      // bytes; otherwise fall back to os.homedir(), whose value comes from a trusted source. Both
+      // resolved INSIDE the try: os.homedir() can throw (no HOME and getpwuid failing).
+      // eslint-disable-next-line no-control-regex
+      const clean = !!intendedCwd && intendedCwd.startsWith('/') && !/[\x00-\x1f\x7f]/.test(intendedCwd)
+      const dir = clean ? (intendedCwd as string) : os.homedir()
+      // Single-quoted so a directory name can never inject shell; the fallback is double-quoted so
+      // the pane's shell expands $HOME even when the primary `cd` fails on a deleted intended cwd.
+      const cmd = `cd ${posixQuote(dir)} 2>/dev/null || cd "$HOME"`
+      // `-l` types the command literally (special chars survive for the shell to interpret); the
+      // Enter is a real key name, so it CANNOT ride the same `-l` call — hence the second send.
+      await runAsync(this.tmuxPath, ['-L', TMUX_SOCKET, 'send-keys', '-t', target, '-l', cmd], {
+        timeout: PROBE_TIMEOUT_MS
+      })
+      await runAsync(this.tmuxPath, ['-L', TMUX_SOCKET, 'send-keys', '-t', target, 'Enter'], {
+        timeout: PROBE_TIMEOUT_MS
+      })
+      return true
+    } catch {
+      return false
     }
   }
 

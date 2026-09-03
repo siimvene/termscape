@@ -61,6 +61,13 @@ const liveTmuxSessions = new Set<string>()
 let paneCurrentPath = os.tmpdir()
 /** Fired when the probe is in flight — the window in which another client can act. */
 let duringProbe: (() => void) | null = null
+/** The literal `-l` payloads the stale-cwd heal typed into the pane (the `cd` repair command). */
+const sentKeys: string[] = []
+/** Force the repair's send-keys to fail, to exercise the banner backstop. */
+let failRepair = false
+/** What the heal's `#{pane_in_mode}` / `#{pane_current_command}` guard probe reports. */
+let paneInMode = '0'
+let paneForegroundCmd = 'zsh'
 
 vi.mock('child_process', () => {
   type Cb = (err: Error | null, res?: { stdout: string; stderr: string }) => void
@@ -78,9 +85,24 @@ vi.mock('child_process', () => {
       events.push('probe:pane_current_path')
       duringProbe?.()
       setTimeout(() => ok(paneCurrentPath), PROBE_MS)
+    } else if (args.some((a) => a.includes('pane_current_command'))) {
+      // The heal's foreground/copy-mode guard: `#{pane_in_mode}\t#{pane_current_command}`.
+      events.push('probe:pane_state')
+      ok(`${paneInMode}\t${paneForegroundCmd}`)
     } else if (args.includes('display-message')) {
       events.push('probe:pane_pid')
       setTimeout(() => ok(''), 2)
+    } else if (args.includes('send-keys')) {
+      // The stale-cwd heal: a literal (`-l`) `cd` payload, then a bare `Enter` to run it.
+      const li = args.indexOf('-l')
+      if (li >= 0) {
+        events.push('repair:send-keys')
+        sentKeys.push(args[li + 1])
+      } else if (args.includes('Enter')) {
+        events.push('repair:enter')
+      }
+      if (failRepair) cb?.(Object.assign(new Error('send-keys failed'), { code: 1 }))
+      else ok('')
     } else {
       ok('')
     }
@@ -112,6 +134,10 @@ describe('warm reattach: the create reply beats the first output flush', () => {
     liveTmuxSessions.clear()
     paneCurrentPath = os.tmpdir()
     duringProbe = null
+    sentKeys.length = 0
+    failRepair = false
+    paneInMode = '0'
+    paneForegroundCmd = 'zsh'
     userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nt-reattach-'))
     fake = fakePlatform({ userDataDir })
     initPlatform(fake)
@@ -196,10 +222,58 @@ describe('warm reattach: the create reply beats the first output flush', () => {
     await drained(r.sessionId)
   })
 
-  it('moving the probe kept its verdict: a pane on a vanished directory is still flagged stale', async () => {
+  it('a pane on a vanished directory is auto-healed before reattach: a cd is sent, banner suppressed', async () => {
     await tmuxManager()
     liveTmuxSessions.add(sessionName(NODE))
     paneCurrentPath = path.join(os.tmpdir(), 'nt-reattach-gone', String(process.pid), 'never-made')
+
+    const r = await create()
+    expect(r.fresh).toBe(false)
+    // The guard probe, the literal cd, then Enter — all BEFORE the client is spawned (so they can
+    // never collide with the renderer's later agent launch, and add no post-spawn await).
+    expect(events.indexOf('probe:pane_state')).toBeLessThan(events.indexOf('repair:send-keys'))
+    expect(events.indexOf('repair:send-keys')).toBeLessThan(events.indexOf('repair:enter'))
+    expect(events.indexOf('repair:enter')).toBeLessThan(events.indexOf('spawn'))
+    // The exact command: cwd single-quoted (create() passes none here, so $HOME), with the
+    // 2>/dev/null and double-quoted $HOME fallback for a cwd that is itself gone.
+    expect(sentKeys).toEqual([`cd '${os.homedir()}' 2>/dev/null || cd "$HOME"`])
+    // A clean heal suppresses the manual "recycle + respawn" banner.
+    expect(r.staleCwd).toBeUndefined()
+    await drained(r.sessionId)
+  })
+
+  it('declines to heal a pane in copy-mode (send-keys would be swallowed): banner stays', async () => {
+    await tmuxManager()
+    liveTmuxSessions.add(sessionName(NODE))
+    paneCurrentPath = path.join(os.tmpdir(), 'nt-reattach-gone', String(process.pid), 'never-made')
+    paneInMode = '1'
+
+    const r = await create()
+    expect(r.fresh).toBe(false)
+    expect(events).not.toContain('repair:send-keys')
+    expect(sentKeys).toHaveLength(0)
+    expect(r.staleCwd).toBe(true)
+    await drained(r.sessionId)
+  })
+
+  it('declines to heal a pane whose foreground is a TUI, not a shell: banner stays', async () => {
+    await tmuxManager()
+    liveTmuxSessions.add(sessionName(NODE))
+    paneCurrentPath = path.join(os.tmpdir(), 'nt-reattach-gone', String(process.pid), 'never-made')
+    paneForegroundCmd = 'nvim'
+
+    const r = await create()
+    expect(r.fresh).toBe(false)
+    expect(events).not.toContain('repair:send-keys')
+    expect(r.staleCwd).toBe(true)
+    await drained(r.sessionId)
+  })
+
+  it('a stale pane whose repair send FAILS still raises the banner as the backstop', async () => {
+    await tmuxManager()
+    liveTmuxSessions.add(sessionName(NODE))
+    paneCurrentPath = path.join(os.tmpdir(), 'nt-reattach-gone', String(process.pid), 'never-made')
+    failRepair = true
 
     const r = await create()
     expect(r.fresh).toBe(false)
