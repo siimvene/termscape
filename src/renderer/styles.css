@@ -2129,14 +2129,22 @@ body,
    * slack swings between 0 and a full cell as the node is resized, which leaves padding-bottom as
    * the only GUARANTEED gap there is. At 2px that guarantee sat under the selection ring, so a
    * selected node's last line read as CLIPPED (reported 2026-08-05, with the ring drawn through
-   * the text). 6px matches the left inset and stays under the 8px the same terminal gets on the
-   * board (`.kanban-modal__termwrap`).
+   * the text). 6px was not enough either: reported again 2026-09-04, an agent CLI's status line
+   * ("auto mode on · 2 shells") still reading as clipped at the bottom of a node. 10px is the
+   * guarantee now — still under the 8px+ the same terminal gets on the board
+   * (`.kanban-modal__termwrap`) once its own slack is counted.
    *
-   * Do NOT unify this with the modal by moving padding onto ITS host: that one is a flex item and
-   * padding there was measured to cost a whole row (see `.kanban-modal__term`). This host is
-   * `position: absolute; inset: 0` and has carried vertical padding all along without losing one.
+   * Padding here is NOT free, and an earlier version of this comment was wrong to imply it: global
+   * `border-box` (line ~170) means every added px comes out of the host's CONTENT height, and rows
+   * come straight from `FitAddon.proposeDimensions()` (TerminalNode `applyFit`), so whenever the
+   * old slack was under 4px this costs one row — and that row is reported to the SHARED pty, so
+   * every co-attached viewer shrinks with it. That is the accepted trade: a row is recoverable by
+   * dragging the node, a clipped status line is not. What absolute positioning does buy is
+   * avoidance of the modal's specific flex failure, where padding cost a row unconditionally.
+   *
+   * Do NOT unify this with the modal by moving padding onto ITS host (see `.kanban-modal__term`).
    * Two elements, two measured behaviours — re-measure before merging them. */
-  padding: 4px 2px 6px 6px;
+  padding: 4px 2px 10px 6px;
 }
 
 .term-node__xterm .xterm {

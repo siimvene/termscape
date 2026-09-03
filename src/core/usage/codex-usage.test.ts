@@ -39,6 +39,68 @@ const RPC_RATE_LIMITS = {
   secondary: { usedPercent: 71, limitWindowSeconds: 604_800, resetsAt: 1_784_800_000 }
 }
 
+describe('mapCodexLimits gating window', () => {
+  // The live payload from a team account whose WEEKLY was spent, 2026-09-04. The session window
+  // sits at 0% and, in the default `remaining` display mode, renders as "100%" — so without a
+  // gating flag the popup read "session 100%" and named nothing as the cause.
+  const BLOCKED_BY_WEEKLY = {
+    allowed: false,
+    limit_reached: true,
+    primary_window: { used_percent: 0, limit_window_seconds: 18000, reset_at: 1788475719 },
+    secondary_window: { used_percent: 100, limit_window_seconds: 604800, reset_at: 1788762385 }
+  }
+
+  it('flags the EXHAUSTED window as the one currently limiting, not the empty one', () => {
+    const limits = mapCodexLimits(BLOCKED_BY_WEEKLY)
+    const session = limits.find((l) => l.kind === 'session')
+    const weekly = limits.find((l) => l.kind === 'weekly_all')
+    expect(session?.usedPercent).toBe(0)
+    expect(session?.isActive).toBe(false)
+    expect(weekly?.usedPercent).toBe(100)
+    expect(weekly?.isActive).toBe(true)
+  })
+
+  it('claims nothing while the account is not blocked, however high a window runs', () => {
+    const limits = mapCodexLimits({
+      allowed: true,
+      limit_reached: false,
+      primary_window: { used_percent: 99.9, limit_window_seconds: 18000 },
+      secondary_window: { used_percent: 100, limit_window_seconds: 604800 }
+    })
+    expect(limits.every((l) => l.isActive === false)).toBe(true)
+  })
+
+  it('names the closest window when blocked with nothing quite at 100 (rounding, unmapped gate)', () => {
+    const limits = mapCodexLimits({
+      allowed: false,
+      limit_reached: true,
+      primary_window: { used_percent: 12, limit_window_seconds: 18000 },
+      secondary_window: { used_percent: 99.6, limit_window_seconds: 604800 }
+    })
+    expect(limits.find((l) => l.kind === 'weekly_all')?.isActive).toBe(true)
+    expect(limits.find((l) => l.kind === 'session')?.isActive).toBe(false)
+  })
+
+  it('claims nothing when blocked and every window reads zero', () => {
+    const limits = mapCodexLimits({
+      limit_reached: true,
+      primary_window: { used_percent: 0, limit_window_seconds: 18000 },
+      secondary_window: { used_percent: 0, limit_window_seconds: 604800 }
+    })
+    expect(limits.every((l) => l.isActive === false)).toBe(true)
+  })
+
+  it('honours the app-server camelCase envelope, not just the backend snake_case one', () => {
+    const limits = mapCodexLimits({
+      rateLimitReached: true,
+      primary: { usedPercent: 0, limitWindowSeconds: 18000 },
+      secondary: { usedPercent: 100, limitWindowSeconds: 604800 }
+    })
+    expect(limits.find((l) => l.kind === 'weekly_all')?.isActive).toBe(true)
+    expect(limits.find((l) => l.kind === 'session')?.isActive).toBe(false)
+  })
+})
+
 describe('mapCodexLimits', () => {
   it('maps the backend snake_case payload', () => {
     const limits = mapCodexLimits(BACKEND_RATE_LIMIT)

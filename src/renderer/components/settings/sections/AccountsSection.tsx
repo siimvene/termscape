@@ -31,6 +31,7 @@ import { Button } from '@renderer/ui/Button'
 import { Input } from '@renderer/ui/Input'
 import { cn } from '@renderer/ui/cn'
 import { thisMachine, thisMachineCap } from '../../../lib/machineName'
+import { isBrowserRuntime } from '../../../bridge/runtime'
 
 const ROWS = {
   accounts: {
@@ -821,7 +822,17 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
               connected={group.remote ? !!connectedProjectIdForHost(group.host) : true}
             >
               {codexRowsFor(group.accounts, group.remote ? group.host : undefined)}
-              {!group.remote ? (
+              {!group.remote && isBrowserRuntime() ? (
+                /* The `codexAccounts` namespace is a hard E_UNSUPPORTED stub in the browser bridge
+                   (`ws-bridge.ts`) because the implementation still lives in `src/main`, not core
+                   the way managed CLAUDE accounts do. Offering a live button that can only ever
+                   reject wastes a click and reads as a broken feature — a tester hit exactly that
+                   on 2026-09-04 and went back to signing out and in. Say it BEFORE the click. */
+                <p className="text-[12px] leading-relaxed text-muted">
+                  Managed Codex accounts are not available in the browser yet — add them from the
+                  desktop app on this machine. Accounts already created there are shown above.
+                </p>
+              ) : !group.remote ? (
                 <div className="space-y-2">
                   <Button variant="primary" disabled={addingCodex} onClick={() => void onAddCodexAccount()}>
                     {addingCodex ? (

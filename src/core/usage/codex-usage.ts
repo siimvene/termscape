@@ -89,7 +89,8 @@ export function mapCodexWindow(
     resetsAt: parseResetTimestamp(w.reset_at ?? w.resetsAt),
     windowMinutes,
     scopeLabel: null,
-    // Codex flags no "currently gating" window; the UI falls back to worst-percentage.
+    // Set by `mapCodexLimits`, which is the only place that can see it: the flag lives on the
+    // ENVELOPE (`limit_reached`), not on the individual window.
     isActive: false
   }
 }
@@ -100,10 +101,44 @@ export function mapCodexLimits(rateLimit: unknown): UsageLimit[] {
   const r = rateLimit as Record<string, any>
   const primary = r.primary_window ?? r.primary
   const secondary = r.secondary_window ?? r.secondary
-  return [
+  const limits = [
     mapCodexWindow(primary, 'session', 'session', PRIMARY_WINDOW_MINUTES),
     mapCodexWindow(secondary, 'weekly_all', 'weekly', SECONDARY_WINDOW_MINUTES)
   ].filter((l): l is UsageLimit => l !== null)
+
+  // Codex DOES say when the account is blocked — `limit_reached` / `allowed` on the envelope — and
+  // the exhausted window is the one that says why. Without this every Codex limit was `isActive:
+  // false`, so `primaryLimit` fell back to worst-percentage and the "● Currently limiting" dot
+  // never lit: a user whose WEEKLY was spent saw a session row reading 100% (0% used, rendered in
+  // the default `remaining` mode) with nothing anywhere naming the window that was actually
+  // stopping them. Reported 2026-09-04 against a live payload of primary 0% / secondary 100% /
+  // limit_reached true.
+  //
+  // Only an EXHAUSTED window is claimed. Blocked-but-nothing-at-100 is a shape we have not
+  // observed, and guessing which window meant it would be worse than leaving the dot off.
+  // Both transports, like the windows above: the backend sends snake_case, the app-server tier
+  // camelCase, and a blocked app-server payload that only answered to `limit_reached` would have
+  // left every window inactive.
+  const blocked =
+    r.limit_reached === true ||
+    r.limitReached === true ||
+    r.rateLimitReached === true ||
+    r.allowed === false
+
+  if (blocked) {
+    const exhausted = limits.filter((l) => l.usedPercent >= 100)
+    if (exhausted.length > 0) {
+      for (const limit of exhausted) limit.isActive = true
+    } else {
+      // Blocked, yet nothing reads 100: rounding (99.6 clamps to 99.6, not 100), or a plan gated on
+      // a window we do not map. Refusing to claim anything here would render as "not blocked" while
+      // the provider is refusing the account, which is the more expensive lie — so name the window
+      // that is closest to the cause. Never one sitting at 0: that is not evidence of anything.
+      const worst = limits.reduce((a, b) => (b.usedPercent > a.usedPercent ? b : a), limits[0])
+      if (worst && worst.usedPercent > 0) worst.isActive = true
+    }
+  }
+  return limits
 }
 
 function snapshot(
