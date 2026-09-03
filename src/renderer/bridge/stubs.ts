@@ -365,6 +365,14 @@ export function buildStubApi(): Omit<
       cancelWaitLogin: U('claudeAccounts.cancelWaitLogin'),
       remove: U('claudeAccounts.remove')
     },
+    // The first six members are REAL over the WS bridge (`buildCodexAccountsApi` spreads this stub
+    // and then overrides them); these stay as the fallback for any assembly that spreads the stub
+    // alone. The switch quartet + `transferThreadToSsh` below are NOT overridden anywhere and are
+    // the live browser answer: the server registers no such channel, because each switch phase is
+    // authorized against the Electron WebContents that reserved it (and auto-releases on that
+    // renderer's `destroyed` event), which a WS connection has no counterpart for. The coded
+    // E_UNSUPPORTED refusal is what lets the UI say "manage this from the desktop app" instead of
+    // surfacing a generic failure.
     codexAccounts: {
       add: U('codexAccounts.add'),
       waitLogin: U('codexAccounts.waitLogin'),

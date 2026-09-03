@@ -12,6 +12,7 @@ import { registerCodexIdentityIpc } from '../../core/codex-identity-caps'
 import { UNKNOWN_CODEX_IDENTITY_CAPS } from '@shared/types'
 import { startUsageService } from '../../core/usage/usage-service'
 import { registerClaudeAccountsIpc } from '../../core/claude-accounts-service'
+import { registerCodexAccountsIpc } from '../../core/codex-accounts-service'
 import { codexUsageAccounts } from '../../core/codex-accounts-core'
 import { codexHomeFor } from '../../core/codex-config-dir'
 import {
@@ -103,6 +104,17 @@ export function registerCoreHandlers(
   // No `remote`: the Server Edition has no SSH-project manager, so an `AccountCtx` carrying a
   // projectId takes the LOCAL path — the same degrade desktop takes before its manager exists.
   registerClaudeAccountsIpc()
+
+  // Managed CODEX accounts, the same five verbs the desktop serves: add / wait-login / cancel-wait
+  // / identity + system-identity / remove (src/core/codex-accounts-service.ts). Until this call the
+  // Server Edition registered NO `codex-accounts:*` channel at all, so the browser bridge stubbed
+  // the whole namespace with E_UNSUPPORTED — a browser-only deployment could see managed Codex
+  // accounts in its usage fan-out (localCodexAccounts below already reads them) but could never
+  // create, log into or remove one. No `isSwitchReserved`: the three-phase account SWITCH stays
+  // desktop-only (it authorizes each phase against the reserving WebContents and auto-releases on
+  // that renderer's `destroyed` event, neither of which the server seam can express), so nothing
+  // here can ever hold a reservation and removal has nothing to refuse for.
+  registerCodexAccountsIpc()
 
   // Claude subscription usage. Previously desktop-only — the browser bridge answered `null`, so
   // the pill never rendered in the Server Edition. The poll runs UNGATED here (the default), not

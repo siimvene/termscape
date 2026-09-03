@@ -191,17 +191,21 @@ describe('buildClaudeAccountsApi', () => {
     expect(install).toContain('...buildClaudeAccountsApi(client)')
   })
 
-  // The Codex half is deliberately NOT ported: its switch verbs authorize the owning window by
-  // Electron WebContents id, which has no meaning over a WS connection. It must keep REFUSING with
-  // the coded error rather than silently no-opping — that code is what the Settings section reads
-  // to say "manage them from the desktop app" instead of a generic failure.
-  it('codexAccounts stays an E_UNSUPPORTED stub', async () => {
+  // The Codex namespace's five parity verbs ARE ported now (buildCodexAccountsApi, covered by
+  // ws-bridge.codex-accounts.test.ts). What stays behind is the switch protocol, which authorizes
+  // the owning window by Electron WebContents id — meaningless over a WS connection. The stub is
+  // still the base every one of those members falls through to, and it must keep REFUSING with the
+  // coded error rather than silently no-opping: that code is what the Settings section reads to say
+  // "manage them from the desktop app" instead of surfacing a generic failure.
+  it('the codexAccounts stub refuses with E_UNSUPPORTED (what the switch verbs keep answering)', async () => {
     const s = buildStubApi()
-    await expect(s.codexAccounts.add()).rejects.toMatchObject({ code: E_UNSUPPORTED })
-    await expect(s.codexAccounts.waitLogin('a1')).rejects.toMatchObject({ code: E_UNSUPPORTED })
-    await expect(s.codexAccounts.cancelWaitLogin('a1')).rejects.toMatchObject({
+    await expect(s.codexAccounts.switchThread('t1', '/cwd')).rejects.toMatchObject({
       code: E_UNSUPPORTED
     })
+    await expect(s.codexAccounts.commitSwitch('tok')).rejects.toMatchObject({
+      code: E_UNSUPPORTED
+    })
+    await expect(s.codexAccounts.add()).rejects.toMatchObject({ code: E_UNSUPPORTED })
     await expect(s.codexAccounts.remove('a1')).rejects.toMatchObject({ code: E_UNSUPPORTED })
   })
 })

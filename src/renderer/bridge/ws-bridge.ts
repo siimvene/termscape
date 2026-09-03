@@ -941,9 +941,8 @@ export function buildTranscriptApi(
  * RpcClient has no request timeout: a pending request rejects only when the socket drops, which is
  * exactly the outcome the caller wants (the login row stays pending and offers Retry).
  *
- * The `codexAccounts` namespace stays STUBBED (E_UNSUPPORTED). Its switch verbs authorize the
- * owning window by Electron WebContents id, which has no meaning over a WS connection — porting it
- * needs a connection-identity design, not a builder.
+ * The `codexAccounts` namespace has its own builder below — five of its verbs are real now, the
+ * switch/transfer ones are not.
  */
 export function buildClaudeAccountsApi(client: RpcClient): Pick<NodeTerminalApi, 'claudeAccounts'> {
   return {
@@ -960,6 +959,53 @@ export function buildClaudeAccountsApi(client: RpcClient): Pick<NodeTerminalApi,
         client.request(IPC.claudeAccountsCancelWait, id) as Promise<void>,
       remove: (id, ctx) => client.request(IPC.claudeAccountsRemove, id, ctx) as Promise<void>
     }
+  }
+}
+
+/**
+ * Managed CODEX accounts over the WS bridge. The five parity VERBS are real — add, waitLogin,
+ * cancelWaitLogin, identity (two members, `identity` and `systemIdentity`, being the one "who is
+ * this?" verb read two ways) and remove: their lifecycle moved into
+ * `src/core/codex-accounts-service.ts` and `registerCodexAccountsIpc()` registers them on the
+ * server, so a browser deployment manages them exactly as it already manages Claude accounts.
+ *
+ * The SWITCH protocol (`switchThread` / `commitSwitch` / `finishSwitch` / `rollbackSwitch`) and the
+ * SSH `transferThreadToSsh` leg stay on the passed-in STUB, i.e. keep rejecting with E_UNSUPPORTED.
+ * That is not an oversight to fix later by pointing them at `client.request`: the server registers
+ * no such channel, and it cannot — every switch phase is authorized against the Electron WebContents
+ * that reserved it and the reservation auto-releases on that renderer's `destroyed` event, neither
+ * of which exists on a WS connection. Wiring them here would turn a legible "manage this from the
+ * desktop app" refusal into an E_NO_HANDLER at the far end. `transferThreadToSsh` needs the
+ * desktop's SshProjectManager, which the Server Edition has no counterpart for.
+ *
+ * Spreading `stub` first is what keeps that split honest: adding a member to `CodexAccountsApi`
+ * lands on the refusing stub until someone deliberately routes it.
+ *
+ * `waitLogin` is a straight passthrough of a poll that runs up to 5 minutes — safe for the same
+ * reason `claudeAccounts.waitLogin` is (RpcClient has no request timeout; a pending request rejects
+ * only when the socket drops, which is exactly what the pending login row wants to see).
+ *
+ * Like `claudeAccounts`, deliberately NOT added to `relay-api.ts`: a relay tab drives someone
+ * else's machine, and minting an account there would create it on the HOST while this renderer's
+ * settings.json records it as one of its own.
+ */
+export function buildCodexAccountsApi(
+  client: RpcClient,
+  stub: NodeTerminalApi['codexAccounts']
+): NodeTerminalApi['codexAccounts'] {
+  return {
+    ...stub,
+    add: () => client.request(IPC.codexAccountsAdd) as Promise<{ id: string; home: string }>,
+    waitLogin: (id) =>
+      client.request(IPC.codexAccountsWaitLogin, id) as Promise<{ email: string | null } | null>,
+    cancelWaitLogin: (id) => client.request(IPC.codexAccountsCancelWait, id) as Promise<void>,
+    identity: (id) =>
+      client.request(IPC.codexAccountsIdentity, id) as Promise<{ email: string | null } | null>,
+    systemIdentity: (ctx) =>
+      client.request(IPC.codexAccountsSystemIdentity, ctx) as Promise<{
+        email: string | null
+      } | null>,
+    remove: (id) => client.request(IPC.codexAccountsRemove, id) as Promise<void>
   }
 }
 
@@ -1081,6 +1127,9 @@ export async function installWsBridge(): Promise<boolean> {
     ...buildTriggersApi(client),
     ...buildGitHubApi(client),
     ...buildClaudeAccountsApi(client),
+    // Five real verbs over the bridge; the switch + SSH transfer members stay on the refusing stub
+    // (see buildCodexAccountsApi).
+    codexAccounts: buildCodexAccountsApi(client, stubApi.codexAccounts),
     codex: buildCodexApi(client),
     // `claude` is assembled from two builders: `cliCaps` from the relay-shared one, and the
     // transcript reader from the Server-Edition-only one (which also supplies `chat`).
