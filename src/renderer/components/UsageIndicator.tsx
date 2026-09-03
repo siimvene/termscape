@@ -1,5 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { ClaudeUsage, ProviderUsage, RemoteAccountUsage, UsageLimit } from '@shared/types'
+import type {
+  ClaudeUsage,
+  ProviderUsage,
+  RemoteAccountUsage,
+  UsageFailureCause,
+  UsageLimit
+} from '@shared/types'
 import { AGENT_CONFIG } from '@shared/agents/config'
 import { useSettings } from '../state/settings'
 import { useProjects } from '../state/projects'
@@ -37,6 +43,58 @@ import { systemAccountDisplay } from '../state/workspace'
 /** Grace period before a hover-opened popover closes, so the pointer can cross the pill's own
  *  gap (or clip a corner en route elsewhere) without the panel flickering shut. */
 const USAGE_HOVER_CLOSE_MS = 220
+
+/** The shape every empty-state site here shares — Claude rows, remote rows and provider rows
+ *  alike. Structural on purpose: `ProviderUsage` has no cause fields and satisfies it unchanged. */
+type UsageEmptyState = {
+  status: 'unavailable' | 'fetching' | 'ok' | 'error'
+  cause?: UsageFailureCause
+  httpStatus?: number
+}
+
+/**
+ * Why a row shows no bars, in one short line.
+ *
+ * Every one of these used to read 'Could not read usage.' or 'No usage data.', which is how an
+ * account whose OAuth credential had expired looked identical to one that was never signed in
+ * and to a 429. The cause comes from the reader (`fetchUsage`); this only words it.
+ *
+ * Two rules it must not break: never invent a cause (an absent `cause` — an older cached row, a
+ * remote read that does not classify — falls back to exactly the sentences printed before), and
+ * never quote the wire. The HTTP number is shown because it is the one detail that is both short
+ * and checkable; a server-supplied message is neither.
+ *
+ * `where` is appended to the vague fallback only ('on this host'), so the remote block keeps
+ * naming the machine it failed to read.
+ */
+export function usageEmptyText(u: UsageEmptyState, where?: string): string {
+  const code = u.httpStatus ? ` (HTTP ${u.httpStatus})` : ''
+  switch (u.cause) {
+    case 'no-credentials':
+      return 'Not signed in.'
+    case 'unauthorized':
+      // The one case that names the fix: the row looks signed in, and it is the credential that
+      // is gone. Settings › Accounts is where "Sign in again" lives.
+      return `Sign-in expired or refused${code}. Sign in again in Settings › Accounts.`
+    case 'rate-limited':
+      return 'Rate limited — usage is readable again shortly (HTTP 429).'
+    case 'server-error':
+      return `Anthropic could not answer${code}.`
+    case 'http':
+      return `Unexpected response${code}.`
+    case 'network':
+      return 'Could not reach Anthropic.'
+    case 'timeout':
+      return 'Timed out reading usage.'
+    case 'parse':
+      return 'Could not read the response.'
+    default:
+      // No cause recorded. Say only what `status` earns — which is what this popover always said.
+      return u.status === 'error'
+        ? `Could not read usage${where ? ` ${where}` : ''}.`
+        : 'No usage data.'
+  }
+}
 
 /**
  * A single limit row in the popover: bar, "% left"/"% used", reset countdown. The bar's fill
@@ -138,7 +196,9 @@ function AccountUsageBlock({
           ))}
         </div>
       )}
-      {u && u.limits.length === 0 && <div className="usage-popover__empty">No usage data.</div>}
+      {u && u.limits.length === 0 && (
+        <div className="usage-popover__empty">{usageEmptyText(u)}</div>
+      )}
       {!u && <div className="usage-popover__empty usage-pill__pulse">···</div>}
     </div>
   )
@@ -185,7 +245,7 @@ function RemoteUsageBlock({
       )}
       {row.usage.limits.length === 0 && (
         <div className="usage-popover__empty">
-          {row.usage.status === 'error' ? 'Could not read usage on this host.' : 'No usage data.'}
+          {usageEmptyText(row.usage, 'on this host')}
         </div>
       )}
     </div>
@@ -220,7 +280,7 @@ function ProviderBlock({ u, mode }: { u: ProviderUsage; mode: 'used' | 'remainin
       )}
       {u.limits.length === 0 && (
         <div className="usage-popover__empty">
-          {u.status === 'error' ? 'Could not read usage.' : 'No usage data.'}
+          {usageEmptyText(u)}
         </div>
       )}
     </div>
@@ -635,7 +695,11 @@ export function UsageIndicator({
                       ))}
                     </div>
                   )}
-                  {!hasData && <div className="usage-popover__empty">No usage data.</div>}
+                  {!hasData && (
+                    <div className="usage-popover__empty">
+                      {claudeUsage ? usageEmptyText(claudeUsage) : 'No usage data.'}
+                    </div>
+                  )}
                   {claudeUsage?.email && (
                     <div className="usage-account">
                       <div className="usage-account__label">Claude Account</div>

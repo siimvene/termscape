@@ -153,27 +153,81 @@ export async function resolveClaudeAccessToken(accountId?: string): Promise<stri
   return (await resolveCreds(accountId)).accessToken
 }
 
-export async function fetchUsage(accountId?: string): Promise<ClaudeUsage> {
+/**
+ * The failure taxonomy for one non-ok HTTP response, in one place. `status` keeps its four
+ * existing meanings (the mirror and the pill's hide rule read it); `cause` is the new detail.
+ *
+ * 401/403 stay 'unavailable' — a refused credential still means "no subscription windows to
+ * show, hide the pill" — but they now carry `unauthorized`, which is what separates an expired
+ * login from an account that was never signed in (both were 'unavailable' and nothing else).
+ */
+export function classifyUsageResponseStatus(httpStatus: number): {
+  status: ClaudeUsage['status']
+  cause: NonNullable<ClaudeUsage['cause']>
+  httpStatus: number
+} {
+  if (httpStatus === 401 || httpStatus === 403)
+    return { status: 'unavailable', cause: 'unauthorized', httpStatus }
+  if (httpStatus === 429) return { status: 'error', cause: 'rate-limited', httpStatus }
+  if (httpStatus >= 500) return { status: 'error', cause: 'server-error', httpStatus }
+  // Every other non-ok code (a 400, a 404 from a moved endpoint, a captive portal's 302 body):
+  // real, observed, and not a class we can name — so say only what we saw, the number itself.
+  return { status: 'error', cause: 'http', httpStatus }
+}
+
+/**
+ * The failure taxonomy for a THROWN request. Only our own abort can be attributed to slowness;
+ * everything else is 'network', which claims no more than "the request did not complete".
+ * `parse` never arrives here — the body read is caught separately, because an ok response with
+ * an unreadable body is a different fact from a request that never landed.
+ */
+export function classifyUsageThrow(err: unknown): NonNullable<ClaudeUsage['cause']> {
+  const name = (err as { name?: string } | null)?.name
+  return name === 'AbortError' || name === 'TimeoutError' ? 'timeout' : 'network'
+}
+
+/**
+ * Injectable edges, for tests only — production passes neither. Reading the real credentials in a
+ * unit test is not an option: on darwin `resolveCreds` reaches the developer's own login keychain,
+ * so a "no token" test would find a real one and a "401" test would send it somewhere.
+ */
+export interface UsageFetchDeps {
+  resolveCreds?: (accountId?: string) => Promise<OAuthCreds>
+  fetchImpl?: typeof fetch
+}
+
+export async function fetchUsage(
+  accountId?: string,
+  deps?: UsageFetchDeps
+): Promise<ClaudeUsage> {
   const now = Date.now()
-  const { accessToken, email } = await resolveCreds(accountId)
-  if (!accessToken) return emptyUsage(email, now, 'unavailable')
+  const readCreds = deps?.resolveCreds ?? resolveCreds
+  const doFetch = deps?.fetchImpl ?? fetch
+  const { accessToken, email } = await readCreds(accountId)
+  if (!accessToken) return emptyUsage(email, now, 'unavailable', { cause: 'no-credentials' })
+  let res: Response
   try {
     const ctrl = new AbortController()
     const t = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS)
-    const res = await fetch(USAGE_URL, {
+    res = await doFetch(USAGE_URL, {
       signal: ctrl.signal,
       cache: 'no-cache',
       headers: { authorization: `Bearer ${accessToken}`, 'anthropic-beta': OAUTH_BETA }
     }).finally(() => clearTimeout(t))
-    if (!res.ok) {
-      // 401/403 → token is an API key or expired: no subscription windows to show.
-      const status = res.status === 401 || res.status === 403 ? 'unavailable' : 'error'
-      return emptyUsage(email, now, status)
-    }
+  } catch (e) {
+    return emptyUsage(email, now, 'error', { cause: classifyUsageThrow(e) })
+  }
+  if (!res.ok) {
+    const { status, cause, httpStatus } = classifyUsageResponseStatus(res.status)
+    return emptyUsage(email, now, status, { cause, httpStatus })
+  }
+  // Split from the request above so a body we cannot read is reported as 'parse' rather than
+  // being laundered into 'network' — the endpoint answered, and that is worth knowing.
+  try {
     const data = (await res.json()) as Record<string, any>
     return usageFromPayload(data, email, now)
   } catch {
-    return emptyUsage(email, now, 'error')
+    return emptyUsage(email, now, 'error', { cause: 'parse', httpStatus: res.status })
   }
 }
 

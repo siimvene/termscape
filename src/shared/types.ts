@@ -2253,6 +2253,38 @@ export interface SessionMemoryApi {
   host(q?: SessionMemoryQuery): Promise<MemInfo | null>
 }
 
+/**
+ * WHY a usage read produced no limits — one coarse, machine-readable value. `status` alone
+ * collapsed six distinct failures into two words: a 429, a 500, a DNS failure and an unreadable
+ * body all reported 'error', and "no credential on disk at all" was indistinguishable from
+ * "Anthropic refused the credential we do have" — both 'unavailable'. That is precisely why an
+ * account whose OAuth credential had expired could not be told apart, from the UI, from one that
+ * was simply never signed in.
+ *
+ * Deliberately coarse: it names the class of failure a human can act on (sign in again / wait it
+ * out / it is not us), never a message copied off the wire. Widening `status` was rejected —
+ * it is read by the phone-facing agent-status mirror (`buildMirrorUsage`) and by the pill's own
+ * hide rule, so its four values keep their exact meanings and the reason rides alongside.
+ */
+export type UsageFailureCause =
+  /** No OAuth credential resolved at all — never signed in, or the credential was removed. */
+  | 'no-credentials'
+  /** A credential exists and the endpoint refused it: expired, revoked, or an API key. 401/403. */
+  | 'unauthorized'
+  /** 429 — the request budget is spent. The numbers exist; we may not read them right now. */
+  | 'rate-limited'
+  /** 5xx — Anthropic's side, nothing to fix here. */
+  | 'server-error'
+  /** Any other non-ok HTTP status; `httpStatus` carries which one. */
+  | 'http'
+  /** The request never completed: DNS, TLS, offline, connection reset. */
+  | 'network'
+  /** Our own 8 s abort fired — reachable but too slow. Kept distinct from `network` because the
+   *  socket was never proven bad, so this is not evidence that the machine is offline. */
+  | 'timeout'
+  /** An ok response whose body could not be read as JSON. */
+  | 'parse'
+
 /** Claude Code subscription usage snapshot for the bottom-left indicator. */
 export interface ClaudeUsage {
   /**
@@ -2271,6 +2303,16 @@ export interface ClaudeUsage {
    * 'fetching' = request in flight. 'ok' = windows present. 'error' = fetch failed.
    */
   status: 'unavailable' | 'fetching' | 'ok' | 'error'
+  /**
+   * Why this snapshot carries no limits, when the reader knows. **Optional and never guessed** —
+   * absent means "not recorded" (an older shell, a remote read, a cached row from before this
+   * field existed), which the UI must render as the same vague sentence it always printed rather
+   * than as a cause nobody observed.
+   */
+  cause?: UsageFailureCause
+  /** The status the usage endpoint actually answered with, when a response was received at all.
+   *  Absent for every failure that never got one (no credential, network, timeout). */
+  httpStatus?: number
 }
 
 /**
