@@ -471,6 +471,14 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
   // credentials; on success flip the row out of `pending` and adopt the captured email. A remote
   // account (`host` set) logs in on its host: the login node runs in remote tmux and waitLogin polls
   // the remote `.claude.json` over ssh (via the ctx `projectId`).
+  //
+  // Also the path a SETTLED account takes back when its OAuth credential expires or is revoked
+  // ("Sign in again"). That caller MUST pass `graceMs: 0`: capture is "`.claude.json` has an
+  // oauthAccount", which an already-logged-in-then-expired dir satisfies immediately — so with
+  // the 5 s grace the race would resolve off the stale identity file, the `claude /login` node
+  // would never open, and the button would do visibly nothing. Zero grace opens the terminal
+  // first, which is the whole affordance; the capture that lands right after only refreshes the
+  // email, and the row is never left latched (`waiting` clears on either outcome).
   const runLogin = async (
     account: Pick<ClaudeAccount, 'id' | 'host'>,
     opts?: { graceMs?: number }
@@ -672,13 +680,17 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
                         pending
                       </span>
                     ) : null}
-                    {account.pending && loginWait[account.id] === 'waiting' ? (
+                    {/* Progress and outcome are NOT gated on `pending` any more: a SETTLED
+                        account signs in through the same machinery (see the button below), and
+                        gating these on `pending` would leave that row silent for the whole
+                        five-minute capture window and silent again when it failed. */}
+                    {loginWait[account.id] === 'waiting' ? (
                       <span className="inline-flex items-center gap-1.5 text-[12px] text-muted">
                         <span className="ui-spinner" aria-hidden />
                         waiting for login…
                       </span>
                     ) : null}
-                    {account.pending && loginWait[account.id] === 'not-captured' ? (
+                    {loginWait[account.id] === 'not-captured' ? (
                       <span className="text-[12px] text-[color:var(--warn)]">
                         login not captured
                       </span>
@@ -702,28 +714,32 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
                   />
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
-                  {account.pending
-                    ? (() => {
-                        // A remote account can only retry login on a connected matching-host
-                        // project; without one, disable Retry (a local spawn would log into the
-                        // system account instead of the remote host).
-                        const blocked = !!account.host && !connectedProjectIdForHost(account.host)
-                        const waiting = loginWait[account.id] === 'waiting'
-                        return (
-                          <Button
-                            disabled={blocked || waiting}
-                            title={
-                              blocked
-                                ? `Connect to ${account.host} to finish logging in`
-                                : undefined
-                            }
-                            onClick={() => void runLogin(account)}
-                          >
-                            Retry login
-                          </Button>
-                        )
-                      })()
-                    : null}
+                  {(() => {
+                    // A remote account can only log in on a connected matching-host project;
+                    // without one, disable the button (a local spawn would log into the system
+                    // account instead of the remote host).
+                    const blocked = !!account.host && !connectedProjectIdForHost(account.host)
+                    const waiting = loginWait[account.id] === 'waiting'
+                    return (
+                      <Button
+                        disabled={blocked || waiting}
+                        title={
+                          blocked
+                            ? `Connect to ${account.host} to finish logging in`
+                            : account.pending
+                              ? undefined
+                              : 'Opens `claude /login` in a terminal for this account. Use it ' +
+                                'when its credential has expired or was revoked — the account ' +
+                                'keeps its config dir, transcripts, colour and every node bound to it.'
+                        }
+                        onClick={() =>
+                          void runLogin(account, account.pending ? undefined : { graceMs: 0 })
+                        }
+                      >
+                        {account.pending ? 'Retry login' : 'Sign in again'}
+                      </Button>
+                    )
+                  })()}
                   <Button
                     variant="ghost"
                     aria-label="Remove account"

@@ -128,11 +128,31 @@ export function usageFromPayload(data: unknown, email: string | null, now: numbe
   }
 }
 
-/** An empty snapshot carrying only the identity we managed to resolve. */
+/**
+ * An empty snapshot carrying only the identity we managed to resolve, plus — when the caller
+ * knows it — WHY it is empty (`cause`, and the HTTP status if a response was received).
+ *
+ * `failure` is optional on purpose: a caller that has not classified its failure must leave the
+ * fields off rather than pass a plausible-looking default, because the UI prints what it finds
+ * here and an invented cause is worse than the vague sentence it replaces. Callers that predate
+ * the taxonomy (the remote-over-SSH reader) keep compiling and keep reporting no cause.
+ */
 export function emptyUsage(
   email: string | null,
   now: number,
-  status: ClaudeUsage['status']
+  status: ClaudeUsage['status'],
+  failure?: { cause?: ClaudeUsage['cause']; httpStatus?: number }
 ): ClaudeUsage {
-  return { limits: [], session: null, weekly: null, email, updatedAt: now, status }
+  return {
+    limits: [],
+    session: null,
+    weekly: null,
+    email,
+    updatedAt: now,
+    status,
+    // Spread rather than assign: an absent cause must stay ABSENT, not become `undefined` on a
+    // key the mirror would then serialize as a field it cannot explain.
+    ...(failure?.cause ? { cause: failure.cause } : {}),
+    ...(typeof failure?.httpStatus === 'number' ? { httpStatus: failure.httpStatus } : {})
+  }
 }
