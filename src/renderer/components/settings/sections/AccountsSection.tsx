@@ -35,6 +35,7 @@ import { Button } from '@renderer/ui/Button'
 import { Input } from '@renderer/ui/Input'
 import { cn } from '@renderer/ui/cn'
 import { thisMachine, thisMachineCap } from '../../../lib/machineName'
+import { isBrowserRuntime } from '../../../bridge/runtime'
 
 const ROWS = {
   accounts: {
@@ -867,7 +868,23 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
               connected={group.remote ? !!connectedProjectIdForHost(group.host) : true}
             >
               {codexRowsFor(group.accounts, group.remote ? group.host : undefined)}
-              {!group.remote ? (
+              {!group.remote && isBrowserRuntime() ? (
+                /* The browser CAN serve every account verb now (the port landed) — what it cannot
+                   yet do safely is bind the login terminal to the account it just minted. Scoping
+                   is decided by `needsCodexAccountScope`, which for an agent-LESS login node falls
+                   through to a live settings lookup; a relay tab reaches a different settings core
+                   than the terminal it opens, and two Server Edition tabs can clobber each other's
+                   snapshot between the save and the spawn. Lose that race and `codex login` writes
+                   over the host's SYSTEM credential instead of the new account's.
+                   The real fix is to carry the codex-scope INTENT into the pty create options
+                   instead of re-deriving it from an eventually-consistent list, which makes losing
+                   the race a visible refusal rather than a silent wrong login. Until that lands,
+                   desktop only — where the node and the settings core are the same process. */
+                <p className="text-[12px] leading-relaxed text-muted">
+                  Adding a Codex account from the browser is temporarily unavailable — add them from
+                  the desktop app on this machine. Accounts already created there are shown above.
+                </p>
+              ) : !group.remote ? (
                 <div className="space-y-2">
                   <Button variant="primary" disabled={addingCodex} onClick={() => void onAddCodexAccount()}>
                     {addingCodex ? (
