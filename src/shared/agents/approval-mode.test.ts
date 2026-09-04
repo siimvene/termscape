@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   approvalFlags,
-  bypassSandboxCaveat,
+  bypassNoSandboxCaveat,
   modeSupported,
   permissionModeAgentIds,
   permissionModeAgentsLabel,
@@ -18,7 +18,8 @@ import {
  * Measured flag vocabularies:
  *   claude / grok : --permission-mode auto|acceptEdits|plan|bypassPermissions   (manual = no flag)
  *   gemini 0.54.4 : --approval-mode  default|auto_edit|yolo|plan                (gemini --help)
- *   codex 0.146.0 : --ask-for-approval untrusted|on-request|never               (codex --help)
+ *   codex 0.153.2 : --ask-for-approval untrusted|on-request  (manual/auto), and
+ *                   --dangerously-bypass-approvals-and-sandbox (bypassPermissions = full yolo)
  */
 describe('approvalFlags — claude and grok are untouched', () => {
   it('emits the historical --permission-mode spelling', () => {
@@ -81,7 +82,10 @@ describe('approvalFlags — gemini', () => {
 describe('approvalFlags — codex REFUSES what it cannot express', () => {
   it('maps only the three modes that have a real counterpart', () => {
     expect(approvalFlags('codex', 'auto')).toEqual(['--ask-for-approval', 'on-request'])
-    expect(approvalFlags('codex', 'bypassPermissions')).toEqual(['--ask-for-approval', 'never'])
+    // Bypass all is FULL yolo: one flag that drops approvals AND the sandbox (not --ask-for-approval never).
+    expect(approvalFlags('codex', 'bypassPermissions')).toEqual([
+      '--dangerously-bypass-approvals-and-sandbox'
+    ])
   })
 
   /**
@@ -118,21 +122,28 @@ describe('approvalFlags — codex REFUSES what it cannot express', () => {
     expect(modeSupported('codex', 'acceptEdits')).toBe(false)
   })
 
-  it('does NOT touch the sandbox flag', () => {
-    // `--sandbox` is a separate axis (read-only | workspace-write | danger-full-access). Folding it
-    // into an approval mode would silently widen filesystem access.
-    for (const m of ALL_PERMISSION_MODES)
-      expect(approvalFlags('codex', m).join(' ')).not.toContain('sandbox')
+  it('touches the sandbox ONLY for Bypass all (full yolo), never for the approval-only modes', () => {
+    // manual/auto are approval-axis only — they must not widen filesystem access.
+    for (const m of ['manual', 'auto'] as const)
+      expect(approvalFlags('codex', m).join(' '), m).not.toContain('sandbox')
+    // bypassPermissions IS full yolo: the one flag that drops approvals AND the sandbox together.
+    expect(approvalFlags('codex', 'bypassPermissions')).toEqual([
+      '--dangerously-bypass-approvals-and-sandbox'
+    ])
   })
 
-  it('only ever emits a value codex --help lists', () => {
-    // The vocabulary read off `codex --help` on 0.146.0. There is no `on-failure` and no plan mode.
-    const CHOICES = ['untrusted', 'on-request', 'never']
+  it('only ever emits flags codex --help lists', () => {
+    // Approval-axis values read off `codex --help`; Bypass all is the standalone bypass flag.
+    const APPROVAL_CHOICES = ['untrusted', 'on-request']
     for (const m of ALL_PERMISSION_MODES) {
       const flags = approvalFlags('codex', m)
       if (!flags.length) continue
+      if (flags[0] === '--dangerously-bypass-approvals-and-sandbox') {
+        expect(flags, m).toEqual(['--dangerously-bypass-approvals-and-sandbox'])
+        continue
+      }
       expect(flags[0], m).toBe('--ask-for-approval')
-      expect(CHOICES, m).toContain(flags[1])
+      expect(APPROVAL_CHOICES, m).toContain(flags[1])
     }
   })
 })
@@ -168,12 +179,13 @@ describe('UI copy derived from the mapping', () => {
     expect(label).not.toContain('Claude')
   })
 
-  it('warns that Bypass all keeps codex’s sandbox, which is a separate axis', () => {
-    // `--ask-for-approval never` does not touch `--sandbox`, so "no permission checks" must not be
-    // read as "no sandbox either". Only codex has that second axis among the capable agents.
-    const caveat = bypassSandboxCaveat()
+  it('warns that Bypass all now runs codex with NO sandbox (full disk + network)', () => {
+    // Inverts the old caveat: codex's bypass maps to --dangerously-bypass-approvals-and-sandbox, so
+    // the warning must say the sandbox is gone, not that it is kept. Only codex among the capable
+    // agents drops a separate sandbox.
+    const caveat = bypassNoSandboxCaveat()
     expect(caveat).toContain('Codex')
-    expect(caveat).toContain('sandbox')
+    expect(caveat.toLowerCase()).toContain('sandbox')
     expect(caveat).not.toContain('Gemini')
     expect(caveat).not.toContain('Claude')
   })
@@ -269,7 +281,70 @@ describe('withPermissionMode — a flag the command already carries (issue #601)
     // and never puts the flag in twice, so the new branch is unreachable for them.
     expect(withPermissionMode('claude', 'claude', 'auto')).toBe('claude --permission-mode auto')
     expect(withPermissionMode('codex', 'codex', 'manual')).toBe('codex --ask-for-approval untrusted')
+    // Bypass all on a plain codex is now full yolo, in one flag.
+    expect(withPermissionMode('codex', 'codex', 'bypassPermissions')).toBe(
+      'codex --dangerously-bypass-approvals-and-sandbox'
+    )
     expect(withPermissionMode('claude', 'claude', 'manual')).toBe('claude')
+  })
+})
+
+describe('withPermissionMode — codex, per-flag conflict suppression (reporter bug + reviewer fix)', () => {
+  it('does NOT append a conflicting flag to a `codex --yolo` launch command', () => {
+    // The reporter's exact case. `--yolo` = `--dangerously-bypass-approvals-and-sandbox`, mutually
+    // exclusive with `--ask-for-approval`; before the fix Bypass all appended one and codex refused.
+    expect(withPermissionMode('codex --yolo', 'codex', 'bypassPermissions')).toBe('codex --yolo')
+    expect(withPermissionMode('codex --yolo', 'codex', 'auto')).toBe('codex --yolo')
+    expect(withPermissionMode('codex --yolo', 'codex', 'manual')).toBe('codex --yolo')
+  })
+
+  it('leaves a command that already owns the APPROVAL axis (or a bypass flag) alone', () => {
+    for (const cmd of [
+      'codex --dangerously-bypass-approvals-and-sandbox',
+      'codex --ask-for-approval never',
+      'codex -a on-request'
+    ]) {
+      expect(withPermissionMode(cmd, 'codex', 'bypassPermissions'), cmd).toBe(cmd)
+      expect(withPermissionMode(cmd, 'codex', 'auto'), cmd).toBe(cmd)
+    }
+  })
+
+  it('a SANDBOX-only launch command still gets the dropdown’s approval policy (reviewer finding)', () => {
+    // `--sandbox` and `--ask-for-approval` are orthogonal and codex takes both, so an approval mode
+    // must NOT be dropped just because the user set a sandbox. Over-broad suppression did exactly
+    // that (a sandbox-only command silently ran at codex's default approval policy).
+    expect(withPermissionMode('codex --sandbox read-only', 'codex', 'auto')).toBe(
+      'codex --sandbox read-only --ask-for-approval on-request'
+    )
+    expect(withPermissionMode('codex -s workspace-write', 'codex', 'manual')).toBe(
+      'codex -s workspace-write --ask-for-approval untrusted'
+    )
+    // But the combined BYPASS flag IS mutually exclusive with --sandbox, so Bypass all is suppressed
+    // beside a --sandbox command rather than emitted into a non-launchable pair.
+    expect(
+      withPermissionMode('codex --sandbox danger-full-access', 'codex', 'bypassPermissions')
+    ).toBe('codex --sandbox danger-full-access')
+  })
+
+  it('still appends for a codex command that states no permission flag', () => {
+    expect(withPermissionMode('my-codex-wrapper', 'codex', 'bypassPermissions')).toBe(
+      'my-codex-wrapper --dangerously-bypass-approvals-and-sandbox'
+    )
+    expect(withPermissionMode('my-codex-wrapper', 'codex', 'auto')).toBe(
+      'my-codex-wrapper --ask-for-approval on-request'
+    )
+  })
+
+  it('recognises the SPACED short approval/sandbox forms (bundled is not — see shell-quote.ts)', () => {
+    // -a / -s spaced are the forms people write, and they suppress correctly.
+    expect(withPermissionMode('codex -a never', 'codex', 'bypassPermissions')).toBe('codex -a never')
+    expect(withPermissionMode('codex -s danger-full-access', 'codex', 'bypassPermissions')).toBe(
+      'codex -s danger-full-access'
+    )
+    // -s is the sandbox axis, orthogonal to approvals: an approval mode STILL appends beside it.
+    expect(withPermissionMode('codex -s workspace-write', 'codex', 'auto')).toBe(
+      'codex -s workspace-write --ask-for-approval on-request'
+    )
   })
 })
 

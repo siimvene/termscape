@@ -7,10 +7,15 @@
 // rather than a nearest match. A silent substitution would show the user "Plan" while codex ran in
 // on-request, or "Auto" while gemini auto-approved every file edit.
 //
-// Measured: `gemini --help` (0.54.4) and `codex --help` (0.146.0). `--sandbox` is deliberately not
-// touched: it is a separate axis (read-only | workspace-write | danger-full-access), and folding
-// `danger-full-access` into `bypassPermissions` would widen filesystem access invisibly —
-// `--ask-for-approval never` on its own still sandboxes.
+// Measured: `gemini --help` (0.54.4) and `codex --help` (0.146.0 / 0.153.2). For codex, `manual`
+// and `auto` touch the APPROVAL axis only (`--ask-for-approval`), leaving the sandbox at its
+// default; but `bypassPermissions` ("Bypass all") is FULL yolo — it maps to
+// `--dangerously-bypass-approvals-and-sandbox`, one flag that drops BOTH the approval prompts and
+// the sandbox, so "Bypass all" means the same unrestricted access on codex as on claude. A bypass
+// that still sandboxed the filesystem was not what the label promised, and the `codex --yolo`
+// launch-command workaround for it was itself broken (see withPermissionMode). That flag is
+// mutually exclusive with `--ask-for-approval` and `--sandbox`, which is why withPermissionMode
+// must recognise the whole permission axis, not just the one flag it would append.
 import {
   AGENT_CONFIG,
   ALL_PERMISSION_MODES,
@@ -25,18 +30,19 @@ import {
 } from './config'
 import { argvHasFlag } from '../shell-quote'
 
-/** One agent's approval dialect: the flag it spells, and the values it accepts. ONE fact per agent —
- *  a flag and a table maintained separately is how a third agent added to the table silently emits
- *  the second agent's flag. */
+/** One agent's approval dialect: each mode it can express → the EXACT argv to append for it. Full
+ *  flag arrays, not a shared flag + value table, because codex's `bypassPermissions` is a DIFFERENT
+ *  flag from its other modes (`--dangerously-bypass-approvals-and-sandbox`, which takes no value) —
+ *  a shared-flag model could not express it. A mode absent from the table has no equivalent in this
+ *  agent's CLI and emits nothing (its own default), surfaced via modeSupported/unsupportedModesNote. */
 interface ApprovalDialect {
-  flag: string
-  modes: Partial<Record<AgentPermissionMode, string>>
+  modes: Partial<Record<AgentPermissionMode, readonly string[]>>
 }
 
-const GEMINI_MODES: Partial<Record<AgentPermissionMode, string>> = {
-  plan: 'plan',
-  acceptEdits: 'auto_edit',
-  bypassPermissions: 'yolo'
+const GEMINI_MODES: Partial<Record<AgentPermissionMode, readonly string[]>> = {
+  plan: ['--approval-mode', 'plan'],
+  acceptEdits: ['--approval-mode', 'auto_edit'],
+  bypassPermissions: ['--approval-mode', 'yolo']
   // `manual` → gemini's own `default`, i.e. NO flag, exactly as it is for claude.
   //
   // `auto` is ABSENT ON PURPOSE, and it is the one absence worth explaining, because `auto` is
@@ -51,7 +57,7 @@ const GEMINI_MODES: Partial<Record<AgentPermissionMode, string>> = {
   // answer and reproduces the pre-branch launch exactly. See `unsupportedModesNote`.
 }
 
-const CODEX_MODES: Partial<Record<AgentPermissionMode, string>> = {
+const CODEX_MODES: Partial<Record<AgentPermissionMode, readonly string[]>> = {
   // codex is the FIRST agent where `manual` emits a flag, and it has to. For every other agent
   // `manual` = no flag = a default that already prompts (gemini's own `default` is documented as
   // "prompt for approval"), which is exactly what the label "Ask each time" promises. codex's
@@ -63,27 +69,33 @@ const CODEX_MODES: Partial<Record<AgentPermissionMode, string>> = {
   // real equivalent: "only run trusted commands without asking; escalate anything not in the trusted
   // set". No codex launch has ever carried this flag (codex joined the list in the same change), so
   // there is no historical command line to keep byte-identical here.
-  manual: 'untrusted',
-  auto: 'on-request',
-  bypassPermissions: 'never'
-  // No `plan` and no edit-specific mode exist in codex 0.146.0, so `plan` and `acceptEdits` are
-  // absent ON PURPOSE — see modeSupported.
+  manual: ['--ask-for-approval', 'untrusted'],
+  auto: ['--ask-for-approval', 'on-request'],
+  // `bypassPermissions` ("Bypass all") is FULL yolo for codex. `--dangerously-bypass-approvals-and-sandbox`
+  // drops the approval prompts AND the sandbox in one flag, so "Bypass all" grants the same
+  // unrestricted access here as on claude — not "approvals off but still sandboxed", which the label
+  // did not promise and which no in-product setting could reach (the `codex --yolo` launch-command
+  // workaround itself broke — see withPermissionMode). The flag is MUTUALLY EXCLUSIVE with
+  // `--ask-for-approval` and `--sandbox`; withPermissionMode suppresses the append whenever the
+  // user's own command already states either axis, so codex is never handed both.
+  bypassPermissions: ['--dangerously-bypass-approvals-and-sandbox']
+  // No `plan` and no edit-specific mode exist in codex, so `plan` and `acceptEdits` are absent ON
+  // PURPOSE — see modeSupported.
 }
 
 /**
- * The agents that need a translation, flag and vocabulary together.
+ * The agents that need a translation: each mode mapped to the exact argv to append.
  *
- * These two used to be separate lookups — a `tableFor` ternary and a `flagFor` ternary whose `else`
- * branch was codex's flag. A third agent added to the table and forgotten in the flag would then
- * have emitted `--ask-for-approval <its own value>`: a wrong flag carrying a right value, i.e. a
- * failed launch, from an edit that looks complete. One record makes that impossible to express.
+ * Each mode carries its FULL flags, so a new agent (or a new mode) states its own spelling and its
+ * value together — there is no shared flag field for a mode to disagree with, which is how a table
+ * once risked emitting one agent's flag with another agent's value.
  *
  * Looked up through `Object.hasOwn`, not `[agentId]`: `AgentId` is OPEN (custom agents carry
  * user-typed ids), so a plain-object index answers `'constructor'` with a Function.
  */
 const APPROVAL_DIALECTS: Partial<Record<AgentId, ApprovalDialect>> = {
-  gemini: { flag: '--approval-mode', modes: GEMINI_MODES },
-  codex: { flag: '--ask-for-approval', modes: CODEX_MODES }
+  gemini: { modes: GEMINI_MODES },
+  codex: { modes: CODEX_MODES }
 }
 
 const dialectFor = (agentId: AgentId): ApprovalDialect | null =>
@@ -117,11 +129,37 @@ export function approvalFlags(agentId: AgentId, mode: AgentPermissionMode): stri
   if (!isPermissionMode(mode)) return []
   const dialect = dialectFor(agentId)
   if (dialect) {
-    const value = dialect.modes[mode]
-    return value ? [dialect.flag, value] : []
+    const flags = dialect.modes[mode]
+    return flags ? [...flags] : []
   }
   // claude + grok keep their exact historical spelling, validated at the interpolation site.
   return hasPermissionMode(agentId) ? permissionModeFlag(mode) : []
+}
+
+// codex's three flag groups. Its APPROVAL axis and its SANDBOX axis are independent (codex accepts
+// `--sandbox X --ask-for-approval Y` together), but the combined BYPASS flag sets both at once and is
+// MUTUALLY EXCLUSIVE with each — codex refuses to launch if a bypass flag appears beside either axis.
+const CODEX_APPROVAL_FLAGS = ['--ask-for-approval', '-a'] as const
+const CODEX_SANDBOX_FLAGS = ['--sandbox', '-s'] as const
+const CODEX_BYPASS_FLAGS = ['--dangerously-bypass-approvals-and-sandbox', '--yolo', '--full-auto'] as const
+
+/**
+ * For codex, the flags already in a launch command that make appending `appendedFlag` (the first
+ * flag we would add) either a mutual-exclusion CONFLICT or a duplicate — so we append nothing.
+ *
+ * The distinction matters and a blanket "any axis flag suppresses" is WRONG (it silently dropped the
+ * dropdown's approval policy for a sandbox-only launch command — reviewer finding):
+ *  - Appending an `--ask-for-approval` flag is suppressed by an existing APPROVAL flag (duplicate) or
+ *    a BYPASS flag (which sets approvals too, and conflicts). It is NOT suppressed by `--sandbox`:
+ *    `codex --sandbox read-only` should still get the dropdown's approval policy — the axes are
+ *    orthogonal and codex takes both.
+ *  - Appending the combined BYPASS flag is suppressed by ANY approval, sandbox, or bypass flag,
+ *    because `--dangerously-bypass-approvals-and-sandbox` is mutually exclusive with both axes.
+ */
+function codexSuppressors(appendedFlag: string): readonly string[] {
+  return appendedFlag === '--dangerously-bypass-approvals-and-sandbox'
+    ? [...CODEX_APPROVAL_FLAGS, ...CODEX_SANDBOX_FLAGS, ...CODEX_BYPASS_FLAGS]
+    : [...CODEX_APPROVAL_FLAGS, ...CODEX_BYPASS_FLAGS]
 }
 
 /**
@@ -138,6 +176,13 @@ export function approvalFlags(agentId: AgentId, mode: AgentPermissionMode): stri
  * `claude --permission-mode bypassPermissions --permission-mode auto` — a duplicate the settings
  * field still displayed as exactly what the user typed, so whichever occurrence the CLI honoured,
  * they had no way to tell which one was in force.
+ *
+ * **For codex the suppression spans its permission axes, not one flag (the reporter's bug).** codex's
+ * `--yolo` / `--dangerously-bypass-approvals-and-sandbox` is mutually exclusive with
+ * `--ask-for-approval` and `--sandbox`, so appending our flag beside a user's `codex --yolo` did not
+ * merely duplicate — codex refused to launch. `codexSuppressors` decides, per the flag we are about
+ * to add, which existing flags conflict with or duplicate it — narrowly, so a sandbox-only launch
+ * command still receives the dropdown's (orthogonal) approval policy.
  *
  * The contract this settles is "program only, minus what you spelled yourself", not "the override
  * owns the whole command". The whole-command reading cannot work: the settings copy already
@@ -156,7 +201,11 @@ export function approvalFlags(agentId: AgentId, mode: AgentPermissionMode): stri
 export function withPermissionMode(cmd: string, id: AgentId, mode: AgentPermissionMode): string {
   const flags = approvalFlags(id, mode)
   if (!flags.length) return cmd
-  if (argvHasFlag(cmd, flags[0])) return cmd
+  // Suppress the append when the user's command already states the relevant permission flag. For
+  // codex the conflicting/duplicate set depends on WHICH flag we would add (codexSuppressors); every
+  // other agent falls back to the single flag it would emit, byte-identical to before.
+  const suppressors = id === 'codex' ? codexSuppressors(flags[0]) : [flags[0]]
+  if (suppressors.some((f) => argvHasFlag(cmd, f))) return cmd
   return `${cmd} ${flags.join(' ')}`
 }
 
@@ -227,20 +276,23 @@ export function unsupportedModesNote(): string {
 }
 
 /**
- * Agents where `bypassPermissions` bypasses APPROVALS only, because their sandbox is a separate axis
- * this module deliberately does not touch — codex's `--sandbox`, where `--ask-for-approval never`
- * still sandboxes. Kept beside the mapping that causes it rather than in the component, so the
- * warning copy cannot drift from which agents it is true of.
+ * Agents whose "Bypass all" ALSO drops the OS sandbox (full filesystem + network), not just the
+ * approval prompts — so the warning can say so. codex's `bypassPermissions` maps to
+ * `--dangerously-bypass-approvals-and-sandbox`; claude/grok/gemini have no separate sandbox to drop
+ * (their bypass was always full). Kept beside the mapping that causes it so the copy cannot drift.
+ * (This inverts the pre-change `bypassSandboxCaveat`, which reassured that codex KEPT its sandbox —
+ * now false.)
  */
-const SANDBOX_RETAINED: readonly AgentId[] = ['codex']
+const BYPASS_DROPS_SANDBOX: readonly AgentId[] = ['codex']
 
-/** The clause a "Bypass all" warning owes, so "no permission checks" is not read as "no sandbox
- *  either". Empty string when it applies to nobody. */
-export function bypassSandboxCaveat(): string {
+/** The clause a "Bypass all" warning owes now that codex's bypass drops the sandbox: "no permission
+ *  checks" must be read as "no sandbox either — full disk and network". Empty when it applies to
+ *  nobody. */
+export function bypassNoSandboxCaveat(): string {
   const ids = permissionModeAgentIds({ mode: 'bypassPermissions' }).filter((id) =>
-    SANDBOX_RETAINED.includes(id)
+    BYPASS_DROPS_SANDBOX.includes(id)
   )
   if (!ids.length) return ''
   const label = joinAnd(ids.map(agentLabel))
-  return `${label} still ${ids.length > 1 ? 'run' : 'runs'} in its own sandbox — only the approval prompts are skipped.`
+  return `${label} additionally ${ids.length > 1 ? 'run' : 'runs'} with NO sandbox — full filesystem and network access, not just skipped prompts.`
 }

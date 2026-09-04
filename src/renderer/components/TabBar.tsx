@@ -20,7 +20,7 @@ import {
   PERMISSION_MODE_LABELS,
   type AgentPermissionMode
 } from '@shared/agents/config'
-import { bypassSandboxCaveat, permissionModeAgentsLabel } from '@shared/agents/approval-mode'
+import { bypassNoSandboxCaveat, permissionModeAgentsLabel } from '@shared/agents/approval-mode'
 
 interface TabBarProps {
   onSwitch: (id: string) => void
@@ -479,12 +479,10 @@ export function TabBar({
                       m === 'bypassPermissions'
                         ? // Both the agent list and the sandbox caveat are derived from the mapping
                           // (approval-mode.ts): the list names exactly the agents "Bypass all"
-                          // actually reaches, so it cannot warn about an agent the mode never applies
-                          // to — or fall silent about one it newly does. The caveat is owed because
-                          // for codex the mode skips APPROVALS only: `--ask-for-approval never` does
-                          // not touch `--sandbox`, which we deliberately leave alone, so "no
-                          // permission checks" must not be read as "no sandbox either".
-                          `Skips every permission prompt. This override is saved in the project file (.nodeterm/project.json), so if you commit it, everyone who clones the repo runs their ${permissionModeAgentsLabel({ mode: 'bypassPermissions' })} sessions without permission checks too. ${bypassSandboxCaveat()}`.trim()
+                          // reaches, and the caveat names those whose bypass ALSO drops the OS sandbox
+                          // (codex now maps to --dangerously-bypass-approvals-and-sandbox), so the
+                          // copy cannot drift from which agents each fact is true of.
+                          `Skips every permission prompt. This override is saved in the project file (.nodeterm/project.json), so if you commit it, everyone who clones the repo runs their ${permissionModeAgentsLabel({ mode: 'bypassPermissions' })} sessions without permission checks too. ${bypassNoSandboxCaveat()}`.trim()
                         : m === 'auto'
                           ? (menuAutoHint ?? undefined)
                           : undefined

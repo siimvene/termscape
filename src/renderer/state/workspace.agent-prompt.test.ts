@@ -93,6 +93,9 @@ describe('createAgentNode — permission mode meets the argv separator', () => {
       'grok --permission-mode bypassPermissions'
     )
     expect(cmd('gemini', undefined, 'bypassPermissions')).toBe('gemini --approval-mode yolo')
-    expect(cmd('codex', undefined, 'bypassPermissions')).toBe('codex --ask-for-approval never')
+    // Codex "Bypass all" is full yolo: one flag dropping approvals AND the sandbox.
+    expect(cmd('codex', undefined, 'bypassPermissions')).toBe(
+      'codex --dangerously-bypass-approvals-and-sandbox'
+    )
   })
 })

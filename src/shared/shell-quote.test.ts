@@ -53,4 +53,16 @@ describe('argvHasFlag', () => {
     expect(argvHasFlag('grok -- --permission-mode', '--permission-mode')).toBe(false)
     expect(argvHasFlag('grok --permission-mode plan -- prompt', '--permission-mode')).toBe(true)
   })
+  it('matches spaced and = short-flag forms, but NOT a bundled short flag', () => {
+    // The forms anyone actually writes are matched.
+    expect(argvHasFlag('codex -a on-request', '-a')).toBe(true)
+    expect(argvHasFlag('codex -a=on-request', '-a')).toBe(true)
+    // The bundled form is deliberately NOT matched: `token.startsWith('-a')` would also match a value
+    // like `-all` and silently downgrade a chosen mode. A loud non-launch on the exotic bundled form
+    // beats a quiet relaxation (see the note in shell-quote.ts).
+    expect(argvHasFlag('codex -aon-request', '-a')).toBe(false)
+    // A short-flag query never matches a long flag, nor a word past `--`.
+    expect(argvHasFlag('codex --append-system-prompt x', '-a')).toBe(false)
+    expect(argvHasFlag('codex -- -a on-request', '-a')).toBe(false)
+  })
 })

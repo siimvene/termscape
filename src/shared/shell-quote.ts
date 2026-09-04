@@ -50,6 +50,14 @@ export function shellQuoteIfNeeded(s: string): string {
  * override like `claude --append-system-prompt 'mind --permission-mode'` mentions the flag inside a
  * quoted argument, and a substring match there would suppress nodeterm's real flag over a sentence.
  *
+ * A BUNDLED short flag (`-aon-request` == `-a on-request` to getopt/clap) is deliberately NOT matched.
+ * The tempting `token.startsWith('-a')` over-matches: a value token that merely begins with the same
+ * letter (`codex --model -all`, where `-all` is the model's value) would falsely read as `-a`, and the
+ * result is a SILENT downgrade — nodeterm suppresses the dropdown's stricter approval flag and codex
+ * falls back to its looser default. A loud non-launch on the exotic bundled form (codex exits 2 on the
+ * resulting mutually-exclusive pair) is safer than a quiet relaxation of a mode the user chose. The
+ * spaced (`-a on-request`) and `=` (`-a=on-request`) forms ARE matched, which is how anyone writes it.
+ *
  * Scanning stops at a bare `--`, because everything after end-of-options is a positional argument —
  * a word there is the CLI's data, not an option it will act on.
  */
