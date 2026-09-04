@@ -44,7 +44,9 @@ export async function discoverResolvedCodexAccounts(
  * - only an account still `pending` is promoted (`!account.pending` short-circuits, so a row that
  *   already changed under a concurrent edit is left exactly as the user left it);
  * - a generated "New Codex account" label is promoted to the captured email; a user-chosen label
- *   is preserved.
+ *   is preserved. The "generated" test is the placeholder string UNLESS `labelEdited` is set: a user
+ *   who deliberately typed "New Codex account" flags the row, and that real label survives capture
+ *   here on the normal login path, not only through the store's stale-snapshot reconcile.
  */
 export function applyResolvedCodexAccounts(
   accounts: readonly CodexAccount[],
@@ -57,7 +59,9 @@ export function applyResolvedCodexAccounts(
     return {
       ...account,
       label:
-        account.label === NEW_CODEX_ACCOUNT_LABEL && identity.email ? identity.email : account.label,
+        !account.labelEdited && account.label === NEW_CODEX_ACCOUNT_LABEL && identity.email
+          ? identity.email
+          : account.label,
       email: identity.email ?? undefined,
       pending: false
     }

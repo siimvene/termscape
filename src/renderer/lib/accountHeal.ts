@@ -18,9 +18,12 @@ type WaitLogin = (id: string) => Promise<{ email: string } | null>
 type ApplyAccounts = (fn: (accs: ClaudeAccount[]) => ClaudeAccount[]) => void
 
 /** Adopt a captured email into a record: clear `pending`, set `email`, and take the email as the
- *  label ONLY when the user has not named it (empty, or the placeholder 'New account'). */
+ *  label ONLY when the user has not named it (empty, or the placeholder 'New account'). A row the
+ *  user deliberately renamed carries `labelEdited`, so even a hand-typed 'New account' counts as
+ *  named and survives the capture — matching the store's stale-snapshot reconcile. */
 export function healedAccount(account: ClaudeAccount, email: string): ClaudeAccount {
-  const named = !!account.label && account.label !== NEW_CLAUDE_ACCOUNT_LABEL
+  const named =
+    !!account.labelEdited || (!!account.label && account.label !== NEW_CLAUDE_ACCOUNT_LABEL)
   return { ...account, email, pending: false, label: named ? account.label : email }
 }
 

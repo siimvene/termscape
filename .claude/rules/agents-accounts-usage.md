@@ -217,6 +217,23 @@ paths:
     membership"), the desktop halves in `main/codex-accounts.test.ts` and
     `main/claude-accounts.probe.test.ts`, the renderer mirrors in `AccountsSection.codex-add` /
     `AccountsSection.claude-add`.
+  - **Known limitations (tracked for a follow-up).** SINGLE-PROCESS account mutation is fully
+    covered — one desktop app, or one server with any number of BROWSER TABS on that one server,
+    all serialize through the store's FIFO chain and lose no row. What is NOT yet guaranteed:
+    - **Concurrent account MUTATION across multiple PROCESSES sharing one `--data-dir`.** The
+      cross-process lock (`src/core/file-lock.ts`) is a hand-rolled O_EXCL lockfile that can
+      double-acquire when two processes break the same STALE lock in the same instant, so a
+      cross-process add/add can still lose a row. (The lock is now BOUNDED — it throws rather than
+      hanging or busy-spinning — but not exclusive under a simultaneous stale-break.) The complete
+      fix (a vetted cross-process lock, e.g. `proper-lockfile`, with owner tokens) is deferred to a
+      dedicated follow-up branch.
+    - **REMOTE account teardown across stale per-process caches.** The `remove`/`add` handlers read
+      membership from THIS process's cache, not from disk under the lock, so a process with a stale
+      cache can delete another process's remote row without SSH teardown; a remote rollback ignores
+      a failed teardown; and a disconnect mid-add can persist a remote account as local. The fix
+      (read membership from disk under the lock in the account handlers) is deferred to the same
+      follow-up. See `docs/atomic-writes.md` "Known limitations". These are NOT fixed here — do not
+      describe them as such.
   - **Hook install** — the managed hook is merged into **each account dir's** `settings.json` at
     add-account **and** at app launch (local, shared `install-helper.ts`) / via
     `RemoteHooks.installIntoAccountDir` (remote), so every identity reports agent status. The

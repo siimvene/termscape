@@ -99,6 +99,27 @@ export class SettingsWriteConflictError extends Error {
   }
 }
 
+/** Thrown by a write path when settings.json EXISTS but could not be READ this instant — a transient
+ *  EPERM/EACCES/EIO on stat or read of a file that is still there. Only `ENOENT` (a genuinely
+ *  missing file) counts as "missing" and may write defaults; any OTHER error is refused exactly like
+ *  the unparseable case (`SettingsCorruptError`), because publishing defaults over a file we merely
+ *  failed to read this instant is the same data loss on a different trigger. See `readDisk`. */
+export class SettingsUnreadableError extends Error {
+  readonly code: string;
+  constructor(filePath: string, cause: unknown) {
+    super(`Refusing to overwrite ${filePath}: it exists but could not be read`);
+    this.name = "SettingsUnreadableError";
+    this.code = codeOf(cause);
+  }
+}
+
+/** The `.code` of a Node fs error, or "" when there is none. */
+function codeOf(err: unknown): string {
+  return typeof err === "object" && err !== null && "code" in err
+    ? String((err as { code: unknown }).code)
+    : "";
+}
+
 /** The shape every shell-owned account row shares: an id, and a login-resolution flag. `labelEdited`
  *  is a transient renderer HINT (never persisted here) — see the placeholder branch in
  *  `reconcileOwnedAccountList`. */
@@ -321,24 +342,36 @@ export class SettingsStore {
    * re-reads — the safe direction.
    *
    * Two absences are DIFFERENT, and conflating them is the corrupt-file bug:
-   *  - MISSING (or vanished/unreadable between the stat and the read): a fresh install has nothing
-   *    on disk yet, so the CACHE is the base with a null stamp (which never matches a later stat,
-   *    so the write is re-checked once and then lands). This is the only case that may write
+   *  - MISSING (ENOENT, or ENOENT-vanished between the stat and the read): a fresh install has
+   *    nothing on disk yet, so the CACHE is the base with a null stamp (which never matches a later
+   *    stat, so the write is re-checked once and then lands). This is the ONLY case that may write
    *    defaults.
+   *  - EXISTS-BUT-UNREADABLE (any non-ENOENT stat/read error — EPERM/EACCES/EIO): the file is there
+   *    but a transient error stopped us reading it. Treating that as "missing" and repairing to
+   *    defaults is the same data loss as the corrupt case on a different trigger, so we THROW
+   *    `SettingsUnreadableError` — never persist defaults over a file we simply could not read.
    *  - EXISTS-BUT-UNPARSEABLE: the file has bytes we could not parse — possibly a recoverable
    *    hand-edit or partial write. Persisting defaults over it is data loss, so we THROW
    *    `SettingsCorruptError` and the write refuses rather than "repairs". (An EMPTY file carries
    *    nothing to lose and is treated as defaults, matching `init`.)
    */
   private readDisk(): DiskRead {
-    const stamp = this.diskStamp();
-    if (stamp === null) return { base: this.cache, stamp: null };
+    let stamp: string;
+    try {
+      const st = statSync(this.filePath);
+      stamp = `${st.ino}:${st.mtimeMs}:${st.size}`;
+    } catch (err) {
+      if (codeOf(err) === "ENOENT") return { base: this.cache, stamp: null };
+      throw new SettingsUnreadableError(this.filePath, err);
+    }
     let raw: string;
     try {
       raw = readFileSync(this.filePath, "utf-8");
-    } catch {
-      // Vanished/unreadable between the stat and the read: treat as missing, not corrupt.
-      return { base: this.cache, stamp: null };
+    } catch (err) {
+      // Vanished between the stat and the read: genuinely missing.
+      if (codeOf(err) === "ENOENT") return { base: this.cache, stamp: null };
+      // Any other read error (EPERM/EACCES/EIO) on a file that just stat'd fine: refuse.
+      throw new SettingsUnreadableError(this.filePath, err);
     }
     if (raw.trim() === "") return { base: mergeSettings(null), stamp };
     try {
@@ -377,8 +410,15 @@ export class SettingsStore {
    * non-cooperating writer), or the lock could not be acquired in time, the write is ABANDONED
    * with a throw (`SettingsWriteConflictError` / `FileLockTimeoutError`), not landed on top of a
    * base it never saw — a failed save stays failed, which is the contract callers like
-   * `codex-accounts:add`'s rollback depend on. A genuinely corrupt file THROWS from `readDisk`
-   * before any write, so defaults are never published over recoverable bytes.
+   * `codex-accounts:add`'s rollback depend on. A genuinely corrupt or unreadable file THROWS from
+   * `readDisk` before any write, so defaults are never published over recoverable bytes.
+   *
+   * KNOWN LIMITATION (tracked for a follow-up, see docs/atomic-writes.md "Known limitations"). The
+   * cross-process serialization rests on `withFileLock`'s hand-rolled O_EXCL lock, which can
+   * double-acquire when two processes break the same STALE lockfile in the same instant. So a
+   * cross-process add/add can still, rarely, lose a row. Single-process (one desktop app, or one
+   * server with any number of browser tabs) is fully covered — the FIFO chain serializes those. The
+   * complete cross-process fix (a vetted lock with owner tokens) is deferred to a dedicated branch.
    */
   private readModifyWrite(
     apply: (base: Settings) => Settings,

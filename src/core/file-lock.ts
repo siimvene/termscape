@@ -73,27 +73,40 @@ export async function withFileLock<T>(
       break
     } catch (e) {
       if (codeOf(e) !== 'EEXIST') throw e
-      // Held by someone. Break it only if it looks abandoned (mtime past the stale ceiling),
-      // re-checking immediately before the unlink so we never remove a lock another process just
-      // freshly created (its mtime would then be recent again).
-      let broke = false
-      try {
-        const st = await fs.stat(lockPath)
-        if (now() - st.mtimeMs > STALE_LOCK_MS) {
-          const again = await fs.stat(lockPath)
-          if (now() - again.mtimeMs > STALE_LOCK_MS) {
-            await fs.rm(lockPath, { force: true })
-            broke = true
-          }
-        }
-      } catch {
-        // The lockfile vanished between our open and our stat — the holder released. Retry now.
-        broke = true
-      }
-      if (broke) continue
-      if (now() >= deadline) throw new FileLockTimeoutError(lockPath, timeoutMs)
-      await sleep(RETRY_MS)
     }
+    // Held by someone (or was, a tick ago). Break it only if it looks abandoned (mtime past the
+    // stale ceiling), re-checking immediately before the unlink so we never remove a lock another
+    // process just freshly created (its mtime would then be recent again).
+    //
+    // KNOWN LIMITATION (tracked for a follow-up, see docs/atomic-writes.md "Known limitations"):
+    // two processes breaking the SAME stale lock in the same instant can both acquire — this is the
+    // hand-rolled lock's residual double-acquire race. Not fixed here; the deadline discipline below
+    // only guarantees the acquire is BOUNDED (never hangs, never hot-spins), not exclusive under a
+    // simultaneous stale-break. The complete fix (a vetted cross-process lock with owner tokens) is
+    // deferred to a dedicated branch.
+    let removed = false
+    try {
+      const st = await fs.stat(lockPath)
+      if (now() - st.mtimeMs > STALE_LOCK_MS) {
+        const again = await fs.stat(lockPath)
+        if (now() - again.mtimeMs > STALE_LOCK_MS) {
+          await fs.rm(lockPath, { force: true })
+          removed = true
+        }
+      }
+    } catch (e) {
+      // ENOENT = the lockfile vanished between our open and our stat — the holder released; retry
+      // immediately. Any OTHER error (EPERM/EACCES on stat, or an `fs.rm` that could not delete the
+      // lock) means we could neither inspect nor break it: fall through to the bounded wait rather
+      // than looping straight back into `fs.open`, which would hot-spin on an unremovable lock.
+      if (codeOf(e) === 'ENOENT') removed = true
+    }
+    // The deadline is checked on EVERY path — including a successful/failed break — so an
+    // unremovable stale lock throws instead of spinning forever.
+    if (now() >= deadline) throw new FileLockTimeoutError(lockPath, timeoutMs)
+    // Retry at once only when we made concrete progress (removed the lock or saw it vanish); on
+    // every other path sleep first so a persistent failure cannot busy-spin.
+    if (!removed) await sleep(RETRY_MS)
   }
   try {
     return await fn()

@@ -51,6 +51,16 @@ describe('applyResolvedCodexAccounts', () => {
     expect(out[0]).toMatchObject({ label: 'Work', email: 'a@x', pending: false })
   })
 
+  it('honors labelEdited: a user who typed the placeholder keeps it through capture', () => {
+    // The user deliberately named the account "New Codex account" — the renderer flags `labelEdited`
+    // — so capture must NOT replace it with the email on the normal login path.
+    const out = applyResolvedCodexAccounts(
+      [pending('a', { labelEdited: true })],
+      [{ id: 'a', email: 'a@x' }]
+    )
+    expect(out[0]).toMatchObject({ label: 'New Codex account', email: 'a@x', pending: false })
+  })
+
   it('merges against fresh state without reviving removed or already-changed accounts', () => {
     // Fresh list: 'a' was already settled by a concurrent edit; 'removed' is gone entirely.
     const fresh: CodexAccount[] = [{ id: 'a', label: 'Renamed', email: 'a@x', pending: false }]

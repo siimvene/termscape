@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { existsSync, mkdtempSync, rmSync, writeFileSync, utimesSync } from 'fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, utimesSync } from 'fs'
 import { tmpdir } from 'os'
 import path from 'path'
 import { withFileLock, FileLockTimeoutError } from './file-lock'
@@ -69,5 +69,23 @@ describe('withFileLock', () => {
     const out = await withFileLock(lock, async () => 'acquired', { timeoutMs: 200 })
     expect(out).toBe('acquired')
     expect(existsSync(lock)).toBe(false)
+  })
+
+  it('an unremovable STALE lock throws (bounded) instead of hot-spinning forever', async () => {
+    // A DIRECTORY at the lock path: `fs.open(path,'wx')` sees EEXIST, but `fs.rm(path,{force:true})`
+    // WITHOUT `recursive` cannot delete a directory — the "stale but unremovable" case. Its mtime is
+    // set old so the stale-break branch is entered on every pass. Pre-fix, the failed `fs.rm` set
+    // broke=true and `continue`d before the deadline check, hot-spinning forever; now every path
+    // checks the deadline and throws.
+    mkdirSync(lock)
+    const old = Date.now() / 1000 - 60 * 60 // well past STALE_LOCK_MS
+    utimesSync(lock, old, old)
+    // `now` seam jumps forward on each read so the throw is provably BOUNDED regardless of sleeps.
+    let t = Date.now()
+    const now = (): number => (t += 100)
+    await expect(
+      withFileLock(lock, async () => 'never', { timeoutMs: 10, now })
+    ).rejects.toBeInstanceOf(FileLockTimeoutError)
+    rmSync(lock, { recursive: true, force: true })
   })
 })

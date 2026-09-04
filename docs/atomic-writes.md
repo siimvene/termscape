@@ -134,6 +134,26 @@ writes the defaults base. The residual is only the historical crash-recovery rac
 breaking the same stale lockfile in the same instant), narrowed by a re-stat before the break and
 no worse than the lock-less check-then-act it replaced.
 
+## Known limitations (tracked for a follow-up)
+
+Single-process account mutation is fully covered — one desktop app, or one server with any number
+of browser tabs, all serialize through the FIFO save chain and lose no row. What is NOT yet
+guaranteed is concurrent MUTATION across multiple processes sharing one `--data-dir`. Two honest
+gaps remain, both deferred to a dedicated follow-up branch (do not describe them as fixed):
+
+- **Cross-process add/add can still, rarely, lose a row.** The cross-process serialization rests on
+  the hand-rolled O_EXCL lock in `src/core/file-lock.ts`, which can double-acquire when two
+  processes break the same STALE lockfile in the same instant. The lock is now BOUNDED — an
+  unremovable or unreadable lock throws `FileLockTimeoutError` rather than hanging or busy-spinning
+  — but it is not exclusive under a simultaneous stale-break. The complete fix is a vetted
+  cross-process lock (e.g. `proper-lockfile`) with owner tokens, not part of this round.
+- **Remote account teardown is not guaranteed across stale per-process caches.** The account
+  handlers (`claude-accounts-service.ts` / `codex-accounts-service.ts`) read membership from THIS
+  process's cache, not from disk under the lock. So a process with a stale cache can delete another
+  process's remote row without its SSH teardown; a remote add's rollback ignores a failed teardown;
+  and a disconnect mid-add can persist a remote account as local. The fix (read membership from disk
+  under the lock inside those handlers) is deferred to the same follow-up.
+
 **A unique name owes cleanup.** A fixed name self-healed — the next save simply overwrote the
 litter. A unique one does not, so every caller must remove its own temp on failure.
 `writeFileAtomic` does that for you; a site that builds its own write sequence must do it by hand.

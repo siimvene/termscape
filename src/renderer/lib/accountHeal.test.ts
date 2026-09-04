@@ -35,6 +35,14 @@ describe('healedAccount (label adoption)', () => {
       pending: false
     })
   })
+  it('honors labelEdited: a user who typed the placeholder keeps it through capture', () => {
+    // Deliberately named "New account" (labelEdited flagged) — capture must not overwrite it.
+    expect(healedAccount(acc({ label: 'New account', labelEdited: true }), 'me@x.io')).toMatchObject({
+      email: 'me@x.io',
+      label: 'New account',
+      pending: false
+    })
+  })
 })
 
 describe('healPendingAccounts', () => {

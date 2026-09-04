@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { existsSync, mkdtempSync, promises as fs, readFileSync, rmSync, writeFileSync } from 'fs'
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  promises as fs,
+  readFileSync,
+  rmSync,
+  writeFileSync
+} from 'fs'
 import { tmpdir } from 'os'
 import path from 'path'
 import { IPC } from '../shared/ipc'
@@ -9,6 +17,7 @@ import { fakePlatform } from './platform-fake'
 import {
   SettingsStore,
   SettingsCorruptError,
+  SettingsUnreadableError,
   SettingsWriteConflictError
 } from './settings-store'
 import { DEFAULT_SETTINGS, type Settings } from '../shared/types'
@@ -852,4 +861,30 @@ describe('SettingsStore — two instances on one file (cross-process read-modify
     await addCodex(store, 'a')
     expect(await onDisk('codexAccounts')).toEqual(['a'])
   })
+
+  // CRITICAL: a TRANSIENT read failure (EACCES/EPERM/EIO) on a settings.json that EXISTS is not
+  // evidence the file is gone. Only ENOENT counts as "missing"; any other error must THROW rather
+  // than publish defaults over a file we merely could not read this instant — same data-loss class
+  // as the corrupt-file bug, other trigger. (win32 ignores POSIX perms, so the denial can't be
+  // staged there — the code path is platform-neutral and exercised on POSIX.)
+  it.skipIf(process.platform === 'win32')(
+    'a mutate whose disk READ is denied refuses (SettingsUnreadableError), file untouched',
+    async () => {
+      const store = boot()
+      await addCodex(store, 'keep') // a real, populated settings.json on disk
+      const settingsPath = path.join(dir, 'settings.json')
+      const before = readFileSync(settingsPath, 'utf-8')
+      // The file stat's fine (it is still there) but the READ is denied — the very case the old
+      // code mis-read as "missing" and would have overwritten with defaults.
+      chmodSync(settingsPath, 0o000)
+      try {
+        await expect(store.mutate((s) => ({ ...s, fontSize: 99 }))).rejects.toBeInstanceOf(
+          SettingsUnreadableError
+        )
+      } finally {
+        chmodSync(settingsPath, 0o600)
+      }
+      expect(readFileSync(settingsPath, 'utf-8')).toBe(before) // untouched
+    }
+  )
 })

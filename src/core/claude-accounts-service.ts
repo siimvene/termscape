@@ -297,6 +297,13 @@ export function claudeAccountsHandlers(
     // `host` (shell-owned, unwritable by a snapshot — see settings-store), never the renderer ctx:
     // that is what keeps a forged/buggy ctx from routing a LOCAL row's removal through ssh (skipping
     // its local home) or a REMOTE row's through the local fs.
+    //
+    // KNOWN LIMITATION (tracked for a follow-up, see .claude/rules/agents-accounts-usage.md and
+    // docs/atomic-writes.md "Known limitations"): membership here is read from THIS process's cache
+    // (`settings.get()`), so across processes sharing one --data-dir a process with a stale cache
+    // can still act on another process's remote row without its SSH teardown. Single-process is
+    // fully covered. The complete fix (read membership from disk under the lock in these handlers)
+    // is deferred to the same branch as the cross-process lock hardening.
     [IPC.claudeAccountsRemove]: async (id: string, ctx?: AccountCtx) => {
       const row = settings.get().claudeAccounts.find((a) => a.id === id)
       const remote = remoteFor(ctx)
