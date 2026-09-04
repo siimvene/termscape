@@ -53,6 +53,7 @@ describe('Add-account version probe budget', () => {
     let rows: { id: string }[] = []
     const settings = {
       get: () => ({ claudeAccounts: rows }) as never,
+      readAccountsFromDisk: async () => ({ claudeAccounts: rows }) as never,
       mutate: async (fn: (s: never) => { claudeAccounts: { id: string }[] }) => {
         rows = fn({ claudeAccounts: rows } as never).claudeAccounts
         return { claudeAccounts: rows } as never

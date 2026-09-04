@@ -263,6 +263,7 @@ describe('claude-accounts — the shell owns row membership', () => {
     let minted: string | undefined
     const failing = {
       get: () => settings.get(),
+      readAccountsFromDisk: async () => settings.get(),
       mutate: async (fn: (s: Settings) => Settings) => {
         minted = fn(settings.get()).claudeAccounts[0]?.id
         throw new Error('disk full')

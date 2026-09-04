@@ -125,6 +125,30 @@ function mintClaudeAccountRow(id: string, host: string | undefined): ClaudeAccou
   }
 }
 
+/** Tear down a remote account dir minted by an add that then failed (its host could not be recorded,
+ *  or its row could not be persisted). Logs LOUDLY if the teardown does not confirm — a false return
+ *  or a throw both leave a row-less config dir on the host, which no fresh-id add/remove can reclaim,
+ *  so it must never vanish silently (mirrors the local add's rollback). */
+async function rollbackRemoteAdd(
+  remote: ClaudeAccountsRemote,
+  projectId: string,
+  id: string
+): Promise<void> {
+  try {
+    const torndown = await remote.remove(projectId, id)
+    if (!torndown) {
+      console.error(
+        `[claude-accounts] rollback of remote add ${id} did not confirm teardown; a config dir may remain on the host`
+      )
+    }
+  } catch (e) {
+    console.error(
+      `[claude-accounts] rollback of remote add ${id} failed; a config dir may remain on the host`,
+      e
+    )
+  }
+}
+
 /**
  * The four `claude-accounts:*` handlers, keyed by channel, with NO registrar baked in. Two callers:
  *  - `registerClaudeAccountsIpc` below binds them through `platform().handle` — the Server Edition.
@@ -173,31 +197,40 @@ export function claudeAccountsHandlers(
         // REMOTE account: create the config dir + install the status hook on the host. No local
         // dir and no local hook install — the session runs entirely on the remote host.
         const res = await remote.r.add(remote.projectId, id)
-        // The row's `host` is the MANAGER's word for the project's host — provenance is the shell's,
-        // not the renderer's. The renderer's `ctx.host` stands in ONLY when nothing was minted
-        // anywhere (`res` is null: the project is not connected, so the manager cannot name the host
-        // either), so the pending row still shows under the machine the user chose and its login
-        // node carries the connection error. When a dir WAS minted (`res` non-null, so the project
-        // is connected), the manager's host is authoritative and `ctx.host` is never consulted — a
-        // row can never claim a host for a dir minted somewhere else. A local add never reads
-        // `ctx.host` at all (below).
-        const host = remote.r.hostKey?.(remote.projectId) ?? (res ? undefined : ctx?.host)
-        const account = mintClaudeAccountRow(id, host)
-        try {
-          await registerRow(account)
-        } catch (error) {
-          if (res) await remote.r.remove(remote.projectId, id).catch(() => {})
-          throw error
+        // Provenance for the row's `host` is the MANAGER's word for the project's host, with the
+        // renderer's `ctx.host` only as a fallback KEY (never authoritative over a minted dir).
+        const hostKey = remote.r.hostKey?.(remote.projectId)
+        if (res) {
+          // A dir WAS minted on the host, so the row MUST record a host — otherwise a later removal
+          // reads it as local, runs the local teardown, and orphans the authenticated dir on the
+          // host. Prefer the manager's host; fall back to `ctx.host` only if the project
+          // disconnected between the mint and this call. If NEITHER can name the host, we minted a
+          // credential dir we can no longer attribute: roll it back and fail, rather than persist a
+          // REMOTE dir under a host-less (local-looking) row.
+          const host = hostKey ?? ctx?.host
+          if (!host) {
+            await rollbackRemoteAdd(remote.r, remote.projectId, id)
+            throw new Error(
+              'Created a remote account dir but its project disconnected before its host could be recorded; rolled it back. Reconnect the project and try again.'
+            )
+          }
+          const account = mintClaudeAccountRow(id, host)
+          try {
+            await registerRow(account)
+          } catch (error) {
+            // Persist failed — roll the minted remote dir back, LOUDLY on a failed teardown (a
+            // swallowed failure here is the orphan this verb exists to prevent).
+            await rollbackRemoteAdd(remote.r, remote.projectId, id)
+            throw error
+          }
+          return { id, configDir: res.configDir, versionSupported: res.versionSupported, account }
         }
-        // Null means the project wasn't connected / mkdir failed: still return the id so the
-        // renderer can show the pending row; the login node will surface the connection error
-        // itself.
-        return {
-          id,
-          configDir: res?.configDir ?? '',
-          versionSupported: res?.versionSupported ?? true,
-          account
-        }
+        // `res` is null: the project wasn't connected / mkdir failed — NOTHING was minted, so there
+        // is nothing to roll back. Still return the id and a pending row (under the host the user
+        // chose, or none) so the renderer can show it; the login node surfaces the connection error.
+        const account = mintClaudeAccountRow(id, hostKey ?? ctx?.host)
+        await registerRow(account)
+        return { id, configDir: '', versionSupported: true, account }
       }
       const configDir = claudeConfigDirFor(id)
       await fs.mkdir(configDir, { recursive: true })
@@ -293,19 +326,17 @@ export function claudeAccountsHandlers(
     // Tear the config dir down, THEN delete the row — on the chain, against the latest list. Dir
     // first so a failed teardown leaves a row the user can see and retry, never a dir nothing
     // points at; and once the row is gone no later renderer snapshot can bring it back (the store
-    // keeps membership from its own list, not from the snapshot). PROVENANCE is the ROW's stored
-    // `host` (shell-owned, unwritable by a snapshot — see settings-store), never the renderer ctx:
-    // that is what keeps a forged/buggy ctx from routing a LOCAL row's removal through ssh (skipping
-    // its local home) or a REMOTE row's through the local fs.
+    // keeps membership from its own list, not from the snapshot).
     //
-    // KNOWN LIMITATION (tracked for a follow-up, see .claude/rules/agents-accounts-usage.md and
-    // docs/atomic-writes.md "Known limitations"): membership here is read from THIS process's cache
-    // (`settings.get()`), so across processes sharing one --data-dir a process with a stale cache
-    // can still act on another process's remote row without its SSH teardown. Single-process is
-    // fully covered. The complete fix (read membership from disk under the lock in these handlers)
-    // is deferred to the same branch as the cross-process lock hardening.
+    // PROVENANCE is the ROW's stored `host`, read from DISK under the store's RMW lock
+    // (`readAccountsFromDisk`), NOT this process's cache: across processes sharing one --data-dir a
+    // stale cache would let one process delete another's remote row down the LOCAL path, skipping
+    // the SSH teardown and orphaning an authenticated dir on the host. A shell-owned `host` is also
+    // unwritable by a renderer snapshot (see settings-store), so a forged/buggy ctx can neither
+    // route a LOCAL row through ssh nor a REMOTE row through the local fs.
     [IPC.claudeAccountsRemove]: async (id: string, ctx?: AccountCtx) => {
-      const row = settings.get().claudeAccounts.find((a) => a.id === id)
+      const onDisk = await settings.readAccountsFromDisk()
+      const row = onDisk.claudeAccounts.find((a) => a.id === id)
       const remote = remoteFor(ctx)
       if (row?.host) {
         // REMOTE account: its credential dir is on `row.host`, so removal must CONFIRM teardown over

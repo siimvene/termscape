@@ -113,13 +113,13 @@ Atomicity is not the only thing a second process breaks. A per-process write que
 that process's writers, but a read-modify-write applied to an in-memory cache the other process
 has since overtaken is a *logical* lost update: the rename is whole, and it publishes a list from
 which the other process's row is simply absent. `settings-store.ts` closes this with a
-**cross-process advisory lock** held across the whole read + write (`withFileLock` on
-`settings.json.lock`, `src/core/file-lock.ts`): the lock is the atomic existence of an `O_EXCL`
-lockfile, so exactly one writer at a time — in ANY process that also takes it (both write paths
-here do) — reads and renames, and no cooperating writer's change is lost. It is advisory: a writer
-that does not take it (a raw external write) is still not serialized, so the same read re-checks
-the file's inode/mtime/size stamp and, on detecting such a landed write, re-runs the mutation
-against it (bounded).
+**cross-process advisory lock** held across the whole read + write (`withFileLock`,
+`src/core/file-lock.ts`, backed by `proper-lockfile` on `settings.json.lock`): the lock is an atomic
+`mkdir` kept fresh by an mtime heartbeat, so exactly one writer at a time — in ANY process that also
+takes it (both write paths here do) — reads and renames, and no cooperating writer's change is lost.
+It is advisory: a writer that does not take it (a raw external write) is still not serialized, so the
+same read re-checks the file's inode/mtime/size stamp and, on detecting such a landed write, re-runs
+the mutation against it (bounded).
 
 Two things it will **never** do. It never persists a **stale** result: if the base kept changing
 under a hot non-cooperating writer past the retry budget, or the lock could not be acquired in
@@ -130,29 +130,37 @@ rollback depends on). And it never publishes **defaults over a corrupt file**: a
 EXISTS but does not parse may be a recoverable hand-edit, so a mutate/save throws
 `SettingsCorruptError` rather than "repairing" it to defaults (which orphaned every account dir it
 stopped listing). A genuinely MISSING or empty file is different — it carries nothing to lose and
-writes the defaults base. The residual is only the historical crash-recovery race (two processes
-breaking the same stale lockfile in the same instant), narrowed by a re-stat before the break and
-no worse than the lock-less check-then-act it replaced.
+writes the defaults base. A holder broken out from under the lock — the stale-break race, or a
+heartbeat that missed its window after a system sleep — is DETECTED (`proper-lockfile` fires
+`onCompromised`; the holder sees its lockfile's mtime is no longer its own) and surfaced as
+`FileLockCompromisedError`. This does not PREVENT the write — `fn`'s atomic rename may already have
+landed by the time the heartbeat detects the break — it FLAGS it, so the caller retries/refreshes
+rather than trusting it; every protected write is one atomic rename, so a raced write is
+last-writer-wins, never torn. The silent double-acquire the hand-rolled O_EXCL lock could not close
+is now loud and recoverable.
 
-## Known limitations (tracked for a follow-up)
+## Cross-process account mutation
 
-Single-process account mutation is fully covered — one desktop app, or one server with any number
-of browser tabs, all serialize through the FIFO save chain and lose no row. What is NOT yet
-guaranteed is concurrent MUTATION across multiple processes sharing one `--data-dir`. Two honest
-gaps remain, both deferred to a dedicated follow-up branch (do not describe them as fixed):
+Single-process account mutation is fully covered by the FIFO save chain — one desktop app, or one
+server with any number of browser tabs, loses no row. Concurrent MUTATION across multiple processes
+sharing one `--data-dir` (two `nodeterm-server --data-dir X`, or `NT_MULTI` desktop) is covered too:
 
-- **Cross-process add/add can still, rarely, lose a row.** The cross-process serialization rests on
-  the hand-rolled O_EXCL lock in `src/core/file-lock.ts`, which can double-acquire when two
-  processes break the same STALE lockfile in the same instant. The lock is now BOUNDED — an
-  unremovable or unreadable lock throws `FileLockTimeoutError` rather than hanging or busy-spinning
-  — but it is not exclusive under a simultaneous stale-break. The complete fix is a vetted
-  cross-process lock (e.g. `proper-lockfile`) with owner tokens, not part of this round.
-- **Remote account teardown is not guaranteed across stale per-process caches.** The account
-  handlers (`claude-accounts-service.ts` / `codex-accounts-service.ts`) read membership from THIS
-  process's cache, not from disk under the lock. So a process with a stale cache can delete another
-  process's remote row without its SSH teardown; a remote add's rollback ignores a failed teardown;
-  and a disconnect mid-add can persist a remote account as local. The fix (read membership from disk
-  under the lock inside those handlers) is deferred to the same follow-up.
+- **Add/add.** The cross-process lock is `proper-lockfile` (an atomic `mkdir` lock kept fresh by an
+  mtime heartbeat), so a live holder is never wrongly declared stale and broken. If a holder IS
+  broken out from under it (the stale-break race, or a heartbeat that missed its window), it LEARNS —
+  the write is FLAGGED with `FileLockCompromisedError` rather than silently proceeding, so the caller
+  retries instead of trusting a list that raced. The flag does not prevent the write (it runs inside
+  `fn`); it signals it. The hand-rolled O_EXCL predecessor's silent double-acquire is gone, and
+  because every write is a single atomic rename, a same-instant race is last-writer-wins with no
+  torn file.
+- **Remote teardown.** The account handlers (`claude-accounts-service.ts` /
+  `codex-accounts-service.ts`) read a row's provenance (`host`) from DISK under the lock
+  (`SettingsStore.readAccountsFromDisk`), not from this process's cache, so a stale cache can no
+  longer route another process's remote account down the local teardown path (which would orphan an
+  authenticated dir on the host). A remote add that then fails — its host cannot be recorded, or its
+  row cannot be persisted — rolls the remote dir back and LOGS loudly on a teardown that does not
+  confirm (never a swallowed failure); and a mint whose project disconnects before its host is known
+  is rolled back rather than persisted as a local-looking row.
 
 **A unique name owes cleanup.** A fixed name self-healed — the next save simply overwrote the
 litter. A unique one does not, so every caller must remove its own temp on failure.

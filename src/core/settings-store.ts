@@ -138,6 +138,13 @@ interface OwnedAccountRow {
 export interface AccountRowStore {
   get(): Settings;
   mutate(fn: (current: Settings) => Settings): Promise<Settings>;
+  /** The on-disk account membership, read under the RMW lock — the AUTHORITATIVE list, not this
+   *  process's (possibly stale) cache. Account removal reads a row's provenance (`host`) from here
+   *  so a stale cache cannot route another process's REMOTE account down the local teardown path
+   *  (leaving an authenticated dir orphaned on the host). Rejects with `SettingsUnreadableError` /
+   *  `SettingsCorruptError` exactly as a write would, failing the removal closed rather than acting
+   *  on membership it could not read. */
+  readAccountsFromDisk(): Promise<Settings>;
 }
 
 /**
@@ -252,11 +259,6 @@ export class SettingsStore {
     return path.join(platform().userDataDir, "settings.json");
   }
 
-  /** The cross-process lock sibling held across every read-modify-write (see `readModifyWrite`). */
-  private get lockPath(): string {
-    return `${this.filePath}.lock`;
-  }
-
   /** Subscribe to saves (fires after each successful `settings:save`). Additive; used by the
    *  desktop shell to create/destroy runtime-toggled subsystems (e.g. the Notch HUD). Returns an
    *  unsubscribe. Never throws into a save. */
@@ -298,6 +300,15 @@ export class SettingsStore {
    */
   mutate(fn: (current: Settings) => Settings): Promise<Settings> {
     return this.enqueue(() => this.readModifyWrite((base) => fn(base)));
+  }
+
+  /** See `AccountRowStore.readAccountsFromDisk`. A pure read under the same cross-process lock the
+   *  RMW takes — NOT on the save chain, so it competes with this process's writers for the lock
+   *  (waiting ms) rather than queueing behind them. `readDisk` yields the on-disk settings (or the
+   *  cache with a null stamp when the file is genuinely absent — a fresh install has no accounts to
+   *  route), and throws on an unreadable/corrupt file so the caller fails closed. */
+  readAccountsFromDisk(): Promise<Settings> {
+    return withFileLock(this.filePath, async () => this.readDisk().base);
   }
 
   private enqueue<T>(job: () => Promise<T>): Promise<T> {
@@ -413,17 +424,19 @@ export class SettingsStore {
    * `codex-accounts:add`'s rollback depend on. A genuinely corrupt or unreadable file THROWS from
    * `readDisk` before any write, so defaults are never published over recoverable bytes.
    *
-   * KNOWN LIMITATION (tracked for a follow-up, see docs/atomic-writes.md "Known limitations"). The
-   * cross-process serialization rests on `withFileLock`'s hand-rolled O_EXCL lock, which can
-   * double-acquire when two processes break the same STALE lockfile in the same instant. So a
-   * cross-process add/add can still, rarely, lose a row. Single-process (one desktop app, or one
-   * server with any number of browser tabs) is fully covered — the FIFO chain serializes those. The
-   * complete cross-process fix (a vetted lock with owner tokens) is deferred to a dedicated branch.
+   * CROSS-PROCESS EXCLUSION rests on `withFileLock` (proper-lockfile: an atomic `mkdir` lock kept
+   * fresh by an mtime heartbeat, with compromise detection). A holder broken out from under it —
+   * the stale-break race, or a heartbeat that missed its window — is DETECTED and the write is
+   * FLAGGED (`FileLockCompromisedError`): the atomic rename may already have landed (last-writer-wins,
+   * never torn), so this signals a non-exclusive write for the caller to retry, it does not prevent
+   * it — turning the hand-rolled lock's SILENT double-acquire into a loud, recoverable one. A
+   * cross-process add/add therefore no longer silently loses a row. Single-process is covered by the
+   * FIFO chain regardless.
    */
   private readModifyWrite(
     apply: (base: Settings) => Settings,
   ): Promise<Settings> {
-    return withFileLock(this.lockPath, async () => {
+    return withFileLock(this.filePath, async () => {
       for (let attempt = 0; ; attempt++) {
         const { base, stamp } = this.readDisk();
         const next = mergeSettings(apply(base));

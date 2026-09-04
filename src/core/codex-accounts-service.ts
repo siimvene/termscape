@@ -309,8 +309,12 @@ export function codexAccountsHandlers(
         // A REMOTE account's home lives on its host; this verb owns no filesystem there, so for a
         // row carrying `host` only the row goes (fail-closed: never the wrong machine's home). A
         // row-less id is still torn down locally — that is how a home orphaned by the pre-fix
-        // renderer race gets cleaned up.
-        const row = settings.get().codexAccounts.find((a) => a.id === id)
+        // renderer race gets cleaned up. PROVENANCE is read from DISK, not this process's cache: a
+        // process with a stale cache would otherwise misjudge host and either skip the local
+        // teardown of a local home (orphaning a credential) or run it against a remote row. The
+        // read is under the store's RMW lock (see SettingsStore.readAccountsFromDisk).
+        const onDisk = await settings.readAccountsFromDisk()
+        const row = onDisk.codexAccounts.find((a) => a.id === id)
         if (!row?.host) {
           try {
             const codex = await findInLoginPath('codex')
