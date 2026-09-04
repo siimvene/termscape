@@ -109,6 +109,21 @@ export interface PtyCreateOptions {
   /** Managed Claude account: inject CLAUDE_CONFIG_DIR for this account into the session env. */
   accountId?: string
   /**
+   * This session is a `codex login` for a managed Codex account — the EXPLICIT scoping intent the
+   * renderer carries when it opens a Codex login node. It exists because the agent-less login node
+   * has no `agentId` and, at the moment it opens, its `accountId` may not yet be in the settings
+   * list the spawn consults (`isCodexAccount` reads live settings; the store persists on a 300 ms
+   * coalesce, a relay tab reaches a different settings core than the terminal it opens, and two
+   * Server Edition tabs can clobber each other's snapshot between the save and the spawn). Losing
+   * that race let `codex login` spawn UNSCOPED and overwrite the user's SYSTEM `~/.codex`.
+   *
+   * When set, Codex account scope is REQUIRED, never inferred: the spawn always scopes to the
+   * managed home, and if that home cannot be resolved (missing account id, or a home that does not
+   * exist) it REFUSES (`PtyCreateResult.unavailable: 'codex-account'`) rather than fall through to
+   * an unscoped `codex login`. A visible refusal is the safe failure; a silent wrong login is not.
+   */
+  codexLogin?: boolean
+  /**
    * Which VIEW of the session this is, WITHIN one connection. A second view in the same renderer
    * (the kanban card modal) passes its own id so it co-attaches as an independently-detachable
    * subscriber rather than a no-op join; absent ⇒ the PRIMARY view (the canvas node) and bit-for-bit

@@ -158,6 +158,19 @@ describe('per-session Codex env', () => {
     expect(needsCodexAccountScope(undefined, undefined, isCodex)).toBe(false)
     expect(needsCodexAccountScope('bash', undefined, isCodex)).toBe(false)
   })
+
+  it('the explicit `codex login` intent forces scope regardless of the settings list', () => {
+    // Nothing is a Codex account by the list — this is exactly the registration race the intent
+    // exists to survive: the login node knows it is a Codex login before its id reaches settings.
+    const noneAreCodex = (): boolean => false
+    expect(needsCodexAccountScope(undefined, 'not-in-list-yet', noneAreCodex, true)).toBe(true)
+    // Even with no account id at all, the intent still demands a scope (the fail-closed refusal for
+    // an unresolvable home then lives in resolveCodexSessionScope, not in a settings guess).
+    expect(needsCodexAccountScope(undefined, undefined, noneAreCodex, true)).toBe(true)
+    // Absent/false intent is unchanged: the same call without the flag falls through to the list.
+    expect(needsCodexAccountScope(undefined, 'not-in-list-yet', noneAreCodex)).toBe(false)
+    expect(needsCodexAccountScope(undefined, 'not-in-list-yet', noneAreCodex, false)).toBe(false)
+  })
 })
 
 describe('remote managed Codex homes', () => {

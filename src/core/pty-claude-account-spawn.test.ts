@@ -108,3 +108,83 @@ describe('a managed Claude account is not a Codex account (#345)', () => {
     expect(spawned).toHaveLength(0)
   })
 })
+
+/**
+ * The `codex login` intent (`PtyCreateOptions.codexLogin`) carried by a Codex login node. The whole
+ * point is the settings RACE: a freshly minted account id has not yet reached the `codexAccounts`
+ * list the spawn consults (`isCodexAccount`), so the login node has no agentId AND no list match.
+ * Without the intent, `needsCodexAccountScope` answered `false` and `codex login` spawned UNSCOPED,
+ * writing the user's SYSTEM `~/.codex`. With it, scope is forced and REQUIRED.
+ *
+ * MUTATION: drop `options.codexLogin` from either pty-manager call site (i.e. stop honoring the
+ * intent) → the "not yet in settings" cases below stop scoping and stop refusing, and the two
+ * refusal assertions redden. Drop `requireManagedAccount` from resolveCodexSessionScope's no-id
+ * branch → the "no account id" case spawns onto the system home instead of refusing.
+ */
+describe('the codex login intent scopes fail-closed against the settings race', () => {
+  let fake: FakePlatform
+  let userDataDir: string
+  // Deliberately NOT in the codexAccounts settings list below — the registration race the intent
+  // exists to survive.
+  const RACY_ACCT = 'racycodexid1'
+
+  beforeEach(async () => {
+    spawned.length = 0
+    userDataDir = mkdtempSync(path.join(os.tmpdir(), 'nodeterm-codex-login-'))
+    fake = fakePlatform({ userDataDir })
+    initPlatform(fake)
+    const { PtyManager } = await import('./pty-manager')
+    // The account being logged in is absent from settings on purpose (the debounce/relay/two-tab
+    // race). Only an UNRELATED account is present, to prove the list is not what unlocks scope.
+    const settings: Settings = {
+      ...DEFAULT_SETTINGS,
+      codexAccounts: [{ id: CODEX_ACCT, label: 'other' }]
+    }
+    const mgr = new PtyManager()
+    mgr.init(() => settings)
+    mgr.registerIpc()
+  })
+  afterEach(() => {
+    resetPlatformForTests()
+    rmSync(userDataDir, { recursive: true, force: true })
+  })
+
+  const create = (options: Partial<PtyCreateOptions>) =>
+    fake.handlers[IPC.ptyCreate](ALICE, {
+      cols: 80, rows: 24, persistKey: 'login-1', cwd: '/srv/app', ...options
+    }) as Promise<PtyCreateResult>
+
+  it('scopes to the managed home even though the id is not yet in settings (home exists)', async () => {
+    // The home is created at add-time (initializeAccountHome mkdir), BEFORE the login node opens.
+    mkdirSync(codexAccountHome(userDataDir, RACY_ACCT), { recursive: true })
+    const res = await create({ codexLogin: true, accountId: RACY_ACCT })
+    expect(res.unavailable).toBeUndefined()
+    expect(spawned).toHaveLength(1)
+    expect(spawned[0].env.CODEX_HOME).toBe(codexAccountHome(userDataDir, RACY_ACCT))
+    expect(spawned[0].env.NODETERM_CODEX_ACCOUNT_ID).toBe(RACY_ACCT)
+  })
+
+  it('REFUSES and spawns nothing when the managed home cannot be resolved', async () => {
+    // The short home was deliberately NOT created — an unresolvable scope. The intent turns this
+    // into a visible refusal rather than an unscoped `codex login` onto ~/.codex.
+    const res = await create({ codexLogin: true, accountId: RACY_ACCT })
+    expect(res.unavailable).toBe('codex-account')
+    expect(spawned).toHaveLength(0)
+  })
+
+  it('REFUSES a login intent with no account id rather than spawn onto the system ~/.codex', async () => {
+    const res = await create({ codexLogin: true })
+    expect(res.unavailable).toBe('codex-account')
+    expect(spawned).toHaveLength(0)
+  })
+
+  it('WITHOUT the intent the same unregistered login spawns UNSCOPED (the bug it fixes)', async () => {
+    // No intent, no agentId, id not in settings ⇒ the old behaviour: it spawns, and nothing scopes
+    // CODEX_HOME, so `codex login` would land on the user's system home. This is the hazard the
+    // intent closes — pinned here so a regression that silently drops scope is visible.
+    const res = await create({ accountId: RACY_ACCT })
+    expect(res.unavailable).toBeUndefined()
+    expect(spawned).toHaveLength(1)
+    expect(spawned[0].env.CODEX_HOME).toBeUndefined()
+  })
+})

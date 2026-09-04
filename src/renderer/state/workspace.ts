@@ -841,10 +841,15 @@ export function createAccountLoginNode(
 /**
  * Terminal node used to log a new managed CODEX account in — the sibling of
  * `createAccountLoginNode`. The session runs under that account's `CODEX_HOME` (S6 §2.1 env
- * injection, gated by `needsCodexAccountScope` asking whether the id is a managed Codex one), so
- * `codex login` writes `auth.json` into the managed home rather than the user's system `~/.codex`.
- * That file is exactly what `codexAccounts.waitLogin` polls for, so without this node the add flow
- * waits on a credential nothing is writing (issue #346).
+ * injection), so `codex login` writes `auth.json` into the managed home rather than the user's
+ * system `~/.codex`. That file is exactly what `codexAccounts.waitLogin` polls for, so without this
+ * node the add flow waits on a credential nothing is writing (issue #346).
+ *
+ * Scope is not left to a settings guess: the create path recognizes this node
+ * (`isCodexAccountLoginNode`, keyed on the 'Codex login' title / `codex login` initialCommand) and
+ * carries `PtyCreateOptions.codexLogin`, which forces the managed scope and REFUSES when the home
+ * cannot be resolved. That closes the race where the account id had not yet reached the settings
+ * list `needsCodexAccountScope` consults, and `codex login` spawned unscoped onto the system home.
  *
  * A plain terminal (not an agent node), like the Claude one: no session-name tracking, and the
  * agent-less shape is what keeps the node out of the Codex AGENT paths while still being scoped.
@@ -922,6 +927,19 @@ export function createSystemLoginNode(
  */
 export function isAccountLoginNode(data: { title?: string; initialCommand?: string }): boolean {
   return data.title === 'Claude login' || (data.initialCommand ?? '').startsWith('claude /login')
+}
+
+/**
+ * True when node data is (or started as) a managed-CODEX login terminal (`codex login`) — the
+ * signal the create path carries into `PtyCreateOptions.codexLogin` so the spawn scopes to the
+ * managed home fail-closed instead of consulting the eventually-consistent Codex account list.
+ * Keyed on the DURABLE title (persisted) plus the one-shot `initialCommand`, mirroring
+ * `isAccountLoginNode`: the title survives a serialize, so a cold restart of a login node that
+ * never finished still declares the intent, and the intent then REQUIRES a resolvable managed home
+ * — a login whose account cannot be resolved refuses rather than writing the user's `~/.codex`.
+ */
+export function isCodexAccountLoginNode(data: { title?: string; initialCommand?: string }): boolean {
+  return data.title === 'Codex login' || (data.initialCommand ?? '').startsWith('codex login')
 }
 
 /**

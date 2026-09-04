@@ -35,7 +35,6 @@ import { Button } from '@renderer/ui/Button'
 import { Input } from '@renderer/ui/Input'
 import { cn } from '@renderer/ui/cn'
 import { thisMachine, thisMachineCap } from '../../../lib/machineName'
-import { isBrowserRuntime } from '../../../bridge/runtime'
 
 const ROWS = {
   accounts: {
@@ -138,6 +137,25 @@ function ProviderHeader({
 function applyCodexAccounts(fn: (accs: CodexAccount[]) => CodexAccount[]): void {
   const s = useSettings.getState()
   s.update({ codexAccounts: fn(s.settings.codexAccounts) })
+}
+
+/**
+ * The Codex-add registration barrier waits for the settings flush to acknowledge the save before it
+ * opens the login node. That flush coalesces on a 300 ms debounce and, over the Server Edition
+ * bridge, is a round-trip — so a flush that never settles would latch the "Setting up…" spinner
+ * forever. Bound it: a timeout is treated exactly like a rejected flush (the id is not known to be
+ * registered), so the caller opens nothing rather than run a login it cannot vouch for.
+ */
+const CODEX_ADD_FLUSH_TIMEOUT_MS = 5000
+function withFlushTimeout<T>(p: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error('settings flush timed out before Codex account registration')),
+      CODEX_ADD_FLUSH_TIMEOUT_MS
+    )
+  })
+  return Promise.race([p, timeout]).finally(() => clearTimeout(timer)) as Promise<T>
 }
 
 /**
@@ -358,7 +376,7 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
       // not known to be registered: fall into the catch below and open nothing, rather than run a
       // login whose destination we cannot vouch for. (The Claude add path needs no barrier: its
       // pty resolves the config dir from the id alone, without consulting settings.)
-      await useSettings.getState().flush()
+      await withFlushTimeout(useSettings.getState().flush())
       window.dispatchEvent(
         new CustomEvent('nodeterm:add-codex-account-login', { detail: { accountId: added.id } })
       )
@@ -868,23 +886,12 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
               connected={group.remote ? !!connectedProjectIdForHost(group.host) : true}
             >
               {codexRowsFor(group.accounts, group.remote ? group.host : undefined)}
-              {!group.remote && isBrowserRuntime() ? (
-                /* The browser CAN serve every account verb now (the port landed) — what it cannot
-                   yet do safely is bind the login terminal to the account it just minted. Scoping
-                   is decided by `needsCodexAccountScope`, which for an agent-LESS login node falls
-                   through to a live settings lookup; a relay tab reaches a different settings core
-                   than the terminal it opens, and two Server Edition tabs can clobber each other's
-                   snapshot between the save and the spawn. Lose that race and `codex login` writes
-                   over the host's SYSTEM credential instead of the new account's.
-                   The real fix is to carry the codex-scope INTENT into the pty create options
-                   instead of re-deriving it from an eventually-consistent list, which makes losing
-                   the race a visible refusal rather than a silent wrong login. Until that lands,
-                   desktop only — where the node and the settings core are the same process. */
-                <p className="text-[12px] leading-relaxed text-muted">
-                  Adding a Codex account from the browser is temporarily unavailable — add them from
-                  the desktop app on this machine. Accounts already created there are shown above.
-                </p>
-              ) : !group.remote ? (
+              {/* The browser gate is gone: the account verbs are served over the bridge, and the
+                  login node now carries the codex-scope INTENT (`PtyCreateOptions.codexLogin`)
+                  instead of re-deriving scope from the eventually-consistent settings list — so a
+                  lost registration race is a VISIBLE refusal, not `codex login` writing the host's
+                  system `~/.codex`. The add flow is therefore identical on desktop and browser. */}
+              {!group.remote ? (
                 <div className="space-y-2">
                   <Button variant="primary" disabled={addingCodex} onClick={() => void onAddCodexAccount()}>
                     {addingCodex ? (

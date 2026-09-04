@@ -2204,8 +2204,27 @@ export class PtyManager {
     // chip. `resolveCodexSessionScope` returns `{ unavailable: 'codex-account' }` for exactly that
     // case; we map it straight through to a real refusal and spawn NOTHING. The system account (no
     // id) always resolves. Remote (ssh) Codex sessions carry their account env via tmux `-e`.
-    if (needsCodexAccountScope(options.agentId, options.accountId, (id) => this.isCodexAccount(id)) && !options.sshRemote) {
-      const scope = resolveCodexSessionScope(platform().userDataDir, options.accountId)
+    //
+    // `options.codexLogin` is the EXPLICIT `codex login` intent (a login node has no agentId and may
+    // race the settings list `isCodexAccount` consults): it both forces scope on here AND makes it
+    // REQUIRED (`requireManagedAccount`), so a login whose managed home cannot be resolved — a
+    // missing id, or a home that does not exist — refuses rather than spawning an unscoped
+    // `codex login` onto the user's SYSTEM `~/.codex`.
+    if (
+      needsCodexAccountScope(
+        options.agentId,
+        options.accountId,
+        (id) => this.isCodexAccount(id),
+        options.codexLogin
+      ) &&
+      !options.sshRemote
+    ) {
+      const scope = resolveCodexSessionScope(
+        platform().userDataDir,
+        options.accountId,
+        fs.existsSync,
+        options.codexLogin === true
+      )
       if (isCodexScopeRefusal(scope)) {
         return { sessionId: '', fresh: false, unavailable: 'codex-account' }
       }
@@ -2993,9 +3012,18 @@ export class PtyManager {
     // reaches the session because both names are in ACCOUNT_SCOPE_UPDATE_ENV (before that, the
     // overwrite-the-leak promise held only for the client that happened to START the server; #419).
     // The missing-explicit-account case already refused in spawnNew (fail-closed,
-    // property 4), so `codexSessionEnv` here never resolves an explicit id to the system home. Also
+    // property 4 — and, for the `codex login` intent, the missing/unresolvable managed home too), so
+    // `codexSessionEnv` here never resolves an explicit id to the system home. Also
     // strip env vars that would shadow the account's OAuth login with API-key auth.
-    if (needsCodexAccountScope(options.agentId, options.accountId, (id) => this.isCodexAccount(id)) && !options.sshRemote) {
+    if (
+      needsCodexAccountScope(
+        options.agentId,
+        options.accountId,
+        (id) => this.isCodexAccount(id),
+        options.codexLogin
+      ) &&
+      !options.sshRemote
+    ) {
       const codexScope = codexSessionEnv(platform().userDataDir, options.accountId)
       env.CODEX_HOME = codexScope.CODEX_HOME
       env.NODETERM_CODEX_ACCOUNT_ID = codexScope.NODETERM_CODEX_ACCOUNT_ID

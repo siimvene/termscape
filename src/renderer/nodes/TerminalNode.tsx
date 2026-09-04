@@ -167,7 +167,7 @@ import { useWorktrees } from '../state/worktrees'
 import { isRemoteSessionNode } from '@shared/worktree'
 import { useSession, useActiveSessionPresence } from '../session/session'
 import { isBrowserRuntime } from '../bridge/runtime'
-import { accountChipLabel, agentLaunchOverride, COLLAPSED_HEIGHT, NODE_COLORS, type CanvasNode } from '../state/workspace'
+import { accountChipLabel, agentLaunchOverride, COLLAPSED_HEIGHT, isCodexAccountLoginNode, NODE_COLORS, type CanvasNode } from '../state/workspace'
 import {
   hasHooks,
   canRecur,
@@ -2882,6 +2882,11 @@ export function TerminalNode({
           agentId: data.agentId,
           agentModel: data.agentModel,
           accountId: data.accountId,
+          // EXPLICIT `codex login` intent, so the spawn scopes to the managed CODEX_HOME fail-closed
+          // rather than re-deriving scope from the eventually-consistent Codex account list (which a
+          // fresh login's id may not have reached yet). An unresolvable managed home then REFUSES
+          // instead of writing the user's system ~/.codex. See isCodexAccountLoginNode.
+          codexLogin: isCodexAccountLoginNode(data),
           sshRemote,
           // Belt AND braces: the guard above cannot see a `ssh` executable that has gone missing,
           // which is core's other route into the local branch.

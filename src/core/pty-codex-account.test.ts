@@ -54,4 +54,24 @@ describe('Codex spawn scope resolves fail-closed', () => {
       'Invalid Codex account id'
     )
   })
+
+  // The `codex login` intent (PtyCreateOptions.codexLogin → requireManagedAccount): scope is
+  // REQUIRED, so the system home — which is precisely what the login must never overwrite — is
+  // never an acceptable fallback.
+  it('refuses a login-intent scope with no managed account instead of scoping to ~/.codex', () => {
+    const scope = resolveCodexSessionScope(userDataDir, undefined, existsSync, true)
+    expect(isCodexScopeRefusal(scope)).toBe(true)
+    expect(scope).toEqual({ unavailable: 'codex-account' })
+    // Contrast: the SAME call without the intent resolves to the system home (existing behaviour).
+    const system = resolveCodexSessionScope(userDataDir, undefined, existsSync, false)
+    expect(isCodexScopeRefusal(system)).toBe(false)
+    expect((system as { NODETERM_CODEX_ACCOUNT_ID: string }).NODETERM_CODEX_ACCOUNT_ID).toBe('')
+  })
+
+  it('a login-intent scope still resolves once the managed home exists', () => {
+    const home = codexAccountHome(userDataDir, 'account-a')
+    mkdirSync(home, { recursive: true })
+    const scope = resolveCodexSessionScope(userDataDir, 'account-a', existsSync, true)
+    expect(scope).toEqual({ CODEX_HOME: home, NODETERM_CODEX_ACCOUNT_ID: 'account-a' })
+  })
 })

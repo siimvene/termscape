@@ -209,13 +209,22 @@ export function isCodexScopeRefusal(scope: CodexSessionScope): scope is CodexSco
  *
  * `homeExists` is injected so the spawn layer passes real `existsSync` and this stays testable
  * against a real temp filesystem. The later `pty-manager` PR maps `unavailable` straight through.
+ *
+ * `requireManagedAccount` is the `codex login` intent (`PtyCreateOptions.codexLogin`): the system
+ * home is exactly what that login must never overwrite, so with no managed account id to resolve
+ * this REFUSES rather than returning the system scope. Off by default, so every existing caller —
+ * which relies on "no id ⇒ system scope" — is unchanged.
  */
 export function resolveCodexSessionScope(
   userDataDir: string,
   accountId: string | undefined,
-  homeExists: (home: string) => boolean = existsSync
+  homeExists: (home: string) => boolean = existsSync,
+  requireManagedAccount = false
 ): CodexSessionScope {
-  if (!accountId) return codexSessionEnv(userDataDir)
+  if (!accountId) {
+    if (requireManagedAccount) return { unavailable: 'codex-account' }
+    return codexSessionEnv(userDataDir)
+  }
   assertCodexAccountId(accountId)
   const home = codexAccountHome(userDataDir, accountId)
   if (!homeExists(home)) return { unavailable: 'codex-account' }
@@ -234,12 +243,20 @@ export function resolveCodexSessionScope(
  * (issue #345: agent nodes and the `claude /login` terminal alike spawned nothing). Answering "no"
  * by default would be worse in the other direction: the `codex login` terminal would spawn without
  * a scope and write its credential into the user's SYSTEM `~/.codex`. So the caller must say.
+ *
+ * `codexLoginIntent` (`PtyCreateOptions.codexLogin`) is the caller SAYING it: the Codex login node
+ * knows it is a Codex login even though it carries no `agentId` and its `accountId` may not have
+ * reached the eventually-consistent settings list yet. When set, scope is needed unconditionally —
+ * the fail-closed refusal for an unresolvable managed home then lives in `resolveCodexSessionScope`
+ * (`requireManagedAccount`), not in a settings guess.
  */
 export function needsCodexAccountScope(
   agentId: string | undefined,
   accountId: string | undefined,
-  isCodexAccount: (id: string) => boolean
+  isCodexAccount: (id: string) => boolean,
+  codexLoginIntent = false
 ): boolean {
+  if (codexLoginIntent) return true
   if (agentId === 'codex') return true
   if (!accountId) return false
   return isCodexAccount(accountId)
