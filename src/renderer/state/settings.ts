@@ -49,7 +49,12 @@ function saveNow(): Promise<void> {
   const snapshot = pendingSave
   pendingSave = null
   if (!snapshot) return saveInFlight ?? Promise.resolve()
-  const save = window.nodeTerminal.settings.save(snapshot).finally(() => {
+  // `Promise.resolve(...)` rather than `.finally` on the raw return: this runs from a TIMER, so a
+  // bridge whose `save` returns undefined (a test double, an older preload) throws an uncaught
+  // exception nobody is positioned to catch — it does not reject the flush, it escapes the tick.
+  // Observed as vitest's "1 unhandled error" out of ShortcutsSection's stub, with its own warning
+  // that it can turn into a false positive elsewhere.
+  const save = Promise.resolve(window.nodeTerminal.settings.save(snapshot)).finally(() => {
     if (saveInFlight === save) saveInFlight = null
   })
   saveInFlight = save
