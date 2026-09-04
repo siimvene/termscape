@@ -20,7 +20,11 @@ import {
   strayCodexAccounts
 } from '../../../lib/codexMachineGroups'
 import { presentAccount } from '../../../lib/accountPresentation'
-import { healedAccount, raceLoginCapture } from '../../../lib/accountHeal'
+import {
+  healedAccount,
+  openLoginNodeThenCapture,
+  raceLoginCapture
+} from '../../../lib/accountHeal'
 import { codexAccountSelectable } from '../../../canvas/codex-account-switch'
 import { AccountIdentityPills } from '../../AccountIdentityPills'
 import { ConfirmDialog } from '../../ConfirmDialog'
@@ -339,6 +343,21 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
       const added = await window.nodeTerminal.codexAccounts.add()
       const account: CodexAccount = { id: added.id, label: 'New Codex account', pending: true }
       applyCodexAccounts((accs) => [...accs, account])
+      // REGISTRATION BARRIER — do not move the dispatch above this line. The login node's pty gets
+      // the managed `CODEX_HOME` only when PtyManager finds this id in the SERVER-SIDE settings
+      // (`isCodexAccount` reads live settings; `codexAccounts` and `claudeAccounts` share an id
+      // alphabet, so the list is the only thing that tells them apart). The store above persists on
+      // a 300 ms coalesce, so dispatching in the same tick raced pty creation against the save:
+      // when the pty won, `codex login` ran under the SYSTEM `~/.codex` — overwriting the user's
+      // default credential — while `waitLogin` polled a managed home nothing was writing to. Tight
+      // on desktop; wide open over the Server Edition's WebSocket, where the settings frame and
+      // the pty-create frame are two round-trips. `flush()` resolves only once the shell has
+      // acknowledged the save (its cache is updated before the RPC answers), which is the actual
+      // condition — a sleep would only have narrowed the window. A REJECTED flush means the id is
+      // not known to be registered: fall into the catch below and open nothing, rather than run a
+      // login whose destination we cannot vouch for. (The Claude add path needs no barrier: its
+      // pty resolves the config dir from the id alone, without consulting settings.)
+      await useSettings.getState().flush()
       window.dispatchEvent(
         new CustomEvent('nodeterm:add-codex-account-login', { detail: { accountId: added.id } })
       )
@@ -472,28 +491,25 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
   // the remote `.claude.json` over ssh (via the ctx `projectId`).
   //
   // Also the path a SETTLED account takes back when its OAuth credential expires or is revoked
-  // ("Sign in again"). That caller MUST pass `graceMs: 0`: capture is "`.claude.json` has an
-  // oauthAccount", which an already-logged-in-then-expired dir satisfies immediately — so with
-  // the 5 s grace the race would resolve off the stale identity file, the `claude /login` node
-  // would never open, and the button would do visibly nothing. Zero grace opens the terminal
-  // first, which is the whole affordance; the capture that lands right after only refreshes the
-  // email, and the row is never left latched (`waiting` clears on either outcome).
+  // ("Sign in again"). That caller MUST pass `openNode: 'always'`: capture is "`.claude.json` has
+  // an oauthAccount", which an already-logged-in-then-expired dir satisfies immediately — so a
+  // capture-first race resolves off the stale identity file, the `claude /login` node never
+  // opens, and the button does visibly nothing. An earlier shape expressed this as `graceMs: 0`
+  // on the race, which is NOT equivalent: a 0 ms timer still loses to a capture that resolves in
+  // the same tick, and the race's `finally` then clears the timer — the exact silent no-op the
+  // zero was meant to prevent (a component test with a never-resolving wait let it survive). So
+  // 'always' opens the terminal synchronously, before the poll even starts; the capture that
+  // lands right after only refreshes the email, and the row is never left latched (`waiting`
+  // clears on either outcome).
   const runLogin = async (
     account: Pick<ClaudeAccount, 'id' | 'host'>,
-    opts?: { graceMs?: number }
+    opts: { openNode: 'always' | 'after-grace' }
   ): Promise<void> => {
     const remote = !!account.host
     const projectId = remote ? projectIdForHost(account.host) : undefined
-    // Retry gets the capture-first grace (defect 3); a FRESH Add passes graceMs 0 — its dir was
-    // just minted, a capture inside the grace is impossible, and 5 silent seconds before the
-    // login node appears read as "clicked Add, nothing happened".
-    const graceMs = opts?.graceMs
-    // Race capture against a short grace: a dir already logged in captures in <2 s, so opening the
-    // `claude /login` node is deferred until the grace elapses — no junk login node when the login
-    // already exists (defect 3). Carry `host` so Canvas resolves the ssh binding BY HOST (among
-    // connected projects), not from whatever project happens to be active when Retry fires.
-    setLoginWaitFor(account.id, 'waiting')
-    const captured = await raceLoginCapture({
+    // Carry `host` so Canvas resolves the ssh binding BY HOST (among connected projects), not
+    // from whatever project happens to be active when the button fires.
+    const loginDeps = {
       waitLogin: () =>
         window.nodeTerminal.claudeAccounts.waitLogin(
           account.id,
@@ -504,13 +520,24 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
           new CustomEvent('nodeterm:add-account-login', {
             detail: { accountId: account.id, remote, host: account.host }
           })
-        ),
-      setTimer: (fn, ms) => window.setTimeout(fn, ms),
-      clearTimer: (h) => window.clearTimeout(h as number),
-      graceMs
+        )
+    }
+    setLoginWaitFor(account.id, 'waiting')
+    // 'after-grace' is the pending-account Retry (defect 3): race capture against the 5 s grace,
+    // so a dir already logged in captures in <2 s and no junk `claude /login` node appears.
+    // 'always' is the settled account's "Sign in again" and a fresh Add — see above.
+    const captured = await (
+      opts.openNode === 'always'
+        ? openLoginNodeThenCapture(loginDeps)
+        : raceLoginCapture({
+            ...loginDeps,
+            setTimer: (fn, ms) => window.setTimeout(fn, ms),
+            clearTimer: (h) => window.clearTimeout(h as number)
+          })
+    )
       // A rejected wait (IPC failure) must land on the honest 'not captured' branch, not leave
       // the row latched on 'waiting for login…' with Retry disabled.
-    }).catch(() => null)
+      .catch(() => null)
     if (!captured) {
       // timeout / cancel: row stays pending, offers Retry with an honest reason.
       setLoginWaitFor(account.id, 'not-captured')
@@ -566,7 +593,8 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
     applyAccounts((accs) => [...accs, account])
     // Fresh Add: the dir was minted milliseconds ago, so a capture inside the grace is impossible
     // — open the login node immediately instead of sitting 5 silent seconds (review finding).
-    await runLogin(account, { graceMs: 0 })
+    // Unconditionally, not via a 0 ms race: see `runLogin`.
+    await runLogin(account, { openNode: 'always' })
   }
 
   const confirmRemove = async (account: ClaudeAccount): Promise<void> => {
@@ -732,7 +760,9 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
                                 'keeps its config dir, transcripts, colour and every node bound to it.'
                         }
                         onClick={() =>
-                          void runLogin(account, account.pending ? undefined : { graceMs: 0 })
+                          void runLogin(account, {
+                            openNode: account.pending ? 'after-grace' : 'always'
+                          })
                         }
                       >
                         {account.pending ? 'Retry login' : 'Sign in again'}

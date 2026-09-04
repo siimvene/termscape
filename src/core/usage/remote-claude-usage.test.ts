@@ -279,11 +279,48 @@ describe('fetchRemoteUsage', () => {
   it('treats a logged-out account as unavailable (hidden), not an error', async () => {
     const u = await fetchRemoteUsage(target, async () => reply('__NTU_EMAIL__', '__NTU_STATUS__nocreds'), 1)
     expect(u.status).toBe('unavailable')
+    expect(u.cause).toBe('no-credentials')
   })
 
-  it('treats an API-key / expired token (401) as unavailable', async () => {
+  // The evening-long one: an expired login on an SSH host is a 401 the host plainly reported,
+  // and the popover said "No usage data." because the remote path recorded no cause at all — the
+  // local row for the same failure already said "Sign-in expired". Same table, same words.
+  it('treats an API-key / expired token (401) as unavailable, and SAYS SO', async () => {
     const u = await fetchRemoteUsage(target, async () => reply('__NTU_EMAIL__', '{}', '__NTU_HTTP__401'), 1)
     expect(u.status).toBe('unavailable')
+    expect(u.cause).toBe('unauthorized')
+    expect(u.httpStatus).toBe(401)
+  })
+
+  it('classifies the other HTTP answers through the same table as the local reader', async () => {
+    const limited = await fetchRemoteUsage(target, async () => reply('', '__NTU_HTTP__429'), 1)
+    expect(limited).toMatchObject({ status: 'error', cause: 'rate-limited', httpStatus: 429 })
+    const down = await fetchRemoteUsage(target, async () => reply('oops', '__NTU_HTTP__503'), 1)
+    expect(down).toMatchObject({ status: 'error', cause: 'server-error', httpStatus: 503 })
+    const odd = await fetchRemoteUsage(target, async () => reply('', '__NTU_HTTP__418'), 1)
+    expect(odd).toMatchObject({ status: 'error', cause: 'http', httpStatus: 418 })
+    const garbage = await fetchRemoteUsage(target, async () => reply('not json', '__NTU_HTTP__200'), 1)
+    expect(garbage).toMatchObject({ status: 'error', cause: 'parse', httpStatus: 200 })
+  })
+
+  it('a credentials file the host cannot read is unreadable, not "not signed in"', async () => {
+    const u = await fetchRemoteUsage(target, async () => reply('__NTU_STATUS__unreadable'), 1)
+    expect(u.status).toBe('error')
+    expect(u.cause).toBe('credentials-unreadable')
+  })
+
+  // The honesty rule, remote edition: where the reply cannot say why, no cause is claimed and the
+  // UI keeps its old sentence. A guessed cause here would be worse than none.
+  it('claims no cause where the reply did not establish one', async () => {
+    expect((await fetchRemoteUsage(target, async () => reply('__NTU_STATUS__nocurl'), 1)).cause).toBeUndefined()
+    // curl ran but never got an HTTP code (DNS / connect / its own timeout): timeout and offline
+    // are indistinguishable from here, so neither is asserted.
+    expect((await fetchRemoteUsage(target, async () => reply('__NTU_EMAIL__', '__NTU_HTTP__000'), 1)).cause).toBeUndefined()
+    expect((await fetchRemoteUsage(target, async () => null, 1)).cause).toBeUndefined()
+    expect((await fetchRemoteUsage(target, async () => 'ssh: connect failed', 1)).cause).toBeUndefined()
+    expect(
+      (await fetchRemoteUsage(target, () => Promise.reject(new Error('master gone')), 1)).cause
+    ).toBeUndefined()
   })
 
   it('keeps a broken read visible as an error', async () => {

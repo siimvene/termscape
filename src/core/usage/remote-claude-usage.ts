@@ -17,6 +17,7 @@
 // already require it on every host, and wget would put the token back on the command line.
 import type { ClaudeAccount, ClaudeUsage } from '../../shared/types'
 import { emptyUsage, usageFromPayload } from './claude-usage-map'
+import { classifyUsageResponseStatus } from './usage-cause'
 
 /** Same shape of id every remote path builder validates against (see claude-accounts-core). */
 const ACCOUNT_ID_RE = /^[A-Za-z0-9_-]+$/
@@ -126,7 +127,13 @@ export function remoteUsageCommand(accountId: string | null): string {
     `t=$(printf '%s' "$c" | ${firstString('accessToken')})`,
     `e=$(${flatten(identityFile)} | ${firstString('emailAddress')})`,
     `printf '${EMAIL}%s\\n' "$e"`,
-    `if [ -z "$t" ]; then printf '${STATUS}nocreds\\n%s\\n' '${END}'; exit 0; fi`,
+    // Sort "no token" the way the local reader does: a credentials file that EXISTS but cannot
+    // be read is 'unreadable' (a store we could not look into), while a missing file or one with
+    // no token in it is 'nocreds' (an observed absence). Without the split every case was
+    // 'nocreds', i.e. "Not signed in" for a chmod'd file.
+    `if [ -z "$t" ]; then if [ -e ${credsFile} ] && ! [ -r ${credsFile} ]; then ` +
+      `printf '${STATUS}unreadable\\n%s\\n' '${END}'; else ` +
+      `printf '${STATUS}nocreds\\n%s\\n' '${END}'; fi; exit 0; fi`,
     `if ! command -v curl >/dev/null 2>&1; then printf '${STATUS}nocurl\\n%s\\n' '${END}'; exit 0; fi`,
     // The token goes in on stdin as a curl config directive — never in argv, where `ps` would
     // hand it to every other user on the host.
@@ -140,7 +147,7 @@ export function remoteUsageCommand(accountId: string | null): string {
 }
 
 export interface RemoteUsageOutput {
-  /** 'nocreds' | 'nocurl' when the remote short-circuited, else null. */
+  /** 'nocreds' | 'unreadable' | 'nocurl' when the remote short-circuited, else null. */
   reason: string | null
   email: string | null
   /** HTTP status curl reported, or null when it never got that far. */
@@ -189,6 +196,16 @@ export function parseRemoteUsageOutput(stdout: string): RemoteUsageOutput {
  * Status mapping mirrors the local fetch: no credentials or a 401/403 means "nothing to show
  * for this identity" ('unavailable', which the UI hides), while a reachable-but-broken read
  * ('error') stays visible — a configured account whose numbers stopped arriving is information.
+ *
+ * `cause` rides alongside, from the SAME table as the local reader (`classifyUsageResponseStatus`),
+ * and only where the remote reply actually established it: the short-circuit markers and the HTTP
+ * code are facts the host reported, an unparseable 200 body is one we observed. Until this the
+ * remote path recorded no cause at all, so an expired login on an SSH host — a 401 the host had
+ * plainly answered — fell back to "No usage data." while the local row for the same failure said
+ * "Sign-in expired"; a user spent an evening unable to tell the two apart. Where the reply cannot
+ * say why (the runner failed, the markers never came, curl is missing, curl itself failed with no
+ * HTTP code) `cause` stays ABSENT on purpose and the UI keeps its old sentence: a cause that was
+ * not observed is not reported. Nothing off the wire reaches the UI — a closed enum and an integer.
  */
 export async function fetchRemoteUsage(
   target: RemoteUsageTarget,
@@ -206,13 +223,25 @@ export async function fetchRemoteUsage(
   // The command never ran (master down, project disconnected mid-read): not evidence that this
   // account has no subscription, so it must not report 'unavailable' and vanish from the popover.
   if (!out.complete) return emptyUsage(out.email, now, 'error')
-  if (out.reason === 'nocreds') return emptyUsage(out.email, now, 'unavailable')
+  if (out.reason === 'nocreds')
+    return emptyUsage(out.email, now, 'unavailable', { cause: 'no-credentials' })
+  if (out.reason === 'unreadable')
+    return emptyUsage(out.email, now, 'error', { cause: 'credentials-unreadable' })
+  // 'nocurl', or a marker this build does not know: real, but not a class the enum names.
   if (out.reason) return emptyUsage(out.email, now, 'error')
-  if (out.httpCode === 401 || out.httpCode === 403) return emptyUsage(out.email, now, 'unavailable')
-  if (out.httpCode !== 200 || !out.body) return emptyUsage(out.email, now, 'error')
+  // curl ran but produced no HTTP code (DNS, connect, its own -m timeout): the request did not
+  // complete, and the remote reply cannot tell timeout from unreachable — so no cause is claimed.
+  if (out.httpCode === null) return emptyUsage(out.email, now, 'error')
+  if (out.httpCode < 200 || out.httpCode >= 300) {
+    const { status, cause, httpStatus } = classifyUsageResponseStatus(out.httpCode)
+    return emptyUsage(out.email, now, status, { cause, httpStatus })
+  }
+  // An ok answer whose body is empty or not JSON: the endpoint answered, so this is 'parse',
+  // exactly as the local reader words it — never laundered into a generic error.
+  if (!out.body) return emptyUsage(out.email, now, 'error', { cause: 'parse', httpStatus: out.httpCode })
   try {
     return usageFromPayload(JSON.parse(out.body), out.email, now)
   } catch {
-    return emptyUsage(out.email, now, 'error')
+    return emptyUsage(out.email, now, 'error', { cause: 'parse', httpStatus: out.httpCode })
   }
 }

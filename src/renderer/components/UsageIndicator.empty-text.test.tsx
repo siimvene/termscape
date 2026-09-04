@@ -10,6 +10,15 @@ import { describe, it, expect } from 'vitest'
 import { usageEmptyText } from './UsageIndicator'
 
 describe('usageEmptyText', () => {
+  // A store the reader could not open must not be worded as an absence: "Not signed in" for a
+  // permissions problem is a guess presented as a fact.
+  it('tells "could not read the credentials" apart from "not signed in"', () => {
+    const unreadable = usageEmptyText({ status: 'error', cause: 'credentials-unreadable' })
+    expect(unreadable).not.toBe('Not signed in.')
+    expect(unreadable).not.toBe('Could not read usage.')
+    expect(unreadable).toContain('credentials')
+  })
+
   it('tells "never signed in" apart from "sign-in refused"', () => {
     expect(usageEmptyText({ status: 'unavailable', cause: 'no-credentials' })).toBe('Not signed in.')
     const refused = usageEmptyText({ status: 'unavailable', cause: 'unauthorized', httpStatus: 401 })

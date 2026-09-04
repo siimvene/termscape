@@ -122,6 +122,48 @@ describe('AccountsSection — signing a settled account back in', () => {
     root.unmount()
   })
 
+  // THE case the never-resolving default above cannot see, and the one a real expired account
+  // is in: its `.claude.json` still holds the old oauthAccount, so the capture poll resolves on
+  // its very first read. The previous shape (a 0 ms grace on the capture race) lost to that —
+  // the race's `finally` cleared the timer before its macrotask ran, no terminal opened, and the
+  // button did nothing. The terminal must open regardless of how fast the capture lands.
+  it('opens the terminal for a settled account even when the capture resolves at once', async () => {
+    waitLogin = vi.fn(async () => ({ email: 'someone@example.test' }))
+    ;(window as unknown as { nodeTerminal: { claudeAccounts: unknown } }).nodeTerminal.claudeAccounts =
+      { waitLogin, cancelWaitLogin: async () => {} }
+    const { host, root } = render([settled])
+    await act(async () => {
+      button(host, 'Sign in again')!.click()
+    })
+    await settle()
+    expect(waitLogin).toHaveBeenCalledWith('a1', undefined)
+    expect(loginNodes).toEqual(['a1'])
+    // The row is not left latched: the capture landed, so the in-flight state cleared.
+    expect(host.textContent).not.toContain('waiting for login…')
+    root.unmount()
+  })
+
+  // The other half of the same fix, pinned so the settled path's "always open" can never leak
+  // into Retry: a pending account whose dir is ALREADY logged in (the launch-heal case, capture
+  // in one poll) must NOT get a junk `claude /login` node — that is defect 3, and it is deliberate.
+  it('a pending Retry whose capture lands at once opens NO terminal and heals the row', async () => {
+    waitLogin = vi.fn(async () => ({ email: 'healed@example.test' }))
+    ;(window as unknown as { nodeTerminal: { claudeAccounts: unknown } }).nodeTerminal.claudeAccounts =
+      { waitLogin, cancelWaitLogin: async () => {} }
+    const { host, root } = render([pending])
+    await act(async () => {
+      button(host, 'Retry login')!.click()
+    })
+    await settle()
+    expect(waitLogin).toHaveBeenCalledWith('a2', undefined)
+    expect(loginNodes).toEqual([])
+    expect(useSettings.getState().settings.claudeAccounts[0]).toMatchObject({
+      pending: false,
+      email: 'healed@example.test'
+    })
+    root.unmount()
+  })
+
   // Not stranding the row: while the login is in flight the settled row says so and cannot be
   // double-fired, and it leaves that state on the honest outcome rather than latching.
   it('shows the in-flight state on a settled row and disables the button', async () => {

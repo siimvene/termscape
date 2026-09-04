@@ -71,22 +71,29 @@ export interface LoginRaceDeps {
   dispatchLoginNode: () => void
   setTimer: (fn: () => void, ms: number) => TimerHandle
   clearTimer: (h: TimerHandle) => void
-  /** Defaults to `RETRY_GRACE_MS`. */
-  graceMs?: number
 }
 
 /**
- * Race a login capture against a grace delay: begin polling immediately and open the login node
+ * Race a login capture against the Retry grace: begin polling immediately and open the login node
  * ONLY if nothing is captured within the grace window (defect 3 — an already-logged-in dir
  * captures in <2 s, so the login node never appears). Awaits the same poll either way and returns
  * its result, so the caller can flip the row or mark it "not captured".
+ *
+ * For a PENDING account's Retry only. The grace is deliberately not configurable any more: a
+ * previous shape took `graceMs`, and the settled-account "Sign in again" path passed `graceMs: 0`
+ * expecting "no grace ⇒ the terminal always opens". It does not. The timer callback only fires
+ * from the macrotask queue, and a capture that resolves before it (an EXPIRED-but-once-logged-in
+ * dir satisfies "`.claude.json` has an oauthAccount" on the first poll, i.e. inside the same tick
+ * on an already-settled promise) runs the `finally` that CLEARS the timer — so the terminal never
+ * opened and the button did visibly nothing. Zero delay narrowed that window; it did not close
+ * it. A caller that needs the terminal regardless of capture uses `openLoginNodeThenCapture`.
  */
 export async function raceLoginCapture(deps: LoginRaceDeps): Promise<{ email: string } | null> {
   let captured = false
   const wait = deps.waitLogin()
   const timer = deps.setTimer(() => {
     if (!captured) deps.dispatchLoginNode()
-  }, deps.graceMs ?? RETRY_GRACE_MS)
+  }, RETRY_GRACE_MS)
   try {
     const result = await wait
     captured = !!result
@@ -94,6 +101,27 @@ export async function raceLoginCapture(deps: LoginRaceDeps): Promise<{ email: st
   } finally {
     deps.clearTimer(timer)
   }
+}
+
+/**
+ * Open the login node FIRST — synchronously, unconditionally — then start the capture poll and
+ * return its result. No timer, no race: there is no ordering of promise resolution that can skip
+ * the dispatch, which is the property `raceLoginCapture` cannot offer (see its note).
+ *
+ * The two callers where the terminal is the whole point of the click:
+ *  - a SETTLED account's "Sign in again": its dir already carries a (stale) identity, so a
+ *    capture-first race resolves off the old file and would open nothing. The capture that lands
+ *    after the terminal only refreshes the email.
+ *  - a FRESH Add: the dir was minted milliseconds ago, so waiting a grace before showing the
+ *    terminal reads as "clicked Add, nothing happened" (review finding).
+ * The pending-account Retry keeps `raceLoginCapture`: there an already-logged-in dir captures in
+ * under 2 s and a login node would be pure noise (defect 3).
+ */
+export async function openLoginNodeThenCapture(
+  deps: Pick<LoginRaceDeps, 'waitLogin' | 'dispatchLoginNode'>
+): Promise<{ email: string } | null> {
+  deps.dispatchLoginNode()
+  return deps.waitLogin()
 }
 
 // ── Launch heal runner ─────────────────────────────────────────────────────────────────────────

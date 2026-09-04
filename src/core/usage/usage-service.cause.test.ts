@@ -12,6 +12,9 @@ import {
   classifyUsageResponseStatus,
   classifyUsageThrow,
   fetchUsage,
+  parseCreds,
+  resolveCreds,
+  type CredsIo,
   type UsageFetchDeps
 } from './usage-service'
 
@@ -115,6 +118,98 @@ describe('fetchUsage failure causes', () => {
     expect(u.status).toBe('ok')
     expect(u.cause).toBeUndefined()
     expect(u.limits).toHaveLength(1)
+  })
+
+  // A store the reader could not open is not an observed absence. It stays VISIBLE ('error',
+  // the pill's ⚠) rather than hidden ('unavailable'): hiding claims "nothing to show for this
+  // identity", and that is exactly what we do not know.
+  it('an unreadable credential store → error / credentials-unreadable, never "not signed in"', async () => {
+    const u = await fetchUsage(undefined, {
+      resolveCreds: async () => ({ accessToken: null, email: null, unreadable: true }),
+      fetchImpl: respond(200, {})
+    })
+    expect(u.status).toBe('error')
+    expect(u.cause).toBe('credentials-unreadable')
+    expect(u.httpStatus).toBeUndefined()
+  })
+})
+
+// The catch blocks themselves. Every one used to swallow its error into "no token", which
+// `fetchUsage` then called 'no-credentials'. Each leg is driven through the injected io so the
+// developer's real keychain and ~/.claude are never touched.
+describe('resolveCreds — absence is observed, never inferred', () => {
+  const enoent = (): Error => Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+  const eacces = (): Error => Object.assign(new Error('EACCES'), { code: 'EACCES' })
+  /** execFile's rejection for a non-zero `security` exit: `code` is the exit status. */
+  const securityExit = (code: number): Error => Object.assign(new Error(`exit ${code}`), { code })
+
+  const linux = (readFile: CredsIo['readFile']): CredsIo => ({
+    readFile,
+    keychainRead: async () => {
+      throw new Error('no keychain on this platform')
+    },
+    darwin: false
+  })
+
+  it('no file at all (ENOENT) is the observed absence', async () => {
+    const c = await resolveCreds(undefined, linux(async () => { throw enoent() }))
+    expect(c.accessToken).toBeNull()
+    expect(c.unreadable).toBeUndefined()
+  })
+
+  it('a file we may not read (EACCES) is unreadable, not absent', async () => {
+    const c = await resolveCreds(undefined, linux(async () => { throw eacces() }))
+    expect(c.accessToken).toBeNull()
+    expect(c.unreadable).toBe(true)
+  })
+
+  it('a file that is not JSON is unreadable, not absent', async () => {
+    const c = await resolveCreds(undefined, linux(async () => '{"claudeAiOauth": {"accessToken": "t'))
+    expect(c.accessToken).toBeNull()
+    expect(c.unreadable).toBe(true)
+  })
+
+  it('a JSON file without a token is the observed absence (the CLI logged out)', async () => {
+    const c = await resolveCreds(undefined, linux(async () => '{}'))
+    expect(c.accessToken).toBeNull()
+    expect(c.unreadable).toBeUndefined()
+  })
+
+  it('on darwin, keychain "no such item" (44) for every service plus ENOENT is absence', async () => {
+    const c = await resolveCreds(undefined, {
+      readFile: async () => { throw enoent() },
+      keychainRead: async () => { throw securityExit(44) },
+      darwin: true
+    })
+    expect(c.accessToken).toBeNull()
+    expect(c.unreadable).toBeUndefined()
+  })
+
+  it('on darwin, any other keychain failure is unreadable even when the file is absent', async () => {
+    const c = await resolveCreds(undefined, {
+      readFile: async () => { throw enoent() },
+      keychainRead: async () => { throw securityExit(36) }, // e.g. a locked keychain
+      darwin: true
+    })
+    expect(c.accessToken).toBeNull()
+    expect(c.unreadable).toBe(true)
+  })
+
+  it('a token found by a later leg clears an earlier leg\'s failure', async () => {
+    const c = await resolveCreds(undefined, {
+      readFile: async (file) =>
+        file.endsWith('.credentials.json') ? '{"claudeAiOauth":{"accessToken":"tok"}}' : '{}',
+      keychainRead: async () => { throw securityExit(36) },
+      darwin: true
+    })
+    expect(c.accessToken).toBe('tok')
+    expect(c.unreadable).toBeUndefined()
+  })
+
+  it('parseCreds marks non-JSON as unreadable and a token-less object as absent', () => {
+    expect(parseCreds('nope').unreadable).toBe(true)
+    expect(parseCreds('{}').unreadable).toBeUndefined()
+    expect(parseCreds('{"accessToken":"t"}')).toEqual({ accessToken: 't', email: null })
   })
 })
 

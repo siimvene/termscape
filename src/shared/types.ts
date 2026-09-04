@@ -2267,8 +2267,16 @@ export interface SessionMemoryApi {
  * hide rule, so its four values keep their exact meanings and the reason rides alongside.
  */
 export type UsageFailureCause =
-  /** No OAuth credential resolved at all — never signed in, or the credential was removed. */
+  /** No OAuth credential resolved at all — never signed in, or the credential was removed.
+   *  Only reported when absence was OBSERVED: the credential file was not there (ENOENT) and, on
+   *  macOS, the keychain answered "no such item" for every service. */
   | 'no-credentials'
+  /** The credential store could not be READ: a file or keychain I/O failure (permissions, a
+   *  locked keychain, a stray directory in the file's place) or a credential file that is not
+   *  valid JSON. NOT evidence of absence — the account may well be signed in. Kept apart from
+   *  `no-credentials` because the reader used to swallow every error into "no token" and the UI
+   *  then printed "Not signed in" for a permissions problem, which is a guess dressed as a fact. */
+  | 'credentials-unreadable'
   /** A credential exists and the endpoint refused it: expired, revoked, or an API key. 401/403. */
   | 'unauthorized'
   /** 429 — the request budget is spent. The numbers exist; we may not read them right now. */

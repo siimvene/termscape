@@ -72,6 +72,11 @@ export function usageEmptyText(u: UsageEmptyState, where?: string): string {
   switch (u.cause) {
     case 'no-credentials':
       return 'Not signed in.'
+    case 'credentials-unreadable':
+      // Deliberately NOT "Not signed in": the reader could not open the credential store, which
+      // says nothing about whether a login is in it. Naming the file is the one useful hint —
+      // a permissions fix or a stray directory there is a thing the user can check.
+      return 'Could not read the saved credentials (keychain or .credentials.json).'
     case 'unauthorized':
       // The one case that names the fix: the row looks signed in, and it is the credential that
       // is gone. Settings › Accounts is where "Sign in again" lives.

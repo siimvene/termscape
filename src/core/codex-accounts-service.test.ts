@@ -138,6 +138,63 @@ describe('registerCodexAccountsIpc — the Server Edition surface', () => {
     await expect(call(IPC.codexAccountsWaitLogin, '../../etc')).rejects.toThrow()
   })
 
+  // Two Server Edition tabs (or a tab and its reload) each start a wait for the SAME account. With
+  // one waiter slot per id the second overwrote the first, so cancel reached only the newer poll
+  // and the older one ran out its full five minutes with nothing left that could stop it. Both
+  // must observe the cancel; a stranded poll shows up here as a promise that never settles.
+  it('cancelWait ends EVERY concurrent wait for the id, not just the last one started', async () => {
+    registerCodexAccountsIpc({ pollMs: 5 })
+    const { id } = await call(IPC.codexAccountsAdd)
+    const first = call(IPC.codexAccountsWaitLogin, id)
+    const second = call(IPC.codexAccountsWaitLogin, id)
+    await new Promise((r) => setTimeout(r, 20))
+    await call(IPC.codexAccountsCancelWait, id)
+    const settled = (p: Promise<unknown>): Promise<'settled' | 'stranded'> =>
+      Promise.race([
+        p.then(() => 'settled' as const),
+        new Promise<'stranded'>((r) => setTimeout(() => r('stranded'), 500))
+      ])
+    expect(await settled(first)).toBe('settled')
+    expect(await settled(second)).toBe('settled')
+    await expect(first).resolves.toBeNull()
+    await expect(second).resolves.toBeNull()
+  })
+
+  // The `finally` of one wait must not take the other's cancel handle with it: after the first
+  // wait ends, a cancel must still reach the second.
+  it('a wait that finished does not strand a concurrent wait for the same id', async () => {
+    registerCodexAccountsIpc({ pollMs: 5 })
+    const { id } = await call(IPC.codexAccountsAdd)
+    const first = call(IPC.codexAccountsWaitLogin, id)
+    const second = call(IPC.codexAccountsWaitLogin, id)
+    await new Promise((r) => setTimeout(r, 20))
+    await call(IPC.codexAccountsCancelWait, id)
+    await first
+    await second
+    // Now a fresh wait must again be reachable by cancel (the map entry was not left dangling).
+    const third = call(IPC.codexAccountsWaitLogin, id)
+    await new Promise((r) => setTimeout(r, 20))
+    await call(IPC.codexAccountsCancelWait, id)
+    await expect(
+      Promise.race([third, new Promise((_, rej) => setTimeout(() => rej(new Error('stranded')), 500))])
+    ).resolves.toBeNull()
+  })
+
+  it('remove cancels every concurrent wait for the account', async () => {
+    registerCodexAccountsIpc({ pollMs: 5 })
+    const { id } = await call(IPC.codexAccountsAdd)
+    const first = call(IPC.codexAccountsWaitLogin, id)
+    const second = call(IPC.codexAccountsWaitLogin, id)
+    await new Promise((r) => setTimeout(r, 20))
+    await call(IPC.codexAccountsRemove, id)
+    await expect(
+      Promise.race([
+        Promise.all([first, second]),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('stranded')), 500))
+      ])
+    ).resolves.toEqual([null, null])
+  })
+
   it('systemIdentity reads THIS machine by default but fails closed for a remote projectId', async () => {
     registerCodexAccountsIpc()
     await expect(call(IPC.codexAccountsSystemIdentity)).resolves.toEqual({

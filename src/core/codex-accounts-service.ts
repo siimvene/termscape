@@ -48,8 +48,20 @@ const LOGIN_TIMEOUT_MS = 5 * 60 * 1000
  *  installation, never a credential or the thread SQLite DB. */
 const SHARED_ENTRIES = ['config.toml', 'AGENTS.md', 'skills', 'plugins', 'packages', 'rules', 'hooks.json']
 
-const waiters = new Map<string, { cancelled: boolean }>()
+// Per id, EVERY live `wait-login` poll — a Set, the same shape `claude-accounts-service.ts` uses,
+// and for the same reason. A single slot per id was a real hole once the verbs reached the Server
+// Edition: two browser tabs (or one tab and a reload) each start a wait for the same account, the
+// second overwrites the first's record, either `finally` deletes the shared entry, and cancel /
+// remove flag only whichever waiter is CURRENTLY recorded. The other keeps polling for its full
+// five minutes with nothing left that can reach it — an uncancellable poll on a home that remove
+// may already have deleted. Ownership-checked teardown below: each wait removes only ITSELF.
+const waiters = new Map<string, Set<{ cancelled: boolean }>>()
 const removingCodexAccounts = new Set<string>()
+
+/** Flag every live wait for `id` cancelled; each poll observes its own flag on the next turn. */
+function cancelWaiters(id: string): void {
+  for (const w of waiters.get(id) ?? []) w.cancelled = true
+}
 
 /** True while `codex-accounts:remove` is tearing this account down. The desktop's switch leg reads
  *  it to refuse a switch onto an account that is mid-removal (the other half of Property 10 — the
@@ -186,7 +198,9 @@ export function codexAccountsHandlers(
       assertCodexAccountId(id)
       const home = localCodexAccountHome(id)
       const waiter = { cancelled: false }
-      waiters.set(id, waiter)
+      const live = waiters.get(id) ?? new Set()
+      live.add(waiter)
+      waiters.set(id, live)
       const deadline = Date.now() + LOGIN_TIMEOUT_MS
       try {
         while (!waiter.cancelled && Date.now() < deadline) {
@@ -205,7 +219,10 @@ export function codexAccountsHandlers(
         }
         return null
       } finally {
-        waiters.delete(id)
+        // Ownership-checked: remove only THIS wait; a concurrent wait for the same id survives.
+        const set = waiters.get(id)
+        set?.delete(waiter)
+        if (set && set.size === 0) waiters.delete(id)
       }
     },
 
@@ -216,8 +233,7 @@ export function codexAccountsHandlers(
       // validated-everywhere rule is worth more than the line it costs — the next person to reach
       // for `id` here should find the guard already standing.
       assertCodexAccountId(id)
-      const waiter = waiters.get(id)
-      if (waiter) waiter.cancelled = true
+      cancelWaiters(id)
     },
 
     [IPC.codexAccountsIdentity]: (id: string) => existingManagedIdentity(id),
@@ -242,8 +258,7 @@ export function codexAccountsHandlers(
       if (removingCodexAccounts.has(id)) throw new Error('Codex account removal is already in progress')
       removingCodexAccounts.add(id)
       try {
-        const waiter = waiters.get(id)
-        if (waiter) waiter.cancelled = true
+        cancelWaiters(id)
         try {
           const codex = await findInLoginPath('codex')
           if (codex) {

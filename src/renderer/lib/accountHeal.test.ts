@@ -3,6 +3,7 @@ import type { ClaudeAccount } from '@shared/types'
 import {
   healedAccount,
   healPendingAccounts,
+  openLoginNodeThenCapture,
   raceLoginCapture,
   healPendingAccountsOnLaunch,
   RETRY_GRACE_MS
@@ -175,6 +176,58 @@ describe('raceLoginCapture', () => {
       clearTimer: vi.fn()
     })
     expect(setTimer).toHaveBeenCalledWith(expect.any(Function), RETRY_GRACE_MS)
+  })
+
+  // The trap the settled-account path fell into, pinned as a property of the RACE itself: with
+  // a REAL clock and a 0 ms timer, an already-resolved capture still wins — the macrotask never
+  // runs before `finally` clears it. This is why the race no longer takes a grace argument and
+  // why a caller that needs the terminal regardless must use `openLoginNodeThenCapture`.
+  it('cannot be made unconditional by a short grace: a same-tick capture still suppresses dispatch', async () => {
+    const dispatchLoginNode = vi.fn()
+    const result = await raceLoginCapture({
+      waitLogin: () => Promise.resolve({ email: 'stale@x.io' }),
+      dispatchLoginNode,
+      // Real timers with the SHORTEST possible delay, ignoring the requested grace.
+      setTimer: (fn) => setTimeout(fn, 0),
+      clearTimer: (h) => clearTimeout(h as ReturnType<typeof setTimeout>)
+    })
+    await new Promise((r) => setTimeout(r, 10))
+    expect(result).toEqual({ email: 'stale@x.io' })
+    expect(dispatchLoginNode).not.toHaveBeenCalled()
+  })
+})
+
+describe('openLoginNodeThenCapture', () => {
+  // The settled-account case: the dir already holds an (expired) identity, so the capture
+  // resolves at once. The terminal must open anyway — that is the entire affordance.
+  it('opens the login node even when the capture resolves immediately', async () => {
+    const dispatchLoginNode = vi.fn()
+    const result = await openLoginNodeThenCapture({
+      waitLogin: () => Promise.resolve({ email: 'stale@x.io' }),
+      dispatchLoginNode
+    })
+    expect(dispatchLoginNode).toHaveBeenCalledTimes(1)
+    expect(result).toEqual({ email: 'stale@x.io' })
+  })
+
+  it('opens the login node synchronously, before the poll is even started', () => {
+    const order: string[] = []
+    void openLoginNodeThenCapture({
+      waitLogin: () => {
+        order.push('wait')
+        return new Promise(() => {})
+      },
+      dispatchLoginNode: () => order.push('dispatch')
+    })
+    expect(order).toEqual(['dispatch', 'wait'])
+  })
+
+  it('returns the poll result — null on timeout — and never dispatches twice', async () => {
+    const dispatchLoginNode = vi.fn()
+    expect(
+      await openLoginNodeThenCapture({ waitLogin: () => Promise.resolve(null), dispatchLoginNode })
+    ).toBeNull()
+    expect(dispatchLoginNode).toHaveBeenCalledTimes(1)
   })
 })
 

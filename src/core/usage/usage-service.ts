@@ -18,6 +18,7 @@ import type {
   RemoteUsageQuery
 } from '../../shared/types'
 import { emptyUsage, usageFromPayload } from './claude-usage-map'
+import { classifyUsageResponseStatus, classifyUsageThrow } from './usage-cause'
 import {
   fetchRemoteUsage,
   type RemoteUsageRunner,
@@ -52,7 +53,40 @@ const REFETCH_DEBOUNCE_MS = 5 * 60 * 1000
 interface OAuthCreds {
   accessToken: string | null
   email: string | null
+  /**
+   * Set when a null `accessToken` is NOT an observed absence: some leg of the store could not be
+   * read (file I/O other than ENOENT, a keychain error other than "no such item") or held bytes
+   * that are not JSON. `fetchUsage` reports it as 'credentials-unreadable' rather than
+   * 'no-credentials'. Never set when a token WAS found — a broken leg that was outranked by a
+   * working one is not worth reporting.
+   */
+  unreadable?: true
 }
+
+/**
+ * The impure edges of `resolveCreds`, injectable for tests. Reading the real store in a unit test
+ * is not an option (see `UsageFetchDeps`), and the catch blocks below are exactly what the tests
+ * for 'credentials-unreadable' have to reach — they cannot be reached through a stubbed reader.
+ */
+export interface CredsIo {
+  /** `fs.readFile(path, 'utf-8')` — rejects with a Node errno error. */
+  readFile: (file: string) => Promise<string>
+  /** `security find-generic-password -s <service> -w` — rejects with execFile's error, whose
+   *  numeric `code` is the tool's exit status (44 = "The specified item could not be found"). */
+  keychainRead: (service: string) => Promise<string>
+  /** Whether the keychain leg runs at all (darwin only in production). */
+  darwin: boolean
+}
+
+const realCredsIo: CredsIo = {
+  readFile: (file) => fs.readFile(file, 'utf-8'),
+  keychainRead: async (service) =>
+    (await execFileP('security', ['find-generic-password', '-s', service, '-w'])).stdout,
+  darwin: process.platform === 'darwin'
+}
+
+/** `security`'s exit status for "no such item" — the one keychain failure that IS an absence. */
+const KEYCHAIN_ITEM_NOT_FOUND = 44
 
 /**
  * Providers other than Claude. Claude keeps its own channels because it alone is account-aware
@@ -71,7 +105,9 @@ const OTHER_PROVIDERS: { id: string; fetch: () => Promise<ProviderUsage> }[] = [
   { id: 'opencode', fetch: async () => fetchOpencodeUsage(await readProviderCookie('opencode')) }
 ]
 
-/** Parse a credentials JSON blob; tokens may sit at top level or under `claudeAiOauth`. */
+/** Parse a credentials JSON blob; tokens may sit at top level or under `claudeAiOauth`. Bytes that
+ *  are not JSON are `unreadable`, not "no token": a half-written or corrupted file is a fact about
+ *  the store, and a JSON object that simply lacks `accessToken` is the observed absence. */
 export function parseCreds(raw: string): OAuthCreds {
   try {
     const j = JSON.parse(raw) as Record<string, any>
@@ -83,9 +119,13 @@ export function parseCreds(raw: string): OAuthCreds {
       null
     return { accessToken, email }
   } catch {
-    return { accessToken: null, email: null }
+    return { accessToken: null, email: null, unreadable: true }
   }
 }
+
+/** Node errno of a rejected fs call, or undefined for anything that is not one. */
+const errnoCode = (e: unknown): string | number | undefined =>
+  (e as { code?: string | number } | null)?.code
 
 /**
  * macOS Keychain → {config}/.credentials.json → email backfill from {config}/.claude.json.
@@ -94,46 +134,52 @@ export function parseCreds(raw: string): OAuthCreds {
  *
  * The Keychain leg is darwin-only by construction — on the Server Edition's Linux host the
  * `security` binary does not exist, so the file leg is the whole story there.
+ *
+ * ABSENCE IS OBSERVED, NEVER INFERRED. Each leg's failure is sorted into "looked, nothing there"
+ * (keychain exit 44, file ENOENT) versus "could not look" (any other error, or bytes that are not
+ * JSON). Before this every catch fell through to a null token and `fetchUsage` called all of it
+ * 'no-credentials', so a chmod'd file or a locked keychain rendered as "Not signed in" — the
+ * `UsageFailureCause` doc promised the cause is never guessed, and that was a guess. A token found
+ * by a later leg clears the flag: the store answered, whatever an earlier leg said.
  */
-async function resolveCreds(accountId?: string): Promise<OAuthCreds> {
+export async function resolveCreds(accountId?: string, io: CredsIo = realCredsIo): Promise<OAuthCreds> {
   const configDir = accountId ? claudeConfigDirFor(accountId) : undefined
   const { services, credsFile, identityFile } = usageCredsPaths(os.homedir(), configDir)
 
   let creds: OAuthCreds = { accessToken: null, email: null }
+  let unreadable = false
 
-  if (process.platform === 'darwin') {
+  if (io.darwin) {
     for (const service of services) {
       try {
-        const { stdout } = await execFileP('security', [
-          'find-generic-password',
-          '-s',
-          service,
-          '-w'
-        ])
-        const parsed = parseCreds(stdout.trim())
+        const parsed = parseCreds((await io.keychainRead(service)).trim())
         if (parsed.accessToken) {
           creds = parsed
           break
         }
-      } catch {
-        // not in keychain under this service — try the next / the file
+        if (parsed.unreadable) unreadable = true
+      } catch (e) {
+        // "No such item" under this service is an observed absence — try the next / the file.
+        // Anything else (a locked keychain, a missing `security`, a spawn failure) is not.
+        if (errnoCode(e) !== KEYCHAIN_ITEM_NOT_FOUND) unreadable = true
       }
     }
   }
 
   if (!creds.accessToken) {
     try {
-      const raw = await fs.readFile(credsFile, 'utf-8')
-      creds = parseCreds(raw)
-    } catch {
-      // no file — leave creds empty
+      const parsed = parseCreds(await io.readFile(credsFile))
+      creds = parsed
+      if (parsed.unreadable) unreadable = true
+    } catch (e) {
+      // No file is the observed absence; EACCES / EISDIR / EIO is a store we could not read.
+      if (errnoCode(e) !== 'ENOENT') unreadable = true
     }
   }
 
   if (creds.accessToken && !creds.email) {
     try {
-      const raw = await fs.readFile(identityFile, 'utf-8')
-      const j = JSON.parse(raw) as Record<string, any>
+      const j = JSON.parse(await io.readFile(identityFile)) as Record<string, any>
       const acct = j.oauthAccount as Record<string, any> | undefined
       const email =
         (acct && typeof acct.emailAddress === 'string' && acct.emailAddress) ||
@@ -141,11 +187,14 @@ async function resolveCreds(accountId?: string): Promise<OAuthCreds> {
         null
       if (email) creds = { ...creds, email }
     } catch {
-      // best-effort only
+      // best-effort only — the email is decoration, the token is the credential
     }
   }
 
-  return creds
+  if (creds.accessToken) return { accessToken: creds.accessToken, email: creds.email }
+  return unreadable
+    ? { accessToken: null, email: creds.email, unreadable: true }
+    : { accessToken: null, email: creds.email }
 }
 
 /** The OAuth access token alone (keychain → {config}/.credentials.json), or null. */
@@ -153,38 +202,10 @@ export async function resolveClaudeAccessToken(accountId?: string): Promise<stri
   return (await resolveCreds(accountId)).accessToken
 }
 
-/**
- * The failure taxonomy for one non-ok HTTP response, in one place. `status` keeps its four
- * existing meanings (the mirror and the pill's hide rule read it); `cause` is the new detail.
- *
- * 401/403 stay 'unavailable' — a refused credential still means "no subscription windows to
- * show, hide the pill" — but they now carry `unauthorized`, which is what separates an expired
- * login from an account that was never signed in (both were 'unavailable' and nothing else).
- */
-export function classifyUsageResponseStatus(httpStatus: number): {
-  status: ClaudeUsage['status']
-  cause: NonNullable<ClaudeUsage['cause']>
-  httpStatus: number
-} {
-  if (httpStatus === 401 || httpStatus === 403)
-    return { status: 'unavailable', cause: 'unauthorized', httpStatus }
-  if (httpStatus === 429) return { status: 'error', cause: 'rate-limited', httpStatus }
-  if (httpStatus >= 500) return { status: 'error', cause: 'server-error', httpStatus }
-  // Every other non-ok code (a 400, a 404 from a moved endpoint, a captive portal's 302 body):
-  // real, observed, and not a class we can name — so say only what we saw, the number itself.
-  return { status: 'error', cause: 'http', httpStatus }
-}
-
-/**
- * The failure taxonomy for a THROWN request. Only our own abort can be attributed to slowness;
- * everything else is 'network', which claims no more than "the request did not complete".
- * `parse` never arrives here — the body read is caught separately, because an ok response with
- * an unreadable body is a different fact from a request that never landed.
- */
-export function classifyUsageThrow(err: unknown): NonNullable<ClaudeUsage['cause']> {
-  const name = (err as { name?: string } | null)?.name
-  return name === 'AbortError' || name === 'TimeoutError' ? 'timeout' : 'network'
-}
+// The HTTP / throw taxonomy moved to usage-cause.ts so the REMOTE reader can classify through the
+// same table (this module imports that reader, so it could not import from here). Re-exported:
+// the classifiers are part of this module's surface and its tests.
+export { classifyUsageResponseStatus, classifyUsageThrow } from './usage-cause'
 
 /**
  * Injectable edges, for tests only — production passes neither. Reading the real credentials in a
@@ -203,8 +224,14 @@ export async function fetchUsage(
   const now = Date.now()
   const readCreds = deps?.resolveCreds ?? resolveCreds
   const doFetch = deps?.fetchImpl ?? fetch
-  const { accessToken, email } = await readCreds(accountId)
-  if (!accessToken) return emptyUsage(email, now, 'unavailable', { cause: 'no-credentials' })
+  const { accessToken, email, unreadable } = await readCreds(accountId)
+  // A store we could not read is 'error' (the pill stays visible, ⚠), not 'unavailable' (which
+  // hides it): hiding the pill claims "nothing to show for this identity", and we do not know that.
+  if (!accessToken) {
+    return unreadable
+      ? emptyUsage(email, now, 'error', { cause: 'credentials-unreadable' })
+      : emptyUsage(email, now, 'unavailable', { cause: 'no-credentials' })
+  }
   let res: Response
   try {
     const ctrl = new AbortController()
