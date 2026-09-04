@@ -3506,7 +3506,7 @@ app.whenReady().then(async () => {
   // CODEX_HOMEs runs here, before the renderer restores its PTYs — an already-persisted managed
   // Codex node must see its migrated (SUN_LEN-safe) home on its very first spawn. Same lazy SSH
   // getter for the local→SSH transfer source leg.
-  initCodexAccounts(() => sshProjectManager)
+  initCodexAccounts(settingsStore, () => sshProjectManager)
   // The jailed core bridge both phone hosts serve: typed git verbs against the real GitService
   // (cwd-jailed to the shared canvas roots inside the handlers) and phone node registration
   // through the workspace store (written as an outside edit, so the watcher broadcasts it and

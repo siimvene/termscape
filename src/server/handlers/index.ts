@@ -12,7 +12,10 @@ import { registerCodexIdentityIpc } from '../../core/codex-identity-caps'
 import { UNKNOWN_CODEX_IDENTITY_CAPS } from '@shared/types'
 import { startUsageService } from '../../core/usage/usage-service'
 import { registerClaudeAccountsIpc } from '../../core/claude-accounts-service'
-import { registerCodexAccountsIpc } from '../../core/codex-accounts-service'
+import {
+  registerCodexAccountsIpc,
+  type CodexAccountRowStore
+} from '../../core/codex-accounts-service'
 import { codexUsageAccounts } from '../../core/codex-accounts-core'
 import { codexHomeFor } from '../../core/codex-config-dir'
 import {
@@ -29,6 +32,9 @@ export function registerCoreHandlers(
   platform: ServerPlatform,
   deps: {
     getSettings: () => Settings
+    /** The settings store itself: the Codex account verbs write their ROW membership through its
+     *  `mutate` (codex-accounts-service.ts), not through a renderer snapshot. */
+    settingsStore: CodexAccountRowStore
     downloadTickets?: DownloadTickets
     /** See fs-handlers' dep of the same name — the canvas-image write directory. */
     localProjectCwd?: (projectId: string) => string | undefined
@@ -114,7 +120,7 @@ export function registerCoreHandlers(
   // desktop-only (it authorizes each phase against the reserving WebContents and auto-releases on
   // that renderer's `destroyed` event, neither of which the server seam can express), so nothing
   // here can ever hold a reservation and removal has nothing to refuse for.
-  registerCodexAccountsIpc()
+  registerCodexAccountsIpc({ settings: deps.settingsStore })
 
   // Claude subscription usage. Previously desktop-only — the browser bridge answered `null`, so
   // the pill never rendered in the Server Edition. The poll runs UNGATED here (the default), not

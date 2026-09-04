@@ -366,3 +366,169 @@ describe('settings:save atomic write', () => {
     expect(mode).toBe(0o600)
   })
 })
+
+// The renderer's `settings:save` is a full snapshot of whatever THAT tab hydrated. With two Server
+// Edition tabs the later save replaced the earlier one's rows, so an account tab A added (whose
+// credential home tab A's `add` had already minted) vanished when tab B saved a label edit from
+// the older snapshot — an authenticated `auth.json` nothing could list, switch to, or remove.
+// Membership of `codexAccounts` is therefore the shell's: `mutate` is the only writer that adds or
+// removes a row, and a snapshot save can only edit rows the cache already has.
+//
+// MUTATIONS:
+//  - make `saveNow` take `settings.codexAccounts` verbatim ⇒ the "stale snapshot cannot drop" and
+//    "cannot resurrect" cases redden.
+//  - union by id instead of cache-membership ⇒ the resurrection case reddens.
+//  - drop the monotonic-resolution guard ⇒ the "cannot un-resolve" case reddens.
+describe('SettingsStore — shell-owned codexAccounts membership', () => {
+  let dir: string
+  let fake: ReturnType<typeof fakePlatform>
+
+  beforeEach(() => {
+    dir = mkdtempSync(path.join(tmpdir(), 'nodeterm-settings-rows-'))
+    fake = fakePlatform({ userDataDir: dir })
+    initPlatform(fake)
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    resetPlatformForTests()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  const row = (id: string, extra: Partial<Settings['codexAccounts'][number]> = {}) => ({
+    id,
+    label: `acct ${id}`,
+    pending: true,
+    ...extra
+  })
+  const addRow = (store: SettingsStore, id: string) =>
+    store.mutate((s) => ({ ...s, codexAccounts: [...s.codexAccounts, row(id)] }))
+  const ids = (store: SettingsStore): string[] => store.get().codexAccounts.map((a) => a.id)
+  const onDisk = async (): Promise<string[]> =>
+    (JSON.parse(await fs.readFile(path.join(dir, 'settings.json'), 'utf-8')) as Settings)
+      .codexAccounts.map((a) => a.id)
+
+  it('two concurrent mutate adds both survive — each sees the other\'s row', async () => {
+    const store = new SettingsStore()
+    store.init()
+    await Promise.all([addRow(store, 'a'), addRow(store, 'b')])
+    expect(ids(store).sort()).toEqual(['a', 'b'])
+    expect((await onDisk()).sort()).toEqual(['a', 'b'])
+  })
+
+  it('a stale renderer snapshot cannot drop a row the shell added after the snapshot was taken', async () => {
+    const store = new SettingsStore()
+    store.init()
+    store.registerIpc()
+    await addRow(store, 'a')
+    const stale = store.get() // tab B hydrated here: knows a, not b
+    await addRow(store, 'b')
+    // Tab B edits a's label and full-saves its snapshot (no b in it).
+    await fake.handlers[IPC.settingsSave]({
+      ...stale,
+      codexAccounts: stale.codexAccounts.map((x) => (x.id === 'a' ? { ...x, label: 'renamed' } : x))
+    })
+    expect(ids(store)).toEqual(['a', 'b'])
+    expect(store.get().codexAccounts[0].label).toBe('renamed') // the edit landed…
+    expect(await onDisk()).toEqual(['a', 'b']) // …and the concurrent add survived it
+  })
+
+  it('a stale renderer snapshot cannot resurrect a row the shell removed, nor add one of its own', async () => {
+    const store = new SettingsStore()
+    store.init()
+    store.registerIpc()
+    await addRow(store, 'a')
+    await addRow(store, 'gone')
+    const stale = store.get()
+    await store.mutate((s) => ({ ...s, codexAccounts: s.codexAccounts.filter((x) => x.id !== 'gone') }))
+    await fake.handlers[IPC.settingsSave]({
+      ...stale,
+      codexAccounts: [...stale.codexAccounts, row('renderer-minted')]
+    })
+    expect(ids(store)).toEqual(['a'])
+    expect(await onDisk()).toEqual(['a'])
+  })
+
+  it('a snapshot that still says pending cannot un-resolve a row the shell already resolved', async () => {
+    const store = new SettingsStore()
+    store.init()
+    store.registerIpc()
+    await addRow(store, 'a')
+    const stale = store.get()
+    // Another tab's reconcile captured the login.
+    await fake.handlers[IPC.settingsSave]({
+      ...store.get(),
+      codexAccounts: [{ ...row('a'), pending: false, email: 'me@example.com', label: 'me@example.com' }]
+    })
+    // The stale tab now saves — its row predates the capture.
+    await fake.handlers[IPC.settingsSave](stale)
+    expect(store.get().codexAccounts).toEqual([
+      { ...row('a'), pending: false, email: 'me@example.com', label: 'me@example.com' }
+    ])
+  })
+
+  it('a snapshot still edits label and color of a row both sides know', async () => {
+    const store = new SettingsStore()
+    store.init()
+    store.registerIpc()
+    await addRow(store, 'a')
+    await fake.handlers[IPC.settingsSave]({
+      ...store.get(),
+      codexAccounts: [{ ...row('a'), label: 'work', color: '#123456' }]
+    })
+    expect(store.get().codexAccounts).toEqual([{ ...row('a'), label: 'work', color: '#123456' }])
+  })
+
+  it('every other key of the snapshot is still taken as sent', async () => {
+    const store = new SettingsStore()
+    store.init()
+    store.registerIpc()
+    await fake.handlers[IPC.settingsSave]({ ...store.get(), fontSize: 23 })
+    expect(store.get().fontSize).toBe(23)
+  })
+
+  it('a mutate whose write fails changes neither the cache nor the disk, and the chain survives', async () => {
+    const store = new SettingsStore()
+    store.init()
+    await addRow(store, 'a')
+    vi.spyOn(fs, 'rename').mockRejectedValueOnce(
+      Object.assign(new Error('EXDEV: cross-device link not permitted, rename'), { code: 'EXDEV' })
+    )
+    await expect(addRow(store, 'b')).rejects.toThrow(/EXDEV/)
+    expect(ids(store)).toEqual(['a'])
+    expect(await onDisk()).toEqual(['a'])
+    vi.restoreAllMocks()
+    await addRow(store, 'c')
+    expect(ids(store)).toEqual(['a', 'c'])
+  })
+
+  it('a mutate whose fn throws rejects that caller only', async () => {
+    const store = new SettingsStore()
+    store.init()
+    await expect(
+      store.mutate(() => {
+        throw new Error('nope')
+      })
+    ).rejects.toThrow(/nope/)
+    await addRow(store, 'a')
+    expect(ids(store)).toEqual(['a'])
+  })
+
+  it('mutate composes with the FIFO save chain — a queued snapshot save sees the mutated cache', async () => {
+    const store = new SettingsStore()
+    store.init()
+    store.registerIpc()
+    const stale = store.get()
+    // Queue order: mutate (adds a), then a stale snapshot save that never heard of a.
+    const m = addRow(store, 'a')
+    const s = fake.handlers[IPC.settingsSave]({ ...stale, fontSize: 31 }) as Promise<void>
+    await Promise.all([m, s])
+    expect(ids(store)).toEqual(['a'])
+    expect(store.get().fontSize).toBe(31)
+    expect(await onDisk()).toEqual(['a'])
+  })
+
+  it('DEFAULT_SETTINGS carries an empty list, so the reconcile has a cache to keep from on a fresh install', () => {
+    expect(DEFAULT_SETTINGS.codexAccounts).toEqual([])
+  })
+})

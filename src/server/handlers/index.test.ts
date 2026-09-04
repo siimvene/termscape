@@ -10,6 +10,7 @@ import { DEFAULT_SETTINGS, type GitStatus } from '../../shared/types'
 import { initPlatform, resetPlatformForTests } from '../../core/platform'
 import { DownloadTickets } from '../../core/download-tickets'
 import { projectImagesDir } from '../../core/canvas-images'
+import { SettingsStore } from '../../core/settings-store'
 
 // The per-account hook writers are exercised by src/core/claude-accounts-service.test.ts. Observe
 // them here instead of running them: the real installer writes into the USER's `~/.nodeterm`, and
@@ -37,7 +38,7 @@ beforeEach(() => {
   // GitService.registerIpc() registers via the global core platform(), so wire it here
   // (boot does this via initPlatform() before registerCoreHandlers — mirror that order).
   initPlatform(platform)
-  registerCoreHandlers(platform, { getSettings: () => DEFAULT_SETTINGS })
+  registerCoreHandlers(platform, { getSettings: () => DEFAULT_SETTINGS, settingsStore: new SettingsStore() })
   ui = platform.attach({ sendText: () => {}, sendBinary: () => {} })
 })
 afterEach(() => {
@@ -87,6 +88,7 @@ describe('registerCoreHandlers (canvas images)', () => {
     initPlatform(p2)
     registerCoreHandlers(p2, {
       getSettings: () => DEFAULT_SETTINGS,
+      settingsStore: new SettingsStore(),
       localProjectCwd: (id) => (id === 'p2' ? repo : undefined)
     })
     const ui2 = p2.attach({ sendText: () => {}, sendBinary: () => {} })
@@ -106,7 +108,7 @@ describe('registerCoreHandlers (download tickets)', () => {
     resetPlatformForTests()
     const p2 = new ServerPlatform({ userDataDir: repo, appVersion: '0' })
     initPlatform(p2)
-    registerCoreHandlers(p2, { getSettings: () => DEFAULT_SETTINGS, downloadTickets: tickets })
+    registerCoreHandlers(p2, { getSettings: () => DEFAULT_SETTINGS, settingsStore: new SettingsStore(), downloadTickets: tickets })
     const ui2 = p2.attach({ sendText: () => {}, sendBinary: () => {} })
     const res = await p2.dispatch(ui2, {
       t: 'req',
@@ -127,7 +129,7 @@ describe('registerCoreHandlers (download tickets)', () => {
     resetPlatformForTests()
     const p2 = new ServerPlatform({ userDataDir: repo, appVersion: '0' })
     initPlatform(p2)
-    registerCoreHandlers(p2, { getSettings: () => DEFAULT_SETTINGS, downloadTickets: tickets })
+    registerCoreHandlers(p2, { getSettings: () => DEFAULT_SETTINGS, settingsStore: new SettingsStore(), downloadTickets: tickets })
     const ui2 = p2.attach({ sendText: () => {}, sendBinary: () => {} })
     const res = await p2.dispatch(ui2, { t: 'req', id: 1, method: IPC.filesDownloadTicket, args: [repo] })
     expect((res as { result: { name: string } }).result.name).toBe(`${path.basename(repo)}.tar.gz`)
@@ -138,7 +140,7 @@ describe('registerCoreHandlers (download tickets)', () => {
     resetPlatformForTests()
     const p2 = new ServerPlatform({ userDataDir: repo, appVersion: '0' })
     initPlatform(p2)
-    registerCoreHandlers(p2, { getSettings: () => DEFAULT_SETTINGS, downloadTickets: tickets })
+    registerCoreHandlers(p2, { getSettings: () => DEFAULT_SETTINGS, settingsStore: new SettingsStore(), downloadTickets: tickets })
     const ui2 = p2.attach({ sendText: () => {}, sendBinary: () => {} })
     const res = await p2.dispatch(ui2, {
       t: 'req',

@@ -1,16 +1,16 @@
 // @vitest-environment jsdom
-// "Add Codex account" is DESKTOP-ONLY, and a browser tab (Server Edition) says why.
+// "Add Codex account" is offered in a browser tab (Server Edition) exactly as on the desktop.
 //
-// The codex-login intent (`PtyCreateOptions.codexLogin`) closed the credential-OVERWRITE race: a
-// login node whose settings save lost to the pty spawn now refuses rather than writing the host's
-// system `~/.codex`. It did NOT close the account-ROW-LOSS race: every Server Edition tab flushes a
-// FULL settings snapshot (`settings-store.ts` `save` replaces, it does not merge), so two tabs
-// adding concurrently leave one of them with a managed home minted on disk and NO settings row
-// pointing at it — a credential-bearing directory nothing can list, switch to, or remove. Until
-// the store merges per account, the browser must not offer the button at all.
+// It was gated off there once: every Server Edition tab flushed a FULL settings snapshot
+// (`settings-store.ts` `save` replaced, it did not merge), so two tabs adding concurrently left one
+// of them with a managed home minted on disk and NO settings row pointing at it — a
+// credential-bearing directory nothing could list, switch to, or remove. Row MEMBERSHIP is now the
+// shell's (`codexAccounts.add()` / `remove()` write it through the store's read-modify-write, and a
+// snapshot save can only edit rows the shell already has — src/core/settings-store.test.ts and
+// src/core/codex-accounts-service.test.ts prove the races), so the gate has nothing left to guard.
 //
-// MUTATION: drop the `isBrowserRuntime()` branch around the button in AccountsSection.tsx → the
-// first test finds a button and reddens.
+// MUTATION: reintroduce an `isBrowserRuntime()` branch around the button in AccountsSection.tsx ⇒
+// the browser case finds no button and reddens.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { createRoot, type Root } from 'react-dom/client'
 import { act } from 'react'
@@ -50,7 +50,11 @@ beforeEach(() => {
     codexAccounts: {
       systemIdentity: async () => null,
       identity: async () => null,
-      add: async () => ({ id: 'never', home: '/nowhere' }),
+      add: async () => ({
+        id: 'never',
+        home: '/nowhere',
+        account: { id: 'never', label: 'New Codex account', pending: true }
+      }),
       waitLogin: () => new Promise(() => {}),
       cancelWaitLogin: async () => {}
     },
@@ -63,16 +67,15 @@ afterEach(() => {
 })
 
 describe('AccountsSection — Add Codex account in a browser tab', () => {
-  it('hides the button and says to add the account from the desktop app', () => {
+  it('offers the button in the browser, with no desktop-only notice', () => {
     browser = true
     const { host, root } = render()
-    expect(addCodexButton(host)).toBeUndefined()
-    expect(host.textContent).toContain('Adding a Codex account from the browser is temporarily unavailable')
-    expect(host.textContent).toContain('desktop app')
+    expect(addCodexButton(host)).toBeTruthy()
+    expect(host.textContent).not.toContain('temporarily unavailable')
     root.unmount()
   })
 
-  it('still offers the button on the desktop', () => {
+  it('offers the button on the desktop', () => {
     browser = false
     const { host, root } = render()
     expect(addCodexButton(host)).toBeTruthy()

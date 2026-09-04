@@ -52,9 +52,12 @@ beforeEach(async () => {
   vi.resetModules()
   const { initPlatform } = await import('../core/platform')
   initPlatform(fakePlatform({ userDataDir }))
+  const { SettingsStore } = await import('../core/settings-store')
+  const settings = new SettingsStore()
+  settings.init()
   const { initCodexAccounts } = await import('./codex-accounts')
   // A live SSH manager carrying PR 6's importer.
-  initCodexAccounts(() => ({ remoteCodexImportThread }) as any)
+  initCodexAccounts(settings, () => ({ remoteCodexImportThread }) as any)
 })
 afterEach(async () => {
   const { resetPlatformForTests } = await import('../core/platform')

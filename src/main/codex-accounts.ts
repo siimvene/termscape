@@ -39,6 +39,7 @@ import {
 } from '../core/codex-accounts-core'
 import {
   codexAccountsHandlers,
+  type CodexAccountRowStore,
   ensureCodexAccountDaemon,
   isCodexAccountRemoving,
   localCodexSocket,
@@ -116,10 +117,14 @@ function isSwitchReserved(accountId: string): boolean {
  *  - **Mobile (phone)** — never originates an add/switch/copy; it drives via relay→IPC and reads
  *    state. No mint here.
  *
+ * @param settings The settings store; account ROW membership is written through its `mutate`.
  * @param getSshManager Lazily resolves the SSH project manager (created after this init in
  * index.ts). Only the local→SSH transfer SOURCE leg uses it today; local account ops never do.
  */
-export function initCodexAccounts(getSshManager?: () => SshProjectManager | undefined): void {
+export function initCodexAccounts(
+  settings: CodexAccountRowStore,
+  getSshManager?: () => SshProjectManager | undefined
+): void {
   // Ensure `~/.nodeterm` exists before any relay/daemon reach (carried PR-4 obligation: only the
   // relay's detached serve() created it before, so a first reach from this process could race a
   // missing root). Desktop-only: the Server Edition has no relay daemon to root.
@@ -129,7 +134,9 @@ export function initCodexAccounts(getSshManager?: () => SshProjectManager | unde
 
   // The shared five. `ipcMain.handle`, not `platform().handle` — the file header explains why. The
   // event is stripped exactly as the seam would strip it: none of the five reads a sender.
-  for (const [channel, fn] of Object.entries(codexAccountsHandlers({ isSwitchReserved }))) {
+  for (const [channel, fn] of Object.entries(
+    codexAccountsHandlers({ isSwitchReserved, settings })
+  )) {
     ipcMain.handle(channel, (_event, ...args: any[]) => fn(...args))
   }
 

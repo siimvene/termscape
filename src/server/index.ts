@@ -279,6 +279,7 @@ export async function startServer(
   const downloadTickets = new DownloadTickets()
   const { gitService } = registerCoreHandlers(platform, {
     getSettings: () => settingsStore.get(),
+    settingsStore,
     downloadTickets,
     localProjectCwd: (projectId: string) => workspaceStore.localCwdForProject(projectId)
   })

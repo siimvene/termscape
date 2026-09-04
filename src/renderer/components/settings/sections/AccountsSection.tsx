@@ -35,7 +35,6 @@ import { Button } from '@renderer/ui/Button'
 import { Input } from '@renderer/ui/Input'
 import { cn } from '@renderer/ui/cn'
 import { thisMachine, thisMachineCap } from '../../../lib/machineName'
-import { isBrowserRuntime } from '../../../bridge/runtime'
 
 const ROWS = {
   accounts: {
@@ -138,25 +137,6 @@ function ProviderHeader({
 function applyCodexAccounts(fn: (accs: CodexAccount[]) => CodexAccount[]): void {
   const s = useSettings.getState()
   s.update({ codexAccounts: fn(s.settings.codexAccounts) })
-}
-
-/**
- * The Codex-add registration barrier waits for the settings flush to acknowledge the save before it
- * opens the login node. That flush coalesces on a 300 ms debounce and, over the Server Edition
- * bridge, is a round-trip — so a flush that never settles would latch the "Setting up…" spinner
- * forever. Bound it: a timeout is treated exactly like a rejected flush (the id is not known to be
- * registered), so the caller opens nothing rather than run a login it cannot vouch for.
- */
-const CODEX_ADD_FLUSH_TIMEOUT_MS = 5000
-function withFlushTimeout<T>(p: Promise<T>): Promise<T> {
-  let timer: ReturnType<typeof setTimeout>
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(
-      () => reject(new Error('settings flush timed out before Codex account registration')),
-      CODEX_ADD_FLUSH_TIMEOUT_MS
-    )
-  })
-  return Promise.race([p, timeout]).finally(() => clearTimeout(timer)) as Promise<T>
 }
 
 /**
@@ -360,24 +340,19 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
     setAddingCodex(true)
     setCodexAddError(null)
     try {
+      // The SHELL registers the row: `add()` appends it to settings inside the store's own chain
+      // and resolves only once that is on disk, so the id is already known to PtyManager (which
+      // reads live settings to decide the login pty's `CODEX_HOME`) before the login node is asked
+      // for. The mirror below is display state for THIS tab; the snapshot save it schedules cannot
+      // add, drop or duplicate a row (settings-store.ts reconciles `codexAccounts` against its own
+      // membership), so two tabs adding at once both keep their accounts. Before this the renderer
+      // appended the row itself and full-saved it, and the later of two tabs' saves erased the
+      // other's row while its authenticated home stayed on disk — the reason the browser's Add
+      // button was gated.
       const added = await window.nodeTerminal.codexAccounts.add()
-      const account: CodexAccount = { id: added.id, label: 'New Codex account', pending: true }
-      applyCodexAccounts((accs) => [...accs, account])
-      // REGISTRATION BARRIER — do not move the dispatch above this line. The login node's pty gets
-      // the managed `CODEX_HOME` only when PtyManager finds this id in the SERVER-SIDE settings
-      // (`isCodexAccount` reads live settings; `codexAccounts` and `claudeAccounts` share an id
-      // alphabet, so the list is the only thing that tells them apart). The store above persists on
-      // a 300 ms coalesce, so dispatching in the same tick raced pty creation against the save:
-      // when the pty won, `codex login` ran under the SYSTEM `~/.codex` — overwriting the user's
-      // default credential — while `waitLogin` polled a managed home nothing was writing to. Tight
-      // on desktop; wide open over the Server Edition's WebSocket, where the settings frame and
-      // the pty-create frame are two round-trips. `flush()` resolves only once the shell has
-      // acknowledged the save (its cache is updated before the RPC answers), which is the actual
-      // condition — a sleep would only have narrowed the window. A REJECTED flush means the id is
-      // not known to be registered: fall into the catch below and open nothing, rather than run a
-      // login whose destination we cannot vouch for. (The Claude add path needs no barrier: its
-      // pty resolves the config dir from the id alone, without consulting settings.)
-      await withFlushTimeout(useSettings.getState().flush())
+      applyCodexAccounts((accs) =>
+        accs.some((a) => a.id === added.account.id) ? accs : [...accs, added.account]
+      )
       window.dispatchEvent(
         new CustomEvent('nodeterm:add-codex-account-login', { detail: { accountId: added.id } })
       )
@@ -405,10 +380,11 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
   const confirmRemoveCodex = async (account: CodexAccount): Promise<void> => {
     setPendingRemoveCodex(null)
     if (account.pending) await window.nodeTerminal.codexAccounts.cancelWaitLogin(account.id)
-    // A remote account's home lives on its host; the base remove() acts locally only, so a remote
-    // account is dropped from settings without a local fs op it does not own (fail-closed — it never
-    // deletes the wrong machine's home).
-    if (!account.host) await window.nodeTerminal.codexAccounts.remove(account.id)
+    // The SHELL deletes the row (after the local home, for a local account; a remote account's
+    // home lives on its host, and remove() touches only the row for a row carrying `host`). The
+    // filter below is this tab's mirror — and because the store keeps membership from its own
+    // cache, no other tab's stale snapshot can bring the row back.
+    await window.nodeTerminal.codexAccounts.remove(account.id)
     applyCodexAccounts((accs) => accs.filter((a) => a.id !== account.id))
     useProjects.setState((s) => ({
       projects: s.projects.map((p) => ({
@@ -887,23 +863,7 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
               connected={group.remote ? !!connectedProjectIdForHost(group.host) : true}
             >
               {codexRowsFor(group.accounts, group.remote ? group.host : undefined)}
-              {!group.remote && isBrowserRuntime() ? (
-                /* The browser CAN serve every account verb (the port landed), and the login node
-                   now carries the codex-scope INTENT (`PtyCreateOptions.codexLogin`), so the
-                   credential-OVERWRITE race — `codex login` landing on the host's system
-                   `~/.codex` when the settings save lost to the pty spawn — is closed: a lost
-                   race is a visible refusal. What is NOT closed is the account-ROW-LOSS race:
-                   every Server Edition tab flushes a FULL settings snapshot (`settings-store.ts`
-                   `save` replaces, it does not merge), so two tabs adding concurrently leave one
-                   of them with a managed home minted on disk and NO settings row pointing at it —
-                   a credential-bearing directory nothing can list, switch to, or remove. Desktop
-                   has one renderer per settings core, so it cannot hit this. Until the store
-                   merges per-account, desktop only. */
-                <p className="text-[12px] leading-relaxed text-muted">
-                  Adding a Codex account from the browser is temporarily unavailable — add them from
-                  the desktop app on this machine. Accounts already created there are shown above.
-                </p>
-              ) : !group.remote ? (
+              {!group.remote ? (
                 <div className="space-y-2">
                   <Button variant="primary" disabled={addingCodex} onClick={() => void onAddCodexAccount()}>
                     {addingCodex ? (

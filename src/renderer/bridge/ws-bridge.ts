@@ -6,6 +6,7 @@
 // namespaces (`pty`, `workspace`, `settings`) over that socket. Every other namespace comes from
 // `buildStubApi()` (Task 7) so the renderer boots without a full Electron preload.
 
+import type { CodexAccount } from '@shared/codex-account'
 import {
   parseRpcMessage,
   encodeArgs,
@@ -995,7 +996,12 @@ export function buildCodexAccountsApi(
 ): NodeTerminalApi['codexAccounts'] {
   return {
     ...stub,
-    add: () => client.request(IPC.codexAccountsAdd) as Promise<{ id: string; home: string }>,
+    add: () =>
+      client.request(IPC.codexAccountsAdd) as Promise<{
+        id: string
+        home: string
+        account: CodexAccount
+      }>,
     waitLogin: (id) =>
       client.request(IPC.codexAccountsWaitLogin, id) as Promise<{ email: string | null } | null>,
     cancelWaitLogin: (id) => client.request(IPC.codexAccountsCancelWait, id) as Promise<void>,

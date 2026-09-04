@@ -111,7 +111,7 @@ describe('desktop registration is unchanged by the split', () => {
   })
 
   it('binds the shared five through ipcMain, not the peer-reachable platform seam', () => {
-    expect(src).toContain('codexAccountsHandlers({ isSwitchReserved })')
+    expect(src).toMatch(/codexAccountsHandlers\(\{\s*isSwitchReserved,\s*settings\s*\}\)/)
     expect(src).toContain('ipcMain.handle(channel,')
   })
 })

@@ -1,7 +1,17 @@
 // Impure lifecycle for machine-scoped managed Codex accounts: private CODEX_HOME creation, the
 // per-account app-server daemon, the device-login poll, identity reads and race/use-safe removal.
-// The account LIST is renderer-owned in `settings.json` (`codexAccounts`); this module owns only
-// the filesystem and the daemon.
+//
+// MEMBERSHIP of the account list (`settings.codexAccounts`) is owned HERE, not by the renderer:
+// `add` appends the row and `remove` deletes it through `SettingsStore.mutate`, a read-modify-write
+// on the store's FIFO chain, in the same verb that mints / tears down the credential home. The
+// renderer keeps the row's display edits (label, color, the login-resolution flip) through its
+// ordinary snapshot save, and the store reconciles that snapshot against its own membership
+// (settings-store.ts `reconcileOwnedAccountList`). Before this the renderer appended the row to
+// ITS snapshot after `add` returned and full-saved it, so two Server Edition tabs adding at once
+// (or an add racing a label edit in another tab) left the later snapshot the winner: one account's
+// home and `auth.json` stayed on disk with no row pointing at it — a credential nothing could
+// list, switch to, or remove. Row and home now change in one verb, and only ever against the
+// latest settings.
 //
 // Lives in core so BOTH shells serve it — the same move `claude-accounts-service.ts` made for
 // issue #313. Before this the five verbs were registered only by src/main, so the Server Edition's
@@ -40,6 +50,8 @@ import {
 import { readCodexAccountAt } from './codex-session-name'
 import { platform } from './platform'
 import { findInLoginPath } from './pty-manager'
+import type { CodexAccount } from '../shared/codex-account'
+import type { Settings } from '../shared/types'
 
 const execFileP = promisify(execFile)
 const LOGIN_POLL_MS = 2000
@@ -70,7 +82,24 @@ export function isCodexAccountRemoving(accountId: string): boolean {
   return removingCodexAccounts.has(accountId)
 }
 
+/**
+ * The slice of `SettingsStore` the account verbs need: the live cache, and the read-modify-write
+ * that is the ONLY writer of `codexAccounts` membership. Narrow on purpose — the desktop passes its
+ * real store, the Server Edition its own, and a test a store over a temp dir.
+ */
+export interface CodexAccountRowStore {
+  get(): Settings
+  mutate(fn: (current: Settings) => Settings): Promise<Settings>
+}
+
+/** The label a freshly minted account carries until its login captures an email
+ *  (`renderer/state/codexAccountReconcile.ts` promotes exactly this string to the email). */
+export const NEW_CODEX_ACCOUNT_LABEL = 'New Codex account'
+
 export interface CodexAccountsDeps {
+  /** Where the account ROW lives. Required: a shell that mints homes without registering rows is
+   *  the orphaned-credential bug this module exists to close. */
+  settings: CodexAccountRowStore
   /**
    * DESKTOP ONLY: does an in-flight switch reservation currently pin this account? Removal must
    * refuse while one does (Property 10), and the reservation table lives with the switch protocol
@@ -185,13 +214,34 @@ export function migrateManagedCodexHomes(): void {
  *    what it was before this split. Only the registrar differs; the logic below is shared.
  */
 export function codexAccountsHandlers(
-  deps: CodexAccountsDeps = {}
+  deps: CodexAccountsDeps
 ): Record<string, (...args: any[]) => unknown> {
   const pollMs = deps.pollMs ?? LOGIN_POLL_MS
+  const { settings } = deps
   return {
+    // Mint the home, THEN register the row — inside the store's chain, against the latest list, so
+    // a concurrent add (another tab) or a concurrent label edit can neither drop nor duplicate it.
+    // The row is what makes the home reachable (PtyManager's `isCodexAccount` reads live settings;
+    // the pickers, usage and removal read the same list), so a home whose row could not be
+    // persisted is torn down again before the error reaches the caller: the failure leaves nothing
+    // behind, rather than exactly the orphan this verb exists to prevent. Resolves only once the
+    // row is on disk, which is why the renderer no longer needs a save barrier before opening the
+    // login node.
     [IPC.codexAccountsAdd]: async () => {
       const id = randomUUID()
-      return { id, home: await initializeAccountHome(id) }
+      const home = await initializeAccountHome(id)
+      const account: CodexAccount = { id, label: NEW_CODEX_ACCOUNT_LABEL, pending: true }
+      try {
+        await settings.mutate((s) =>
+          s.codexAccounts.some((a) => a.id === id)
+            ? s
+            : { ...s, codexAccounts: [...s.codexAccounts, account] }
+        )
+      } catch (error) {
+        await fs.rm(home, { recursive: true, force: true }).catch(() => {})
+        throw error
+      }
+      return { id, home, account }
     },
 
     [IPC.codexAccountsWaitLogin]: async (id: string) => {
@@ -259,23 +309,39 @@ export function codexAccountsHandlers(
       removingCodexAccounts.add(id)
       try {
         cancelWaiters(id)
-        try {
-          const codex = await findInLoginPath('codex')
-          if (codex) {
-            await execFileP(codex, ['app-server', 'daemon', 'stop'], {
-              cwd: os.homedir(),
-              env: { ...process.env, CODEX_HOME: localCodexAccountHome(id) },
-              timeout: 10_000,
-              maxBuffer: 1024 * 1024
-            })
+        // A REMOTE account's home lives on its host; this verb owns no filesystem there, so for a
+        // row carrying `host` only the row goes (fail-closed: never the wrong machine's home). A
+        // row-less id is still torn down locally — that is how a home orphaned by the pre-fix
+        // renderer race gets cleaned up.
+        const row = settings.get().codexAccounts.find((a) => a.id === id)
+        if (!row?.host) {
+          try {
+            const codex = await findInLoginPath('codex')
+            if (codex) {
+              await execFileP(codex, ['app-server', 'daemon', 'stop'], {
+                cwd: os.homedir(),
+                env: { ...process.env, CODEX_HOME: localCodexAccountHome(id) },
+                timeout: 10_000,
+                maxBuffer: 1024 * 1024
+              })
+            }
+          } catch {
+            // A stopped/missing daemon is already the desired state.
           }
-        } catch {
-          // A stopped/missing daemon is already the desired state.
+          const home = localCodexAccountHome(id)
+          const legacy = legacyCodexAccountHome(platform().userDataDir, id)
+          await fs.rm(home, { recursive: true, force: true })
+          if (legacy !== home) await fs.rm(legacy, { recursive: true, force: true })
         }
-        const home = localCodexAccountHome(id)
-        const legacy = legacyCodexAccountHome(platform().userDataDir, id)
-        await fs.rm(home, { recursive: true, force: true })
-        if (legacy !== home) await fs.rm(legacy, { recursive: true, force: true })
+        // The row goes LAST, on the chain, against the latest list. Home-then-row so a failed
+        // teardown leaves a row the user can see and retry, never a home nothing points at; and
+        // once the row is gone no later renderer snapshot can bring it back (the store keeps
+        // membership from its own cache, not from the snapshot).
+        await settings.mutate((s) =>
+          s.codexAccounts.some((a) => a.id === id)
+            ? { ...s, codexAccounts: s.codexAccounts.filter((a) => a.id !== id) }
+            : s
+        )
       } finally {
         removingCodexAccounts.delete(id)
       }
@@ -288,7 +354,7 @@ export function codexAccountsHandlers(
  * SERVER EDITION's entry point; the desktop registers the same handlers through `ipcMain` (see
  * `codexAccountsHandlers`' note) and adds the switch + transfer verbs on top.
  */
-export function registerCodexAccountsIpc(deps: CodexAccountsDeps = {}): void {
+export function registerCodexAccountsIpc(deps: CodexAccountsDeps): void {
   migrateManagedCodexHomes()
   for (const [channel, fn] of Object.entries(codexAccountsHandlers(deps))) {
     platform().handle(channel, fn)

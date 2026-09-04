@@ -79,8 +79,11 @@ beforeEach(async () => {
   vi.resetModules()
   const { initPlatform } = await import('../core/platform')
   initPlatform(fakePlatform({ userDataDir }))
+  const { SettingsStore } = await import('../core/settings-store')
+  const settings = new SettingsStore()
+  settings.init()
   const { initCodexAccounts } = await import('./codex-accounts')
-  initCodexAccounts()
+  initCodexAccounts(settings, )
 })
 afterEach(async () => {
   const { resetPlatformForTests } = await import('../core/platform')

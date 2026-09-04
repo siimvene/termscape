@@ -98,6 +98,7 @@ let relayMod: typeof import('./codex-relay-daemon')
 let IPC: typeof import('../shared/ipc').IPC
 
 let userDataDir = ''
+let settingsStore: import('../core/settings-store').SettingsStore
 let systemHome = ''
 let prevCodexHome: string | undefined
 const createdHomes: string[] = []
@@ -134,8 +135,11 @@ beforeEach(async () => {
   // Arm the record-signing secret on THIS module graph (deterministic bytes for the record legs).
   proxy.setCodexThreadIdentityAuthSecret(new Uint8Array(32).fill(7))
 
+  const { SettingsStore } = await import('../core/settings-store')
+  settingsStore = new SettingsStore()
+  settingsStore.init()
   const accounts = await import('./codex-accounts')
-  accounts.initCodexAccounts(() => ({ remoteCodexImportThread }) as any)
+  accounts.initCodexAccounts(settingsStore, () => ({ remoteCodexImportThread }) as any)
 })
 
 afterEach(async () => {
@@ -341,7 +345,7 @@ describe('S6 acceptance gate — the merged machine-scoped-Codex-account chain c
   it('the local→SSH transfer refuses (named) when no remote importer is available', async () => {
     const { initCodexAccounts } = await import('./codex-accounts')
     // Re-init with NO ssh manager (getSshManager returns undefined) — the remote leg is unavailable.
-    initCodexAccounts(() => undefined)
+    initCodexAccounts(settingsStore, () => undefined)
     const localHome = makeManagedHome(LOCAL)
     const sessionsDir = path.join(localHome, 'sessions', '2026', '08')
     mkdirSync(sessionsDir, { recursive: true })

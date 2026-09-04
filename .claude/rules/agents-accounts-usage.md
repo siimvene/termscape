@@ -160,6 +160,35 @@ paths:
     authorize the owning window by Electron WebContents id, which has no meaning over a WS
     connection. The Settings section now *names* that refusal instead of leaving an unhandled
     promise rejection — a spinner that stops and says nothing reads as a dead button.
+  - **Codex account ROW membership is the shell's, not the renderer's (2026-09-04).**
+    `settings.codexAccounts` used to be renderer-owned like `claudeAccounts`: the renderer appended
+    the minted id to its own snapshot and full-saved it. `settings-store.ts` `save` REPLACES the
+    file (FIFO, so never torn — but last-write-wins), so two Server Edition tabs adding at once, or
+    an add racing a label edit in another tab, left the later snapshot the winner: one authenticated
+    home + `auth.json` on disk with NO row pointing at it — a credential nothing could list, switch
+    to, or remove. That is why the browser's Add button was gated. Now `codex-accounts:add`
+    appends the row and `codex-accounts:remove` deletes it through **`SettingsStore.mutate`** (a
+    read-modify-write on the store's own save chain, against the LATEST cache), in the same verb
+    that mints / tears down the home; `add` resolves only once the row is on disk (so the renderer's
+    old save barrier before the login node is gone) and rolls the minted home back if the persist
+    fails; `remove` deletes the row LAST so a failed teardown stays visible and retryable, skips the
+    local fs for a row carrying `host`, and still tears down a row-less home (a pre-fix orphan).
+    A renderer snapshot save is reconciled against the cache (`reconcileOwnedAccountList`):
+    membership comes from the CACHE (a row only the cache has is kept, a row only the snapshot has
+    is dropped — so a stale tab can neither lose an add nor resurrect a remove), a row both have
+    takes the snapshot's fields (label, color, the reconcile's `pending → email` flip), and login
+    resolution is monotonic (a still-`pending` snapshot row never overwrites a resolved one). Both
+    shells pass their store: `initCodexAccounts(settingsStore, …)` on desktop (still bound through
+    `ipcMain`, never `platform().handle` — the relay-peer invariant is unchanged) and
+    `registerCoreHandlers(…, { settingsStore })` on the server; the dep is REQUIRED, because a
+    shell that mints homes without registering rows is exactly this bug. **`claudeAccounts` is NOT
+    covered** — its add/remove still come from the renderer as a full snapshot (the add path
+    carries remote-host / version-probe shape the row needs), and reconciling a list whose rows are
+    only ever added that way would drop every new account. Moving it is the same mechanical change:
+    write the row in `claude-accounts-service.ts` add/remove through `mutate`, then list the key in
+    `saveNow`. Proofs: `settings-store.test.ts` ("shell-owned codexAccounts membership"),
+    `codex-accounts-service.test.ts` ("the shell owns row membership"), the desktop half in
+    `main/codex-accounts.test.ts`.
   - **Hook install** — the managed hook is merged into **each account dir's** `settings.json` at
     add-account **and** at app launch (local, shared `install-helper.ts`) / via
     `RemoteHooks.installIntoAccountDir` (remote), so every identity reports agent status. The

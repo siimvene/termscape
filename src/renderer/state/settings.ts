@@ -9,13 +9,15 @@ interface SettingsState {
   update(patch: Partial<Settings>): void
   /**
    * Persist any coalesced edit NOW and resolve once the shell has ACKNOWLEDGED the save — i.e.
-   * once the server-side settings cache holds it (settings-store's `saveNow` updates the cache
-   * before it touches the disk, and the RPC resolves after both). Ordinary edits keep the debounce
+   * once the server-side settings cache holds it (settings-store's `persist` writes the disk and
+   * then publishes the cache, and the RPC resolves after both). Ordinary edits keep the debounce
    * below; this is the one barrier for a caller that is about to trigger server-side work which
    * READS settings, and must not do so until the server can see what the renderer just wrote.
    *
    * Origin: "Add Codex account" pushed the minted id into this store and opened its `codex login`
-   * terminal in the same tick. PtyManager injects the managed `CODEX_HOME` only when it finds the
+   * terminal in the same tick. (That flow no longer needs the barrier — the shell registers the
+   * row inside `codexAccounts.add()` itself — but the primitive stays for the next caller with
+   * the same shape.) PtyManager injects the managed `CODEX_HOME` only when it finds the
    * id in ITS settings, which arrive up to 300 ms later — so if the pty won the race the login ran
    * against the SYSTEM Codex account and overwrote the user's default credential, while the poll
    * watched a managed home nothing was writing to. On desktop the window was tight; over the

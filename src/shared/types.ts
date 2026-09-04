@@ -2516,14 +2516,17 @@ export interface ClaudeAccountsApi {
 
 /**
  * Machine-scoped managed Codex accounts (S6). LOCAL accounts on this Mac are reachable through
- * PR 5; SSH remote accounts land in PR 6. The account LIST is renderer-owned in `settings.json`
- * (`codexAccounts`), exactly like `claudeAccounts`; main owns only the fs + daemon lifecycle and
- * the switch protocol.
+ * PR 5; SSH remote accounts land in PR 6. The account list lives in `settings.json`
+ * (`codexAccounts`); its MEMBERSHIP is written by the shell inside `add` / `remove` (a
+ * read-modify-write on the settings store), while the renderer keeps a row's display edits. Unlike
+ * `claudeAccounts`, a renderer snapshot save can neither add nor drop a Codex row.
  */
 export interface CodexAccountsApi {
-  /** Mint a new managed account: create its private CODEX_HOME (0700) and symlink the shared,
-   *  non-secret runtime assets in. Returns the new id + its home. */
-  add(): Promise<{ id: string; home: string }>
+  /** Mint a new managed account: create its private CODEX_HOME (0700), symlink the shared,
+   *  non-secret runtime assets in, and register its (pending) row in settings. Resolves once the
+   *  row is persisted, so the id is already known to PtyManager. Returns the id, the home and the
+   *  row as registered. */
+  add(): Promise<{ id: string; home: string; account: CodexAccount }>
   /** Poll the account's `auth.json` (a real file, never a symlink) every 2s up to 5min for a
    *  completed device login, then read its email; null on timeout/cancel. */
   waitLogin(id: string): Promise<{ email: string | null } | null>

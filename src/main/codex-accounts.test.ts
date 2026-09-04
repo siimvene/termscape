@@ -12,7 +12,7 @@
  *  - drop the `removingCodexAccounts` in-progress guard ⇒ a concurrent removal is admitted ⇒ red.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { lstatSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'fs'
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'fs'
 import os from 'os'
 import path from 'path'
 
@@ -51,8 +51,11 @@ beforeEach(async () => {
   vi.resetModules()
   const { initPlatform } = await import('../core/platform')
   initPlatform(fakePlatform({ userDataDir }))
+  const { SettingsStore } = await import('../core/settings-store')
+  const settings = new SettingsStore()
+  settings.init()
   const { initCodexAccounts } = await import('./codex-accounts')
-  initCodexAccounts()
+  initCodexAccounts(settings, )
 })
 afterEach(async () => {
   const { resetPlatformForTests } = await import('../core/platform')
@@ -79,6 +82,24 @@ describe('Codex local account lifecycle (Task 5.1)', () => {
     expect(lstatSync(path.join(home, 'skills')).isSymbolicLink()).toBe(true)
     // auth.json is NEVER symlinked in — a managed account acts only as its own login.
     expect(() => lstatSync(path.join(home, 'auth.json'))).toThrow()
+  })
+
+  // The desktop half of the row-ownership proof (the Server Edition half is
+  // src/core/codex-accounts-service.test.ts): the ipcMain-bound add/remove write the row through
+  // the settings store, so the renderer never has to full-save membership on either shell.
+  it('add registers the row in settings.json and remove deletes it, through the ipcMain binding', async () => {
+    const rows = (): string[] =>
+      (JSON.parse(readFileSync(path.join(userDataDir, 'settings.json'), 'utf-8')) as {
+        codexAccounts: { id: string }[]
+      }).codexAccounts.map((a) => a.id)
+    const { id, account } = (await call(IPC.codexAccountsAdd)) as {
+      id: string
+      account: { id: string; label: string; pending?: boolean }
+    }
+    expect(account).toEqual({ id, label: 'New Codex account', pending: true })
+    expect(rows()).toEqual([id])
+    await call(IPC.codexAccountsRemove, id)
+    expect(rows()).toEqual([])
   })
 
   it('the login gate returns the identity for a REAL non-symlink auth.json', async () => {
