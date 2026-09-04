@@ -88,7 +88,13 @@ export function usageEmptyText(u: UsageEmptyState, where?: string): string {
     case 'http':
       return `Unexpected response${code}.`
     case 'network':
-      return 'Could not reach Anthropic.'
+      // NOT "Could not reach Anthropic": a single account's failed-in-flight request is not
+      // evidence the host is down — only "this read did not complete" is something we saw.
+      return 'Could not complete the usage check.'
+    case 'request':
+      // The request never reached the network — built and thrown inside this app. Naming a
+      // specific cause (the credential, a header) would be a guess; this says only what is true.
+      return 'Could not prepare the usage request.'
     case 'timeout':
       return 'Timed out reading usage.'
     case 'parse':

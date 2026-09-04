@@ -2285,8 +2285,14 @@ export type UsageFailureCause =
   | 'server-error'
   /** Any other non-ok HTTP status; `httpStatus` carries which one. */
   | 'http'
-  /** The request never completed: DNS, TLS, offline, connection reset. */
+  /** The request failed IN FLIGHT: DNS, TLS, offline, connection refused or reset. Never claims
+   *  more than that — it is not "Anthropic is unreachable", which needs more than one account's
+   *  worth of evidence (a single account's throw says nothing about whether the host is up). */
   | 'network'
+  /** The request never reached the network at all — thrown while BUILDING it (a malformed URL,
+   *  a header value `fetch` itself refuses). Distinct from `network`: this is a fact about this
+   *  process, not about Anthropic or the connection, so it must never be worded as unreachable. */
+  | 'request'
   /** Our own 8 s abort fired — reachable but too slow. Kept distinct from `network` because the
    *  socket was never proven bad, so this is not evidence that the machine is offline. */
   | 'timeout'
