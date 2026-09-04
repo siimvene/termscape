@@ -423,18 +423,28 @@ export function reduceEntry(
   //   - The FIRST agentId seen establishes the node's canonical agent (the node was launched as
   //     that agent, so its own first hook — claude's SessionStart, codex's first working — wins
   //     the race against any child that can only appear AFTER the parent is already running).
-  //   - A `session`-kind event (SessionStart/SessionEnd) comes from the node's OWN agent lifecycle,
-  //     never from a transient child: `normalizeCodex` maps a codex child's every event to a
-  //     `state` kind (its SessionStart is a `working` state, it emits no `session` kind at all), so
-  //     a child can never forge one. A genuine agent change (the node relaunched as a different
-  //     agent) announces itself here, and is honored — this is what keeps a node that legitimately
-  //     IS now a different agent from being pinned to a stale identity.
-  //   - Any OTHER event whose agentId differs from the canonical is treated as an inherited child
-  //     id and REJECTED, leaving the canonical intact.
-  if (ev.agentId) {
-    if (!next.agentId || ev.agentId === next.agentId || ev.kind === 'session') {
-      next.agentId = ev.agentId
-    }
+  //   - An event from a DIFFERENT agent than the canonical is an inherited child, and the WHOLE
+  //     event is rejected — identity, sessionId, state and verification alike. Guarding only
+  //     `agentId` was not enough: the child's `sessionId` and its `done` still landed on the
+  //     parent, flipping a working node to done+verified under the child's session — and the
+  //     messaging gate reads exactly those fields to decide a prompt is safe to inject into.
+  //   - The kind of the event cannot tell a child from the node's own lifecycle. Only
+  //     `normalizeCodex` folds SessionStart into a `state`; every OTHER vendor (claude, gemini,
+  //     copilot, opencode, grok) emits `kind:'session'` for SessionStart/SessionEnd, so a
+  //     non-codex child leaking the parent's node id forges a `session` event trivially.
+  //   - What tells them apart is WHEN it arrives. A child can only run while its parent is busy:
+  //     it is spawned by the parent's turn, so its events land while the node is `working`. A
+  //     genuine relaunch as a different agent (the user quit claude and started codex in the
+  //     same pane) starts while the node is IDLE — no turn is open to spawn anything. So a
+  //     foreign `session`/`start` is honored as a relaunch only when the node is not working;
+  //     the same event mid-turn is a child and is dropped like the rest.
+  if (ev.agentId && next.agentId && ev.agentId !== next.agentId) {
+    const relaunch =
+      ev.kind === 'session' && ev.sessionPhase === 'start' && prev?.state !== 'working'
+    if (!relaunch) return next
+    next.agentId = ev.agentId
+  } else if (ev.agentId) {
+    next.agentId = ev.agentId
   }
   if (ev.sessionId) next.sessionId = ev.sessionId
 

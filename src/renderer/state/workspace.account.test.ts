@@ -3,6 +3,7 @@ import {
   accountChipLabel,
   accountsForProject,
   isAccountLoginNode,
+  isCodexAccountLoginNode,
   sshAccountsHint,
   systemAccountDisplay
 } from './workspace'
@@ -114,6 +115,29 @@ describe('isAccountLoginNode', () => {
     expect(isAccountLoginNode({ title: 'My session', initialCommand: 'claude' })).toBe(false)
     expect(isAccountLoginNode({ title: 'Terminal' })).toBe(false)
     expect(isAccountLoginNode({})).toBe(false)
+  })
+})
+
+// The Codex twin raises a FAIL-CLOSED intent (`PtyCreateOptions.codexLogin`: the spawn refuses
+// unless a managed home resolves), so a false positive is a refused terminal, not a cosmetic slip.
+describe('isCodexAccountLoginNode', () => {
+  it('matches the factory title and the exact login command (with or without a flag)', () => {
+    expect(isCodexAccountLoginNode({ title: 'Codex login' })).toBe(true)
+    expect(isCodexAccountLoginNode({ title: 'renamed', initialCommand: 'codex login' })).toBe(true)
+    expect(
+      isCodexAccountLoginNode({ title: 'renamed', initialCommand: 'codex login --device-auth' })
+    ).toBe(true)
+  })
+
+  it('does NOT match a command that merely starts with the letters `codex login`', () => {
+    expect(isCodexAccountLoginNode({ title: 'x', initialCommand: 'codex loginfoo' })).toBe(false)
+    expect(isCodexAccountLoginNode({ title: 'x', initialCommand: 'codex login-helper' })).toBe(false)
+  })
+
+  it('does not match ordinary codex nodes', () => {
+    expect(isCodexAccountLoginNode({ title: 'My session', initialCommand: 'codex' })).toBe(false)
+    expect(isCodexAccountLoginNode({ title: 'Terminal' })).toBe(false)
+    expect(isCodexAccountLoginNode({})).toBe(false)
   })
 })
 

@@ -2871,6 +2871,37 @@ export class PtyManager {
       )
     }
 
+    // PRE-FLIGHT 2 — a `codex login` whose managed home cannot be resolved is refused HERE, not
+    // only in `spawnNew`. `spawnNew` refuses it (fail-closed, property 4), but `createDetached` /
+    // `attachDetached` (the relay host's paths) call `spawnSession` DIRECTLY and never pass through
+    // that check. For the `codexLogin` intent the unresolved case is exactly the one that must
+    // never fall through: the scope site below would hand `codexSessionEnv(userDataDir, undefined)`
+    // the user's SYSTEM `~/.codex`, and a `codex login` spawned under it overwrites the real
+    // credential. `spawnSession` returns a bare id, so the refusal is a THROW, and it sits beside
+    // the device pre-flight for the same reason that one is first: a refusal must leave the node
+    // exactly as it found it (the shadow swap-out below is irreversible), and the swap-out's
+    // "nothing after this can fail" ordering must stay provable. `spawnNew` turns the throw into
+    // a rejected create (the renderer's `.catch` records `spawnError` for the node overlay); the
+    // relay host's attach path catches it and surfaces an error frame. Same resolver, same
+    // arguments as `spawnNew`'s check, so the two sites cannot disagree. Non-login sessions are
+    // untouched: a managed id with a missing home is still `spawnNew`'s `unavailable`, and a
+    // system Codex session (no id, no intent) still resolves the system home.
+    if (options.codexLogin === true && !options.sshRemote) {
+      const scope = resolveCodexSessionScope(
+        platform().userDataDir,
+        options.accountId,
+        fs.existsSync,
+        true
+      )
+      if (isCodexScopeRefusal(scope)) {
+        throw new Error(
+          `Refusing to start \`codex login\`: the managed Codex account ${
+            options.accountId ? JSON.stringify(options.accountId) : '(none given)'
+          } has no resolvable home, and an unscoped login would overwrite the system ~/.codex credential.`
+        )
+      }
+    }
+
     // SWAP-OUT, before anything at all is spawned: a painter pty client is arriving for this node,
     // and a session never has both. The painter attaches with `-D` and would kick the shadow off by
     // itself — but only once tmux has processed both attaches, leaving a window where two clients
@@ -2880,8 +2911,8 @@ export class PtyManager {
     //
     // Here rather than in `create()` so EVERY path to a painter is covered — the warm reattach, the
     // relay host's `attachDetached`, and whatever spawns next — and so the ordering is provable:
-    // nothing between here and `pty.spawn` can fail, in the same synchronous function. (The
-    // pre-flight above is the one thing that CAN, which is exactly why it runs before this.)
+    // nothing between here and `pty.spawn` can fail, in the same synchronous function. (The two
+    // pre-flights above are the things that CAN, which is exactly why they run before this.)
     // The shared background-write client goes too, for the same reason, when it is this node's
     // session it happens to be attached to.
     if (options.persistKey) {
@@ -3011,10 +3042,14 @@ export class PtyManager {
     // the wrong login. Note this write lands on the CLIENT env — on a shared tmux server it only
     // reaches the session because both names are in ACCOUNT_SCOPE_UPDATE_ENV (before that, the
     // overwrite-the-leak promise held only for the client that happened to START the server; #419).
-    // The missing-explicit-account case already refused in spawnNew (fail-closed,
-    // property 4 — and, for the `codex login` intent, the missing/unresolvable managed home too), so
-    // `codexSessionEnv` here never resolves an explicit id to the system home. Also
-    // strip env vars that would shadow the account's OAuth login with API-key auth.
+    // Also strip env vars that would shadow the account's OAuth login with API-key auth.
+    //
+    // Who refuses the unresolvable cases before this line: a managed id whose home is missing was
+    // refused by `spawnNew` (fail-closed, property 4) on the create path; a `codex login` intent
+    // with no resolvable managed home was refused by PRE-FLIGHT 2 at the top of THIS function —
+    // `spawnNew` is not the only caller (`createDetached`/`attachDetached` bypass it), so that
+    // check cannot live in `spawnNew` alone. What is left for `codexSessionEnv` here is a
+    // resolvable managed id or the system account, never a login onto the system home.
     if (
       needsCodexAccountScope(
         options.agentId,

@@ -188,3 +188,71 @@ describe('the codex login intent scopes fail-closed against the settings race', 
     expect(spawned[0].env.CODEX_HOME).toBeUndefined()
   })
 })
+
+/**
+ * The SECOND way into a spawn. `spawnNew` refuses an unresolvable `codex login`, but the relay
+ * host's `createDetached` / `attachDetached` call `spawnSession` directly and never pass through
+ * that refusal — so `spawnSession` must refuse on its own, BEFORE any CODEX_HOME is written, or a
+ * detached login with no resolvable managed home lands on the user's SYSTEM `~/.codex`.
+ * `spawnSession` returns a bare id, so its refusal is a throw (the relay host catches it).
+ *
+ * MUTATION: delete PRE-FLIGHT 2 in `spawnSession` → the two refusal cases below spawn onto the
+ * system home instead of throwing.
+ */
+describe('spawnSession refuses an unresolvable codex login on the detached (relay) path too', () => {
+  let fake: FakePlatform
+  let userDataDir: string
+  let mgr: InstanceType<typeof import('./pty-manager').PtyManager>
+  const sinks = { onData: () => {}, onExit: () => {} }
+  const RACY_ACCT = 'racycodexid2'
+
+  beforeEach(async () => {
+    spawned.length = 0
+    userDataDir = mkdtempSync(path.join(os.tmpdir(), 'nodeterm-codex-detached-'))
+    fake = fakePlatform({ userDataDir })
+    initPlatform(fake)
+    const { PtyManager } = await import('./pty-manager')
+    const settings: Settings = { ...DEFAULT_SETTINGS, codexAccounts: [] }
+    mgr = new PtyManager()
+    mgr.init(() => settings)
+  })
+  afterEach(() => {
+    resetPlatformForTests()
+    rmSync(userDataDir, { recursive: true, force: true })
+  })
+
+  it('throws, and writes no CODEX_HOME, for a login intent with no account id', () => {
+    expect(() =>
+      mgr.createDetached({ cols: 80, rows: 24, cwd: '/srv/app', codexLogin: true }, sinks)
+    ).toThrow(/codex login/)
+    expect(spawned).toHaveLength(0)
+  })
+
+  it('throws, and spawns nothing, when the managed home is missing', () => {
+    expect(() =>
+      mgr.createDetached(
+        { cols: 80, rows: 24, cwd: '/srv/app', codexLogin: true, accountId: RACY_ACCT },
+        sinks
+      )
+    ).toThrow(/codex login/)
+    expect(spawned).toHaveLength(0)
+  })
+
+  it('spawns under the managed home once it exists (the refusal is not a blanket ban)', () => {
+    mkdirSync(codexAccountHome(userDataDir, RACY_ACCT), { recursive: true })
+    const id = mgr.createDetached(
+      { cols: 80, rows: 24, cwd: '/srv/app', codexLogin: true, accountId: RACY_ACCT },
+      sinks
+    )
+    expect(id).toBeTruthy()
+    expect(spawned).toHaveLength(1)
+    expect(spawned[0].env.CODEX_HOME).toBe(codexAccountHome(userDataDir, RACY_ACCT))
+  })
+
+  it('a system Codex session (no id, no intent) still resolves the system home as before', () => {
+    mgr.createDetached({ cols: 80, rows: 24, cwd: '/srv/app', agentId: 'codex' }, sinks)
+    expect(spawned).toHaveLength(1)
+    expect(spawned[0].env.NODETERM_CODEX_ACCOUNT_ID).toBe('')
+    expect(spawned[0].env.CODEX_HOME).toBeTruthy()
+  })
+})

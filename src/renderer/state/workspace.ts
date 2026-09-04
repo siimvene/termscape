@@ -937,9 +937,15 @@ export function isAccountLoginNode(data: { title?: string; initialCommand?: stri
  * `isAccountLoginNode`: the title survives a serialize, so a cold restart of a login node that
  * never finished still declares the intent, and the intent then REQUIRES a resolvable managed home
  * — a login whose account cannot be resolved refuses rather than writing the user's `~/.codex`.
+ *
+ * The command match is on the WORD `login`, not the prefix: `codex login` exactly, or `codex login`
+ * followed by whitespace (a flag). A bare `startsWith('codex login')` also claimed `codex loginfoo`,
+ * and the intent this predicate raises is fail-closed — it makes the spawn REFUSE unless a managed
+ * home resolves — so a false positive turns an unrelated command into a refused terminal.
  */
+const CODEX_LOGIN_COMMAND_RE = /^codex login(?:\s|$)/
 export function isCodexAccountLoginNode(data: { title?: string; initialCommand?: string }): boolean {
-  return data.title === 'Codex login' || (data.initialCommand ?? '').startsWith('codex login')
+  return data.title === 'Codex login' || CODEX_LOGIN_COMMAND_RE.test(data.initialCommand ?? '')
 }
 
 /**

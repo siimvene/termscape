@@ -47,11 +47,18 @@ export function legacyCodexAccountHome(userDataDir: string, accountId: string): 
  * it (`<home>/app-server-control/app-server-control.sock`) and must stay under macOS `SUN_LEN` —
  * the normal Electron userData path plus a UUID already overshoots. `userDataDir` is folded into
  * the digest so separate NodeTerm profiles never collide, without a global static account root.
+ *
+ * `NODETERM_CX_ROOT` is a TEST seam, not a user setting: unset in production, so the root is the
+ * real `~/.nodeterm/cx`. The vitest worker setup points it at a short directory inside the run's
+ * private sandbox — a temp `userDataDir` alone was never isolation here, because the digest is
+ * only the leaf and the root stayed the developer's real managed-account namespace (measured:
+ * 1552 stray digest dirs left under `~/.nodeterm/cx` by suites that created accounts). Read at
+ * call time, not at import, so a test that sets it after the module loads is still honored.
  */
 export function codexAccountHome(
   userDataDir: string,
   accountId: string,
-  shortRoot = path.join(os.homedir(), '.nodeterm', 'cx')
+  shortRoot = process.env.NODETERM_CX_ROOT ?? path.join(os.homedir(), '.nodeterm', 'cx')
 ): string {
   assertCodexAccountId(accountId)
   const digest = createHash('sha256')

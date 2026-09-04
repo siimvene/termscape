@@ -35,6 +35,7 @@ import { Button } from '@renderer/ui/Button'
 import { Input } from '@renderer/ui/Input'
 import { cn } from '@renderer/ui/cn'
 import { thisMachine, thisMachineCap } from '../../../lib/machineName'
+import { isBrowserRuntime } from '../../../bridge/runtime'
 
 const ROWS = {
   accounts: {
@@ -886,12 +887,23 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
               connected={group.remote ? !!connectedProjectIdForHost(group.host) : true}
             >
               {codexRowsFor(group.accounts, group.remote ? group.host : undefined)}
-              {/* The browser gate is gone: the account verbs are served over the bridge, and the
-                  login node now carries the codex-scope INTENT (`PtyCreateOptions.codexLogin`)
-                  instead of re-deriving scope from the eventually-consistent settings list — so a
-                  lost registration race is a VISIBLE refusal, not `codex login` writing the host's
-                  system `~/.codex`. The add flow is therefore identical on desktop and browser. */}
-              {!group.remote ? (
+              {!group.remote && isBrowserRuntime() ? (
+                /* The browser CAN serve every account verb (the port landed), and the login node
+                   now carries the codex-scope INTENT (`PtyCreateOptions.codexLogin`), so the
+                   credential-OVERWRITE race — `codex login` landing on the host's system
+                   `~/.codex` when the settings save lost to the pty spawn — is closed: a lost
+                   race is a visible refusal. What is NOT closed is the account-ROW-LOSS race:
+                   every Server Edition tab flushes a FULL settings snapshot (`settings-store.ts`
+                   `save` replaces, it does not merge), so two tabs adding concurrently leave one
+                   of them with a managed home minted on disk and NO settings row pointing at it —
+                   a credential-bearing directory nothing can list, switch to, or remove. Desktop
+                   has one renderer per settings core, so it cannot hit this. Until the store
+                   merges per-account, desktop only. */
+                <p className="text-[12px] leading-relaxed text-muted">
+                  Adding a Codex account from the browser is temporarily unavailable — add them from
+                  the desktop app on this machine. Accounts already created there are shown above.
+                </p>
+              ) : !group.remote ? (
                 <div className="space-y-2">
                   <Button variant="primary" disabled={addingCodex} onClick={() => void onAddCodexAccount()}>
                     {addingCodex ? (

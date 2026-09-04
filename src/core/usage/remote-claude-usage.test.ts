@@ -266,6 +266,38 @@ describe('the generated command, run by /bin/sh', () => {
     const out = parseRemoteUsageOutput(await runCommand(null))
     expect(out.reason).toBe('nocreds')
   })
+
+  // The classification mirrors the local `parseCreds` (`JSON.parse`, then `j.claudeAiOauth ?? j`)
+  // by SHAPE, since sh has no JSON parser. These are the cases the old `\{*\}` brace test got
+  // backwards: a brace-wrapped non-JSON blob was called a logout, and a JSON array — which
+  // parseCreds parses and finds tokenless — was called unreadable.
+  const writeRaw = (content: string): void => {
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true })
+    fs.writeFileSync(path.join(home, '.claude', '.credentials.json'), content)
+  }
+
+  it('reports nocreds for a pretty-printed, token-less JSON object', async () => {
+    writeRaw(JSON.stringify({ mcpOAuth: { other: { accessToken: '' } }, claudeAiOauth: {} }, null, 2))
+    const out = parseRemoteUsageOutput(await runCommand(null))
+    expect(out.reason).toBe('nocreds')
+  })
+
+  it('reports nocreds for a JSON array (parseCreds parses it and finds no token)', async () => {
+    writeRaw('[]')
+    expect(parseRemoteUsageOutput(await runCommand(null)).reason).toBe('nocreds')
+    writeRaw('[1, {"a": 2}]')
+    expect(parseRemoteUsageOutput(await runCommand(null)).reason).toBe('nocreds')
+  })
+
+  it('reports unreadable, not nocreds, for brace-wrapped content that is not JSON', async () => {
+    writeRaw('{not-json}')
+    expect(parseRemoteUsageOutput(await runCommand(null)).reason).toBe('unreadable')
+  })
+
+  it('reports unreadable for a top-level scalar (nothing parseCreds could index into)', async () => {
+    writeRaw('null')
+    expect(parseRemoteUsageOutput(await runCommand(null)).reason).toBe('unreadable')
+  })
 })
 
 describe('parseRemoteUsageOutput', () => {

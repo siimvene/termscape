@@ -129,16 +129,26 @@ export function remoteUsageCommand(accountId: string | null): string {
     `e=$(${flatten(identityFile)} | ${firstString('emailAddress')})`,
     `printf '${EMAIL}%s\\n' "$e"`,
     // Sort "no token" the way the local reader's `parseCreds` does: absence is claimed ONLY on a
-    // MISSING file, or one whose content parses as a JSON object that simply has no token in it
-    // (the CLI logged out) — both are things we actually looked at and found empty. Anything else
-    // is 'unreadable' — a store we could not look INTO: a permission-denied file (the redirect
-    // above silently produced nothing) or one that is not even shaped like an object (truncated,
-    // binary, a stray directory in its place). Before this split, a corrupt or unreadable file
-    // that also failed to yield a token read exactly like a real logout: "Not signed in" for a
-    // file this command never actually got to inspect.
+    // MISSING file, or one whose content parses as JSON that simply has no token in it (the CLI
+    // logged out) — both are things we actually looked at and found empty. Anything else is
+    // 'unreadable' — a store we could not look INTO: a permission-denied file (the redirect above
+    // silently produced nothing), or content that is not JSON (truncated, binary, a stray
+    // directory in its place). Before this split, a corrupt or unreadable file that also failed
+    // to yield a token read exactly like a real logout: "Not signed in" for a file this command
+    // never actually got to inspect.
+    //
+    // POSIX sh has no JSON parser, so the classification is by SHAPE, mirroring what
+    // `parseCreds` (`JSON.parse`, then `j.claudeAiOauth ?? j`) accepts and rejects. Whitespace is
+    // dropped first (`tr -d`), so a pretty-printed file matches the same patterns. Two shapes are
+    // JSON-ish enough to be "looked at and found empty": an object — `{}` or `{"…` (a JSON object's
+    // first member always starts with a quoted key, so `{not-json}` is refused, where the old
+    // `\{*\}` brace test called it a logout) — and an ARRAY, `[…]`, which `parseCreds` parses and
+    // then finds tokenless (the old test called `[]` unreadable). A top-level scalar, or anything
+    // that does not close its bracket, is not something we inspected.
+    `j=$(printf '%s' "$raw" | tr -d ' \\t')`,
     `if [ -z "$t" ]; then if [ ! -e ${credsFile} ]; then ` +
-      `printf '${STATUS}nocreds\\n%s\\n' '${END}'; else case "$raw" in ` +
-      `\\{*\\}) printf '${STATUS}nocreds\\n%s\\n' '${END}';; ` +
+      `printf '${STATUS}nocreds\\n%s\\n' '${END}'; else case "$j" in ` +
+      `'{}'|'{"'*'}'|'['*']') printf '${STATUS}nocreds\\n%s\\n' '${END}';; ` +
       `*) printf '${STATUS}unreadable\\n%s\\n' '${END}';; esac; fi; exit 0; fi`,
     `if ! command -v curl >/dev/null 2>&1; then printf '${STATUS}nocurl\\n%s\\n' '${END}'; exit 0; fi`,
     // The token goes in on stdin as a curl config directive — never in argv, where `ps` would

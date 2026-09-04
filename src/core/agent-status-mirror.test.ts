@@ -134,14 +134,63 @@ describe('reduceEntry (main-state reduction)', () => {
     expect(e.agentId).toBe('claude')
   })
 
-  it('honors a genuine agent change announced by a session-lifecycle event', () => {
-    // A codex child can only ever emit `state`-kind events (normalizeCodex maps its SessionStart to
-    // a `working` state), so a `session`-kind event is the node's OWN agent lifecycle — a real
-    // relaunch as a different agent must be honored, not pinned to the stale identity.
+  it('honors a genuine relaunch as a different agent: a session start while the node is IDLE', () => {
+    // The user quit claude and started codex in the same pane. No turn is open, so nothing could
+    // have spawned a child — the foreign session start is the node's OWN new lifecycle.
     let e = reduceEntry(undefined, ev({ agentId: 'claude', kind: 'state', state: 'working' }), 1000)
+    e = reduceEntry(e, ev({ agentId: 'claude', kind: 'state', state: 'done' }), 1500)
     expect(e.agentId).toBe('claude')
-    e = reduceEntry(e, ev({ agentId: 'codex', kind: 'session', sessionPhase: 'start' }), 2000)
+    e = reduceEntry(e, ev({ agentId: 'codex', kind: 'session', sessionPhase: 'start', sessionId: 'cx-1' }), 2000)
     expect(e.agentId).toBe('codex')
+    expect(e.sessionId).toBe('cx-1')
+    expect(e.state).toBeUndefined() // the start reset to idle, as any session start does
+  })
+
+  it('a codex child (state-kind, foreign agentId, parent working) changes NOTHING on the parent', () => {
+    // Not the agentId, not the sessionId, not the state, not the proof. Before this the guard
+    // covered only `agentId`: the child's `done` still flipped a working parent to done+verified
+    // under the child's session id — the exact fields the messaging gate reads to decide a
+    // prompt is safe to inject into.
+    let e = reduceEntry(
+      undefined,
+      ev({ agentId: 'claude', kind: 'state', state: 'working', sessionId: 'parent-1', newTurn: true }),
+      1000
+    )
+    const before = { ...e }
+    e = reduceEntry(
+      e,
+      ev({ agentId: 'codex', kind: 'state', state: 'done', sessionId: 'child-1', verified: true }),
+      1100
+    )
+    expect(e).toEqual(before)
+    expect(e.state).toBe('working')
+    expect(e.sessionId).toBe('parent-1')
+    expect(e.stateVerified).not.toBe(true)
+  })
+
+  it('a NON-codex child forging a session-kind event while the parent works is rejected too', () => {
+    // Only normalizeCodex folds SessionStart into a `state`; claude/gemini/copilot/opencode/grok all
+    // emit `kind:'session'` for it — so "session-kind means the node's own lifecycle" was never a
+    // sound test. A gemini child leaking the parent's node id must not become the canonical agent
+    // or reset a working parent to idle.
+    let e = reduceEntry(
+      undefined,
+      ev({ agentId: 'claude', kind: 'state', state: 'working', sessionId: 'parent-1' }),
+      1000
+    )
+    const before = { ...e }
+    e = reduceEntry(
+      e,
+      ev({ agentId: 'gemini', kind: 'session', sessionPhase: 'start', sessionId: 'gem-child' }),
+      1100
+    )
+    expect(e).toEqual(before)
+    e = reduceEntry(
+      e,
+      ev({ agentId: 'gemini', kind: 'session', sessionPhase: 'end', sessionId: 'gem-child' }),
+      1200
+    )
+    expect(e).toEqual(before)
   })
 
   it("a codex node's own events establish and keep codex as canonical", () => {
