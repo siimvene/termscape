@@ -123,17 +123,23 @@ export function remoteUsageCommand(accountId: string | null): string {
     // local `parseCreds` does (`j.claudeAiOauth ?? j`); a file without that key falls back to the
     // whole text, which is the flat top-level shape parseCreds also accepts.
     `c=$(${flatten(credsFile)})`,
+    `raw=$c`,
     `case "$c" in *claudeAiOauth*) c=\${c#*claudeAiOauth}; c=\${c%%\\}*};; esac`,
     `t=$(printf '%s' "$c" | ${firstString('accessToken')})`,
     `e=$(${flatten(identityFile)} | ${firstString('emailAddress')})`,
     `printf '${EMAIL}%s\\n' "$e"`,
-    // Sort "no token" the way the local reader does: a credentials file that EXISTS but cannot
-    // be read is 'unreadable' (a store we could not look into), while a missing file or one with
-    // no token in it is 'nocreds' (an observed absence). Without the split every case was
-    // 'nocreds', i.e. "Not signed in" for a chmod'd file.
-    `if [ -z "$t" ]; then if [ -e ${credsFile} ] && ! [ -r ${credsFile} ]; then ` +
-      `printf '${STATUS}unreadable\\n%s\\n' '${END}'; else ` +
-      `printf '${STATUS}nocreds\\n%s\\n' '${END}'; fi; exit 0; fi`,
+    // Sort "no token" the way the local reader's `parseCreds` does: absence is claimed ONLY on a
+    // MISSING file, or one whose content parses as a JSON object that simply has no token in it
+    // (the CLI logged out) — both are things we actually looked at and found empty. Anything else
+    // is 'unreadable' — a store we could not look INTO: a permission-denied file (the redirect
+    // above silently produced nothing) or one that is not even shaped like an object (truncated,
+    // binary, a stray directory in its place). Before this split, a corrupt or unreadable file
+    // that also failed to yield a token read exactly like a real logout: "Not signed in" for a
+    // file this command never actually got to inspect.
+    `if [ -z "$t" ]; then if [ ! -e ${credsFile} ]; then ` +
+      `printf '${STATUS}nocreds\\n%s\\n' '${END}'; else case "$raw" in ` +
+      `\\{*\\}) printf '${STATUS}nocreds\\n%s\\n' '${END}';; ` +
+      `*) printf '${STATUS}unreadable\\n%s\\n' '${END}';; esac; fi; exit 0; fi`,
     `if ! command -v curl >/dev/null 2>&1; then printf '${STATUS}nocurl\\n%s\\n' '${END}'; exit 0; fi`,
     // The token goes in on stdin as a curl config directive — never in argv, where `ps` would
     // hand it to every other user on the host.

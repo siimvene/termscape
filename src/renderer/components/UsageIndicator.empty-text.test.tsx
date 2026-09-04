@@ -38,9 +38,21 @@ describe('usageEmptyText', () => {
   })
 
   it('separates unreachable from too-slow from an unreadable body', () => {
-    expect(usageEmptyText({ status: 'error', cause: 'network' })).toBe('Could not reach Anthropic.')
+    expect(usageEmptyText({ status: 'error', cause: 'network' })).toBe(
+      'Could not complete the usage check.'
+    )
     expect(usageEmptyText({ status: 'error', cause: 'timeout' })).toBe('Timed out reading usage.')
     expect(usageEmptyText({ status: 'error', cause: 'parse' })).toBe('Could not read the response.')
+  })
+
+  // The overclaim this taxonomy exists to fix: a request that never left the process (a
+  // construction-time TypeError) is not "Anthropic is unreachable" — it never touched the wire,
+  // and neither wording nor the credential theory behind it belongs in front of a user.
+  it('never claims unreachability for a request that never left the process', () => {
+    const text = usageEmptyText({ status: 'error', cause: 'request' })
+    expect(text).not.toBe('Could not reach Anthropic.')
+    expect(text).not.toContain('Anthropic')
+    expect(text).not.toMatch(/network|unreachable/i)
   })
 
   // The honesty rule: with nothing recorded, say no more than the old copy did.
@@ -56,7 +68,7 @@ describe('usageEmptyText', () => {
     )
     // …but a real cause outranks the host suffix: the reason is the useful half.
     expect(usageEmptyText({ status: 'error', cause: 'network' }, 'on this host')).toBe(
-      'Could not reach Anthropic.'
+      'Could not complete the usage check.'
     )
   })
 

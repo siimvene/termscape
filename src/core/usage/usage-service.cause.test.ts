@@ -234,4 +234,15 @@ describe('classify helpers', () => {
     expect(classifyUsageThrow(new TypeError('fetch failed'))).toBe('network')
     expect(classifyUsageThrow(null)).toBe('network')
   })
+
+  // The overclaim this taxonomy exists to fix: a request that never left the process (thrown
+  // while building it — e.g. a header value `fetch` refuses) is not evidence Anthropic was
+  // unreachable. Only undici's OWN network-failure shape (`TypeError('fetch failed')`, asserted
+  // above) still counts as `network` — every other TypeError is a construction failure.
+  it('a TypeError that is not undici\'s own network-failure shape is "request", not "network"', () => {
+    expect(classifyUsageThrow(new TypeError('Invalid character in header content ["authorization"]'))).toBe(
+      'request'
+    )
+    expect(classifyUsageThrow(new TypeError('Failed to parse URL'))).toBe('request')
+  })
 })

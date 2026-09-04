@@ -29,11 +29,21 @@ export function classifyUsageResponseStatus(httpStatus: number): {
 
 /**
  * The failure taxonomy for a THROWN request. Only our own abort can be attributed to slowness;
- * everything else is 'network', which claims no more than "the request did not complete".
- * `parse` never arrives here — the body read is caught separately, because an ok response with
- * an unreadable body is a different fact from a request that never landed.
+ * `network` claims no more than "the request failed in flight" — DNS, TLS, connection refused
+ * or reset, offline. `parse` never arrives here — the body read is caught separately, because an
+ * ok response with an unreadable body is a different fact from a request that never landed.
+ *
+ * A request that never reached the network at all — thrown while BUILDING it (a malformed URL,
+ * a header value `fetch` refuses, e.g. one containing a stray newline) — is not evidence Anthropic
+ * was unreachable, so it gets its own `'request'` cause. The one wrinkle: Node's own `fetch`
+ * (undici) reports a genuine in-flight failure as a `TypeError` too, always with the exact message
+ * `'fetch failed'` and the real cause underneath it — so that specific shape still counts as
+ * `network`, and every OTHER `TypeError` (a different message, thrown before any socket exists)
+ * counts as `request`.
  */
 export function classifyUsageThrow(err: unknown): NonNullable<ClaudeUsage['cause']> {
   const name = (err as { name?: string } | null)?.name
-  return name === 'AbortError' || name === 'TimeoutError' ? 'timeout' : 'network'
+  if (name === 'AbortError' || name === 'TimeoutError') return 'timeout'
+  if (err instanceof TypeError && err.message !== 'fetch failed') return 'request'
+  return 'network'
 }

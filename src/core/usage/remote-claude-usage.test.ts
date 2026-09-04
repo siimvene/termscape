@@ -231,6 +231,41 @@ describe('the generated command, run by /bin/sh', () => {
     const out = parseRemoteUsageOutput(await runCommand(null, { curl: false }))
     expect(out.reason).toBe('nocurl')
   })
+
+  it('reports unreadable, not nocreds, for a credentials file that is not valid JSON', async () => {
+    // A corrupt file (truncated write, disk error) is a store we could not look INTO, not an
+    // observed absence — worded as "Not signed in" it would have sent a signed-in host through
+    // the wrong flow (re-login) for a problem re-login cannot fix.
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true })
+    fs.writeFileSync(path.join(home, '.claude', '.credentials.json'), '{"claudeAiOauth": {"acce')
+    const out = parseRemoteUsageOutput(await runCommand(null))
+    expect(out.reason).toBe('unreadable')
+  })
+
+  // Root ignores the permission bit below, which would make the case fall through to a real
+  // read instead of the EACCES path this test exists to exercise.
+  it.skipIf(process.getuid?.() === 0)(
+    'reports unreadable, not nocreds, for a credentials file the host cannot read',
+    async () => {
+      fs.mkdirSync(path.join(home, '.claude'), { recursive: true })
+      const file = path.join(home, '.claude', '.credentials.json')
+      writeCreds(path.join(home, '.claude'), 'tok-hidden')
+      fs.chmodSync(file, 0o000)
+      try {
+        const out = parseRemoteUsageOutput(await runCommand(null))
+        expect(out.reason).toBe('unreadable')
+      } finally {
+        fs.chmodSync(file, 0o600)
+      }
+    }
+  )
+
+  it('still reports nocreds for a valid, token-less credentials file (a real logout)', async () => {
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true })
+    fs.writeFileSync(path.join(home, '.claude', '.credentials.json'), JSON.stringify({}))
+    const out = parseRemoteUsageOutput(await runCommand(null))
+    expect(out.reason).toBe('nocreds')
+  })
 })
 
 describe('parseRemoteUsageOutput', () => {
