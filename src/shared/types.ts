@@ -1200,6 +1200,10 @@ export interface ClaudeAccount {
    *  as a string — this file is hand-editable and nothing checks it field-by-field on load. */
   color?: string
   createdAt: number
+  /** Transient renderer HINT (not persisted by the store's reconcile): true once the USER has
+   *  renamed this row by hand, so a stale-pending snapshot whose label happens to equal the mint
+   *  placeholder is still taken as an edit rather than discarded. See `reconcileOwnedAccountList`. */
+  labelEdited?: boolean
 }
 
 export interface SpeechSettings {

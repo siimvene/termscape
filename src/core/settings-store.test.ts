@@ -1,12 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mkdtempSync, promises as fs, rmSync, writeFileSync } from 'fs'
+import { existsSync, mkdtempSync, promises as fs, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import path from 'path'
 import { IPC } from '../shared/ipc'
 import { sanitizeKeybindingOverrides } from '../shared/keybindings'
 import { initPlatform, resetPlatformForTests } from './platform'
 import { fakePlatform } from './platform-fake'
-import { SettingsStore } from './settings-store'
+import {
+  SettingsStore,
+  SettingsCorruptError,
+  SettingsWriteConflictError
+} from './settings-store'
 import { DEFAULT_SETTINGS, type Settings } from '../shared/types'
 
 describe('SettingsStore nested-default merge', () => {
@@ -654,6 +658,32 @@ describe('SettingsStore — shell-owned fields survive a snapshot (host, created
     expect('color' in disk.claudeAccounts[0]).toBe(false)
   })
 
+  // MINOR: "unedited" must not be inferred from the label STRING. A user who deliberately names an
+  // account exactly the mint placeholder flags the row `labelEdited`, and that edit is taken like
+  // any other rather than being discarded as an un-touched placeholder (which is what re-labels a
+  // resolved account back to the placeholder for as long as a stale tab lives).
+  it('a placeholder-string label the user actually typed (labelEdited) survives a concurrent resolution', async () => {
+    const store = await boot()
+    const stale = store.get() // k1/c1 still pending, placeholder labels
+    // Tab A captures the login and resolves both rows with the email.
+    await save(store, {
+      claudeAccounts: [{ ...claudeRow, pending: false, email: 'me@example.com', label: 'me@example.com' }],
+      codexAccounts: [{ ...codexRow, pending: false, email: 'me@example.com', label: 'me@example.com' }]
+    })
+    // Tab B (stale-pending) deliberately renamed each account TO the placeholder string — a real
+    // edit, so it carries `labelEdited`.
+    await save(store, {
+      claudeAccounts: stale.claudeAccounts.map((a) => ({ ...a, label: 'New account', labelEdited: true })),
+      codexAccounts: stale.codexAccounts.map((a) => ({ ...a, label: 'New Codex account', labelEdited: true }))
+    })
+    expect(store.get().claudeAccounts[0].label).toBe('New account')
+    expect(store.get().codexAccounts[0].label).toBe('New Codex account')
+    // The hint itself is transient — never written to disk.
+    const disk = JSON.parse(await fs.readFile(path.join(dir, 'settings.json'), 'utf-8')) as Settings
+    expect('labelEdited' in disk.claudeAccounts[0]).toBe(false)
+    expect('labelEdited' in disk.codexAccounts[0]).toBe(false)
+  })
+
   it('claudeAccounts membership is the shell\'s too: a stale snapshot neither drops an add nor resurrects a remove', async () => {
     const store = await boot()
     const stale = store.get()
@@ -756,5 +786,70 @@ describe('SettingsStore — two instances on one file (cross-process read-modify
     rmSync(path.join(dir, 'settings.json'))
     await addCodex(p1, 'b')
     expect(await onDisk('codexAccounts')).toEqual(['a', 'b'])
+  })
+
+  // CRITICAL: the cross-process read-modify-write is now serialized by an O_EXCL lockfile
+  // (settings.json.lock) held across read + write. Two instances persisting TRULY concurrently
+  // (Promise.all, so their awaits interleave) must both land — a check-then-act alone could let the
+  // later rename clobber the earlier one inside the check→rename gap.
+  it('two instances persisting truly concurrently lose no row (the lock serializes them)', async () => {
+    const p1 = boot()
+    const p2 = boot()
+    await Promise.all([
+      addCodex(p1, 'a'),
+      addCodex(p2, 'b'),
+      addClaude(p1, 'ka'),
+      addClaude(p2, 'kb')
+    ])
+    expect((await onDisk('codexAccounts')).sort()).toEqual(['a', 'b'])
+    expect((await onDisk('claudeAccounts')).sort()).toEqual(['ka', 'kb'])
+    // The lockfile is released, not stranded.
+    expect(existsSync(path.join(dir, 'settings.json.lock'))).toBe(false)
+  })
+
+  // CRITICAL: a base that keeps changing under a non-cooperating writer must, past the bounded
+  // retries, ABANDON the write with a throw — never persist its stale result over the base it never
+  // saw. A failed save stays failed (the rollback contract in codex-accounts:add depends on it).
+  it('a base that keeps changing exhausts the retries and THROWS rather than clobbering', async () => {
+    const store = boot()
+    await addCodex(store, 'seed')
+    const settingsPath = path.join(dir, 'settings.json')
+    let n = 0
+    await expect(
+      store.mutate((s) => {
+        n++
+        // A non-cooperating external writer lands a different file every time fn runs, so the stamp
+        // never stabilizes and the bounded re-read never converges.
+        writeFileSync(
+          settingsPath,
+          JSON.stringify({ ...s, codexAccounts: [...s.codexAccounts, row(`ext${n}`)] })
+        )
+        return { ...s, codexAccounts: [...s.codexAccounts, row('mine')] }
+      })
+    ).rejects.toThrow(SettingsWriteConflictError)
+    const disk = await onDisk('codexAccounts')
+    expect(disk).not.toContain('mine') // the stale write never landed
+    expect(disk).toContain(`ext${n}`) // the last external write stands
+  })
+
+  // CRITICAL: a settings.json that EXISTS but does not parse may be a recoverable hand-edit. A
+  // mutate/save must THROW rather than publish defaults over it — never wipe a corrupt-but-nonempty
+  // file (which is what orphaned every account dir it stopped listing).
+  it('a mutate against a corrupt-but-nonempty settings.json throws and leaves the file untouched', async () => {
+    const settingsPath = path.join(dir, 'settings.json')
+    writeFileSync(settingsPath, '{ "fontSize": 15,, not valid json ', 'utf-8')
+    const store = boot() // init swallows the parse error → cache = defaults
+    const before = readFileSync(settingsPath, 'utf-8')
+    await expect(store.mutate((s) => ({ ...s, fontSize: 42 }))).rejects.toThrow(SettingsCorruptError)
+    expect(readFileSync(settingsPath, 'utf-8')).toBe(before) // untouched
+  })
+
+  // The counterpart: an EMPTY (0-byte) file carries nothing recoverable, so it is treated as
+  // defaults and the write proceeds — the corrupt refusal is for files with bytes we could not parse.
+  it('a mutate against an EMPTY settings.json writes (nothing to lose), unlike a corrupt one', async () => {
+    writeFileSync(path.join(dir, 'settings.json'), '', 'utf-8')
+    const store = boot()
+    await addCodex(store, 'a')
+    expect(await onDisk('codexAccounts')).toEqual(['a'])
   })
 })

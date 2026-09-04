@@ -222,6 +222,7 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
   const sshByProject = useSshConn((s) => s.byProject)
   const [versionWarning, setVersionWarning] = useState(false)
   const [pendingRemove, setPendingRemove] = useState<ClaudeAccount | null>(null)
+  const [removeError, setRemoveError] = useState<string | null>(null)
   /**
    * Which "Add account" button is mid-setup: the host key, or LOCAL_TARGET for this machine.
    * Minting a REMOTE account is 10–15 s of real work on the host — mkdir, merging the status hook
@@ -243,8 +244,10 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
       return { ...m, [id]: state }
     })
 
+  // `labelEdited` marks this as a deliberate user rename, so the store's reconcile takes it even
+  // when the typed label happens to equal the mint placeholder (see reconcileOwnedAccountList).
   const setLabel = (id: string, label: string): void =>
-    applyAccounts((accs) => accs.map((a) => (a.id === id ? { ...a, label } : a)))
+    applyAccounts((accs) => accs.map((a) => (a.id === id ? { ...a, label, labelEdited: true } : a)))
 
   const setColor = (id: string, color?: string): void =>
     applyAccounts((accs) => accs.map((a) => (a.id === id ? { ...a, color } : a)))
@@ -326,8 +329,9 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
     }
   }, [isActive, codexAccounts])
 
+  // See `setLabel`: mark a deliberate user rename so a placeholder-equal label survives reconcile.
   const setCodexLabel = (id: string, label: string): void =>
-    applyCodexAccounts((accs) => accs.map((a) => (a.id === id ? { ...a, label } : a)))
+    applyCodexAccounts((accs) => accs.map((a) => (a.id === id ? { ...a, label, labelEdited: true } : a)))
 
   const setCodexColor = (id: string, color?: string): void =>
     applyCodexAccounts((accs) => accs.map((a) => (a.id === id ? { ...a, color } : a)))
@@ -604,17 +608,30 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
     // draining; its late resolution must not resurrect a row label for a dead account).
     setLoginWaitFor(account.id, null)
     setPendingRemove(null)
+    setRemoveError(null)
     // Removing a pending account: stop the 5-minute waitLogin poll loop first.
     if (account.pending) await window.nodeTerminal.claudeAccounts.cancelWaitLogin(account.id)
     const projectId = projectIdForHost(account.host)
     // The SHELL deletes the row (after the config dir, for a local account; a row carrying `host`
-    // has its dir removed over ssh when the project is connected and never locally). The filter
-    // below is this tab's mirror — and because the store keeps membership from its own list, no
-    // other tab's stale snapshot can bring the row back.
-    await window.nodeTerminal.claudeAccounts.remove(
-      account.id,
-      projectId ? { projectId } : undefined
-    )
+    // has its dir removed over ssh only once teardown on the host is CONFIRMED, never locally). The
+    // filter below is this tab's mirror — and because the store keeps membership from its own list,
+    // no other tab's stale snapshot can bring the row back.
+    try {
+      await window.nodeTerminal.claudeAccounts.remove(
+        account.id,
+        projectId ? { projectId } : undefined
+      )
+    } catch {
+      // The shell refused to delete the row — e.g. a remote account whose host could not be reached
+      // to confirm teardown. Leave the row visible + retryable and say why, rather than pretending
+      // the account is gone while its credential dir survives on the host.
+      setRemoveError(
+        account.host
+          ? `Couldn't remove "${account.label}" on ${account.host}. Reconnect the project and try again.`
+          : `Couldn't remove "${account.label}".`
+      )
+      return
+    }
     applyAccounts((accs) => accs.filter((a) => a.id !== account.id))
     // Clear the account off serialized nodes (all projects) + any project default...
     useProjects.setState((s) => ({
@@ -665,6 +682,17 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
               <button
                 className="shrink-0 cursor-pointer text-muted hover:text-text"
                 onClick={() => setVersionWarning(false)}
+              >
+                Dismiss
+              </button>
+            </div>
+          ) : null}
+          {removeError ? (
+            <div className="flex items-start justify-between gap-3 rounded-md border border-[color:var(--danger)]/40 bg-[color:var(--danger)]/10 px-3 py-2 text-[13px] leading-relaxed text-[color:var(--danger)]">
+              <span>{removeError}</span>
+              <button
+                className="shrink-0 cursor-pointer text-muted hover:text-text"
+                onClick={() => setRemoveError(null)}
               >
                 Dismiss
               </button>

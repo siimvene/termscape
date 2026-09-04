@@ -112,13 +112,27 @@ so two servers can be aimed at one directory and a desktop app can share it.
 Atomicity is not the only thing a second process breaks. A per-process write queue serializes
 that process's writers, but a read-modify-write applied to an in-memory cache the other process
 has since overtaken is a *logical* lost update: the rename is whole, and it publishes a list from
-which the other process's row is simply absent. `settings-store.ts` therefore re-reads
-`settings.json` at the start of every write, applies the change to what is on disk, and re-reads
-once more if the file's inode/mtime/size changed before the write. That shrinks the window from
-"however long the cache has been stale" to the gap between that check and the rename; it is a
-check-then-act, not a lock, and a write landing inside the gap is still overwritten. The complete
-fix is an advisory lock held across read + rename, or an in-file version the rename is conditioned
-on; neither exists yet.
+which the other process's row is simply absent. `settings-store.ts` closes this with a
+**cross-process advisory lock** held across the whole read + write (`withFileLock` on
+`settings.json.lock`, `src/core/file-lock.ts`): the lock is the atomic existence of an `O_EXCL`
+lockfile, so exactly one writer at a time — in ANY process that also takes it (both write paths
+here do) — reads and renames, and no cooperating writer's change is lost. It is advisory: a writer
+that does not take it (a raw external write) is still not serialized, so the same read re-checks
+the file's inode/mtime/size stamp and, on detecting such a landed write, re-runs the mutation
+against it (bounded).
+
+Two things it will **never** do. It never persists a **stale** result: if the base kept changing
+under a hot non-cooperating writer past the retry budget, or the lock could not be acquired in
+time, the write is abandoned with a throw (`SettingsWriteConflictError` / `FileLockTimeoutError`),
+because several callers treat a failed save as `persisted:false` and a save that lands on a base it
+never saw is worse than one that honestly failed (it is the contract `codex-accounts:add`'s
+rollback depends on). And it never publishes **defaults over a corrupt file**: a settings.json that
+EXISTS but does not parse may be a recoverable hand-edit, so a mutate/save throws
+`SettingsCorruptError` rather than "repairing" it to defaults (which orphaned every account dir it
+stopped listing). A genuinely MISSING or empty file is different — it carries nothing to lose and
+writes the defaults base. The residual is only the historical crash-recovery race (two processes
+breaking the same stale lockfile in the same instant), narrowed by a re-stat before the break and
+no worse than the lock-less check-then-act it replaced.
 
 **A unique name owes cleanup.** A fixed name self-healed — the next save simply overwrote the
 litter. A unique one does not, so every caller must remove its own temp on failure.

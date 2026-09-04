@@ -162,6 +162,7 @@ describe('the remote leg is resolved lazily, and its absence falls back to LOCAL
         readLogin: async () => JSON.stringify({ oauthAccount: { email: 'r@h.com' } }),
         remove: async (projectId, id) => {
           calls.push(`rm:${projectId}:${id}`)
+          return true // teardown confirmed on the (connected) host
         },
         hostKey: (projectId) => (projectId === 'p1' ? 'me@box' : undefined)
       })
@@ -187,7 +188,7 @@ describe('the remote leg is resolved lazily, and its absence falls back to LOCAL
       remote: () => ({
         add: async () => null, // not connected: nothing minted anywhere
         readLogin: async () => null,
-        remove: async () => {},
+        remove: async () => false,
         hostKey: () => undefined
       })
     })
@@ -283,7 +284,11 @@ describe('claude-accounts — the shell owns row membership', () => {
     expect(onDisk()).toEqual([])
   })
 
-  it('remove of a REMOTE row (host set) with no remote leg deletes only the row — it owns no local dir', async () => {
+  // CRITICAL: a remote row can only be removed once teardown on its host is CONFIRMED. With no
+  // remote leg wired (disconnected / SSH not available), removal must KEEP the row (visible +
+  // retryable) and error — never delete the row while an authenticated dir survives on the host —
+  // and it must never touch the local fs for a host-bearing row.
+  it('remove of a REMOTE row (host set) with no remote leg keeps the row, errors, and never deletes a local dir', async () => {
     registerClaudeAccountsIpc()
     await settings.mutate((s) => ({
       ...s,
@@ -295,9 +300,55 @@ describe('claude-accounts — the shell owns row membership', () => {
     // A local dir under that id would belong to someone else's mint; it must survive.
     const stray = accountConfigDir(userDataDir, 'remote-1')
     mkdirSync(stray, { recursive: true })
-    await call(IPC.claudeAccountsRemove, 'remote-1')
+    await expect(call(IPC.claudeAccountsRemove, 'remote-1')).rejects.toThrow(/remote host/)
     expect(existsSync(stray)).toBe(true)
+    expect(rows()).toEqual(['remote-1'])
+  })
+
+  // CRITICAL: a remote leg that reports teardown UNCONFIRMED (`remove(...) === false`, which the SSH
+  // primitive returns for BOTH "not connected" AND a non-zero remote `rm`) must leave the row and
+  // surface a reach-the-host error. The pre-fix code deleted the row regardless, stranding the
+  // credential dir on the host with no retry path.
+  it('a remote remove whose teardown is unconfirmed keeps the row and errors', async () => {
+    let tornDownConfirms = false
+    registerClaudeAccountsIpc({
+      remote: () => ({
+        add: async (_p, id) => ({ configDir: `~/.nodeterm/claude-accounts/${id}`, versionSupported: true }),
+        readLogin: async () => null,
+        // First a disconnected/failed teardown (false), then a confirmed one (true).
+        remove: async () => tornDownConfirms,
+        hostKey: () => 'me@box'
+      })
+    })
+    const res = await call(IPC.claudeAccountsAdd, { projectId: 'p1', host: 'me@box' })
+    await expect(call(IPC.claudeAccountsRemove, res.id, { projectId: 'p1' })).rejects.toThrow(
+      /Could not reach me@box/
+    )
+    expect(rows()).toEqual([res.id]) // row kept — the removal is retryable
+    // Reconnect / the host answers: a confirmed teardown now deletes the row.
+    tornDownConfirms = true
+    await call(IPC.claudeAccountsRemove, res.id, { projectId: 'p1' })
     expect(rows()).toEqual([])
+  })
+
+  // SERIOUS: provenance is the ROW's shell-owned `host`, never the renderer ctx. A forged/buggy ctx
+  // that routes a LOCAL row's removal through a connected SSH project must be REFUSED — never skip
+  // the local home (which would delete the row and orphan an authenticated dir on THIS machine).
+  it('a remove ctx claiming a remote project for a LOCAL row is refused; the local dir is not skipped', async () => {
+    registerClaudeAccountsIpc({
+      remote: () => ({
+        add: async () => null,
+        readLogin: async () => null,
+        remove: async () => true,
+        hostKey: () => 'me@box' // ctx.projectId 'p1' resolves to a connected remote host
+      })
+    })
+    const { id, configDir } = await call(IPC.claudeAccountsAdd) // LOCAL add (no ctx): row.host unset
+    await expect(call(IPC.claudeAccountsRemove, id, { projectId: 'p1' })).rejects.toThrow(
+      /local but its project is remote/
+    )
+    expect(existsSync(configDir)).toBe(true)
+    expect(rows()).toEqual([id])
   })
 
   it('remove of an id with no row still tears its local dir down (cleans a pre-fix orphan)', async () => {

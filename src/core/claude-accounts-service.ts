@@ -59,7 +59,14 @@ export interface ClaudeAccountsRemote {
     id: string
   ): Promise<{ configDir: string; versionSupported: boolean } | null>
   readLogin(projectId: string, id: string): Promise<string | null>
-  remove(projectId: string, id: string): Promise<void>
+  /**
+   * Tear down the account's config dir ON THE HOST and REPORT whether it actually happened:
+   * `true` only when the project was connected AND the remote `rm` confirmed removal, `false`
+   * otherwise (not connected, or a non-zero exit). The service deletes the row ONLY on a `true`,
+   * so a disconnected/failed teardown leaves the row visible and retryable instead of orphaning an
+   * authenticated credential dir on the host under a removal the UI reported as complete.
+   */
+  remove(projectId: string, id: string): Promise<boolean>
   /** `user@host` of a CONNECTED project (matches `ClaudeAccount.host`); undefined otherwise. */
   hostKey?(projectId: string): string | undefined
 }
@@ -166,13 +173,15 @@ export function claudeAccountsHandlers(
         // REMOTE account: create the config dir + install the status hook on the host. No local
         // dir and no local hook install — the session runs entirely on the remote host.
         const res = await remote.r.add(remote.projectId, id)
-        // The row's `host` is the manager's word for the project's host. When it has none (the
-        // project is not connected — `res` is null and nothing was minted anywhere), the
-        // renderer's own key for that project stands in, so the pending row still shows under
-        // the machine the user chose and its login node carries the connection error. A local
-        // add never reads `ctx.host` (below), so a row can never claim a host for a dir that
-        // was minted here.
-        const host = remote.r.hostKey?.(remote.projectId) ?? ctx?.host
+        // The row's `host` is the MANAGER's word for the project's host — provenance is the shell's,
+        // not the renderer's. The renderer's `ctx.host` stands in ONLY when nothing was minted
+        // anywhere (`res` is null: the project is not connected, so the manager cannot name the host
+        // either), so the pending row still shows under the machine the user chose and its login
+        // node carries the connection error. When a dir WAS minted (`res` non-null, so the project
+        // is connected), the manager's host is authoritative and `ctx.host` is never consulted — a
+        // row can never claim a host for a dir minted somewhere else. A local add never reads
+        // `ctx.host` at all (below).
+        const host = remote.r.hostKey?.(remote.projectId) ?? (res ? undefined : ctx?.host)
         const account = mintClaudeAccountRow(id, host)
         try {
           await registerRow(account)
@@ -198,14 +207,30 @@ export function claudeAccountsHandlers(
       // ~/.claude).
       installClaudeHooksInto(configDir)
       deps.installSkill?.(configDir)
-      // Ensure fullscreen TUI in the new account dir (write-if-absent, version-gated).
-      // Best-effort, off the response path — the memoized probe + write both fail open.
-      void ensureClaudeFullscreenTuiInto(configDir)
+      // Ensure fullscreen TUI in the new account dir (write-if-absent, version-gated). AWAITED
+      // before the row is persisted, not fire-and-forget: its writer recreates the parent dir when
+      // absent (claude-tui.ts), so an un-awaited probe finishing AFTER the rollback rm below would
+      // recreate a row-less orphan the rollback just removed. Awaiting sequences it before the
+      // persist so the rollback is the last writer to touch this dir. It fails open internally
+      // (memoized probe + write both swallow errors), so awaiting never turns a cosmetic write into
+      // an add failure.
+      await ensureClaudeFullscreenTuiInto(configDir)
       const account = mintClaudeAccountRow(id, undefined)
       try {
         await registerRow(account)
       } catch (error) {
-        await fs.rm(configDir, { recursive: true, force: true }).catch(() => {})
+        // Roll the minted dir back so a failed persist leaves no row-less credential dir. If the
+        // teardown ALSO fails, do not swallow it silently: a row-less dir is left behind, which a
+        // later add/remove of this id reclaims (remove tears down a row-less local dir). Surface it
+        // loudly beside the persist error rather than reporting only one.
+        try {
+          await fs.rm(configDir, { recursive: true, force: true })
+        } catch (cleanupError) {
+          console.error(
+            `[claude-accounts] add of ${id} failed to persist and its config dir could not be removed; a later add/remove will reclaim it`,
+            cleanupError
+          )
+        }
         throw error
       }
       // Bound the probe: it shells out through a LOGIN shell, which on a slow machine can take
@@ -268,20 +293,44 @@ export function claudeAccountsHandlers(
     // Tear the config dir down, THEN delete the row — on the chain, against the latest list. Dir
     // first so a failed teardown leaves a row the user can see and retry, never a dir nothing
     // points at; and once the row is gone no later renderer snapshot can bring it back (the store
-    // keeps membership from its own list, not from the snapshot).
+    // keeps membership from its own list, not from the snapshot). PROVENANCE is the ROW's stored
+    // `host` (shell-owned, unwritable by a snapshot — see settings-store), never the renderer ctx:
+    // that is what keeps a forged/buggy ctx from routing a LOCAL row's removal through ssh (skipping
+    // its local home) or a REMOTE row's through the local fs.
     [IPC.claudeAccountsRemove]: async (id: string, ctx?: AccountCtx) => {
-      const remote = remoteFor(ctx)
       const row = settings.get().claudeAccounts.find((a) => a.id === id)
-      if (remote) {
-        // Best-effort remote cleanup; if the project isn't connected the manager no-ops (the dir
-        // is orphaned on the host, harmless) and the row still goes.
-        await remote.r.remove(remote.projectId, id)
-      } else if (!row?.host) {
-        // A row pinned to a `host` owns no LOCAL dir, so nothing local is deleted for it
-        // (fail-closed: never the wrong machine's home — and since a snapshot cannot write
-        // `host`, a local row cannot be dressed up as a remote one to skip this). A row-less id is
-        // still torn down locally: that is how a dir orphaned by the pre-fix renderer race gets
-        // cleaned up. `claudeConfigDirFor` validates the id (rejects traversal).
+      const remote = remoteFor(ctx)
+      if (row?.host) {
+        // REMOTE account: its credential dir is on `row.host`, so removal must CONFIRM teardown over
+        // ssh BEFORE the row goes. A disconnected/failed teardown that still deleted the row would
+        // strand an authenticated dir on the host with no retry path (the "row-last = retryable"
+        // guarantee was false for remote).
+        if (!remote) {
+          throw new Error(
+            'This account lives on a remote host; open its project (and connect) to remove it.'
+          )
+        }
+        // The ctx's project must resolve to the SAME host as the row. A mismatch means the renderer
+        // routed us at the wrong machine — refuse rather than act on the forged route.
+        const ctxHost = remote.r.hostKey?.(remote.projectId)
+        if (ctxHost && ctxHost !== row.host) {
+          throw new Error('Account host does not match its project; refusing to remove.')
+        }
+        const torndown = await remote.r.remove(remote.projectId, id)
+        if (!torndown) {
+          throw new Error(
+            `Could not reach ${row.host} to remove this account; it is still listed. Reconnect the project and try again.`
+          )
+        }
+      } else {
+        // LOCAL account (host-less), or a row-less orphan id. A ctx resolving to a CONNECTED SSH
+        // project is a forged/buggy provenance for a LOCAL row — refuse rather than skip the local
+        // home. A row-less orphan (no row to consult) takes the local teardown unconditionally:
+        // that is how a dir orphaned by the pre-fix renderer race gets cleaned up.
+        // `claudeConfigDirFor` validates the id (rejects traversal).
+        if (row && remote && remote.r.hostKey?.(remote.projectId)) {
+          throw new Error('Account is local but its project is remote; refusing to remove.')
+        }
         const configDir = claudeConfigDirFor(id)
         await fs.rm(configDir, { recursive: true, force: true })
       }

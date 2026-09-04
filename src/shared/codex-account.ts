@@ -31,6 +31,10 @@ export interface CodexAccount {
    *  unset = the agent's own brand color. Read through `accountNodeColor`, which re-validates it
    *  as a string — settings.json is hand-editable and nothing checks it field-by-field on load. */
   color?: string
+  /** Transient renderer HINT (not persisted by the store's reconcile): true once the USER has
+   *  renamed this row by hand, so a stale-pending snapshot whose label happens to equal the mint
+   *  placeholder is still taken as an edit rather than discarded. See `reconcileOwnedAccountList`. */
+  labelEdited?: boolean
 }
 
 /**

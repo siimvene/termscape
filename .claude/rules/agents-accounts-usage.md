@@ -171,9 +171,17 @@ paths:
     through **`SettingsStore.mutate`** (a read-modify-write on the store's own save chain), in the
     same verb that mints / tears down the home; `add` resolves only once the row is on disk (so the
     renderer's old save barrier before the login node is gone) and rolls the minted home back if
-    the persist fails; `remove` deletes the row LAST so a failed teardown stays visible and
+    the persist fails (Claude awaits the fullscreen-TUI write FIRST so a slow probe cannot recreate
+    the dir after the rollback removed it; a rollback whose cleanup ALSO fails logs loudly instead
+    of swallowing it); `remove` deletes the row LAST so a failed teardown stays visible and
     retryable, never touches the local fs for a row carrying `host`, and still tears down a
-    row-less home (a pre-fix orphan). Both services are handler TABLES with two registrars
+    row-less home (a pre-fix orphan). **Removal branches on the ROW's `host` (shell-owned), not the
+    renderer ctx**, and a **Claude remote** removal deletes the row ONLY once teardown on the host is
+    CONFIRMED — the SSH `remove` primitive returns `true` only when the project is connected AND the
+    remote `rm` exits 0; a disconnected/failed teardown KEEPS the row and errors rather than
+    orphaning an authenticated dir on the host under a removal the UI called complete, and a ctx
+    whose project host mismatches the row's (or routes a local row through an SSH project) is
+    refused. Both services are handler TABLES with two registrars
     (`codexAccountsHandlers` / `claudeAccountsHandlers`): `platform().handle` on the Server
     Edition (`registerCoreHandlers(…, { settingsStore })`) and `ipcMain.handle` on the desktop
     (`initCodexAccounts(settingsStore, …)`, `initClaudeAccounts(settingsStore, …)`) — never
@@ -198,9 +206,12 @@ paths:
     `docs/atomic-writes.md`) each have their own cache and chain, so a mutate applied to a stale
     cache would publish the other process's add out of existence. Every write re-reads
     settings.json, applies itself to that, and re-reads again if the file's inode/mtime/size
-    stamp changed before the write (bounded). That is a check-then-act, not a lock: the residual
-    window is the gap between the stamp check and the rename; `flock` across read+rename or an
-    in-file version the rename is conditioned on would close it, and neither is done. Proofs:
+    stamp changed before the write (bounded). The read + write are now held under a **cross-process
+    advisory lock** (`withFileLock` on `settings.json.lock`, an `O_EXCL` lockfile — `src/core/file-lock.ts`),
+    so two cooperating processes no longer race the stamp-check→rename gap; the stamp re-read stays
+    as a second line against a raw external writer, and on retry-exhaustion or a lock timeout the
+    write is ABANDONED with a throw rather than landed stale (a genuinely corrupt settings.json is
+    likewise refused, never overwritten with defaults). See docs/atomic-writes.md. Proofs:
     `settings-store.test.ts` (the three ownership describes, incl. two instances on one file),
     `codex-accounts-service.test.ts` / `claude-accounts-service.test.ts` ("the shell owns row
     membership"), the desktop halves in `main/codex-accounts.test.ts` and

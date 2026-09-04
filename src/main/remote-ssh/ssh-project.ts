@@ -1963,13 +1963,20 @@ export class SshProjectManager {
     return code === 0 && stdout ? stdout : null
   }
 
-  /** Delete a managed remote account's config dir (`rm -rf`). No-op when not connected. The id is
-   *  regex-validated and the prefix (`~/.nodeterm/claude-accounts/`) fixed, so no traversal. */
-  async remoteAccountRemove(projectId: string, accountId: string): Promise<void> {
+  /**
+   * Delete a managed remote account's config dir (`rm -rf`) and REPORT whether it happened:
+   * `true` only when the project is connected AND the remote `rm` exits 0, `false` otherwise (not
+   * connected, or a non-zero exit). The caller (`claude-accounts-service`) deletes the account row
+   * ONLY on `true`, so a disconnected/failed teardown leaves the row visible and retryable instead
+   * of stranding an authenticated dir on the host under a removal the UI reported complete. The id
+   * is regex-validated and the prefix (`~/.nodeterm/claude-accounts/`) fixed, so no traversal.
+   */
+  async remoteAccountRemove(projectId: string, accountId: string): Promise<boolean> {
     const c = this.conns.get(projectId)
-    if (!c) return
+    if (!c) return false
     const dir = remoteAccountConfigDir(accountId)
-    await this.r.run(childArgs(c.conn, c.controlPath, `rm -rf ${quoteRemotePath(dir)}`))
+    const { code } = await this.r.run(childArgs(c.conn, c.controlPath, `rm -rf ${quoteRemotePath(dir)}`))
+    return code === 0
   }
 
   /**

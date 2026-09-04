@@ -1,6 +1,7 @@
 import { readFileSync, statSync } from "fs";
 import path from "path";
 import { writeFileAtomic } from "./fs-atomic";
+import { withFileLock } from "./file-lock";
 import { IPC } from "../shared/ipc";
 import { platform } from "./platform";
 import {
@@ -79,11 +80,33 @@ function mergeSettings(saved: Partial<Settings> | null | undefined): Settings {
   return merged;
 }
 
-/** The shape every shell-owned account row shares: an id, and a login-resolution flag. */
+/** Thrown by a write path when the settings file EXISTS but its bytes could not be parsed. Such a
+ *  file may be recoverable by hand, so a mutate/save refuses rather than publishing defaults over
+ *  it — see `readDisk`. A MISSING file is not this: it yields the defaults base and writes. */
+export class SettingsCorruptError extends Error {
+  constructor(filePath: string) {
+    super(`Refusing to overwrite an unparseable ${filePath} with defaults`);
+    this.name = "SettingsCorruptError";
+  }
+}
+
+/** Thrown when a cross-process write kept losing the race to another writer past the retry budget.
+ *  The write is abandoned, never landed with a stale base — a failed save stays failed. */
+export class SettingsWriteConflictError extends Error {
+  constructor(filePath: string) {
+    super(`Gave up persisting ${filePath}: it kept changing under the read-modify-write`);
+    this.name = "SettingsWriteConflictError";
+  }
+}
+
+/** The shape every shell-owned account row shares: an id, and a login-resolution flag. `labelEdited`
+ *  is a transient renderer HINT (never persisted here) — see the placeholder branch in
+ *  `reconcileOwnedAccountList`. */
 interface OwnedAccountRow {
   id: string;
   label?: string;
   pending?: boolean;
+  labelEdited?: boolean;
 }
 
 /**
@@ -125,7 +148,10 @@ const RENDERER_OWNED_FIELDS = ["label", "color", "email"] as const;
  *    for a row the cache has already resolved predates the capture and cannot un-resolve it. Its
  *    label is still an edit the user may have typed in that stale tab, so it is honoured — EXCEPT
  *    when it is the mint-time placeholder, which the capture replaced with the email: taking that
- *    back would re-label a resolved account "New account" for as long as the stale tab lives.
+ *    back would re-label a resolved account "New account" for as long as the stale tab lives. That
+ *    "unedited" judgement no longer rests on the label STRING (a user who names an account exactly
+ *    "New account" would have lost it): the renderer stamps `labelEdited` on a row the user
+ *    actually renamed, and an explicitly-edited placeholder is taken like any other edit.
  */
 function reconcileOwnedAccountList<T extends OwnedAccountRow>(
   cache: readonly T[] | undefined,
@@ -151,9 +177,10 @@ function reconcileOwnedAccountList<T extends OwnedAccountRow>(
       // Still pending in the cache: the snapshot may resolve it (or leave it pending).
       if ("pending" in edited) next.pending = edited.pending;
       else delete next.pending;
-    } else if (edited.pending && edited.label === placeholderLabel) {
-      // Stale on resolution AND still carrying the placeholder: not an edit, the capture's label
-      // stands. (A non-placeholder label from the same stale tab was taken above.)
+    } else if (edited.pending && edited.label === placeholderLabel && !edited.labelEdited) {
+      // Stale on resolution AND still carrying the placeholder AND not explicitly edited: not an
+      // edit, the capture's label stands. (A non-placeholder label — or a placeholder the user
+      // deliberately typed, flagged `labelEdited` — from the same stale tab was taken above.)
       next.label = row.label;
     }
     return next;
@@ -202,6 +229,11 @@ export class SettingsStore {
 
   private get filePath(): string {
     return path.join(platform().userDataDir, "settings.json");
+  }
+
+  /** The cross-process lock sibling held across every read-modify-write (see `readModifyWrite`). */
+  private get lockPath(): string {
+    return `${this.filePath}.lock`;
   }
 
   /** Subscribe to saves (fires after each successful `settings:save`). Additive; used by the
@@ -286,19 +318,33 @@ export class SettingsStore {
    * The settings currently ON DISK, plus a stamp naming that file version. The stamp is taken
    * BEFORE the bytes are read: if a rename lands in between, the stamp is the older file's and
    * the bytes the newer's, so the pre-write comparison in `readModifyWrite` sees a change and
-   * re-reads — the safe direction. A missing or unparseable file yields the CACHE as the base (a
-   * fresh install has nothing on disk yet, and a corrupt file must not be "repaired" by a mutate
-   * that wipes every setting to the defaults) with a null stamp, which never matches a later
-   * stat, so such a write is re-checked once and then lands.
+   * re-reads — the safe direction.
+   *
+   * Two absences are DIFFERENT, and conflating them is the corrupt-file bug:
+   *  - MISSING (or vanished/unreadable between the stat and the read): a fresh install has nothing
+   *    on disk yet, so the CACHE is the base with a null stamp (which never matches a later stat,
+   *    so the write is re-checked once and then lands). This is the only case that may write
+   *    defaults.
+   *  - EXISTS-BUT-UNPARSEABLE: the file has bytes we could not parse — possibly a recoverable
+   *    hand-edit or partial write. Persisting defaults over it is data loss, so we THROW
+   *    `SettingsCorruptError` and the write refuses rather than "repairs". (An EMPTY file carries
+   *    nothing to lose and is treated as defaults, matching `init`.)
    */
   private readDisk(): DiskRead {
     const stamp = this.diskStamp();
     if (stamp === null) return { base: this.cache, stamp: null };
+    let raw: string;
     try {
-      const raw = readFileSync(this.filePath, "utf-8");
+      raw = readFileSync(this.filePath, "utf-8");
+    } catch {
+      // Vanished/unreadable between the stat and the read: treat as missing, not corrupt.
+      return { base: this.cache, stamp: null };
+    }
+    if (raw.trim() === "") return { base: mergeSettings(null), stamp };
+    try {
       return { base: mergeSettings(JSON.parse(raw)), stamp };
     } catch {
-      return { base: this.cache, stamp: null };
+      throw new SettingsCorruptError(this.filePath);
     }
   }
 
@@ -315,31 +361,36 @@ export class SettingsStore {
   }
 
   /**
-   * Read-modify-write against the FILE. `apply` runs on what is on disk right now (merged like
-   * `init` merges it), and the result is written only if the file has not changed since that
-   * read; if it has, the loop re-reads and re-applies (bounded — after `RMW_MAX_RETRIES` it
-   * writes anyway rather than spin against a hot writer, so the LAST retry can still lose to a
-   * write that lands in the window below).
+   * Read-modify-write against the FILE, under a CROSS-PROCESS lock held across the whole read +
+   * write (`withFileLock` on `lockPath`, docs/atomic-writes.md). `apply` runs on what is on disk
+   * right now (merged like `init` merges it), and its result is persisted.
    *
-   * WHAT THIS DOES AND DOES NOT GUARANTEE. Within one process the chain makes every write see
-   * every earlier one — that part is exact. Across processes sharing a directory the re-read
-   * shrinks the lost-update window from "however long this process's cache has been stale"
-   * (whole user think-time) to the gap between the stamp check and `writeFileAtomic`'s rename —
-   * microseconds to a few milliseconds — and the stamp check catches a write that lands anywhere
-   * before it. It is a check-then-act, not a lock: a write by another process inside that final
-   * gap is still overwritten, silently. The complete fix is an advisory lock held across
-   * read + rename (`flock`, which Node does not expose without a native dependency) or a
-   * version counter inside the file that the rename is conditioned on; neither is done here.
+   * WHAT THIS GUARANTEES. Within one process the FIFO chain makes every write see every earlier
+   * one. Across processes sharing a directory, the lock makes each process's read + rename
+   * atomic with respect to every OTHER process that also takes it (both write paths here do), so
+   * no cooperating writer's change is lost — closing the check-then-act window the previous
+   * version left open. The lock is advisory: a writer that does NOT take it (a raw external write)
+   * is still not serialized, so the stamp re-read below stays as a second line of defence and, on
+   * detecting such a landed write, RE-RUNS `apply` against it (bounded by `RMW_MAX_RETRIES`).
+   *
+   * NEVER PERSISTS STALE. If the base kept changing under us past the retry budget (a hot
+   * non-cooperating writer), or the lock could not be acquired in time, the write is ABANDONED
+   * with a throw (`SettingsWriteConflictError` / `FileLockTimeoutError`), not landed on top of a
+   * base it never saw — a failed save stays failed, which is the contract callers like
+   * `codex-accounts:add`'s rollback depend on. A genuinely corrupt file THROWS from `readDisk`
+   * before any write, so defaults are never published over recoverable bytes.
    */
-  private async readModifyWrite(
+  private readModifyWrite(
     apply: (base: Settings) => Settings,
   ): Promise<Settings> {
-    for (let attempt = 0; ; attempt++) {
-      const { base, stamp } = this.readDisk();
-      const next = mergeSettings(apply(base));
-      if (attempt < RMW_MAX_RETRIES && this.diskStamp() !== stamp) continue;
-      return this.persist(next);
-    }
+    return withFileLock(this.lockPath, async () => {
+      for (let attempt = 0; ; attempt++) {
+        const { base, stamp } = this.readDisk();
+        const next = mergeSettings(apply(base));
+        if (this.diskStamp() === stamp) return this.persist(next);
+        if (attempt >= RMW_MAX_RETRIES) throw new SettingsWriteConflictError(this.filePath);
+      }
+    });
   }
 
   /** Write, then publish: the cache takes the new value only once it is on disk, so a failed write
