@@ -118,6 +118,39 @@ describe('reduceEntry (main-state reduction)', () => {
     expect(b.state).toBe('working')
     expect(b.updatedAt).toBe(9000)
   })
+
+  it("a child's inherited agentId does NOT overwrite the node's canonical agent", () => {
+    // A claude node establishes its canonical agent from its own first hook event…
+    let e = reduceEntry(undefined, ev({ agentId: 'claude', kind: 'state', state: 'working' }), 1000)
+    expect(e.agentId).toBe('claude')
+    // …then a `codex exec` child, inheriting the node id, POSTs codex-tagged state events. These
+    // must NOT flap the node's identity to codex.
+    e = reduceEntry(e, ev({ agentId: 'codex', kind: 'state', state: 'working' }), 1100)
+    expect(e.agentId).toBe('claude')
+    e = reduceEntry(e, ev({ agentId: 'codex', kind: 'state', state: 'done' }), 1200)
+    expect(e.agentId).toBe('claude')
+    // The node's own claude events keep the canonical identity, no flapping back and forth.
+    e = reduceEntry(e, ev({ agentId: 'claude', kind: 'state', state: 'working', newTurn: true }), 1300)
+    expect(e.agentId).toBe('claude')
+  })
+
+  it('honors a genuine agent change announced by a session-lifecycle event', () => {
+    // A codex child can only ever emit `state`-kind events (normalizeCodex maps its SessionStart to
+    // a `working` state), so a `session`-kind event is the node's OWN agent lifecycle — a real
+    // relaunch as a different agent must be honored, not pinned to the stale identity.
+    let e = reduceEntry(undefined, ev({ agentId: 'claude', kind: 'state', state: 'working' }), 1000)
+    expect(e.agentId).toBe('claude')
+    e = reduceEntry(e, ev({ agentId: 'codex', kind: 'session', sessionPhase: 'start' }), 2000)
+    expect(e.agentId).toBe('codex')
+  })
+
+  it("a codex node's own events establish and keep codex as canonical", () => {
+    // First-seen establishes canonical for a real codex node too (it emits only state events).
+    let e = reduceEntry(undefined, ev({ agentId: 'codex', kind: 'state', state: 'working' }), 1000)
+    expect(e.agentId).toBe('codex')
+    e = reduceEntry(e, ev({ agentId: 'codex', kind: 'state', state: 'done' }), 1100)
+    expect(e.agentId).toBe('codex')
+  })
 })
 
 describe('buildFile (shape + expiry)', () => {

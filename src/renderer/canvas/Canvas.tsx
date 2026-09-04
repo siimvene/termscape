@@ -11579,6 +11579,14 @@ export function Canvas() {
           // working node: blocked/waiting is also "idle at the prompt", and clearing it there
           // would drop a live approval off the badge. Same rule as the mirror's reduceEntry.
           const stuckRescueSkip = e.idle === true && cs.byId[e.nodeId]?.state !== 'working'
+          // Edge-trigger the done alert: was this node ALREADY done before this event? Captured
+          // BEFORE `cs.setState` runs — a genuine working→done transition mints a new `byId` (so
+          // this snapshot still reads the prior state), while a repeated `done` takes setState's
+          // same-state fast path. Firing the alert on every event carrying `state:'done'` (a
+          // re-emitted Stop after a restart, a legacy tokenless re-assert) was the notification
+          // spam; a real completion is a TRANSITION into done, which happens once per turn (a
+          // /loop iteration passes through `working` first, so it still counts).
+          const wasAlreadyDone = cs.byId[e.nodeId]?.state === 'done'
           // `pendingId` (deterministic approvals) rides a `blocked` event; the store keeps it only
           // while blocked so the header's Approve/Deny buttons appear + vanish with the state.
           // `e.verified` is the identity evidence for this very transition (hook-server labels it);
@@ -11605,7 +11613,7 @@ export function Canvas() {
             const m = e.task.match(/^\s*\/(loop|schedule|cron)\b/)
             if (m) cs.setLoop(e.nodeId, true, m[1] as 'loop' | 'schedule' | 'cron', { task: e.task })
           }
-          if (e.state === 'done' && !e.interrupted && !stuckRescueSkip) {
+          if (e.state === 'done' && !e.interrupted && !stuckRescueSkip && !wasAlreadyDone) {
             // Interrupted turns (Esc/Ctrl-C) alert nobody: the user did it themselves, and
             // the turn didn't complete, so it isn't a loop iteration either.
             // An IGNORED rescue is silent for the same reason it moves no badge: it claims a turn

@@ -411,7 +411,31 @@ export function reduceEntry(
   }
   // Identity is captured off ANY event (mirrors the renderer's per-event setSessionId +
   // agentId threading). agentId is always present on a NormalizedAgentEvent.
-  if (ev.agentId) next.agentId = ev.agentId
+  //
+  // But a node's canonical agent must OUTRANK an id merely inherited by a child process. A
+  // `codex exec` (in-process app-server) launched inside a claude node LEAKS the node's
+  // `NODETERM_NODE_ID`/`NODETERM_HOOK_SOCK` into its shell (codex-thread-identity-sh.ts: the
+  // `[ -z NODETERM_NODE_ID ]` rebind guard no-ops for that leak), so the child's codex hook POSTs
+  // arrive tagged nodeId=<the claude node>, agentId=codex — and an unconditional `next.agentId =
+  // ev.agentId` re-tagged the node on every such event, flapping its identity between claude and
+  // codex. The declared agent must win. This module aggregates events for MANY nodes, so it must
+  // NOT read its own process env; the authoritative signal is in the event stream itself:
+  //   - The FIRST agentId seen establishes the node's canonical agent (the node was launched as
+  //     that agent, so its own first hook — claude's SessionStart, codex's first working — wins
+  //     the race against any child that can only appear AFTER the parent is already running).
+  //   - A `session`-kind event (SessionStart/SessionEnd) comes from the node's OWN agent lifecycle,
+  //     never from a transient child: `normalizeCodex` maps a codex child's every event to a
+  //     `state` kind (its SessionStart is a `working` state, it emits no `session` kind at all), so
+  //     a child can never forge one. A genuine agent change (the node relaunched as a different
+  //     agent) announces itself here, and is honored — this is what keeps a node that legitimately
+  //     IS now a different agent from being pinned to a stale identity.
+  //   - Any OTHER event whose agentId differs from the canonical is treated as an inherited child
+  //     id and REJECTED, leaving the canonical intact.
+  if (ev.agentId) {
+    if (!next.agentId || ev.agentId === next.agentId || ev.kind === 'session') {
+      next.agentId = ev.agentId
+    }
+  }
   if (ev.sessionId) next.sessionId = ev.sessionId
 
   if (ev.kind === 'state' && ev.state) {
