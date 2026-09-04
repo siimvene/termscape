@@ -12,6 +12,12 @@
  * class. `id` empty/undefined at a call site means the SYSTEM account (`~/.codex`); any non-empty
  * `id` here is a managed account. `host` absent ⇒ this machine; set ⇒ that SSH host.
  */
+/** The label a freshly minted Codex account carries until its login captures an email
+ *  (`renderer/state/codexAccountReconcile.ts` promotes exactly this string to the email, and the
+ *  settings store's snapshot reconcile treats it as "not an edit"). One definition for both sides
+ *  of the seam; `src/core/codex-accounts-service.ts` re-exports it. */
+export const NEW_CODEX_ACCOUNT_LABEL = 'New Codex account'
+
 export interface CodexAccount {
   id: string
   /** Display label; defaults to the captured email. */

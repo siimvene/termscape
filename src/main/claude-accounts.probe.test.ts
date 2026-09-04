@@ -48,7 +48,17 @@ describe('Add-account version probe budget', () => {
     findInLoginPath.mockReset()
     vi.resetModules()
     const mod = await import('./claude-accounts')
-    mod.initClaudeAccounts?.(() => undefined)
+    // The row store: the verb registers its row through `mutate` before it probes, so a store is
+    // required — an in-memory one keeps this file about the probe.
+    let rows: { id: string }[] = []
+    const settings = {
+      get: () => ({ claudeAccounts: rows }) as never,
+      mutate: async (fn: (s: never) => { claudeAccounts: { id: string }[] }) => {
+        rows = fn({ claudeAccounts: rows } as never).claudeAccounts
+        return { claudeAccounts: rows } as never
+      }
+    }
+    mod.initClaudeAccounts?.(settings, () => undefined)
   })
   afterEach(() => {
     vi.useRealTimers()

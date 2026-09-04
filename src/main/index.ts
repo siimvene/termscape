@@ -3500,8 +3500,9 @@ app.whenReady().then(async () => {
   initTelemetry(() => settingsStore.get())
   initLicense(() => {})
   // Lazy getter: sshProjectManager is created just below, so a remote account op (which only runs
-  // after the user has connected an SSH project) always sees the live manager.
-  initClaudeAccounts(() => sshProjectManager)
+  // after the user has connected an SSH project) always sees the live manager. The store is where
+  // the account ROW is written (core's `claudeAccountsHandlers`, bound through ipcMain here).
+  initClaudeAccounts(settingsStore, () => sshProjectManager)
   // Machine-scoped managed Codex accounts (S6). Its synchronous boot migration of legacy long
   // CODEX_HOMEs runs here, before the renderer restores its PTYs — an already-persisted managed
   // Codex node must see its migrated (SUN_LEN-safe) home on its very first spawn. Same lazy SSH

@@ -11,14 +11,20 @@
  * the skill case and the local-fallback case redden.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { existsSync, mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'fs'
 import os from 'os'
 import path from 'path'
 import { initPlatform, resetPlatformForTests } from './platform'
 import { fakePlatform, type FakePlatform } from './platform-fake'
 import { IPC } from '../shared/ipc'
-import { registerClaudeAccountsIpc, installHooksIntoLocalAccounts } from './claude-accounts-service'
+import {
+  registerClaudeAccountsIpc as registerWithDeps,
+  installHooksIntoLocalAccounts,
+  type ClaudeAccountsDeps
+} from './claude-accounts-service'
 import { accountConfigDir } from './claude-accounts-core'
+import { SettingsStore } from './settings-store'
+import { NEW_CLAUDE_ACCOUNT_LABEL, type Settings } from '../shared/types'
 
 // The hook + TUI writers are exercised by their own suites; here they only have to be OBSERVED,
 // and a real write would touch the account dir this file then asserts about.
@@ -35,6 +41,10 @@ vi.mock('./agents/hooks/claude', () => ({
 
 let fake: FakePlatform
 let userDataDir: string
+let settings: SettingsStore
+/** Registers with the real settings store over the temp dir (the row's home) plus `deps`. */
+const registerClaudeAccountsIpc = (deps: Omit<ClaudeAccountsDeps, 'settings'> = {}): void =>
+  registerWithDeps({ settings, ...deps })
 
 const call = (channel: string, ...args: unknown[]): Promise<any> =>
   Promise.resolve(fake.handlers[channel](...args))
@@ -45,6 +55,8 @@ beforeEach(() => {
   userDataDir = mkdtempSync(path.join(os.tmpdir(), 'nt-accounts-'))
   fake = fakePlatform({ userDataDir })
   initPlatform(fake)
+  settings = new SettingsStore()
+  settings.init()
 })
 afterEach(() => {
   resetPlatformForTests()
@@ -150,11 +162,15 @@ describe('the remote leg is resolved lazily, and its absence falls back to LOCAL
         readLogin: async () => JSON.stringify({ oauthAccount: { email: 'r@h.com' } }),
         remove: async (projectId, id) => {
           calls.push(`rm:${projectId}:${id}`)
-        }
+        },
+        hostKey: (projectId) => (projectId === 'p1' ? 'me@box' : undefined)
       })
     })
-    const res = await call(IPC.claudeAccountsAdd, { projectId: 'p1' })
+    const res = await call(IPC.claudeAccountsAdd, { projectId: 'p1', host: 'renderer@says' })
     expect(res.configDir).toBe(`~/.nodeterm/claude-accounts/${res.id}`)
+    // The row is pinned to the host the MANAGER names, not the one the renderer sent.
+    expect(res.account.host).toBe('me@box')
+    expect(settings.get().claudeAccounts).toEqual([res.account])
     // Nothing local was created or installed for a remote account.
     expect(existsSync(accountConfigDir(userDataDir, res.id))).toBe(false)
     expect(installed).toEqual([])
@@ -163,13 +179,150 @@ describe('the remote leg is resolved lazily, and its absence falls back to LOCAL
     })
     await call(IPC.claudeAccountsRemove, res.id, { projectId: 'p1' })
     expect(calls).toEqual([`add:p1:${res.id}`, `rm:p1:${res.id}`])
+    expect(settings.get().claudeAccounts).toEqual([])
+  })
+
+  it('a remote add whose project is not connected still registers the pending row under the renderer\'s host', async () => {
+    registerClaudeAccountsIpc({
+      remote: () => ({
+        add: async () => null, // not connected: nothing minted anywhere
+        readLogin: async () => null,
+        remove: async () => {},
+        hostKey: () => undefined
+      })
+    })
+    const res = await call(IPC.claudeAccountsAdd, { projectId: 'p1', host: 'me@box' })
+    expect(res.configDir).toBe('')
+    expect(res.account).toMatchObject({ id: res.id, host: 'me@box', pending: true })
+    expect(existsSync(accountConfigDir(userDataDir, res.id))).toBe(false)
   })
 
   it('a ctx with a projectId but NO wired remote takes the local path (Server Edition)', async () => {
     registerClaudeAccountsIpc({ remote: () => undefined })
-    const res = await call(IPC.claudeAccountsAdd, { projectId: 'p1' })
+    // A renderer `host` on a LOCAL add is ignored: the dir was minted here, so the row says so.
+    const res = await call(IPC.claudeAccountsAdd, { projectId: 'p1', host: 'me@box' })
     expect(res.configDir).toBe(accountConfigDir(userDataDir, res.id))
     expect(existsSync(res.configDir)).toBe(true)
+    expect(res.account.host).toBeUndefined()
+  })
+})
+
+// Row MEMBERSHIP is this module's, written through the store's read-modify-write inside the same
+// verb that mints / tears down the config dir — the same ownership `codex-accounts-service.ts`
+// has. Before this the renderer appended the row to its OWN snapshot and full-saved it, so two
+// browser tabs adding at once left the later save the winner: one logged-in config dir on disk
+// with no row pointing at it.
+//
+// MUTATIONS:
+//  - return from `add` before the `mutate` ⇒ the two-tabs case reddens (a dir with no row).
+//  - drop the rollback in `add`'s catch ⇒ the failed-persist case reddens (an orphan is left).
+//  - delete the row before the dir in `remove` ⇒ the row-last case reddens.
+//  - let a snapshot rewrite `host` in the store ⇒ the relay-host case reddens (dir survives).
+describe('claude-accounts — the shell owns row membership', () => {
+  const rows = (): string[] => settings.get().claudeAccounts.map((a) => a.id)
+  const onDisk = (): string[] =>
+    (JSON.parse(readFileSync(path.join(userDataDir, 'settings.json'), 'utf-8')) as Settings)
+      .claudeAccounts.map((a) => a.id)
+
+  it('add registers a pending row in settings and returns it; the row is on disk before add resolves', async () => {
+    registerClaudeAccountsIpc()
+    const { id, configDir, account } = await call(IPC.claudeAccountsAdd)
+    expect(account).toMatchObject({ id, label: NEW_CLAUDE_ACCOUNT_LABEL, pending: true })
+    expect(typeof account.createdAt).toBe('number')
+    expect(account.host).toBeUndefined()
+    expect(settings.get().claudeAccounts).toEqual([account])
+    expect(onDisk()).toEqual([id])
+    expect(existsSync(configDir)).toBe(true)
+  })
+
+  it('two concurrent adds (two browser tabs) both keep their rows AND their dirs', async () => {
+    registerClaudeAccountsIpc()
+    const [a, b] = await Promise.all([call(IPC.claudeAccountsAdd), call(IPC.claudeAccountsAdd)])
+    expect(rows().sort()).toEqual([a.id, b.id].sort())
+    expect(onDisk().sort()).toEqual([a.id, b.id].sort())
+    expect(existsSync(a.configDir)).toBe(true)
+    expect(existsSync(b.configDir)).toBe(true)
+  })
+
+  it('a label edit from a snapshot taken before a concurrent add does not drop the added row', async () => {
+    registerClaudeAccountsIpc()
+    const { id: first } = await call(IPC.claudeAccountsAdd)
+    const staleSnapshot = settings.get()
+    const { id: second } = await call(IPC.claudeAccountsAdd)
+    await settings.save({
+      ...staleSnapshot,
+      claudeAccounts: staleSnapshot.claudeAccounts.map((a) => ({ ...a, label: 'work' }))
+    })
+    expect(rows()).toEqual([first, second])
+    expect(onDisk()).toEqual([first, second])
+    expect(settings.get().claudeAccounts[0].label).toBe('work')
+  })
+
+  it('add tears the minted dir down again when the row cannot be persisted (no orphan, no row)', async () => {
+    let minted: string | undefined
+    const failing = {
+      get: () => settings.get(),
+      mutate: async (fn: (s: Settings) => Settings) => {
+        minted = fn(settings.get()).claudeAccounts[0]?.id
+        throw new Error('disk full')
+      }
+    }
+    registerWithDeps({ settings: failing })
+    await expect(call(IPC.claudeAccountsAdd)).rejects.toThrow(/disk full/)
+    expect(minted).toBeDefined()
+    expect(existsSync(accountConfigDir(userDataDir, minted as string))).toBe(false)
+    expect(rows()).toEqual([])
+  })
+
+  it('remove deletes the row LAST: the row is gone only once the dir is', async () => {
+    registerClaudeAccountsIpc()
+    const { id, configDir } = await call(IPC.claudeAccountsAdd)
+    await call(IPC.claudeAccountsRemove, id)
+    expect(existsSync(configDir)).toBe(false)
+    expect(rows()).toEqual([])
+    expect(onDisk()).toEqual([])
+  })
+
+  it('remove of a REMOTE row (host set) with no remote leg deletes only the row — it owns no local dir', async () => {
+    registerClaudeAccountsIpc()
+    await settings.mutate((s) => ({
+      ...s,
+      claudeAccounts: [
+        ...s.claudeAccounts,
+        { id: 'remote-1', label: 'box', host: 'me@box', pending: true, createdAt: 1 }
+      ]
+    }))
+    // A local dir under that id would belong to someone else's mint; it must survive.
+    const stray = accountConfigDir(userDataDir, 'remote-1')
+    mkdirSync(stray, { recursive: true })
+    await call(IPC.claudeAccountsRemove, 'remote-1')
+    expect(existsSync(stray)).toBe(true)
+    expect(rows()).toEqual([])
+  })
+
+  it('remove of an id with no row still tears its local dir down (cleans a pre-fix orphan)', async () => {
+    registerClaudeAccountsIpc()
+    const orphan = accountConfigDir(userDataDir, 'orphan-1')
+    mkdirSync(orphan, { recursive: true })
+    await call(IPC.claudeAccountsRemove, 'orphan-1')
+    expect(existsSync(orphan)).toBe(false)
+  })
+
+  // The SERIOUS finding: `settings:save` is relay-reachable, so a peer's snapshot that stamps a
+  // `host` onto a local row would make this verb skip the local dir on removal — a logged-in
+  // credential left on disk while the UI reports the account gone. The store keeps `host` from
+  // its own row, so the snapshot changes nothing and the dir is deleted.
+  it('a snapshot cannot dress a local row up as remote to make remove skip its dir', async () => {
+    registerClaudeAccountsIpc()
+    const { id, configDir } = await call(IPC.claudeAccountsAdd)
+    await settings.save({
+      ...settings.get(),
+      claudeAccounts: settings.get().claudeAccounts.map((a) => ({ ...a, host: 'evil@peer' }))
+    })
+    expect(settings.get().claudeAccounts[0].host).toBeUndefined()
+    await call(IPC.claudeAccountsRemove, id)
+    expect(existsSync(configDir)).toBe(false)
+    expect(rows()).toEqual([])
   })
 })
 

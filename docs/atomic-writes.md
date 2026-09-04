@@ -109,6 +109,17 @@ writes and are not covered by this atomicity claim.
 silent about a second — and a second is not hypothetical: the Server Edition takes a `--data-dir`,
 so two servers can be aimed at one directory and a desktop app can share it.
 
+Atomicity is not the only thing a second process breaks. A per-process write queue serializes
+that process's writers, but a read-modify-write applied to an in-memory cache the other process
+has since overtaken is a *logical* lost update: the rename is whole, and it publishes a list from
+which the other process's row is simply absent. `settings-store.ts` therefore re-reads
+`settings.json` at the start of every write, applies the change to what is on disk, and re-reads
+once more if the file's inode/mtime/size changed before the write. That shrinks the window from
+"however long the cache has been stale" to the gap between that check and the rename; it is a
+check-then-act, not a lock, and a write landing inside the gap is still overwritten. The complete
+fix is an advisory lock held across read + rename, or an in-file version the rename is conditioned
+on; neither exists yet.
+
 **A unique name owes cleanup.** A fixed name self-healed — the next save simply overwrote the
 litter. A unique one does not, so every caller must remove its own temp on failure.
 `writeFileAtomic` does that for you; a site that builds its own write sequence must do it by hand.

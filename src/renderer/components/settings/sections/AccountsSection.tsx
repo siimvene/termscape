@@ -547,14 +547,26 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
 
   // `host` set → create the account dir + hook ON that SSH host (via the ctx projectId); the row
   // then carries the host chip and only appears in that host's projects.
+  //
+  // The SHELL registers the row: `add()` appends it to settings inside the store's own chain and
+  // resolves only once that is on disk. The mirror below is display state for THIS tab; the
+  // snapshot save it schedules cannot add, drop or duplicate a row, nor change its `host`
+  // (settings-store.ts reconciles `claudeAccounts` against its own membership, field by field), so
+  // two tabs adding at once both keep their accounts. Before this the renderer appended the row
+  // itself and full-saved it, and the later of two tabs' saves erased the other's row while its
+  // logged-in config dir stayed on disk.
   const onAddAccount = async (host?: string): Promise<void> => {
     if (addingOn) return // one setup at a time — the buttons are disabled, this is the guard
     const projectId = host ? projectIdForHost(host) : undefined
     setAddingOn(host ?? LOCAL_TARGET)
     setAddError(null)
-    let added: { id: string; versionSupported: boolean }
+    let added: { id: string; versionSupported: boolean; account: ClaudeAccount }
     try {
-      added = await window.nodeTerminal.claudeAccounts.add(projectId ? { projectId } : undefined)
+      // `host` rides along for the one case the shell cannot name it itself (the project is not
+      // connected, so nothing is minted anywhere yet); a local add ignores it.
+      added = await window.nodeTerminal.claudeAccounts.add(
+        projectId ? { projectId, host } : undefined
+      )
     } catch (e) {
       // The remote path does not reject on a failed setup (it answers with an empty configDir and
       // lets the login node report the connection error), so reaching here means the call itself
@@ -579,14 +591,8 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
     // Non-blocking: the account still isolates config, but an old CLI's unscoped macOS keychain
     // service would collide across accounts — surface a dismissable warning.
     if (!added.versionSupported) setVersionWarning(true)
-    const account: ClaudeAccount = {
-      id: added.id,
-      label: 'New account',
-      pending: true,
-      createdAt: Date.now(),
-      ...(host ? { host } : {})
-    }
-    applyAccounts((accs) => [...accs, account])
+    const { account } = added
+    applyAccounts((accs) => (accs.some((a) => a.id === account.id) ? accs : [...accs, account]))
     // Fresh Add: the dir was minted milliseconds ago, so a capture inside the grace is impossible
     // — open the login node immediately instead of sitting 5 silent seconds (review finding).
     // Unconditionally, not via a 0 ms race: see `runLogin`.
@@ -601,6 +607,10 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
     // Removing a pending account: stop the 5-minute waitLogin poll loop first.
     if (account.pending) await window.nodeTerminal.claudeAccounts.cancelWaitLogin(account.id)
     const projectId = projectIdForHost(account.host)
+    // The SHELL deletes the row (after the config dir, for a local account; a row carrying `host`
+    // has its dir removed over ssh when the project is connected and never locally). The filter
+    // below is this tab's mirror — and because the store keeps membership from its own list, no
+    // other tab's stale snapshot can bring the row back.
     await window.nodeTerminal.claudeAccounts.remove(
       account.id,
       projectId ? { projectId } : undefined

@@ -7,7 +7,7 @@
 // late can never revive an account the user removed, nor clobber one that already changed. Nothing
 // here fabricates an account: an unauthenticated / unreadable home drops out of the resolved set.
 
-import type { CodexAccount } from '@shared/codex-account'
+import { NEW_CODEX_ACCOUNT_LABEL, type CodexAccount } from '@shared/codex-account'
 
 export interface ResolvedCodexAccount {
   id: string
@@ -57,7 +57,7 @@ export function applyResolvedCodexAccounts(
     return {
       ...account,
       label:
-        account.label === 'New Codex account' && identity.email ? identity.email : account.label,
+        account.label === NEW_CODEX_ACCOUNT_LABEL && identity.email ? identity.email : account.label,
       email: identity.email ?? undefined,
       pending: false
     }

@@ -12,10 +12,8 @@ import { registerCodexIdentityIpc } from '../../core/codex-identity-caps'
 import { UNKNOWN_CODEX_IDENTITY_CAPS } from '@shared/types'
 import { startUsageService } from '../../core/usage/usage-service'
 import { registerClaudeAccountsIpc } from '../../core/claude-accounts-service'
-import {
-  registerCodexAccountsIpc,
-  type CodexAccountRowStore
-} from '../../core/codex-accounts-service'
+import { registerCodexAccountsIpc } from '../../core/codex-accounts-service'
+import type { AccountRowStore } from '../../core/settings-store'
 import { codexUsageAccounts } from '../../core/codex-accounts-core'
 import { codexHomeFor } from '../../core/codex-config-dir'
 import {
@@ -32,9 +30,10 @@ export function registerCoreHandlers(
   platform: ServerPlatform,
   deps: {
     getSettings: () => Settings
-    /** The settings store itself: the Codex account verbs write their ROW membership through its
-     *  `mutate` (codex-accounts-service.ts), not through a renderer snapshot. */
-    settingsStore: CodexAccountRowStore
+    /** The settings store itself: the Claude and Codex account verbs write their ROW membership
+     *  through its `mutate` (claude-accounts-service.ts / codex-accounts-service.ts), not through
+     *  a renderer snapshot. */
+    settingsStore: AccountRowStore
     downloadTickets?: DownloadTickets
     /** See fs-handlers' dep of the same name — the canvas-image write directory. */
     localProjectCwd?: (projectId: string) => string | undefined
@@ -109,7 +108,8 @@ export function registerCoreHandlers(
   // `control unavailable` by name), so a per-account skill file would point at nothing.
   // No `remote`: the Server Edition has no SSH-project manager, so an `AccountCtx` carrying a
   // projectId takes the LOCAL path — the same degrade desktop takes before its manager exists.
-  registerClaudeAccountsIpc()
+  // The store is where the account ROW is written, in the same verb that mints the dir.
+  registerClaudeAccountsIpc({ settings: deps.settingsStore })
 
   // Managed CODEX accounts, the same five verbs the desktop serves: add / wait-login / cancel-wait
   // / identity + system-identity / remove (src/core/codex-accounts-service.ts). Until this call the

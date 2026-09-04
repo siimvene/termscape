@@ -20,6 +20,7 @@ import {
   UNKNOWN_CLAUDE_CLI_CAPS,
   UNKNOWN_GROK_CLI_CAPS,
   type BoardLogApi,
+  type ClaudeAccount,
   type LogApi,
   type LogRecord,
   type BoardLogReadResult,
@@ -953,6 +954,7 @@ export function buildClaudeAccountsApi(client: RpcClient): Pick<NodeTerminalApi,
           id: string
           configDir: string
           versionSupported: boolean
+          account: ClaudeAccount
         }>,
       waitLogin: (id, ctx) =>
         client.request(IPC.claudeAccountsWaitLogin, id, ctx) as Promise<{ email: string } | null>,

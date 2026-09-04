@@ -1180,6 +1180,12 @@ export interface CustomAgent {
  * remote accounts) injected as CLAUDE_CONFIG_DIR at spawn. The claude CLI owns login,
  * credential storage, and token refresh inside that dir — we never write credentials.
  */
+/** The label a freshly minted Claude account carries until its login captures an email. The
+ *  renderer's capture (`renderer/lib/accountHeal.ts`) promotes exactly this string to the email,
+ *  and the settings store's snapshot reconcile treats it as "not an edit" for the same reason —
+ *  one definition, shared across the seam. */
+export const NEW_CLAUDE_ACCOUNT_LABEL = 'New account'
+
 export interface ClaudeAccount {
   id: string
   /** Display label; defaults to the captured email. */
@@ -1450,10 +1456,13 @@ export interface Settings {
    *  wherever the agent would. Empty/absent = the builtin default, byte-identical to before this
    *  setting existed. Keyed by builtin id only: custom agents already own their `launchCmd`. */
   agentLaunchCommands: Partial<Record<BuiltinAgentId, string>>
-  /** Managed Claude accounts (config-dir isolated). See ClaudeAccount. */
+  /** Managed Claude accounts (config-dir isolated). See ClaudeAccount. MEMBERSHIP (which rows
+   *  exist) is the shell's, written by `claude-accounts:add` / `remove` through the settings
+   *  store's read-modify-write; a renderer snapshot save only carries a row's display edits
+   *  (label, color, the login-capture email) and can change nothing else on it — never `host`. */
   claudeAccounts: ClaudeAccount[]
   /** Managed Codex accounts (CODEX_HOME isolated, machine-scoped by `host`). See CodexAccount.
-   *  Renderer-owned in settings.json exactly like `claudeAccounts`; main owns only fs lifecycle. */
+   *  Same ownership as `claudeAccounts`: the shell writes membership, the renderer edits display. */
   codexAccounts: CodexAccount[]
   /** Custom display label for the SYSTEM Claude account (~/.claude) in pickers/settings.
    *  Empty = unset → fall back to the detected login email, else "System account". */
@@ -2500,17 +2509,33 @@ export interface ChatApi {
  *  account lives on that host (config dir + login + removal happen over ssh). Omit it for local. */
 export interface AccountSshCtx {
   projectId?: string
+  /** `user@host` key the renderer scoped an ADD to. Read by the shell only on the remote leg, and
+   *  only when the SSH manager cannot name the host itself (project not connected, nothing minted
+   *  anywhere yet); a local add ignores it, so a row's `host` can never point away from a home
+   *  that was minted on this machine. */
+  host?: string
 }
+/**
+ * Managed Claude accounts. The account list lives in `settings.json` (`claudeAccounts`); its
+ * MEMBERSHIP is written by the shell inside `add` / `remove` (a read-modify-write on the settings
+ * store), while the renderer keeps a row's display edits. A renderer snapshot save can neither
+ * add nor drop a row, nor change its `host`.
+ */
 export interface ClaudeAccountsApi {
-  /** Mint a new managed account: create its config dir, install the hook, check the CLI version.
-   *  With an SSH `ctx` the dir + hook are created on the remote host instead of locally. */
-  add(ctx?: AccountSshCtx): Promise<{ id: string; configDir: string; versionSupported: boolean }>
+  /** Mint a new managed account: create its config dir, install the hook, check the CLI version,
+   *  and register its (pending) row in settings. Resolves once the row is persisted. With an SSH
+   *  `ctx` the dir + hook are created on the remote host instead of locally and the row carries
+   *  that `host`. Returns the row as registered. */
+  add(
+    ctx?: AccountSshCtx
+  ): Promise<{ id: string; configDir: string; versionSupported: boolean; account: ClaudeAccount }>
   /** Poll the account's `.claude.json` for a completed login; null on timeout/cancel. With an SSH
    *  `ctx` the poll reads the remote host's copy over ssh. */
   waitLogin(id: string, ctx?: AccountSshCtx): Promise<{ email: string } | null>
   /** Cancel an in-flight `waitLogin` for this account. */
   cancelWaitLogin(id: string): Promise<void>
-  /** Delete a managed account's config dir (recursive). With an SSH `ctx`, `rm -rf` on the host. */
+  /** Delete a managed account's config dir (recursive) and then its row. With an SSH `ctx`,
+   *  `rm -rf` on the host; a row pinned to a `host` never has a LOCAL dir deleted for it. */
   remove(id: string, ctx?: AccountSshCtx): Promise<void>
 }
 
@@ -2518,7 +2543,7 @@ export interface ClaudeAccountsApi {
  * Machine-scoped managed Codex accounts (S6). LOCAL accounts on this Mac are reachable through
  * PR 5; SSH remote accounts land in PR 6. The account list lives in `settings.json`
  * (`codexAccounts`); its MEMBERSHIP is written by the shell inside `add` / `remove` (a
- * read-modify-write on the settings store), while the renderer keeps a row's display edits. Unlike
+ * read-modify-write on the settings store), while the renderer keeps a row's display edits. Like
  * `claudeAccounts`, a renderer snapshot save can neither add nor drop a Codex row.
  */
 export interface CodexAccountsApi {

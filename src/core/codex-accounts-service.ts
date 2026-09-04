@@ -50,8 +50,8 @@ import {
 import { readCodexAccountAt } from './codex-session-name'
 import { platform } from './platform'
 import { findInLoginPath } from './pty-manager'
-import type { CodexAccount } from '../shared/codex-account'
-import type { Settings } from '../shared/types'
+import { NEW_CODEX_ACCOUNT_LABEL, type CodexAccount } from '../shared/codex-account'
+import type { AccountRowStore } from './settings-store'
 
 const execFileP = promisify(execFile)
 const LOGIN_POLL_MS = 2000
@@ -84,17 +84,14 @@ export function isCodexAccountRemoving(accountId: string): boolean {
 
 /**
  * The slice of `SettingsStore` the account verbs need: the live cache, and the read-modify-write
- * that is the ONLY writer of `codexAccounts` membership. Narrow on purpose — the desktop passes its
- * real store, the Server Edition its own, and a test a store over a temp dir.
+ * that is the ONLY writer of `codexAccounts` membership (`settings-store.ts` `AccountRowStore`,
+ * shared with the Claude service). Narrow on purpose — the desktop passes its real store, the
+ * Server Edition its own, and a test a store over a temp dir.
  */
-export interface CodexAccountRowStore {
-  get(): Settings
-  mutate(fn: (current: Settings) => Settings): Promise<Settings>
-}
+export type CodexAccountRowStore = AccountRowStore
 
-/** The label a freshly minted account carries until its login captures an email
- *  (`renderer/state/codexAccountReconcile.ts` promotes exactly this string to the email). */
-export const NEW_CODEX_ACCOUNT_LABEL = 'New Codex account'
+/** Re-exported from `shared/codex-account.ts` for this module's existing importers. */
+export { NEW_CODEX_ACCOUNT_LABEL }
 
 export interface CodexAccountsDeps {
   /** Where the account ROW lives. Required: a shell that mints homes without registering rows is

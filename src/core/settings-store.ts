@@ -1,10 +1,15 @@
-import { readFileSync } from "fs";
+import { readFileSync, statSync } from "fs";
 import path from "path";
 import { writeFileAtomic } from "./fs-atomic";
 import { IPC } from "../shared/ipc";
 import { platform } from "./platform";
-import { DEFAULT_SETTINGS, type Settings } from "../shared/types";
-import type { CodexAccount } from "../shared/codex-account";
+import {
+  DEFAULT_SETTINGS,
+  NEW_CLAUDE_ACCOUNT_LABEL,
+  type ClaudeAccount,
+  type Settings,
+} from "../shared/types";
+import { NEW_CODEX_ACCOUNT_LABEL, type CodexAccount } from "../shared/codex-account";
 
 /**
  * Merge a possibly-partial/legacy `Settings` object over `DEFAULT_SETTINGS`. A plain
@@ -77,31 +82,55 @@ function mergeSettings(saved: Partial<Settings> | null | undefined): Settings {
 /** The shape every shell-owned account row shares: an id, and a login-resolution flag. */
 interface OwnedAccountRow {
   id: string;
+  label?: string;
   pending?: boolean;
 }
 
 /**
+ * The slice of `SettingsStore` an account service needs: the live cache, and the read-modify-write
+ * that is the ONLY writer of a shell-owned account list's membership. Narrow on purpose — the
+ * desktop passes its real store, the Server Edition its own, and a test a store over a temp dir.
+ */
+export interface AccountRowStore {
+  get(): Settings;
+  mutate(fn: (current: Settings) => Settings): Promise<Settings>;
+}
+
+/**
+ * The fields of a shell-owned account row the RENDERER may still write through its snapshot save:
+ * the display edits (label, color) and the login-capture payload (email). Everything else on the
+ * row — `id`, `host`, `createdAt`, and whatever a later field turns out to be — is the shell's,
+ * and a snapshot cannot change it. `host` is the one that matters: it is what removal reads to
+ * decide whether the credential home is on THIS machine (deleted) or on an SSH host (left alone),
+ * and `settings:save` is reachable by a paired relay peer (it is not in `HOST_ONLY_CHANNELS`), so
+ * a snapshot that could rewrite `host` could turn a local account into one whose home is never
+ * deleted while the UI reports the removal as complete.
+ */
+const RENDERER_OWNED_FIELDS = ["label", "color", "email"] as const;
+
+/**
  * Reconcile a SHELL-OWNED account list against a renderer snapshot. The renderer's `settings:save`
- * is a full snapshot of whatever that tab hydrated, so with two Server Edition tabs (or a tab and
- * its reload) the later save REPLACES the earlier one's rows: an account tab A added (and whose
- * credential home tab A's `add` already minted on disk) vanished from settings when tab B, still
- * holding the snapshot from before, saved a label edit — an authenticated `auth.json` nothing can
- * list, switch to, or remove. Union by id would fix the loss but resurrect a removed row for the
- * same reason. So MEMBERSHIP is the cache's alone:
- *
- *  - a row only the cache has is KEPT (the renderer cannot drop a row; `remove` goes through
- *    `mutate`, below);
- *  - a row only the snapshot has is DROPPED (the renderer cannot add a row; `add` goes through
+ * is a full snapshot of whatever that tab loaded plus its own edits, and two tabs (Server Edition)
+ * or a tab and the shell (an add / remove verb) can hold different lists at once. Membership is the
+ * shell's, so:
+ *  - a row only the CACHE has is kept (it was added through `mutate` after the snapshot was taken);
+ *  - a row only the SNAPSHOT has is dropped (the renderer cannot mint a row — it goes through
  *    `mutate` — and a snapshot that predates a removal cannot bring the row back);
- *  - a row both have takes the snapshot's FIELDS (label, color: the edits the renderer still owns),
- *    EXCEPT that login resolution is monotonic: a snapshot that still says `pending` for a row the
- *    cache has already resolved predates the login capture, and its whole row is the older one —
- *    keeping it would flip a usable account back to pending (and out of every picker) until some
- *    tab's reconcile loop noticed.
+ *  - a row both have is merged FIELD BY FIELD: the shell-owned fields (`id`, `host`, `createdAt`,
+ *    …) come from the cache, only `RENDERER_OWNED_FIELDS` are taken from the snapshot (a key that
+ *    is present, even as `undefined`, is an edit — that is how a color is cleared; an absent key
+ *    is not one, and keeps the cache's value);
+ *  - login resolution is MONOTONIC: a snapshot may flip a row `pending → resolved` (that flip is
+ *    the renderer's capture, and it carries the email), but a snapshot that still says `pending`
+ *    for a row the cache has already resolved predates the capture and cannot un-resolve it. Its
+ *    label is still an edit the user may have typed in that stale tab, so it is honoured — EXCEPT
+ *    when it is the mint-time placeholder, which the capture replaced with the email: taking that
+ *    back would re-label a resolved account "New account" for as long as the stale tab lives.
  */
 function reconcileOwnedAccountList<T extends OwnedAccountRow>(
   cache: readonly T[] | undefined,
   snapshot: unknown,
+  placeholderLabel: string,
 ): T[] {
   const incoming = new Map<string, T>();
   if (Array.isArray(snapshot)) {
@@ -114,10 +143,32 @@ function reconcileOwnedAccountList<T extends OwnedAccountRow>(
   return (cache ?? []).map((row) => {
     const edited = incoming.get(row.id);
     if (!edited) return row;
-    if (!row.pending && edited.pending) return row;
-    return edited;
+    const next: T = { ...row };
+    for (const field of RENDERER_OWNED_FIELDS) {
+      if (field in edited) (next as Record<string, unknown>)[field] = edited[field as keyof T];
+    }
+    if (row.pending) {
+      // Still pending in the cache: the snapshot may resolve it (or leave it pending).
+      if ("pending" in edited) next.pending = edited.pending;
+      else delete next.pending;
+    } else if (edited.pending && edited.label === placeholderLabel) {
+      // Stale on resolution AND still carrying the placeholder: not an edit, the capture's label
+      // stands. (A non-placeholder label from the same stale tab was taken above.)
+      next.label = row.label;
+    }
+    return next;
   });
 }
+
+/** What `readDisk` saw. `stamp` identifies the file version the base was read from; null when the
+ *  file was absent or unreadable (then `base` is the cache — see `readDisk`). */
+interface DiskRead {
+  base: Settings;
+  stamp: string | null;
+}
+
+/** Bounded re-reads when another PROCESS lands a write between our read and our write. */
+const RMW_MAX_RETRIES = 3;
 
 /**
  * Stores user settings in settings.json. Keeps a synchronous cache so the PtyManager
@@ -125,10 +176,19 @@ function reconcileOwnedAccountList<T extends OwnedAccountRow>(
  *
  * Two write paths, one FIFO chain, one persist:
  *  - `save(snapshot)` — the renderer's full snapshot. Every key is taken as sent EXCEPT the
- *    shell-owned account lists, which are reconciled against the cache (`reconcileOwnedAccountList`).
- *  - `mutate(fn)` — the shell's own read-modify-write: `fn` runs against the LATEST cache, on the
- *    chain, and its result is persisted as-is. Membership of `codexAccounts` is written only here
- *    (`codex-accounts-service.ts` add/remove), so two concurrent adds compose instead of racing.
+ *    shell-owned account lists, which are reconciled against the store's own membership
+ *    (`reconcileOwnedAccountList`).
+ *  - `mutate(fn)` — the shell's own read-modify-write: `fn` runs against the LATEST settings, on
+ *    the chain, and its result is persisted as-is. Membership of `codexAccounts` and
+ *    `claudeAccounts` is written only here (`codex-accounts-service.ts` /
+ *    `claude-accounts-service.ts` add/remove), so two concurrent adds compose instead of racing.
+ *
+ * "Latest" means the FILE, not this process's cache (`readModifyWrite`). The chain serializes
+ * writers inside ONE process; a second process on the same directory (two Server Edition
+ * instances on one `--data-dir`, or a desktop sharing it — docs/atomic-writes.md) has its own
+ * cache and its own chain, and a mutate applied to a cache that another process has since
+ * overtaken would publish that process's add straight out of existence. Every write therefore
+ * re-reads settings.json first and applies itself to what is actually on disk.
  */
 export class SettingsStore {
   private cache: Settings = DEFAULT_SETTINGS;
@@ -175,14 +235,16 @@ export class SettingsStore {
   }
 
   /**
-   * Read-modify-write on the save chain: `fn` sees the LATEST cache (every earlier save or mutate
-   * has landed), and its result is persisted verbatim — this is the only path that changes the
-   * MEMBERSHIP of a shell-owned account list. A throw from `fn` rejects this call and leaves the
-   * cache and the disk untouched; the chain survives for the next caller. Resolves with what was
-   * persisted.
+   * Read-modify-write on the save chain: `fn` sees the LATEST settings — re-read from disk, so a
+   * write another process landed since this one's cache was filled is part of the base (every
+   * earlier save or mutate of THIS process has landed too, by the chain) — and its result is
+   * persisted verbatim. This is the only path that changes the MEMBERSHIP of a shell-owned
+   * account list. `fn` must be pure: it is re-run against a fresh read when a concurrent write is
+   * detected (`readModifyWrite`). A throw from `fn` rejects this call and leaves the cache and the
+   * disk untouched; the chain survives for the next caller. Resolves with what was persisted.
    */
   mutate(fn: (current: Settings) => Settings): Promise<Settings> {
-    return this.enqueue(() => this.persist(mergeSettings(fn(this.cache))));
+    return this.enqueue(() => this.readModifyWrite((base) => fn(base)));
   }
 
   private enqueue<T>(job: () => Promise<T>): Promise<T> {
@@ -199,17 +261,85 @@ export class SettingsStore {
   }
 
   private saveNow(settings: Settings): Promise<Settings> {
-    const next = mergeSettings(settings);
     // Membership of these lists is the shell's: `mutate` above is the only writer that adds or
-    // removes a row. `claudeAccounts` is NOT listed yet — its add/remove still come from the
-    // renderer as a full snapshot, and reconciling a list whose rows are only ever added that way
-    // would drop every new account. It joins once `claude-accounts-service.ts` writes its rows
-    // through `mutate` too.
-    next.codexAccounts = reconcileOwnedAccountList<CodexAccount>(
-      this.cache.codexAccounts,
-      settings?.codexAccounts,
-    );
-    return this.persist(next);
+    // removes a row (`codex-accounts-service.ts` and `claude-accounts-service.ts`, add / remove).
+    // The reconcile runs against the settings ON DISK, not this process's cache, for the same
+    // reason `mutate` does — a snapshot save is the write most likely to be stale across two
+    // processes, and its job here is to carry display edits, never to decide membership.
+    return this.readModifyWrite((base) => {
+      const next = mergeSettings(settings);
+      next.codexAccounts = reconcileOwnedAccountList<CodexAccount>(
+        base.codexAccounts,
+        settings?.codexAccounts,
+        NEW_CODEX_ACCOUNT_LABEL,
+      );
+      next.claudeAccounts = reconcileOwnedAccountList<ClaudeAccount>(
+        base.claudeAccounts,
+        settings?.claudeAccounts,
+        NEW_CLAUDE_ACCOUNT_LABEL,
+      );
+      return next;
+    });
+  }
+
+  /**
+   * The settings currently ON DISK, plus a stamp naming that file version. The stamp is taken
+   * BEFORE the bytes are read: if a rename lands in between, the stamp is the older file's and
+   * the bytes the newer's, so the pre-write comparison in `readModifyWrite` sees a change and
+   * re-reads — the safe direction. A missing or unparseable file yields the CACHE as the base (a
+   * fresh install has nothing on disk yet, and a corrupt file must not be "repaired" by a mutate
+   * that wipes every setting to the defaults) with a null stamp, which never matches a later
+   * stat, so such a write is re-checked once and then lands.
+   */
+  private readDisk(): DiskRead {
+    const stamp = this.diskStamp();
+    if (stamp === null) return { base: this.cache, stamp: null };
+    try {
+      const raw = readFileSync(this.filePath, "utf-8");
+      return { base: mergeSettings(JSON.parse(raw)), stamp };
+    } catch {
+      return { base: this.cache, stamp: null };
+    }
+  }
+
+  /** Identity of the file version on disk: inode + mtime + size. A `writeFileAtomic` publishes a
+   *  NEW inode (temp file, renamed over), so a concurrent atomic writer changes the stamp even on
+   *  a filesystem with coarse mtime; null when the file does not exist. */
+  private diskStamp(): string | null {
+    try {
+      const st = statSync(this.filePath);
+      return `${st.ino}:${st.mtimeMs}:${st.size}`;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Read-modify-write against the FILE. `apply` runs on what is on disk right now (merged like
+   * `init` merges it), and the result is written only if the file has not changed since that
+   * read; if it has, the loop re-reads and re-applies (bounded — after `RMW_MAX_RETRIES` it
+   * writes anyway rather than spin against a hot writer, so the LAST retry can still lose to a
+   * write that lands in the window below).
+   *
+   * WHAT THIS DOES AND DOES NOT GUARANTEE. Within one process the chain makes every write see
+   * every earlier one — that part is exact. Across processes sharing a directory the re-read
+   * shrinks the lost-update window from "however long this process's cache has been stale"
+   * (whole user think-time) to the gap between the stamp check and `writeFileAtomic`'s rename —
+   * microseconds to a few milliseconds — and the stamp check catches a write that lands anywhere
+   * before it. It is a check-then-act, not a lock: a write by another process inside that final
+   * gap is still overwritten, silently. The complete fix is an advisory lock held across
+   * read + rename (`flock`, which Node does not expose without a native dependency) or a
+   * version counter inside the file that the rename is conditioned on; neither is done here.
+   */
+  private async readModifyWrite(
+    apply: (base: Settings) => Settings,
+  ): Promise<Settings> {
+    for (let attempt = 0; ; attempt++) {
+      const { base, stamp } = this.readDisk();
+      const next = mergeSettings(apply(base));
+      if (attempt < RMW_MAX_RETRIES && this.diskStamp() !== stamp) continue;
+      return this.persist(next);
+    }
   }
 
   /** Write, then publish: the cache takes the new value only once it is on disk, so a failed write

@@ -8,7 +8,7 @@
 //  (2) Silent capture window: after Add, the app polled 5 min then gave up with no visible change.
 //  (3) Retry spawned a junk login node: it opened `claude /login` BEFORE checking whether the dir
 //      was already logged in, when capture then lands in <=2 s and the node is pure noise.
-import type { ClaudeAccount } from '@shared/types'
+import { NEW_CLAUDE_ACCOUNT_LABEL, type ClaudeAccount } from '@shared/types'
 import { useSettings } from '../state/settings'
 
 /** How long the Retry race waits for a fast capture before opening a login node (defect 3). */
@@ -20,7 +20,7 @@ type ApplyAccounts = (fn: (accs: ClaudeAccount[]) => ClaudeAccount[]) => void
 /** Adopt a captured email into a record: clear `pending`, set `email`, and take the email as the
  *  label ONLY when the user has not named it (empty, or the placeholder 'New account'). */
 export function healedAccount(account: ClaudeAccount, email: string): ClaudeAccount {
-  const named = !!account.label && account.label !== 'New account'
+  const named = !!account.label && account.label !== NEW_CLAUDE_ACCOUNT_LABEL
   return { ...account, email, pending: false, label: named ? account.label : email }
 }
 

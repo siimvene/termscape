@@ -453,17 +453,21 @@ describe('SettingsStore — shell-owned codexAccounts membership', () => {
     const store = new SettingsStore()
     store.init()
     store.registerIpc()
-    await addRow(store, 'a')
+    // Minted with the placeholder label, as `codex-accounts:add` mints it.
+    const minted = row('a', { label: 'New Codex account' })
+    await store.mutate((s) => ({ ...s, codexAccounts: [...s.codexAccounts, minted] }))
     const stale = store.get()
     // Another tab's reconcile captured the login.
     await fake.handlers[IPC.settingsSave]({
       ...store.get(),
-      codexAccounts: [{ ...row('a'), pending: false, email: 'me@example.com', label: 'me@example.com' }]
+      codexAccounts: [{ ...minted, pending: false, email: 'me@example.com', label: 'me@example.com' }]
     })
-    // The stale tab now saves — its row predates the capture.
+    // The stale tab now saves — its row predates the capture: still pending, still the
+    // placeholder. Neither is an edit; resolution and the captured label both stand. (A label the
+    // stale tab actually typed IS taken — see the field-level describe below.)
     await fake.handlers[IPC.settingsSave](stale)
     expect(store.get().codexAccounts).toEqual([
-      { ...row('a'), pending: false, email: 'me@example.com', label: 'me@example.com' }
+      { ...minted, pending: false, email: 'me@example.com', label: 'me@example.com' }
     ])
   })
 
@@ -530,5 +534,227 @@ describe('SettingsStore — shell-owned codexAccounts membership', () => {
 
   it('DEFAULT_SETTINGS carries an empty list, so the reconcile has a cache to keep from on a fresh install', () => {
     expect(DEFAULT_SETTINGS.codexAccounts).toEqual([])
+  })
+})
+
+// Field-level reconcile: a snapshot row edits only what the renderer owns. `host` is the one that
+// bites — `settings:save` is reachable by a paired relay peer (not in HOST_ONLY_CHANNELS), and the
+// remove verbs read `host` to decide whether the credential home is local (deleted) or on an SSH
+// host (left alone). A row that took the snapshot wholesale let a peer turn a local account into
+// one whose home is never deleted while the UI reports the removal complete.
+//
+// MUTATIONS:
+//  - take the snapshot row wholesale again ⇒ the host cases redden.
+//  - drop the placeholder exception ⇒ the "placeholder from a stale tab" case reddens.
+//  - reconcile only codexAccounts in saveNow ⇒ every claudeAccounts case reddens.
+describe('SettingsStore — shell-owned fields survive a snapshot (host, createdAt); display fields do not', () => {
+  let dir: string
+  let fake: ReturnType<typeof fakePlatform>
+
+  beforeEach(() => {
+    dir = mkdtempSync(path.join(tmpdir(), 'nodeterm-settings-fields-'))
+    fake = fakePlatform({ userDataDir: dir })
+    initPlatform(fake)
+  })
+
+  afterEach(() => {
+    resetPlatformForTests()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  const codexRow = { id: 'c1', label: 'New Codex account', pending: true }
+  const claudeRow = { id: 'k1', label: 'New account', pending: true, createdAt: 1234 }
+  const boot = async (): Promise<SettingsStore> => {
+    const store = new SettingsStore()
+    store.init()
+    store.registerIpc()
+    await store.mutate((s) => ({
+      ...s,
+      codexAccounts: [...s.codexAccounts, codexRow],
+      claudeAccounts: [...s.claudeAccounts, claudeRow]
+    }))
+    return store
+  }
+  const save = (store: SettingsStore, patch: Partial<Settings>): Promise<void> =>
+    fake.handlers[IPC.settingsSave]({ ...store.get(), ...patch }) as Promise<void>
+
+  it('a snapshot cannot change host on a codex row', async () => {
+    const store = await boot()
+    await save(store, { codexAccounts: [{ ...codexRow, host: 'me@box' }] })
+    expect(store.get().codexAccounts).toEqual([codexRow])
+  })
+
+  it('a snapshot cannot change host on a claude row, nor createdAt', async () => {
+    const store = await boot()
+    await save(store, { claudeAccounts: [{ ...claudeRow, host: 'me@box', createdAt: 9 }] })
+    expect(store.get().claudeAccounts).toEqual([claudeRow])
+  })
+
+  it('a snapshot cannot strip host off a remote row either', async () => {
+    const store = await boot()
+    await store.mutate((s) => ({
+      ...s,
+      claudeAccounts: [{ ...claudeRow, id: 'k2', host: 'me@box' }]
+    }))
+    const { host: _h, ...withoutHost } = { ...claudeRow, id: 'k2', host: 'me@box' }
+    await save(store, { claudeAccounts: [withoutHost] })
+    expect(store.get().claudeAccounts[0].host).toBe('me@box')
+  })
+
+  it('a label edit from a stale-pending tab is preserved while resolution stays resolved', async () => {
+    const store = await boot()
+    const stale = store.get() // tab B hydrated: k1 and c1 still pending
+    // Tab A's capture resolves both rows.
+    await save(store, {
+      claudeAccounts: [{ ...claudeRow, pending: false, email: 'me@example.com', label: 'me@example.com' }],
+      codexAccounts: [{ ...codexRow, pending: false, email: 'me@example.com', label: 'me@example.com' }]
+    })
+    // Tab B renames both rows off its stale (still-pending) view.
+    await save(store, {
+      claudeAccounts: stale.claudeAccounts.map((a) => ({ ...a, label: 'work' })),
+      codexAccounts: stale.codexAccounts.map((a) => ({ ...a, label: 'work' }))
+    })
+    expect(store.get().claudeAccounts).toEqual([
+      { ...claudeRow, pending: false, email: 'me@example.com', label: 'work' }
+    ])
+    expect(store.get().codexAccounts).toEqual([
+      { ...codexRow, pending: false, email: 'me@example.com', label: 'work' }
+    ])
+  })
+
+  it('a stale-pending tab that still carries the placeholder label does not re-label a resolved row', async () => {
+    const store = await boot()
+    const stale = store.get()
+    await save(store, {
+      claudeAccounts: [{ ...claudeRow, pending: false, email: 'me@example.com', label: 'me@example.com' }]
+    })
+    await save(store, { claudeAccounts: stale.claudeAccounts, fontSize: 19 })
+    expect(store.get().claudeAccounts[0]).toMatchObject({
+      pending: false,
+      email: 'me@example.com',
+      label: 'me@example.com'
+    })
+    expect(store.get().fontSize).toBe(19)
+  })
+
+  it('a snapshot still resolves a pending row (the capture is the renderer\'s) and clears a color', async () => {
+    const store = await boot()
+    await save(store, {
+      claudeAccounts: [{ ...claudeRow, pending: false, email: 'a@b.c', label: 'a@b.c', color: '#111111' }]
+    })
+    expect(store.get().claudeAccounts[0]).toEqual({
+      ...claudeRow, pending: false, email: 'a@b.c', label: 'a@b.c', color: '#111111'
+    })
+    // A present-but-undefined color is the swatch's "clear" and lands; JSON drops the key.
+    await save(store, {
+      claudeAccounts: [{ ...store.get().claudeAccounts[0], color: undefined }]
+    })
+    expect(store.get().claudeAccounts[0].color).toBeUndefined()
+    const disk = JSON.parse(await fs.readFile(path.join(dir, 'settings.json'), 'utf-8')) as Settings
+    expect('color' in disk.claudeAccounts[0]).toBe(false)
+  })
+
+  it('claudeAccounts membership is the shell\'s too: a stale snapshot neither drops an add nor resurrects a remove', async () => {
+    const store = await boot()
+    const stale = store.get()
+    await store.mutate((s) => ({
+      ...s,
+      claudeAccounts: [...s.claudeAccounts.filter((a) => a.id !== 'k1'), { ...claudeRow, id: 'k2' }]
+    }))
+    await save(store, { claudeAccounts: [...stale.claudeAccounts, { ...claudeRow, id: 'renderer-minted' }] })
+    expect(store.get().claudeAccounts.map((a) => a.id)).toEqual(['k2'])
+  })
+})
+
+// Two PROCESSES on one settings.json (two Server Edition instances on one --data-dir, or a desktop
+// sharing it — docs/atomic-writes.md). Each has its own cache and its own FIFO chain, so the chain
+// alone serializes nothing between them: a mutate applied to a cache the other process has since
+// overtaken publishes that process's add straight out of existence. Every write re-reads the file
+// first and applies itself to what is on disk, and re-applies if the file changed underneath.
+//
+// MUTATIONS:
+//  - apply `fn` to `this.cache` instead of the disk read ⇒ the first two cases redden (P1's row
+//    is gone from disk after P2 writes).
+//  - drop the stamp re-check in readModifyWrite ⇒ the in-window case reddens (fn runs once and
+//    the externally landed row is lost).
+describe('SettingsStore — two instances on one file (cross-process read-modify-write)', () => {
+  let dir: string
+
+  beforeEach(() => {
+    dir = mkdtempSync(path.join(tmpdir(), 'nodeterm-settings-multi-'))
+    initPlatform(fakePlatform({ userDataDir: dir }))
+  })
+
+  afterEach(() => {
+    resetPlatformForTests()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  const row = (id: string) => ({ id, label: `acct ${id}`, pending: true })
+  const addCodex = (store: SettingsStore, id: string) =>
+    store.mutate((s) => ({ ...s, codexAccounts: [...s.codexAccounts, row(id)] }))
+  const addClaude = (store: SettingsStore, id: string) =>
+    store.mutate((s) => ({ ...s, claudeAccounts: [...s.claudeAccounts, { ...row(id), createdAt: 1 }] }))
+  const onDisk = async (key: 'codexAccounts' | 'claudeAccounts'): Promise<string[]> =>
+    (JSON.parse(await fs.readFile(path.join(dir, 'settings.json'), 'utf-8')) as Settings)[key].map(
+      (a) => a.id
+    )
+  const boot = (): SettingsStore => {
+    const s = new SettingsStore()
+    s.init()
+    return s
+  }
+
+  it('a mutate in P2 (stale cache) sees the row P1 added — neither add is lost', async () => {
+    const p1 = boot()
+    const p2 = boot() // both hydrated from the same (empty) file
+    await addCodex(p1, 'a')
+    await addClaude(p1, 'ka')
+    expect(p2.get().codexAccounts).toEqual([]) // P2's cache is stale, by construction
+    await addCodex(p2, 'b')
+    await addClaude(p2, 'kb')
+    expect(await onDisk('codexAccounts')).toEqual(['a', 'b'])
+    expect(await onDisk('claudeAccounts')).toEqual(['ka', 'kb'])
+    // P2's cache now reflects the file it wrote, so its own later reads are right too.
+    expect(p2.get().codexAccounts.map((a) => a.id)).toEqual(['a', 'b'])
+  })
+
+  it('a snapshot save from P2 (stale cache) keeps the row P1 added, and still carries P2\'s edit', async () => {
+    const p1 = boot()
+    const p2 = boot()
+    await addCodex(p1, 'a')
+    await p2.save({ ...p2.get(), fontSize: 27 })
+    expect(await onDisk('codexAccounts')).toEqual(['a'])
+    expect(p2.get().fontSize).toBe(27)
+    expect(p1.get().codexAccounts.map((a) => a.id)).toEqual(['a'])
+  })
+
+  it('a write that lands between the read and the write is detected: fn re-runs against it', async () => {
+    const p1 = boot()
+    const p2 = boot()
+    await addCodex(p1, 'a')
+    let runs = 0
+    await p2.mutate((s) => {
+      runs++
+      if (runs === 1) {
+        // "Another process" lands a write while this mutate is between its read and its write.
+        // Synchronous and out of band on purpose: it is not on p2's chain.
+        writeFileSync(
+          path.join(dir, 'settings.json'),
+          JSON.stringify({ ...s, codexAccounts: [...s.codexAccounts, row('landed-meanwhile')] })
+        )
+      }
+      return { ...s, codexAccounts: [...s.codexAccounts, row('b')] }
+    })
+    expect(runs).toBe(2)
+    expect(await onDisk('codexAccounts')).toEqual(['a', 'landed-meanwhile', 'b'])
+  })
+
+  it('a missing file is not a reason to wipe the cache: the mutate applies to what this process knows', async () => {
+    const p1 = boot()
+    await addCodex(p1, 'a')
+    rmSync(path.join(dir, 'settings.json'))
+    await addCodex(p1, 'b')
+    expect(await onDisk('codexAccounts')).toEqual(['a', 'b'])
   })
 })

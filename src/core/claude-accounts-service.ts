@@ -1,23 +1,37 @@
 // Impure lifecycle for managed Claude accounts: config-dir creation/deletion, login capture
-// (poll .claude.json), CLI version check, per-account hook install. The account LIST lives in
-// settings.json (renderer-owned via useSettings); this module only owns the filesystem.
+// (poll .claude.json), CLI version check, per-account hook install — AND the account row.
+//
+// MEMBERSHIP of the account list (`settings.claudeAccounts`) is owned HERE, not by the renderer:
+// `add` appends the row and `remove` deletes it through `SettingsStore.mutate`, a read-modify-write
+// on the store's FIFO chain against the settings on disk, in the same verb that mints / tears down
+// the config dir. The renderer keeps a row's display edits (label, color, the login-capture flip)
+// through its ordinary snapshot save, and the store reconciles that snapshot against its own
+// membership field by field (settings-store.ts `reconcileOwnedAccountList`) — so a snapshot can
+// neither add nor drop a row, nor rewrite its `host`. Before this the renderer appended the row to
+// ITS snapshot after `add` returned and full-saved it, so two Server Edition tabs adding at once
+// (or an add racing a label edit in another tab) left the later snapshot the winner: one account's
+// config dir with a captured credential stayed on disk with no row pointing at it — a credential
+// nothing could list, pick, or remove. Same bug, same fix as `codex-accounts-service.ts`.
 //
 // Lives in core so BOTH shells serve it. Before this the four channels were registered only by
 // src/main, so the Server Edition's bridge answered E_UNSUPPORTED for every one of them: a
 // browser-only deployment could select a managed account (env injection, transcript readers,
 // usage and the pickers are all core already) but could never CREATE, log into or remove one
-// (issue #313).
+// (issue #313). The desktop now binds the SAME handlers through `ipcMain` (`claudeAccountsHandlers`
+// below, `src/main/claude-accounts.ts`) — see that file for why not `platform().handle`.
 import { randomUUID } from 'crypto'
 import { promises as fs } from 'fs'
 import path from 'path'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { IPC } from '../shared/ipc'
+import { NEW_CLAUDE_ACCOUNT_LABEL, type ClaudeAccount } from '../shared/types'
 import { isSupportedClaudeVersion, parseLoginCapture } from './claude-accounts-core'
 import { claudeConfigDirFor } from './claude-config-dir'
 import { installClaudeHooksInto, ensureClaudeFullscreenTuiInto } from './agents/hooks/claude'
 import { findInLoginPath } from './pty-manager'
 import { platform } from './platform'
+import type { AccountRowStore } from './settings-store'
 
 const execFileP = promisify(execFile)
 const LOGIN_POLL_MS = 2000
@@ -30,9 +44,12 @@ const ADD_VERSION_PROBE_BUDGET_MS = 1500
  * ControlMaster, the account is a REMOTE one: its config dir + login capture + removal happen on the
  * host over ssh instead of on the local filesystem. The renderer passes it only for accounts scoped
  * to an SSH project (`ClaudeAccount.host`); local accounts omit it entirely (unchanged behavior).
+ * `host` is the renderer's `user@host` key for that project, consulted for the ROW only when the
+ * remote leg ran and the manager could not name the host itself (see `add`).
  */
 export interface AccountCtx {
   projectId?: string
+  host?: string
 }
 
 /** The three remote legs, as the shell implements them (desktop: SshProjectManager). */
@@ -43,9 +60,14 @@ export interface ClaudeAccountsRemote {
   ): Promise<{ configDir: string; versionSupported: boolean } | null>
   readLogin(projectId: string, id: string): Promise<string | null>
   remove(projectId: string, id: string): Promise<void>
+  /** `user@host` of a CONNECTED project (matches `ClaudeAccount.host`); undefined otherwise. */
+  hostKey?(projectId: string): string | undefined
 }
 
 export interface ClaudeAccountsDeps {
+  /** Where the account ROW lives. Required: a shell that mints config dirs without registering
+   *  rows is the orphaned-credential bug this module exists to close. */
+  settings: AccountRowStore
   /**
    * Install the canvas-control skill into a freshly created account dir. Claude Code resolves
    * skills relative to CLAUDE_CONFIG_DIR, so a managed account needs its own copy. DESKTOP ONLY:
@@ -85,104 +107,194 @@ async function checkClaudeVersion(): Promise<boolean> {
   }
 }
 
-/** Register the four `claude-accounts:*` channels on the core platform seam. */
-export function registerClaudeAccountsIpc(deps: ClaudeAccountsDeps = {}): void {
+/** The row `add` registers: pending, placeholder-labelled, pinned to `host` when minted there. */
+function mintClaudeAccountRow(id: string, host: string | undefined): ClaudeAccount {
+  return {
+    id,
+    label: NEW_CLAUDE_ACCOUNT_LABEL,
+    pending: true,
+    createdAt: Date.now(),
+    ...(host ? { host } : {})
+  }
+}
+
+/**
+ * The four `claude-accounts:*` handlers, keyed by channel, with NO registrar baked in. Two callers:
+ *  - `registerClaudeAccountsIpc` below binds them through `platform().handle` — the Server Edition.
+ *  - `src/main/claude-accounts.ts` binds the SAME table through `ipcMain.handle` on the desktop.
+ *    Not `platform().handle` there: that registers into the peer-reachable handler table
+ *    (platform-electron.ts, "THE INVARIANT (4c)"), which would newly let a paired relay GUEST mint
+ *    and delete managed accounts on the HOST. Only the registrar differs; the logic is shared.
+ */
+export function claudeAccountsHandlers(
+  deps: ClaudeAccountsDeps
+): Record<string, (...args: any[]) => unknown> {
   const pollMs = deps.pollMs ?? LOGIN_POLL_MS
+  const { settings } = deps
   // Resolve the live remote legs for a context, or null when the context is local / not connected.
   const remoteFor = (ctx?: AccountCtx): { r: ClaudeAccountsRemote; projectId: string } | null => {
     const projectId = ctx?.projectId
     const r = deps.remote?.()
     return projectId && r ? { r, projectId } : null
   }
+  // Register the row on the store's chain, against the settings on disk. Idempotent on the id (a
+  // freshly minted UUID is never present, but a retry must not duplicate it either).
+  const registerRow = (account: ClaudeAccount): Promise<unknown> =>
+    settings.mutate((s) =>
+      s.claudeAccounts.some((a) => a.id === account.id)
+        ? s
+        : { ...s, claudeAccounts: [...s.claudeAccounts, account] }
+    )
+  const deleteRow = (id: string): Promise<unknown> =>
+    settings.mutate((s) =>
+      s.claudeAccounts.some((a) => a.id === id)
+        ? { ...s, claudeAccounts: s.claudeAccounts.filter((a) => a.id !== id) }
+        : s
+    )
 
-  platform().handle(IPC.claudeAccountsAdd, async (ctx?: AccountCtx) => {
-    const id = randomUUID()
-    const remote = remoteFor(ctx)
-    if (remote) {
-      // REMOTE account: create the config dir + install the status hook on the host. No local dir
-      // and no local hook install — the session runs entirely on the remote host.
-      const res = await remote.r.add(remote.projectId, id)
-      // Null means the project wasn't connected / mkdir failed: still return the id so the renderer
-      // can show the pending row; the login node will surface the connection error itself.
-      return { id, configDir: res?.configDir ?? '', versionSupported: res?.versionSupported ?? true }
-    }
-    const configDir = claudeConfigDirFor(id)
-    await fs.mkdir(configDir, { recursive: true })
-    // Install the managed hook (+ the canvas skill where the shell has one) up front so the very
-    // first session in this account already reports status (badges/notifications/subagent viz)
-    // and can control the canvas (Claude resolves both relative to CLAUDE_CONFIG_DIR, not ~/.claude).
-    installClaudeHooksInto(configDir)
-    deps.installSkill?.(configDir)
-    // Ensure fullscreen TUI in the new account dir (write-if-absent, version-gated). Best-effort,
-    // off the response path — the memoized probe + write both fail open.
-    void ensureClaudeFullscreenTuiInto(configDir)
-    // Bound the probe: it shells out through a LOGIN shell, which on a slow machine can take
-    // ~10 s, and Add-account is a button — an unbounded await leaves it spinning with no signal.
-    // The timeout resolves FALSE (= show the < 2.1 keychain-collision warning), not true: failing
-    // safe costs a dismissable notice when a modern CLI merely answered slowly, while failing
-    // open costs account B's login overwriting account A's shared unscoped Keychain credential.
-    let probeTimer: NodeJS.Timeout | undefined
-    try {
-      const versionSupported = await Promise.race([
-        checkClaudeVersion(),
-        new Promise<boolean>((resolve) => {
-          probeTimer = setTimeout(() => resolve(false), ADD_VERSION_PROBE_BUDGET_MS)
-        })
-      ])
-      return { id, configDir, versionSupported }
-    } finally {
-      // The losing branch is never observed again; leaving the timer armed keeps a handle alive
-      // per Add. (The probe subprocess is separately bounded by its own execFile timeout.)
-      if (probeTimer) clearTimeout(probeTimer)
-    }
-  })
-
-  platform().handle(IPC.claudeAccountsWaitLogin, async (id: string, ctx?: AccountCtx) => {
-    const remote = remoteFor(ctx)
-    // Local path: `claudeConfigDirFor` also validates the id shape (rejects traversal).
-    const configDir = remote ? null : claudeConfigDirFor(id)
-    const w = { cancelled: false }
-    const set = waiters.get(id) ?? new Set()
-    set.add(w)
-    waiters.set(id, set)
-    const deadline = Date.now() + LOGIN_TIMEOUT_MS
-    try {
-      while (!w.cancelled && Date.now() < deadline) {
+  return {
+    // Mint the dir, THEN register the row — inside the store's chain, against the latest list, so
+    // a concurrent add (another tab) or a concurrent label edit can neither drop nor duplicate it.
+    // The row is what makes the dir reachable (the pickers, the launch heal, usage and removal all
+    // read the list), so a dir whose row could not be persisted is torn down again before the
+    // error reaches the caller: the failure leaves nothing behind, rather than exactly the orphan
+    // this verb exists to prevent. Resolves only once the row is on disk.
+    [IPC.claudeAccountsAdd]: async (ctx?: AccountCtx) => {
+      const id = randomUUID()
+      const remote = remoteFor(ctx)
+      if (remote) {
+        // REMOTE account: create the config dir + install the status hook on the host. No local
+        // dir and no local hook install — the session runs entirely on the remote host.
+        const res = await remote.r.add(remote.projectId, id)
+        // The row's `host` is the manager's word for the project's host. When it has none (the
+        // project is not connected — `res` is null and nothing was minted anywhere), the
+        // renderer's own key for that project stands in, so the pending row still shows under
+        // the machine the user chose and its login node carries the connection error. A local
+        // add never reads `ctx.host` (below), so a row can never claim a host for a dir that
+        // was minted here.
+        const host = remote.r.hostKey?.(remote.projectId) ?? ctx?.host
+        const account = mintClaudeAccountRow(id, host)
         try {
-          const raw = remote
-            ? await remote.r.readLogin(remote.projectId, id)
-            : await fs.readFile(path.join(configDir as string, '.claude.json'), 'utf-8')
-          const captured = raw ? parseLoginCapture(raw) : null
-          if (captured) return captured
-        } catch {
-          // not written yet — keep polling
+          await registerRow(account)
+        } catch (error) {
+          if (res) await remote.r.remove(remote.projectId, id).catch(() => {})
+          throw error
         }
-        await new Promise((r) => setTimeout(r, pollMs))
+        // Null means the project wasn't connected / mkdir failed: still return the id so the
+        // renderer can show the pending row; the login node will surface the connection error
+        // itself.
+        return {
+          id,
+          configDir: res?.configDir ?? '',
+          versionSupported: res?.versionSupported ?? true,
+          account
+        }
       }
-      return null
-    } finally {
-      // Ownership-checked: remove only THIS wait; a concurrent wait for the same id survives.
-      const live = waiters.get(id)
-      live?.delete(w)
-      if (live && live.size === 0) waiters.delete(id)
-    }
-  })
+      const configDir = claudeConfigDirFor(id)
+      await fs.mkdir(configDir, { recursive: true })
+      // Install the managed hook (+ the canvas skill where the shell has one) up front so the very
+      // first session in this account already reports status (badges/notifications/subagent viz)
+      // and can control the canvas (Claude resolves both relative to CLAUDE_CONFIG_DIR, not
+      // ~/.claude).
+      installClaudeHooksInto(configDir)
+      deps.installSkill?.(configDir)
+      // Ensure fullscreen TUI in the new account dir (write-if-absent, version-gated).
+      // Best-effort, off the response path — the memoized probe + write both fail open.
+      void ensureClaudeFullscreenTuiInto(configDir)
+      const account = mintClaudeAccountRow(id, undefined)
+      try {
+        await registerRow(account)
+      } catch (error) {
+        await fs.rm(configDir, { recursive: true, force: true }).catch(() => {})
+        throw error
+      }
+      // Bound the probe: it shells out through a LOGIN shell, which on a slow machine can take
+      // ~10 s, and Add-account is a button — an unbounded await leaves it spinning with no
+      // signal. The timeout resolves FALSE (= show the < 2.1 keychain-collision warning), not
+      // true: failing safe costs a dismissable notice when a modern CLI merely answered slowly,
+      // while failing open costs account B's login overwriting account A's shared unscoped
+      // Keychain credential.
+      let probeTimer: NodeJS.Timeout | undefined
+      try {
+        const versionSupported = await Promise.race([
+          checkClaudeVersion(),
+          new Promise<boolean>((resolve) => {
+            probeTimer = setTimeout(() => resolve(false), ADD_VERSION_PROBE_BUDGET_MS)
+          })
+        ])
+        return { id, configDir, versionSupported, account }
+      } finally {
+        // The losing branch is never observed again; leaving the timer armed keeps a handle
+        // alive per Add. (The probe subprocess is separately bounded by its own execFile timeout.)
+        if (probeTimer) clearTimeout(probeTimer)
+      }
+    },
 
-  platform().handle(IPC.claudeAccountsCancelWait, (id: string) => {
-    for (const w of waiters.get(id) ?? []) w.cancelled = true
-  })
+    [IPC.claudeAccountsWaitLogin]: async (id: string, ctx?: AccountCtx) => {
+      const remote = remoteFor(ctx)
+      // Local path: `claudeConfigDirFor` also validates the id shape (rejects traversal).
+      const configDir = remote ? null : claudeConfigDirFor(id)
+      const w = { cancelled: false }
+      const set = waiters.get(id) ?? new Set()
+      set.add(w)
+      waiters.set(id, set)
+      const deadline = Date.now() + LOGIN_TIMEOUT_MS
+      try {
+        while (!w.cancelled && Date.now() < deadline) {
+          try {
+            const raw = remote
+              ? await remote.r.readLogin(remote.projectId, id)
+              : await fs.readFile(path.join(configDir as string, '.claude.json'), 'utf-8')
+            const captured = raw ? parseLoginCapture(raw) : null
+            if (captured) return captured
+          } catch {
+            // not written yet — keep polling
+          }
+          await new Promise((r) => setTimeout(r, pollMs))
+        }
+        return null
+      } finally {
+        // Ownership-checked: remove only THIS wait; a concurrent wait for the same id survives.
+        const live = waiters.get(id)
+        live?.delete(w)
+        if (live && live.size === 0) waiters.delete(id)
+      }
+    },
 
-  platform().handle(IPC.claudeAccountsRemove, async (id: string, ctx?: AccountCtx) => {
-    const remote = remoteFor(ctx)
-    if (remote) {
-      // Best-effort remote cleanup; if the project isn't connected the manager no-ops and the
-      // renderer still drops the account from its list (the dir is orphaned, harmless).
-      await remote.r.remove(remote.projectId, id)
-      return
+    [IPC.claudeAccountsCancelWait]: (id: string) => {
+      for (const w of waiters.get(id) ?? []) w.cancelled = true
+    },
+
+    // Tear the config dir down, THEN delete the row — on the chain, against the latest list. Dir
+    // first so a failed teardown leaves a row the user can see and retry, never a dir nothing
+    // points at; and once the row is gone no later renderer snapshot can bring it back (the store
+    // keeps membership from its own list, not from the snapshot).
+    [IPC.claudeAccountsRemove]: async (id: string, ctx?: AccountCtx) => {
+      const remote = remoteFor(ctx)
+      const row = settings.get().claudeAccounts.find((a) => a.id === id)
+      if (remote) {
+        // Best-effort remote cleanup; if the project isn't connected the manager no-ops (the dir
+        // is orphaned on the host, harmless) and the row still goes.
+        await remote.r.remove(remote.projectId, id)
+      } else if (!row?.host) {
+        // A row pinned to a `host` owns no LOCAL dir, so nothing local is deleted for it
+        // (fail-closed: never the wrong machine's home — and since a snapshot cannot write
+        // `host`, a local row cannot be dressed up as a remote one to skip this). A row-less id is
+        // still torn down locally: that is how a dir orphaned by the pre-fix renderer race gets
+        // cleaned up. `claudeConfigDirFor` validates the id (rejects traversal).
+        const configDir = claudeConfigDirFor(id)
+        await fs.rm(configDir, { recursive: true, force: true })
+      }
+      await deleteRow(id)
     }
-    const configDir = claudeConfigDirFor(id) // id validation prevents traversal
-    await fs.rm(configDir, { recursive: true, force: true })
-  })
+  }
+}
+
+/** Register the four `claude-accounts:*` channels on the core platform seam (Server Edition). */
+export function registerClaudeAccountsIpc(deps: ClaudeAccountsDeps): void {
+  for (const [channel, fn] of Object.entries(claudeAccountsHandlers(deps))) {
+    platform().handle(channel, fn)
+  }
 }
 
 /**
