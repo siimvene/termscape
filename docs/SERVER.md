@@ -64,7 +64,7 @@ Precedence: **CLI flag > environment variable > default.**
 | `--port <n>` | `NODETERM_PORT` | `8443` | TCP port to listen on. |
 | `--host <h>` | `NODETERM_HOST` | `127.0.0.1` | Interface to bind. |
 | `--data-dir <path>` | `NODETERM_DATA_DIR` | `~/.nodeterm-server` | Where auth, sessions, workspace, settings, and scrollback live. |
-| — | `NODETERM_PEER_USER_DATA` | unset | A co-located desktop app's userData dir (macOS: `~/Library/Application Support/node-terminal`). Managed Claude accounts the desktop owns are resolved there at spawn time when this server has no dir of its own for the id, so a phone attach to a desktop node runs under the node's account instead of silently falling back to the System account. Spawn-side only: the server never creates or deletes a dir in the peer's tree. |
+| — | `NODETERM_PEER_USER_DATA` | derived from `NODETERM_PEER_STATUS_MIRROR` (its directory), else unset | A co-located desktop app's userData dir (macOS: `~/Library/Application Support/node-terminal`). Managed Claude accounts the desktop owns are resolved there at spawn time when this server has no dir of its own for the id, so a phone attach to a desktop node runs under the node's account instead of silently falling back to the System account. Spawn-side only: the server never creates or deletes a dir in the peer's tree. |
 | `--renderer-dir <path>` | `NODETERM_RENDERER_DIR` | `out/renderer` (resolved from cwd) | Directory of the built renderer (`index.html` + hashed assets). |
 | `--insecure-http` | — | off | Acknowledge serving plain HTTP directly on a non-loopback interface (see below). |
 | — | `NODETERM_SERVER_PASSWORD` | — | Seed the password headlessly on first boot (see above). |

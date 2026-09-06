@@ -26,6 +26,21 @@ describe('resolveConfig', () => {
     expect(() => resolveConfig({ NODETERM_HOST: '0.0.0.0' }, ['--insecure-http'])).not.toThrow()
   })
 
+  it('peerUserDataDir: explicit env wins, else derived from the peer mirror path, else absent', () => {
+    expect(resolveConfig({}, []).peerUserDataDir).toBeUndefined()
+    expect(
+      resolveConfig({ NODETERM_PEER_STATUS_MIRROR: '/Users/x/Library/Application Support/node-terminal/agent-status.json' }, [])
+        .peerUserDataDir
+    ).toBe('/Users/x/Library/Application Support/node-terminal')
+    expect(
+      resolveConfig(
+        { NODETERM_PEER_STATUS_MIRROR: '/peer/agent-status.json', NODETERM_PEER_USER_DATA: '/explicit' },
+        []
+      ).peerUserDataDir
+    ).toBe('/explicit')
+    expect(resolveConfig({ NODETERM_PEER_USER_DATA: '  ' }, []).peerUserDataDir).toBeUndefined()
+  })
+
   it('headless: off by default, on for "1"/"true" (case-insensitive), off for anything else', () => {
     expect(resolveConfig({}, []).headless).toBe(false)
     expect(resolveConfig({ NODETERM_HEADLESS: '1' }, []).headless).toBe(true)

@@ -23,10 +23,12 @@ export type ServerConfig = {
    */
   headless: boolean
   /**
-   * `NODETERM_PEER_USER_DATA`: a co-located desktop app's userData dir (the Mac phone-desktop
-   * topology). Managed Claude accounts the desktop owns are resolved there at spawn time when this
-   * instance has no dir of its own for the id — see `CorePlatform.peerUserDataDir`. Unset on a
-   * Linux server with no desktop peer.
+   * A co-located desktop app's userData dir (the Mac phone-desktop topology). Managed Claude
+   * accounts the desktop owns are resolved there at spawn time when this instance has no dir of its
+   * own for the id — see `CorePlatform.peerUserDataDir`. `NODETERM_PEER_USER_DATA` names it
+   * explicitly; otherwise it is DERIVED from `NODETERM_PEER_STATUS_MIRROR` (the desktop's mirror
+   * file is `<userData>/agent-status.json`, so the peer whose status we tail is the peer whose
+   * accounts we resolve — one peer, one knob). Unset on a Linux server with no desktop peer.
    */
   peerUserDataDir?: string
   /**
@@ -103,7 +105,9 @@ export function resolveConfig(env: NodeJS.ProcessEnv, argv: string[]): ServerCon
   // truthy spellings the install script + systemd unit emit.
   const headlessEnv = (env.NODETERM_HEADLESS || '').trim().toLowerCase()
   const headless = headlessEnv === '1' || headlessEnv === 'true'
-  const peerUserDataDir = (env.NODETERM_PEER_USER_DATA || '').trim() || undefined
+  const peerMirror = (env.NODETERM_PEER_STATUS_MIRROR || '').trim()
+  const peerUserDataDir =
+    (env.NODETERM_PEER_USER_DATA || '').trim() || (peerMirror ? path.dirname(peerMirror) : undefined)
 
   // Headless binds nothing, so the "plain HTTP on a public interface" hazard the loopback refusal
   // guards against does not apply — a stray NODETERM_HOST must not fail a headless boot.

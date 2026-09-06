@@ -349,24 +349,27 @@ paths:
   `email || label`), and mirror writes are serialized per path so a stale doc can never overwrite
   a fresher one. `fetchCodexUsage` skips the `codex app-server` subprocess tier when the home has
   no `auth.json` at all. Contract + rationale: `docs/mobile-usage-inbox.md`.
-- **`accountFallback` is a FRESH-spawn statement; the Server Edition beside a desktop resolves the
-  desktop's account dirs at spawn.** `pty:create` reports `accountFallback` only when THIS create
-  spawned the process: a warm tmux reattach joined a shell already running under the account it was
-  started with, so the spawn-side env (and its missing-dir fallback) never reached it — reporting it
-  there told the phone "running as the System account" for every desktop node it attached to
-  (2026-09-07). The record is corrected on the warm path so a later same-process `join` agrees.
-  Separately, `claudeConfigDirForSpawn` (`src/core/claude-config-dir.ts`) resolves an account id
-  this instance has no dir for under `CorePlatform.peerUserDataDir` — the Server Edition sets it from
-  `NODETERM_PEER_USER_DATA` (the Mac launchd wrapper points it at the desktop's app-support dir) —
-  so a phone COLD spawn of a desktop node runs under the node's real account. Spawn-side only:
-  add/login/remove keep `claudeConfigDirFor` and never touch the peer tree. Tests:
-  `pty-account-fallback.test.ts`, `claude-config-dir.test.ts`. The hook transcript-path jail
+- **`accountFallback` is a dir re-check at EVERY attach, and the Server Edition beside a desktop
+  resolves the desktop's account dirs.** The phone showed "account folder missing" on every attach
+  to an account-bound desktop node (2026-09-07): the server resolved the id under ITS data dir
+  (`~/.nodeterm-server`), where the desktop's accounts do not live. Fixed where it arose:
+  `claudeConfigDirForSpawn` (`src/core/claude-config-dir.ts`) resolves an id this instance has no
+  dir for under `CorePlatform.peerUserDataDir` — the Server Edition takes it from
+  `NODETERM_PEER_USER_DATA`, else DERIVES it from `NODETERM_PEER_STATUS_MIRROR`'s directory (the
+  mirror is `<userData>/agent-status.json`; one peer, one knob) — so a phone attach or COLD spawn of
+  a desktop node runs under the node's real account. Spawn-side only: add/login/remove keep
+  `claudeConfigDirFor` and never touch the peer tree. The hook transcript-path jail
   (`isSafeLocalTranscriptPath`) accepts the peer's `claude-accounts/<id>/projects` too, same shape,
-  or such a node's hook POSTs would be refused and it would show no status. Known limit (blind
-  security side-pass, MINOR, deferred): a node that GENUINELY fell back at a fresh spawn and is
-  reopened after a process restart reattaches warm and shows no fallback — the old code re-checked
-  the dir at reattach, which was a different guess, not the pane's real account; a true answer
-  would need the pane's env, not a client env. Still open on that topology: the
-  server's own `settings.json` lists no accounts, so the phone's New Session sheet offers only the
-  System account, and a Codex account-bound desktop node is still refused (`unavailable:
+  or such a node's hook POSTs would be refused and it would show no status. **Do not gate the flag
+  on `fresh`**: that was tried the same day and reverted after two independent reviewers (Codex,
+  blind security agent) showed it hides a GENUINE fallback after a process restart — spawned fresh
+  with the dir missing, pane really on `~/.claude`, reopened warm ⇒ flag dropped, chip healthy. The
+  re-check is a guess about the pane on warm paths either way (the pane's real env is not knowable
+  cheaply); "dir missing everywhere" is the honest, conservative answer. Tests:
+  `pty-account-fallback.test.ts`, `claude-config-dir.test.ts`, `config.test.ts`. Still open on that
+  topology: the server's transcript/session-name/context-link READERS (`transcript-index.ts` etc.)
+  enumerate the server's own settings accounts only, so a peer-account node's transcript is not
+  found by the browser find-bar / ⌘M (pre-existing for every desktop-spawned account node, deferred);
+  the server's own `settings.json` lists no accounts, so the phone's New Session sheet offers only
+  the System account; and a Codex account-bound desktop node is still refused (`unavailable:
   'codex-account'`) — Codex homes are keyed by the instance's userData digest.

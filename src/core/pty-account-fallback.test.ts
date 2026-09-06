@@ -1,9 +1,8 @@
-// `accountFallback` is a statement about the PROCESS that runs in the pane, so it is reported only
-// when this create genuinely spawned that process. A warm tmux reattach (`new-session -A` joined a
-// shell already running under the account it was started with) applies no env at all — reporting
-// the spawn-side fallback there told the phone "running as the System account" for every desktop
-// node it attached to on the phone-desktop topology (the Server Edition resolves account dirs
-// under ITS data dir, where the desktop's accounts do not live). The second half of that fix is
+// `accountFallback` means "the node's account dir could not be found when THIS client attached".
+// It is a dir re-check on every path, warm reattach included (a fresh-only version hid a genuine
+// fallback after a process restart and was reverted — see `spawnNew`). What fixes the phone
+// topology (the Server Edition beside the desktop resolved account dirs under ITS data dir, where
+// the desktop's accounts do not live, so every attach to a desktop node raised the flag) is
 // `claudeConfigDirForSpawn`: a co-located peer's account dir is used when this instance has none.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import fs from 'fs'
@@ -77,7 +76,7 @@ const CLIENT = 7
 const NODE = 'node-account-fallback-1'
 const ACCOUNT = 'acct-11111111-2222-3333-4444-555555555555'
 
-describe('accountFallback is reported for a FRESH spawn only', () => {
+describe('accountFallback: a dir re-check at every attach, resolved through the peer', () => {
   let fake: FakePlatform
   let userDataDir: string
   let peerDir: string
@@ -136,8 +135,17 @@ describe('accountFallback is reported for a FRESH spawn only', () => {
     expect(spawnEnvs[0].CLAUDE_CONFIG_DIR).not.toBe(path.join(userDataDir, 'claude-accounts', ACCOUNT))
   })
 
-  it('a warm reattach to a live tmux session reports NOTHING: the pane keeps the account it started with', async () => {
+  it('a warm reattach still reports a dir that is missing everywhere (a genuine fallback survives a restart)', async () => {
     await manager()
+    liveTmuxSessions.add(sessionName(NODE))
+    const r = await create()
+    expect(r.fresh).toBe(false)
+    expect(r.accountFallback).toBe(true)
+  })
+
+  it("a warm reattach reports NOTHING when the dir exists in the co-located peer's userData", async () => {
+    fs.mkdirSync(path.join(peerDir, 'claude-accounts', ACCOUNT), { recursive: true })
+    await manager(peerDir)
     liveTmuxSessions.add(sessionName(NODE))
     const r = await create()
     expect(r.fresh).toBe(false)
@@ -145,8 +153,9 @@ describe('accountFallback is reported for a FRESH spawn only', () => {
     expect('accountFallback' in r).toBe(false)
   })
 
-  it('a same-process co-attach after a warm reattach agrees (the record was corrected, not just the reply)', async () => {
-    await manager()
+  it('a same-process co-attach reports what the attach it joined found (the record is the source)', async () => {
+    fs.mkdirSync(path.join(peerDir, 'claude-accounts', ACCOUNT), { recursive: true })
+    await manager(peerDir)
     liveTmuxSessions.add(sessionName(NODE))
     const first = await create()
     expect(first.fresh).toBe(false)

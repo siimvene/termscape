@@ -2405,16 +2405,16 @@ export class PtyManager {
         throw error
       }
     }
-    // Surface a missing-account-dir fallback so the renderer can flag the node's account chip —
-    // for a FRESH spawn only. The env `spawnSession` computed (and the fallback it recorded) never
-    // reached a WARM reattach: `new-session -A` joined a shell that is already running under
-    // whatever account it was started with, so "running as the System account" would describe a
-    // client env, not the process. The record is corrected too, so a later same-process co-attach
-    // (`join`, which reports the record's flag) agrees. Measured on the phone-desktop topology:
-    // every phone attach to an account-bound desktop node raised the banner (consort-era
-    // finding surfaced by the iOS account-fallback banner, 2026-09-07).
-    if (!fresh && spawned?.accountFallback) spawned.accountFallback = false
-    const accountFallback = fresh ? spawned?.accountFallback : undefined
+    // Surface a missing-account-dir fallback so the renderer can flag the node's account chip. The
+    // flag means "the node's account dir could not be found when THIS client attached" — on a warm
+    // reattach it is a re-check of the dir, not knowledge of the pane's real identity (the shell
+    // keeps whatever env it was spawned with). It is deliberately NOT gated on `fresh`: a
+    // fresh-only version was tried and reverted the same day (2026-09-07, two reviewers agreed) —
+    // it hid a GENUINE fallback after a process restart (spawned fresh with the dir missing, pane
+    // really on `~/.claude`, reopened warm ⇒ flag dropped, chip healthy). The phone-topology false
+    // positive that motivated it is fixed where it arose instead: `claudeConfigDirForSpawn` finds
+    // the desktop peer's dir, so the re-check answers true only when the dir is missing everywhere.
+    const accountFallback = spawned?.accountFallback
     // The session's `persistKey` is set iff the spawn actually landed on a tmux, local or remote
     // (`persisted` in spawnSession) — i.e. exactly "this session survives losing its client",
     // which is what the renderer's cache-dispose levers must not assume. See PtyCreateResult.

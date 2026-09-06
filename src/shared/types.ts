@@ -169,9 +169,10 @@ export interface PtyCreateResult {
   sessionId: string
   fresh: boolean
   /** Set when the node's `accountId` had no config dir at spawn, so the session fell back to the
-   *  system account. The renderer flags the account chip (folder-missing warning) when true.
-   *  FRESH spawns only: a warm reattach (`fresh:false`) joined a shell already running under the
-   *  account it was started with, so nothing is reported for it. */
+   *  system account. The renderer flags the account chip (folder-missing warning) when true. On a
+   *  warm reattach it is a re-check of the dir at THIS attach (the pane's real identity is not
+   *  knowable cheaply), reported on every path — see the note above `accountFallback` in
+   *  `pty-manager.ts` `spawnNew`. */
   accountFallback?: boolean
   /**
    * WARM reattach only (local tmux): the reattached session's live working directory no longer
