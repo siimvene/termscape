@@ -40,7 +40,7 @@ export interface MirrorUsageAccount {
   accountId: string | null         // null = system ~/.claude
   label: string | null             // account label from settings (managed accounts)
   email: string | null
-  agentId: string                  // 'claude' (codex later — same shape)
+  agentId: string                  // 'claude' | 'codex' — same shape for both
   status: string                   // 'ok' | 'unavailable' | 'error' | 'fetching'
   updatedAt: number
   limits: MirrorUsageLimit[]       // pass-through of shared UsageLimit — do NOT re-derive
@@ -64,6 +64,32 @@ Rules:
 - Source is `src/core/usage/usage-service.ts` caches. The service now proactively polls **all
   local accounts** (system + non-pending local managed accounts) on its existing 15-min cadence,
   not just the system account, and notifies the mirror on every cache update.
+- **Codex rows ride the same block** (`agentId: 'codex'`). Claude rows come from the account-aware
+  `snapshot()`; Codex rows come from the provider cache (`providersSnapshot()`) — the system Codex
+  account (`accountId: null`) plus one row per managed local Codex account, each keyed by its own
+  `accountId` (S6 §4.3, never merged). `buildMirrorUsage` orders Claude rows first (system first),
+  then the Codex system row, then managed Codex rows. `label` and `email` of a managed row both come
+  from the settings codex account list (the provider row's `account` is `email || label`, so it is
+  never copied into `email` — an email-less account would otherwise show its label twice); the
+  system row has no settings entry and passes its own `account` through (null in production). A
+  managed row whose account is no longer in the settings list (removed or pending between the run
+  and the flush) is an orphan and gets `email: null` — it is not the system row, and its `account`
+  is the same email-or-label field. A Codex row with **status `'unavailable'` (not signed in) is DROPPED** — the desktop hides such a
+  provider entirely, so the phone must not show a dead "Codex — unavailable" row on every machine.
+  The mirror flush calls `refreshProvidersIfStale()` before reading the cache. That refresh is
+  **Codex-only** (the billing providers gemini/grok/kimi/minimax/opencode stay popover-on-demand),
+  merges into the provider cache without disturbing the other providers' rows, is **gated exactly
+  like the Claude poll** (`shouldPoll() || mirrorMayBeRead()` — an unfocused desktop with no phone
+  paired fetches nothing), and fires at most once per **15 min** (`POLL_MS`, the Claude poll's own
+  cadence — the phone reads both blocks off one file, so the Codex rows are exactly as fresh as the
+  Claude rows beside them). A completed run re-flushes via `onCacheUpdate`, and the fresh-cache guard
+  ends the flush→refresh→flush chain after one run. A popover open (`usage:providers`) within its own
+  5-min debounce of a background Codex run REUSES those Codex rows rather than fetching them again
+  (`force` bypasses this). The Codex account-set fingerprint that busts the popover's debounce is
+  stamped when a run's rows LAND, not when the leg starts, so a popover opened during an in-flight
+  Codex leg for a changed account set joins that leg instead of being served the previous set's cache.
+  The mirror's disk writes are serialized per path, so an older doc built before a run landed can
+  never overwrite the fresher one written after it.
 - **SSH slices carry no `usage`** in v1 (`filterMirrorForNodes` drops it, like `settings`):
   a remote host's account credentials live on that host, so the desktop cannot answer for them.
   A host that runs nodeterm itself (server edition) writes its own mirror with its own usage.

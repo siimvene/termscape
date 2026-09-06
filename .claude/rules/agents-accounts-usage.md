@@ -333,3 +333,19 @@ paths:
   slice pushed to a host still drops `usage` (a host reading its own numbers back off us is
   pointless), and no keychain leg exists remotely (a headless macOS host would hang on the prompt,
   so a mac host reports nothing).
+- **Codex usage in the agent-status mirror (the phone's Codex rows, 2026-09-06).** The mirror's
+  `usage` block carries Codex rows (`agentId:'codex'`, the un-owned system row + one per managed
+  local account) next to the Claude rows; `src/server/peer-status-bridge.ts` forwards them
+  untouched and the phone keys rows by `accountId ?? "system:<agentId>"`. The design has TWO
+  cache stamps in `usage-service.ts`: `providersAt` (the pill's full run, all providers, 5-min
+  debounce) and `codexAt` (the Codex-only leg the mirror kicks through
+  `refreshProvidersIfStale()`, POLL_MS cadence, gated exactly like `pollAll` on
+  `shouldPoll() || mirrorMayBeRead()`, a no-op while EITHER a Codex leg or a full run is in
+  flight). The Codex leg MERGES into `providersCache` (other providers' rows untouched, never
+  stamps `providersAt`), and the account-set fingerprint is stamped where rows LAND, never at leg
+  start — stamping it early let a popover be served the previous account set. `buildMirrorUsage`
+  drops `status:'unavailable'` Codex rows (a phone must not show a dead Codex row on every
+  machine), takes a managed row's email from settings only (the provider's `account` is
+  `email || label`), and mirror writes are serialized per path so a stale doc can never overwrite
+  a fresher one. `fetchCodexUsage` skips the `codex app-server` subprocess tier when the home has
+  no `auth.json` at all. Contract + rationale: `docs/mobile-usage-inbox.md`.

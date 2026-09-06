@@ -325,6 +325,17 @@ export interface UsageService {
   refreshIfStale(): void
   /** Every cached usage row (system account first). Feeds the agent-status mirror's `usage` block. */
   snapshot(): { accountId: string | null; usage: ClaudeUsage }[]
+  /** The cached PROVIDER rows (Codex system + managed, plus the billing providers) — NEVER fetches.
+   *  Feeds the mirror's `usage` block with Codex rows; empty until the first provider run lands. */
+  providersSnapshot(): ProviderUsage[]
+  /** Fire-and-forget: refresh the CODEX rows of the provider cache when they are stale (older than
+   *  POLL_MS — the Claude poll cadence, so a phone reads Codex rows exactly as fresh as the Claude
+   *  rows beside them — never fetched, or the Codex account set changed). Codex only — the mirror
+   *  consumes nothing else, and the billing providers (gemini/grok/kimi/minimax/opencode) stay on
+   *  demand. Gated exactly like the Claude poll (`shouldPoll() || mirrorMayBeRead()`): an unfocused
+   *  desktop with no phone paired fetches nothing. A no-op while the Codex rows are already in flight
+   *  or fresh, so a flush→refresh→flush chain terminates after one run. */
+  refreshProvidersIfStale(): void
   /** Stop the poll timer. */
   dispose(): void
 }
@@ -342,6 +353,17 @@ export function startUsageService(opts: UsageServiceOptions = {}): UsageService 
   const lastFetchAt = new Map<string, number>()
   const inFlight = new Map<string, Promise<ClaudeUsage>>()
 
+  // Notify the mirror (fail-open) so its phone-facing `usage` block re-assembles from the cache.
+  // Both the Claude poll (push) and a completed provider run call this — a provider run that lands
+  // Codex numbers must re-flush the mirror exactly like a Claude poll does.
+  const notifyCacheUpdate = (): void => {
+    try {
+      opts.onCacheUpdate?.()
+    } catch {
+      // a mirror flush must never break the usage cache update
+    }
+  }
+
   const push = (key: string, u: ClaudeUsage): void => {
     last.set(key, u)
     lastFetchAt.set(key, u.updatedAt)
@@ -356,12 +378,7 @@ export function startUsageService(opts: UsageServiceOptions = {}): UsageService 
         // shell gone — nobody left to notify
       }
     }
-    // Notify the mirror (fail-open) so its phone-facing `usage` block re-assembles from the cache.
-    try {
-      opts.onCacheUpdate?.()
-    } catch {
-      // a mirror flush must never break the usage cache update
-    }
+    notifyCacheUpdate()
   }
 
   const run = async (accountId?: string): Promise<ClaudeUsage> => {
@@ -387,13 +404,41 @@ export function startUsageService(opts: UsageServiceOptions = {}): UsageService 
   })
   platform().handle(IPC.usageRefresh, (accountId?: string) => run(accountId))
 
-  // Non-Claude providers. Fetched on demand (when the popover opens) rather than polled: each
-  // one costs its own network round-trip — and, on the app-server fallback, a subprocess — so
-  // polling them all on the Claude cadence would multiply that cost for data nobody is looking
-  // at. Cached under the same debounce.
+  // Non-Claude providers. The FULL set (Codex + the billing providers) is fetched on demand — when
+  // the popover opens — rather than polled: each one costs its own network round-trip (and, on the
+  // Codex app-server fallback, a subprocess per row), so polling them all on the Claude cadence
+  // would multiply that cost for data nobody is looking at. Cached under the same debounce.
+  //
+  // The one exception is CODEX, and only when the poll gate is open (`shouldPoll() ||
+  // mirrorMayBeRead()`, the same gate the Claude poll honors): the agent-status mirror consumes the
+  // Codex rows for the phone, so every mirror flush calls `refreshProvidersIfStale`, which re-fetches
+  // the Codex rows alone — never the other providers — at most once per POLL_MS (the Claude poll's
+  // own 15-min cadence: the phone reads both blocks off one file, so Codex rows should be exactly as
+  // fresh as the Claude rows beside them, no fresher and no staler). With the gate shut (unfocused
+  // desktop, no phone paired) nothing here fetches at all.
+  //
+  // Two cache stamps, because the two consumers have different freshness questions:
+  //  - `providersAt`: when the last FULL run landed. Governs the popover's `usage:providers`
+  //    debounce — a Codex-only refresh must NOT stamp it, or the popover would be served a cache
+  //    whose billing rows are stale or (before any full run) missing entirely.
+  //  - `codexAt`: when the Codex rows last landed (from either kind of run). Governs the mirror's
+  //    Codex-only refresh, and lets a full run REUSE Codex rows that landed within the popover's own
+  //    debounce instead of fetching them again (a popover opened right after a background Codex run
+  //    must not cost a second subprocess per account).
+  //
+  // `codexAccountsFingerprint` is stamped where the rows LAND (after the merge / cache replace), not
+  // when a leg starts: the `usage:providers` handler busts its debounce only on a fingerprint
+  // mismatch, so a stamp at leg start would let a popover opened during an in-flight Codex leg
+  // (up to 8 s of HTTP plus an app-server subprocess) be served the cache built from the PREVIOUS
+  // account set (S6 §4.3). Each leg returns the fingerprint of the set it actually fetched.
   let providersAt = 0
+  let codexAt = 0
   let providersCache: ProviderUsage[] = []
   let providersInFlight: Promise<ProviderUsage[]> | null = null
+  // The Codex leg's own in-flight slot, shared by the full run and the Codex-only refresh so the two
+  // can never fetch the same account twice concurrently (a full run reuses a Codex leg already in
+  // flight, and vice versa).
+  let codexInFlight: Promise<CodexLeg> | null = null
   // The account set the current cache was built from. When it changes (an account added, removed,
   // or relabelled) the cache is busted so a snapshot from a DIFFERENT account set is never served —
   // switching accounts can't show stale numbers (S6 §4.3, cache fingerprint).
@@ -416,20 +461,39 @@ export function startUsageService(opts: UsageServiceOptions = {}): UsageService 
   ): string =>
     accounts.map((a) => `${a.id}\0${a.home}\0${a.label}\0${a.email ?? ''}`).join('\x01')
 
-  const runProviders = async (): Promise<ProviderUsage[]> => {
-    if (providersInFlight) return providersInFlight
-    // Codex is account-scoped: one system fetcher (no identity ⇒ accountId undefined, the un-owned
-    // row stays un-owned) plus one fetcher per managed account against ITS OWN home + identity.
-    // No reduce/dedupe merge step — each row is keyed by its own accountId and can never collapse
-    // into another (Property 9). The account id is carried on the descriptor so even a THROWN fetch
-    // stays attributed to its own account (fail closed), never masquerading as the system row.
+  type ProviderFetcher = {
+    id: string
+    accountId?: string
+    fetch: () => Promise<ProviderUsage>
+  }
+  /** The result of one Codex leg: the rows plus the fingerprint of the account set they came from. */
+  type CodexLeg = { rows: ProviderUsage[]; fingerprint: string }
+  // One slow / throwing provider must not withhold the others — settle each independently.
+  const settle = (p: ProviderFetcher): Promise<ProviderUsage> =>
+    p.fetch().catch(
+      (): ProviderUsage => ({
+        provider: p.id,
+        limits: [],
+        account: null,
+        // Keep the failing row attributed to its own account (undefined for the un-owned rows) so
+        // an error fails closed to THIS account, never another's or a fabricated one.
+        accountId: p.accountId,
+        updatedAt: Date.now(),
+        status: 'error'
+      })
+    )
+
+  // The Codex leg: one system fetcher (no identity ⇒ accountId undefined, the un-owned row stays
+  // un-owned) plus one fetcher per managed account against ITS OWN home + identity. No reduce/dedupe
+  // merge step — each row is keyed by its own accountId and can never collapse into another
+  // (Property 9). The account id is carried on the descriptor so even a THROWN fetch stays
+  // attributed to its own account (fail closed), never masquerading as the system row.
+  // Returns the fresh Codex rows plus the fingerprint of the account set they were fetched for; the
+  // caller decides how they enter the cache and stamps the fingerprint only once they have.
+  const runCodex = async (): Promise<CodexLeg> => {
+    if (codexInFlight) return codexInFlight
     const codexAccounts = readCodexAccounts()
-    codexAccountsFingerprint = fingerprintCodexAccounts(codexAccounts)
-    type ProviderFetcher = {
-      id: string
-      accountId?: string
-      fetch: () => Promise<ProviderUsage>
-    }
+    const fingerprint = fingerprintCodexAccounts(codexAccounts)
     const codexProviders: ProviderFetcher[] = [
       { id: 'codex', fetch: () => fetchCodexUsage() },
       ...codexAccounts.map((account) => ({
@@ -438,31 +502,62 @@ export function startUsageService(opts: UsageServiceOptions = {}): UsageService 
         fetch: () => fetchCodexUsage(account.home, account)
       }))
     ]
-    const allProviders: ProviderFetcher[] = [...codexProviders, ...OTHER_PROVIDERS]
-    // One slow provider must not withhold the others — settle each independently.
-    providersInFlight = Promise.all(
-      allProviders.map((p) =>
-        p.fetch().catch(
-          (): ProviderUsage => ({
-            provider: p.id,
-            limits: [],
-            account: null,
-            // Keep the failing row attributed to its own account (undefined for the un-owned
-            // rows) so an error fails closed to THIS account, never another's or a fabricated one.
-            accountId: p.accountId,
-            updatedAt: Date.now(),
-            status: 'error'
-          })
-        )
-      )
+    codexInFlight = Promise.all(codexProviders.map(settle)).then((rows) => ({ rows, fingerprint }))
+    try {
+      const leg = await codexInFlight
+      codexAt = Date.now()
+      return leg
+    } finally {
+      codexInFlight = null
+    }
+  }
+
+  // The cached Codex rows, reusable by a full run when they landed within the popover's own debounce
+  // (the same bar `usage:providers` already applies to the whole cache), nothing is in flight, and
+  // they were built from the CURRENT account set. `force` (the popover's refresh button) bypasses it.
+  const reusableCodexLeg = (force: boolean | undefined): CodexLeg | null => {
+    if (force || codexInFlight || !codexAt || Date.now() - codexAt >= REFETCH_DEBOUNCE_MS) return null
+    if (fingerprintCodexAccounts(readCodexAccounts()) !== codexAccountsFingerprint) return null
+    const rows = providersCache.filter((r) => r.provider === 'codex')
+    return rows.length > 0 ? { rows, fingerprint: codexAccountsFingerprint } : null
+  }
+
+  // The FULL run (popover path): Codex + every billing provider, replacing the whole cache.
+  const runProviders = async (force?: boolean): Promise<ProviderUsage[]> => {
+    if (providersInFlight) return providersInFlight
+    const reused = reusableCodexLeg(force)
+    const codexLeg = reused ? Promise.resolve(reused) : runCodex()
+    providersInFlight = Promise.all([codexLeg, Promise.all(OTHER_PROVIDERS.map(settle))]).then(
+      ([codex, otherRows]) => {
+        providersCache = [...codex.rows, ...otherRows]
+        // Stamped where the rows land (see the cache notes above).
+        codexAccountsFingerprint = codex.fingerprint
+        return providersCache
+      }
     )
     try {
-      providersCache = await providersInFlight
+      await providersInFlight
       providersAt = Date.now()
+      // A completed run re-flushes the mirror so freshly-landed Codex numbers reach the phone even
+      // when nothing (no open pill) asked for providers. `refreshProvidersIfStale` will see fresh
+      // Codex rows on the resulting flush and not kick another run — the flush→refresh→flush chain ends.
+      notifyCacheUpdate()
       return providersCache
     } finally {
       providersInFlight = null
     }
+  }
+
+  // The Codex-only refresh (mirror path): MERGES the fresh Codex rows into the cache, leaving every
+  // other provider's cached row untouched — the popover reads this same cache over `usage:providers`
+  // and must never see its billing rows vanish because the phone asked about Codex. Codex rows stay
+  // first (the order the full run produces). Does not stamp `providersAt` (see the cache notes above).
+  const refreshCodexRows = async (): Promise<void> => {
+    const { rows, fingerprint } = await runCodex()
+    providersCache = [...rows, ...providersCache.filter((r) => r.provider !== 'codex')]
+    // Stamped where the rows land (see the cache notes above).
+    codexAccountsFingerprint = fingerprint
+    notifyCacheUpdate()
   }
 
   // The cookie is write-only from the UI's perspective: it can be set and cleared, and the UI
@@ -486,12 +581,14 @@ export function startUsageService(opts: UsageServiceOptions = {}): UsageService 
   platform().handle(IPC.usageProviders, (force?: boolean) => {
     // Bust the debounce when the Codex account set has changed since the cache was built, so a
     // snapshot from a different account set (stale numbers after an add/remove/switch) is never
-    // served (S6 §4.3). runProviders re-stamps the fingerprint from the fresh set.
+    // served (S6 §4.3). The fingerprint is re-stamped from the fresh set only when its rows LAND, so
+    // a call during an in-flight Codex leg still mismatches here and joins that leg instead of being
+    // served the previous set's cache.
     if (fingerprintCodexAccounts(readCodexAccounts()) !== codexAccountsFingerprint) providersAt = 0
     if (!force && providersAt && Date.now() - providersAt < REFETCH_DEBOUNCE_MS) {
       return providersCache
     }
-    return runProviders()
+    return runProviders(force)
   })
 
   // Remote (SSH host) Claude accounts. Cached per target under the same debounce and, like the
@@ -593,6 +690,27 @@ export function startUsageService(opts: UsageServiceOptions = {}): UsageService 
       [...last.entries()]
         .sort((a, b) => (a[0] === '' ? -1 : b[0] === '' ? 1 : 0))
         .map(([key, usage]) => ({ accountId: key === '' ? null : key, usage })),
+    providersSnapshot: () => providersCache,
+    refreshProvidersIfStale: () => {
+      // Same request-budget gate as pollAll: the mirror flushes on every agent event, and with no
+      // focused window and no phone paired nobody is reading either the pill or the mirror — so an
+      // ungated kick here would poll Codex (a subprocess per row on the app-server fallback) on an
+      // idle desktop for nobody.
+      if (!shouldPoll() && !mirrorMayBeRead()) return
+      // No-op while the Codex leg OR a full run is in flight (either completion re-flushes via
+      // notifyCacheUpdate) or the rows are fresh — this is what terminates the flush→refresh→flush
+      // chain: after a run, codexAt is `now` and the fingerprint matches, so the flush this run
+      // triggered kicks nothing. The full run matters too: its Codex leg settles (codexAt stamped,
+      // codexInFlight cleared) seconds before the billing providers do, and the fingerprint is only
+      // stamped when the WHOLE run lands — so without this check a flush in that window read a
+      // changed account set against the OLD fingerprint and fetched every Codex account twice.
+      if (codexInFlight || providersInFlight) return
+      const stale =
+        !codexAt ||
+        Date.now() - codexAt >= POLL_MS ||
+        fingerprintCodexAccounts(readCodexAccounts()) !== codexAccountsFingerprint
+      if (stale) void refreshCodexRows().catch(() => {})
+    },
     dispose: () => clearInterval(interval)
   }
 }

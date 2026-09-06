@@ -155,9 +155,23 @@ export function registerCoreHandlers(
   // The provider is consulted fresh at every flush, pairing the usage service's cache with the
   // settings account labels. Dropped from SSH slices by filterMirrorForNodes (no SSH server-side
   // anyway). Wired here (not index.ts) since the usage service is created here.
-  setMirrorUsageProvider(() =>
-    buildMirrorUsage(usageService.snapshot(), deps.getSettings().claudeAccounts ?? [], Date.now())
-  )
+  setMirrorUsageProvider(() => {
+    // Refresh the CODEX rows (only those — the billing providers stay popover-on-demand) when they
+    // are stale, BEFORE reading the cache, so the mirror's Codex rows stay fresh on this flush
+    // cadence without an open pill. Gated inside the service exactly like the Claude poll
+    // (shouldPoll || mirrorMayBeRead) and debounced to one run per 15 min — the Claude poll's own
+    // cadence, so the phone's Codex rows are exactly as fresh as the Claude rows beside them.
+    // Fire-and-forget: a run that lands re-flushes via onCacheUpdate; the fresh-cache guard ends
+    // that chain.
+    usageService.refreshProvidersIfStale()
+    return buildMirrorUsage(
+      usageService.snapshot(),
+      deps.getSettings().claudeAccounts ?? [],
+      Date.now(),
+      usageService.providersSnapshot(),
+      localCodexAccounts()
+    )
+  })
 
   return { gitService }
 }

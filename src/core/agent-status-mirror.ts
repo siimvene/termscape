@@ -223,6 +223,18 @@ export interface MirrorUsage {
   accounts: MirrorUsageAccount[]
 }
 
+/** A loose limit shape shared by both usage sources below (STRUCTURAL — see `UsageSnapshotEntry`). */
+interface UsageLimitLike {
+  kind: string
+  usedPercent: number
+  group?: string | null
+  severity?: string | null
+  resetsAt?: number | null
+  windowMinutes?: number | null
+  scopeLabel?: string | null
+  isActive?: boolean
+}
+
 /** One cached usage row from the usage service. Deliberately STRUCTURAL (not `import`ed from
  *  `@shared/types`) so this file does not couple to a `ClaudeUsage` shape a parallel branch is
  *  mid-flight editing — a real `ClaudeUsage` is assignable to this loose shape. */
@@ -232,32 +244,58 @@ export interface UsageSnapshotEntry {
     email?: string | null
     updatedAt?: number
     status?: string
-    limits?: ReadonlyArray<{
-      kind: string
-      usedPercent: number
-      group?: string | null
-      severity?: string | null
-      resetsAt?: number | null
-      windowMinutes?: number | null
-      scopeLabel?: string | null
-      isActive?: boolean
-    }>
+    limits?: ReadonlyArray<UsageLimitLike>
+  }
+}
+
+/** One cached PROVIDER usage row (the usage service's `providersSnapshot()`), Codex included.
+ *  STRUCTURAL for the same reason as `UsageSnapshotEntry` — a real `ProviderUsage` from
+ *  `@shared/types` is assignable to this loose shape. */
+export interface UsageProviderEntry {
+  /** 'codex' | 'gemini' | 'grok' | … — only 'codex' rows are mapped into the mirror. */
+  provider: string
+  /** The managed Codex account this row belongs to; undefined = the un-owned system row. */
+  accountId?: string
+  /** Signed-in identity the provider exposed cheaply (email / label), when any. */
+  account?: string | null
+  status?: string
+  updatedAt?: number
+  limits?: ReadonlyArray<UsageLimitLike>
+}
+
+/** Map one loose limit through DEFENSIVELY (`?? null`) so it compiles whether the source's
+ *  `severity` is `string` or `string | null`, and never re-derives severity/window from the
+ *  percentage — those are the provider's call (see claude-usage-map.ts). */
+function mapUsageLimit(l: UsageLimitLike): MirrorUsageLimit {
+  return {
+    kind: l.kind,
+    group: l.group ?? null,
+    usedPercent: l.usedPercent,
+    // `?? null` here is the whole point: it type-checks against BOTH a `string` and a
+    // `string | null` severity (the parallel branch's in-flight generalization).
+    severity: l.severity ?? null,
+    resetsAt: l.resetsAt ?? null,
+    windowMinutes: l.windowMinutes ?? null,
+    scopeLabel: l.scopeLabel ?? null,
+    isActive: l.isActive ?? false
   }
 }
 
 /**
- * Assemble the `usage` block from the usage service's cached snapshots + the settings account
- * list (for labels). Pure. Maps each `UsageLimit` through DEFENSIVELY (`?? null`) so it compiles
- * whether the source's `severity` is `string` or `string | null`, and never re-derives severity
- * or window from the percentage — those are the provider's call (see claude-usage-map.ts).
- * Returns `undefined` when there is nothing to advertise, so the file keeps its old shape.
+ * Assemble the `usage` block. Pure. Claude rows come from `snapshot` (account-aware, system first);
+ * Codex rows come from `providers` (the provider cache), each keyed by its own `accountId` so one
+ * account's numbers can never collapse into another's (S6 §4.3). `agentId` ('claude' / 'codex')
+ * distinguishes them for the phone. Ordering: Claude rows then Codex (system row first, then managed
+ * accounts in given order). Every `UsageLimit` is mapped DEFENSIVELY (see `mapUsageLimit`). Returns
+ * `undefined` only when there is NOTHING to advertise, so the file keeps its old shape.
  */
 export function buildMirrorUsage(
   snapshot: ReadonlyArray<UsageSnapshotEntry>,
   accounts: ReadonlyArray<{ id: string; label?: string | null; email?: string | null }>,
-  now: number
+  now: number,
+  providers: ReadonlyArray<UsageProviderEntry> = [],
+  codexAccounts: ReadonlyArray<{ id: string; label?: string | null; email?: string | null }> = []
 ): MirrorUsage | undefined {
-  if (snapshot.length === 0) return undefined
   const byId = new Map(accounts.map((a) => [a.id, a]))
   // System account (accountId null) first, then everything else in given order.
   const ordered = [...snapshot].sort((a, b) => {
@@ -266,7 +304,7 @@ export function buildMirrorUsage(
     if (b.accountId === null) return 1
     return 0
   })
-  const mapped: MirrorUsageAccount[] = ordered.map((e) => {
+  const claudeRows: MirrorUsageAccount[] = ordered.map((e) => {
     const acct = e.accountId ? byId.get(e.accountId) : undefined
     const u = e.usage
     return {
@@ -276,20 +314,41 @@ export function buildMirrorUsage(
       agentId: 'claude',
       status: u.status ?? 'unavailable',
       updatedAt: u.updatedAt ?? now,
-      limits: (u.limits ?? []).map((l) => ({
-        kind: l.kind,
-        group: l.group ?? null,
-        usedPercent: l.usedPercent,
-        // `?? null` here is the whole point: it type-checks against BOTH a `string` and a
-        // `string | null` severity (the parallel branch's in-flight generalization).
-        severity: l.severity ?? null,
-        resetsAt: l.resetsAt ?? null,
-        windowMinutes: l.windowMinutes ?? null,
-        scopeLabel: l.scopeLabel ?? null,
-        isActive: l.isActive ?? false
-      }))
+      limits: (u.limits ?? []).map(mapUsageLimit)
     }
   })
+
+  // Codex rows from the provider cache. DROP 'unavailable' (not signed in): the desktop hides such
+  // providers entirely, so a phone must not show a dead "Codex — unavailable" row on every machine.
+  const codexById = new Map(codexAccounts.map((a) => [a.id, a]))
+  const codexPresent = providers.filter((p) => p.provider === 'codex' && p.status !== 'unavailable')
+  // System row (un-owned ⇒ no accountId) first, then managed accounts in given order.
+  const codexSorted = [
+    ...codexPresent.filter((p) => p.accountId == null),
+    ...codexPresent.filter((p) => p.accountId != null)
+  ]
+  const codexRows: MirrorUsageAccount[] = codexSorted.map((p) => {
+    const acct = p.accountId ? codexById.get(p.accountId) : undefined
+    return {
+      accountId: p.accountId ?? null,
+      label: acct?.label ?? null,
+      // `p.account` is `identity.email || identity.label` for a managed row (fetchCodexUsage), so
+      // reading it here would put an email-less account's LABEL into the email field and the phone
+      // would print the label twice. The managed row's email comes from settings only; the system
+      // row has no settings entry, so its own field (null in production, the provider exposes no
+      // identity for the un-owned account) is all there is. A managed row whose account is no
+      // longer in settings (removed, or pending, between the run and this flush) is an orphan: it
+      // is NOT the system row and its `account` is the same email-or-label field, so it gets null.
+      email: acct ? (acct.email ?? null) : p.accountId == null ? (p.account ?? null) : null,
+      agentId: 'codex',
+      status: p.status ?? 'unavailable',
+      updatedAt: p.updatedAt || now,
+      limits: (p.limits ?? []).map(mapUsageLimit)
+    }
+  })
+
+  const mapped = [...claudeRows, ...codexRows]
+  if (mapped.length === 0) return undefined
   const updatedAt = mapped.reduce((m, a) => Math.max(m, a.updatedAt), 0) || now
   return { updatedAt, accounts: mapped }
 }
@@ -757,6 +816,13 @@ const STALE_SWEEP_MS = 60_000
 let sweepTimer: ReturnType<typeof setInterval> | null = null
 let targetFile: string | null = null
 let writeTimer: NodeJS.Timeout | null = null
+// Per-path tail of the mirror's disk writes. Overlapping flushes (an agent event, a usage poll and
+// a provider run landing within one tick) each build their doc in issue order, but `writeFileAtomic`
+// uses a unique temp per call and the LAST RENAME wins whatever the issue order — so without this an
+// older, usage-less doc could land over a fresher one. Chaining the writes per path keeps the file
+// monotone: the doc built last is the doc that ends up on disk. The chain never rejects (a failed
+// write is swallowed per flush, as before), so one failure cannot stall the writes behind it.
+const writeChains = new Map<string, Promise<void>>()
 const flushListeners = new Set<(doc: MirrorFile) => void>()
 // Supplies the host-level settings block, consulted fresh on every flush (so a mid-session
 // permission-mode / account change is picked up without re-wiring). Null = no block written.
@@ -1920,11 +1986,14 @@ export async function flush(): Promise<void> {
       // A listener must never break the local write (or its sibling listeners).
     }
   }
-  try {
-    await writeFileAtomic(file, JSON.stringify(doc), { mode: 0o600 })
-  } catch {
-    // best-effort: listeners already got the doc; a failed local write cleans up its own temp
-  }
+  const data = JSON.stringify(doc)
+  const write = (writeChains.get(file) ?? Promise.resolve()).then(() =>
+    writeFileAtomic(file, data, { mode: 0o600 }).catch(() => {
+      // best-effort: listeners already got the doc; a failed local write cleans up its own temp
+    })
+  )
+  writeChains.set(file, write)
+  await write
 }
 
 // ---- Test helpers --------------------------------------------------------------------------

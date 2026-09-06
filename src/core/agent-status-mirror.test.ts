@@ -1687,6 +1687,141 @@ describe('buildMirrorUsage', () => {
   it('returns undefined for an empty snapshot', () => {
     expect(buildMirrorUsage([], [], 5)).toBeUndefined()
   })
+
+  it('returns undefined when neither Claude snapshot nor Codex providers have any row', () => {
+    expect(buildMirrorUsage([], [], 5, [], [])).toBeUndefined()
+  })
+
+  it('maps a Codex system row (accountId null, agentId codex) after the Claude rows', () => {
+    const snap = [{ accountId: null, usage: { email: 'sys@x', updatedAt: 100, status: 'ok', limits: [] } }]
+    // The shape fetchCodexUsage produces for the un-owned system row: no identity ⇒ account null.
+    const providers = [
+      {
+        provider: 'codex',
+        accountId: undefined,
+        account: null,
+        status: 'ok',
+        updatedAt: 300,
+        limits: [{ kind: 'session', usedPercent: 55 }]
+      }
+    ]
+    const mu = buildMirrorUsage(snap, [], 500, providers, [])!
+    // Claude first, then the Codex system row.
+    expect(mu.accounts.map((a) => a.agentId)).toEqual(['claude', 'codex'])
+    const codex = mu.accounts[1]
+    expect(codex.accountId).toBeNull()
+    expect(codex.label).toBeNull()
+    expect(codex.email).toBeNull()
+    expect(codex.status).toBe('ok')
+    expect(codex.limits[0]).toEqual({
+      kind: 'session',
+      group: null,
+      usedPercent: 55,
+      severity: null,
+      resetsAt: null,
+      windowMinutes: null,
+      scopeLabel: null,
+      isActive: false
+    })
+    // updatedAt is the freshest row overall (the Codex row here).
+    expect(mu.updatedAt).toBe(300)
+  })
+
+  it('looks up a managed Codex row label from the codexAccounts list, email backfilled', () => {
+    const providers = [
+      { provider: 'codex', accountId: 'cx1', account: null, status: 'ok', updatedAt: 10, limits: [] }
+    ]
+    const mu = buildMirrorUsage([], [], 9, providers, [
+      { id: 'cx1', label: 'Codex Work', email: 'work@codex' }
+    ])!
+    expect(mu.accounts).toHaveLength(1)
+    expect(mu.accounts[0]).toMatchObject({
+      accountId: 'cx1',
+      label: 'Codex Work',
+      email: 'work@codex',
+      agentId: 'codex'
+    })
+  })
+
+  it("a managed row's email comes from settings, never from the provider row's `account`", () => {
+    // fetchCodexUsage stamps `account = identity.email || identity.label`, so for an account WITHOUT
+    // an email that field holds the LABEL — copying it into `email` would show the label twice.
+    const providers = [
+      { provider: 'codex', accountId: 'cx1', account: 'Codex Work', status: 'ok', updatedAt: 10, limits: [] }
+    ]
+    const mu = buildMirrorUsage([], [], 9, providers, [{ id: 'cx1', label: 'Codex Work' }])!
+    expect(mu.accounts[0].label).toBe('Codex Work')
+    expect(mu.accounts[0].email).toBeNull()
+  })
+
+  it("a managed row with an email in settings reports that email (the row's `account` is not consulted)", () => {
+    const providers = [
+      { provider: 'codex', accountId: 'cx1', account: 'W', status: 'ok', updatedAt: 10, limits: [] }
+    ]
+    const mu = buildMirrorUsage([], [], 9, providers, [{ id: 'cx1', label: 'W', email: 'work@codex' }])!
+    expect(mu.accounts[0].email).toBe('work@codex')
+  })
+
+  it("a system row's own `account` is passed through when present", () => {
+    const providers = [
+      { provider: 'codex', accountId: undefined, account: 'sys@codex', status: 'ok', updatedAt: 10, limits: [] }
+    ]
+    const mu = buildMirrorUsage([], [], 9, providers, [])!
+    expect(mu.accounts[0].email).toBe('sys@codex')
+  })
+
+  it("an ORPHAN managed row (accountId not in codexAccounts) gets email null — its `account` is never copied", () => {
+    // The account was removed (or is pending) between the provider run and this flush. It is not
+    // the system row, and its `account` is the same email-or-label field a managed row carries, so
+    // falling into the system-row branch would print a label as an email.
+    const providers = [
+      { provider: 'codex', accountId: 'gone', account: 'Old Label', status: 'ok', updatedAt: 10, limits: [] }
+    ]
+    const mu = buildMirrorUsage([], [], 9, providers, [{ id: 'cx1', label: 'W', email: 'w@x' }])!
+    expect(mu.accounts).toHaveLength(1)
+    expect(mu.accounts[0]).toMatchObject({ accountId: 'gone', label: null, agentId: 'codex' })
+    expect(mu.accounts[0].email).toBeNull()
+  })
+
+  it("drops Codex rows with status 'unavailable' (not signed in)", () => {
+    const providers = [
+      { provider: 'codex', accountId: undefined, account: null, status: 'unavailable', updatedAt: 1, limits: [] },
+      { provider: 'codex', accountId: 'cx1', account: null, status: 'ok', updatedAt: 2, limits: [] }
+    ]
+    const mu = buildMirrorUsage([], [], 9, providers, [{ id: 'cx1', label: 'W' }])!
+    // Only the signed-in managed row survives; the unavailable system row is gone.
+    expect(mu.accounts.map((a) => a.accountId)).toEqual(['cx1'])
+  })
+
+  it('orders Codex rows system-first then managed in given order', () => {
+    const providers = [
+      { provider: 'codex', accountId: 'b', account: null, status: 'ok', updatedAt: 1, limits: [] },
+      { provider: 'codex', accountId: undefined, account: null, status: 'ok', updatedAt: 1, limits: [] },
+      { provider: 'codex', accountId: 'a', account: null, status: 'ok', updatedAt: 1, limits: [] }
+    ]
+    const mu = buildMirrorUsage([], [], 9, providers, [
+      { id: 'a', label: 'A' },
+      { id: 'b', label: 'B' }
+    ])!
+    // System row (null) first, then the managed rows in the ORDER THEY WERE GIVEN (b before a).
+    expect(mu.accounts.map((a) => a.accountId)).toEqual([null, 'b', 'a'])
+  })
+
+  it('ignores non-codex providers (gemini/grok/…)', () => {
+    const providers = [
+      { provider: 'gemini', accountId: undefined, account: null, status: 'ok', updatedAt: 1, limits: [] },
+      { provider: 'grok', accountId: undefined, account: null, status: 'ok', updatedAt: 1, limits: [] }
+    ]
+    // No Claude rows, no Codex rows ⇒ nothing to advertise.
+    expect(buildMirrorUsage([], [], 5, providers, [])).toBeUndefined()
+  })
+
+  it('is unchanged for the Claude-only call shape (providers omitted)', () => {
+    const snap = [{ accountId: null, usage: { email: 'sys@x', updatedAt: 100, status: 'ok', limits: [] } }]
+    const mu = buildMirrorUsage(snap, [], 500)!
+    expect(mu.accounts).toHaveLength(1)
+    expect(mu.accounts[0].agentId).toBe('claude')
+  })
 })
 
 describe('usage block on flush', () => {

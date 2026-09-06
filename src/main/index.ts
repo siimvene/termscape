@@ -3494,9 +3494,23 @@ app.whenReady().then(async () => {
       }
     }
   })
-  setMirrorUsageProvider(() =>
-    buildMirrorUsage(usageService.snapshot(), settingsStore.get().claudeAccounts ?? [], Date.now())
-  )
+  setMirrorUsageProvider(() => {
+    // Refresh the CODEX rows (only those — the billing providers stay popover-on-demand) when they
+    // are stale, BEFORE reading the cache, so the mirror's Codex rows stay fresh on this flush
+    // cadence without an open pill. Gated inside the service exactly like the Claude poll
+    // (shouldPoll || mirrorMayBeRead) and debounced to one run per 15 min — the Claude poll's own
+    // cadence, so the phone's Codex rows are exactly as fresh as the Claude rows beside them.
+    // Fire-and-forget: a run that lands re-flushes via onCacheUpdate; the fresh-cache guard ends
+    // that chain.
+    usageService.refreshProvidersIfStale()
+    return buildMirrorUsage(
+      usageService.snapshot(),
+      settingsStore.get().claudeAccounts ?? [],
+      Date.now(),
+      usageService.providersSnapshot(),
+      localCodexAccounts()
+    )
+  })
   initTelemetry(() => settingsStore.get())
   initLicense(() => {})
   // Lazy getter: sshProjectManager is created just below, so a remote account op (which only runs

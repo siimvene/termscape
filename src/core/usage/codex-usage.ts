@@ -50,6 +50,16 @@ export async function readCodexAuth(home = codexHome()): Promise<CodexAuth> {
   }
 }
 
+/** Does the home hold an auth.json at all (readable or not)? Presence only — never parsed here. */
+async function hasCodexAuthFile(home: string): Promise<boolean> {
+  try {
+    await fs.access(path.join(home, 'auth.json'))
+    return true
+  } catch {
+    return false
+  }
+}
+
 function clampPercent(v: unknown): number | null {
   if (typeof v !== 'number' || !Number.isFinite(v)) return null
   return Math.min(100, Math.max(0, v))
@@ -290,6 +300,12 @@ export async function fetchCodexUsage(
   } catch {
     // fall through to the app-server tier
   }
+  // A home that has never seen `codex login` has no auth.json at all. The app-server tier would
+  // spawn `codex app-server` only to be told the same thing, and since the mirror's Codex refresh
+  // now runs this on the poll cadence for every focused desktop (not just on popover open), that
+  // subprocess per Codex home every 15 min bought nothing. A home WITH an auth file whose backend
+  // read declined (offline, non-OK) still gets the app-server tier below.
+  if (!(await hasCodexAuthFile(home))) return snapshot([], 'unavailable', account, accountId)
   try {
     const viaAppServer = await fetchViaAppServer(home)
     if (viaAppServer) return { ...viaAppServer, account, accountId }
