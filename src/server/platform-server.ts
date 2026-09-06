@@ -16,6 +16,7 @@ type Listener = { fn: (...args: any[]) => void; withSender: boolean }
  *  One instance per server process; each authenticated WebSocket attaches as one UI. */
 export class ServerPlatform implements CorePlatform {
   readonly userDataDir: string
+  readonly peerUserDataDir?: string
   readonly appVersion: string
   readonly isPackaged = true
 
@@ -29,9 +30,10 @@ export class ServerPlatform implements CorePlatform {
   private registry = new UiSinkRegistry()
   private nextUiId = 1
 
-  constructor(opts: { userDataDir: string; appVersion: string }) {
+  constructor(opts: { userDataDir: string; appVersion: string; peerUserDataDir?: string }) {
     this.userDataDir = opts.userDataDir
     this.appVersion = opts.appVersion
+    if (opts.peerUserDataDir) this.peerUserDataDir = opts.peerUserDataDir
   }
 
   handle(channel: string, fn: (...args: any[]) => unknown): void {

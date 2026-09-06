@@ -160,9 +160,17 @@ export async function startServer(
   // Core platform boundary — must be initialized before any core service registers handlers.
   const platform = new ServerPlatform({
     userDataDir: config.dataDir,
-    appVersion: readAppVersion()
+    appVersion: readAppVersion(),
+    ...(config.peerUserDataDir ? { peerUserDataDir: config.peerUserDataDir } : {})
   })
   initPlatform(platform)
+  if (config.peerUserDataDir) {
+    const peerAccounts = path.join(config.peerUserDataDir, 'claude-accounts')
+    console.log(
+      `peer user data: ${config.peerUserDataDir}` +
+        (fs.existsSync(peerAccounts) ? '' : ' (no claude-accounts/ there yet)')
+    )
+  }
 
   const auth = new Auth(config.dataDir)
   if (config.passwordSeed && !auth.isConfigured()) auth.setPassword(config.passwordSeed)

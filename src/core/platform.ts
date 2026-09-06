@@ -6,6 +6,16 @@
 export interface CorePlatform {
   /** Root for all persistent state (Electron: app.getPath('userData')). */
   readonly userDataDir: string
+  /**
+   * A CO-LOCATED desktop peer's userData dir, when this instance runs beside one (the Mac
+   * phone-desktop topology: the Server Edition serves the phone, the desktop app owns the managed
+   * accounts under ITS `claude-accounts/`). Read at SPAWN time only, by `claudeConfigDirForSpawn`,
+   * and only for an account id this instance has no dir of its own for: a phone attach to a
+   * desktop node otherwise resolves the node's account under the server's data dir, finds nothing,
+   * and runs (or claims to run) the session as the System account. Never used to mint or delete
+   * an account dir — those stay under `userDataDir`. Unset everywhere but that topology.
+   */
+  readonly peerUserDataDir?: string
   readonly appVersion: string
   readonly isPackaged: boolean
   /** Electron's `process.resourcesPath` — `<app>/Contents/Resources` in a packaged build, where

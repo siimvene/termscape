@@ -70,7 +70,7 @@ import { terminateWindowsProcessTree } from '../session-host/windows-process-tre
 import { effectiveSize, type PtySize } from './pty-size'
 import { machOArch, archMismatch } from './macho-arch'
 import { writeScrollback, readScrollback, deleteScrollback } from './scrollback-store'
-import { claudeConfigDirFor } from './claude-config-dir'
+import { claudeConfigDirForSpawn } from './claude-config-dir'
 import { findExecutableSync, findInPathString, resolveShellPath, shellPathNow } from './exec-path'
 import {
   AUTH_ENV_STRIP,
@@ -2405,8 +2405,16 @@ export class PtyManager {
         throw error
       }
     }
-    // Surface a missing-account-dir fallback so the renderer can flag the node's account chip.
-    const accountFallback = spawned?.accountFallback
+    // Surface a missing-account-dir fallback so the renderer can flag the node's account chip —
+    // for a FRESH spawn only. The env `spawnSession` computed (and the fallback it recorded) never
+    // reached a WARM reattach: `new-session -A` joined a shell that is already running under
+    // whatever account it was started with, so "running as the System account" would describe a
+    // client env, not the process. The record is corrected too, so a later same-process co-attach
+    // (`join`, which reports the record's flag) agrees. Measured on the phone-desktop topology:
+    // every phone attach to an account-bound desktop node raised the banner (consort-era
+    // finding surfaced by the iOS account-fallback banner, 2026-09-07).
+    if (!fresh && spawned?.accountFallback) spawned.accountFallback = false
+    const accountFallback = fresh ? spawned?.accountFallback : undefined
     // The session's `persistKey` is set iff the spawn actually landed on a tmux, local or remote
     // (`persisted` in spawnSession) — i.e. exactly "this session survives losing its client",
     // which is what the renderer's cache-dispose levers must not assume. See PtyCreateResult.
@@ -3021,7 +3029,7 @@ export class PtyManager {
     // (the local ssh client process doesn't need it).
     let accountFallback = false
     let accountDir =
-      options.accountId && !options.sshRemote ? claudeConfigDirFor(options.accountId) : null
+      options.accountId && !options.sshRemote ? claudeConfigDirForSpawn(options.accountId) : null
     // Missing/deleted account dir (spec: error handling) → fall back to system default
     // instead of pointing claude at a dead dir; the node then behaves like an unbound one.
     // `accountFallback` is surfaced to the renderer (warning chip) via the create() result.

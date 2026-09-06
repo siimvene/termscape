@@ -23,6 +23,13 @@ export type ServerConfig = {
    */
   headless: boolean
   /**
+   * `NODETERM_PEER_USER_DATA`: a co-located desktop app's userData dir (the Mac phone-desktop
+   * topology). Managed Claude accounts the desktop owns are resolved there at spawn time when this
+   * instance has no dir of its own for the id — see `CorePlatform.peerUserDataDir`. Unset on a
+   * Linux server with no desktop peer.
+   */
+  peerUserDataDir?: string
+  /**
    * Merge the managed agent hooks into the user's real agent config dirs (~/.claude,
    * ~/.codex, ~/.gemini) at boot. Defaults to true — the server needs them to receive
    * agent status. Tests MUST pass false: installing rewrites the machine's REAL settings.json
@@ -96,6 +103,7 @@ export function resolveConfig(env: NodeJS.ProcessEnv, argv: string[]): ServerCon
   // truthy spellings the install script + systemd unit emit.
   const headlessEnv = (env.NODETERM_HEADLESS || '').trim().toLowerCase()
   const headless = headlessEnv === '1' || headlessEnv === 'true'
+  const peerUserDataDir = (env.NODETERM_PEER_USER_DATA || '').trim() || undefined
 
   // Headless binds nothing, so the "plain HTTP on a public interface" hazard the loopback refusal
   // guards against does not apply — a stray NODETERM_HOST must not fail a headless boot.
@@ -127,5 +135,15 @@ export function resolveConfig(env: NodeJS.ProcessEnv, argv: string[]): ServerCon
     )
   }
 
-  return { port, host, dataDir, rendererDir, insecureHttp, passwordSeed, trustProxy, headless }
+  return {
+    port,
+    host,
+    dataDir,
+    rendererDir,
+    insecureHttp,
+    passwordSeed,
+    trustProxy,
+    headless,
+    ...(peerUserDataDir ? { peerUserDataDir } : {})
+  }
 }
