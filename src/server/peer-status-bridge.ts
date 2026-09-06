@@ -47,8 +47,68 @@ function readMirrorJson(file: string): Record<string, unknown> | null {
   }
 }
 
-/** Pass the mirror's `usage` block through, lightly validated (the desktop wrote it; the phone
- *  renders it). Returns null when absent/malformed so the bridge can skip the broadcast. */
+/** Bounded copy of one string field, or undefined when absent / not a string. Same discipline as
+ *  `readPeerMirror` below: the mirror is a same-user file, but its strings land verbatim in every
+ *  WS client's store, so they are clamped rather than trusted forever (consort finding, applied
+ *  here too on the security side-pass that reviewed the Codex rows). */
+function boundedStr(v: unknown, max: number): string | undefined {
+  return typeof v === 'string' ? v.slice(0, max) : undefined
+}
+const finiteNum = (v: unknown): number | undefined =>
+  typeof v === 'number' && Number.isFinite(v) ? v : undefined
+
+/** One usage row, whitelisted to the `MirrorUsageAccount` shape (agent-status-mirror.ts) with every
+ *  string clamped; `null` for anything that is not a row. Only fields PRESENT in the source are
+ *  emitted (the phone decodes tolerantly and defaults the rest), and unknown fields are dropped so an
+ *  arbitrary object shape never reaches a client's render path. */
+function readUsageAccount(v: unknown): Record<string, unknown> | null {
+  if (typeof v !== 'object' || v === null || Array.isArray(v)) return null
+  const a = v as Record<string, unknown>
+  const out: Record<string, unknown> = {}
+  if (a.accountId === null) out.accountId = null
+  else if (typeof a.accountId === 'string') out.accountId = a.accountId.slice(0, 128)
+  const label = boundedStr(a.label, 200)
+  if (label !== undefined) out.label = label
+  else if (a.label === null) out.label = null
+  const email = boundedStr(a.email, 320)
+  if (email !== undefined) out.email = email
+  else if (a.email === null) out.email = null
+  const agentId = boundedStr(a.agentId, 64)
+  if (agentId !== undefined) out.agentId = agentId
+  const status = boundedStr(a.status, 32)
+  if (status !== undefined) out.status = status
+  const updatedAt = finiteNum(a.updatedAt)
+  if (updatedAt !== undefined) out.updatedAt = updatedAt
+  if (Array.isArray(a.limits)) {
+    const limits: Record<string, unknown>[] = []
+    for (const l of a.limits) {
+      if (typeof l !== 'object' || l === null || Array.isArray(l)) continue
+      const lim = l as Record<string, unknown>
+      const kind = boundedStr(lim.kind, 64)
+      const usedPercent = finiteNum(lim.usedPercent)
+      if (kind === undefined || usedPercent === undefined) continue
+      const o: Record<string, unknown> = { kind, usedPercent }
+      for (const k of ['group', 'severity', 'scopeLabel'] as const) {
+        const s = boundedStr(lim[k], 200)
+        if (s !== undefined) o[k] = s
+        else if (lim[k] === null) o[k] = null
+      }
+      for (const k of ['resetsAt', 'windowMinutes'] as const) {
+        const n = finiteNum(lim[k])
+        if (n !== undefined) o[k] = n
+        else if (lim[k] === null) o[k] = null
+      }
+      if (typeof lim.isActive === 'boolean') o.isActive = lim.isActive
+      limits.push(o)
+    }
+    out.limits = limits
+  }
+  return out
+}
+
+/** Pass the mirror's `usage` block through, validated row by row (the desktop wrote it; the phone
+ *  renders it): malformed rows are dropped, strings are bounded, unknown fields never cross. Returns
+ *  null when the block is absent/malformed so the bridge can skip the broadcast. */
 export function readPeerUsage(file: string): { updatedAt: number; accounts: unknown[] } | null {
   const raw = readMirrorJson(file)
   const u = raw?.usage
@@ -56,7 +116,10 @@ export function readPeerUsage(file: string): { updatedAt: number; accounts: unkn
   const accounts = (u as { accounts?: unknown }).accounts
   if (!Array.isArray(accounts)) return null
   const updatedAt = (u as { updatedAt?: unknown }).updatedAt
-  return { updatedAt: typeof updatedAt === 'number' ? updatedAt : 0, accounts }
+  return {
+    updatedAt: typeof updatedAt === 'number' ? updatedAt : 0,
+    accounts: accounts.map(readUsageAccount).filter((a): a is Record<string, unknown> => a !== null)
+  }
 }
 
 /** Tolerant read of a peer mirror file: absent/corrupt/foreign-shaped → empty map, never throw. */

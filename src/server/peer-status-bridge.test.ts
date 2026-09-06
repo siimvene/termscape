@@ -109,6 +109,47 @@ describe('readPeerUsage', () => {
     expect(readPeerUsage(tmpMirror({}))).toBeNull()
     expect(readPeerUsage(tmpMirror({}, { accounts: 'nope' }))).toBeNull()
   })
+
+  it('drops non-row entries, unknown fields and malformed limits, and bounds every string', () => {
+    const long = 'x'.repeat(5000)
+    const file = tmpMirror(
+      {},
+      {
+        updatedAt: 3,
+        accounts: [
+          42,
+          'nope',
+          null,
+          {
+            accountId: 'cx1',
+            label: long,
+            email: 'e@x',
+            agentId: 'codex',
+            status: 'ok',
+            updatedAt: 7,
+            render: '<img onerror=1>',
+            limits: [
+              { kind: 'session', usedPercent: 40, group: 'session', scopeLabel: long, resetsAt: 1, isActive: true },
+              { kind: 'weekly' }, // no usedPercent → dropped
+              'junk',
+              { kind: 'bad', usedPercent: Number.NaN }
+            ]
+          }
+        ]
+      }
+    )
+    const u = readPeerUsage(file)!
+    expect(u.updatedAt).toBe(3)
+    expect(u.accounts).toHaveLength(1)
+    const row = u.accounts[0] as Record<string, unknown>
+    expect(Object.keys(row).sort()).toEqual(
+      ['accountId', 'agentId', 'email', 'label', 'limits', 'status', 'updatedAt'].sort()
+    )
+    expect((row.label as string).length).toBe(200)
+    expect(row.limits).toEqual([
+      { kind: 'session', usedPercent: 40, group: 'session', scopeLabel: 'x'.repeat(200), resetsAt: 1, isActive: true }
+    ])
+  })
 })
 
 describe('startPeerStatusBridge — usage', () => {
