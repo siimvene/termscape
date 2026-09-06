@@ -89,7 +89,8 @@ export function isSafeLocalTranscriptPath(
   homeDir: string,
   userDataPath: string,
   codexHomeDir?: string,
-  grokHomeDir?: string
+  grokHomeDir?: string,
+  peerUserDataPath?: string
 ): boolean {
   const legacyRoot = path.join(homeDir, '.claude', 'projects')
   if (abs === legacyRoot || abs.startsWith(legacyRoot + path.sep)) return true
@@ -110,12 +111,22 @@ export function isSafeLocalTranscriptPath(
   // means the context link silently never resolves, never a widened read.
   const grokRoot = path.join(grokHomeDir || path.join(homeDir, '.grok'), 'sessions')
   if (abs === grokRoot || abs.startsWith(grokRoot + path.sep)) return true
-  const accountsRoot = path.join(userDataPath, 'claude-accounts')
-  if (abs !== accountsRoot && !abs.startsWith(accountsRoot + path.sep)) return false
-  // Relative to the accounts root: expect `<accountId>/projects[/…]`. Because `abs` is normalized
-  // and confirmed under `accountsRoot`, `path.relative` yields no leading `..`.
-  const segs = path.relative(accountsRoot, abs).split(path.sep)
-  return segs.length >= 2 && ACCOUNT_ID_RE.test(segs[0]) && segs[1] === 'projects'
+  // A managed account's transcripts: `<accountsRoot>/<accountId>/projects[/…]`, under this
+  // instance's own userData — or under a co-located desktop peer's (`CorePlatform.peerUserDataDir`),
+  // because a session `claudeConfigDirForSpawn` resolved into the peer's account dir writes its
+  // transcript there and POSTs that path to THIS instance's hook server. The peer root gets the
+  // identical `<id>/projects` shape, nothing wider (the same tree holds `.credentials.json`).
+  const roots = [userDataPath, ...(peerUserDataPath ? [peerUserDataPath] : [])].map((ud) =>
+    path.join(ud, 'claude-accounts')
+  )
+  for (const accountsRoot of roots) {
+    if (abs !== accountsRoot && !abs.startsWith(accountsRoot + path.sep)) continue
+    // Relative to the accounts root: expect `<accountId>/projects[/…]`. Because `abs` is normalized
+    // and confirmed under `accountsRoot`, `path.relative` yields no leading `..`.
+    const segs = path.relative(accountsRoot, abs).split(path.sep)
+    return segs.length >= 2 && ACCOUNT_ID_RE.test(segs[0]) && segs[1] === 'projects'
+  }
+  return false
 }
 
 /**

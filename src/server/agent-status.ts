@@ -201,7 +201,17 @@ export function wireAgentStatus(
     // so a relocated grok home would silently never resolve a context link. BOTH shells pass it
     // (invariant 11) — a jail widened in one shell only is a feature the Server Edition lacks with
     // nothing to say so.
-    return isSafeLocalTranscriptPath(abs, homedir(), platform.userDataDir, codexHome(), grokHomeDir())
+    // The peer root (Server Edition beside a desktop, `NODETERM_PEER_USER_DATA`): a session spawned
+    // into the desktop's managed-account dir writes its transcript there — jailing to our own
+    // userData alone would drop every payload of such a node (blind security side-pass, 2026-09-07).
+    return isSafeLocalTranscriptPath(
+      abs,
+      homedir(),
+      platform.userDataDir,
+      codexHome(),
+      grokHomeDir(),
+      platform.peerUserDataDir
+    )
       ? abs
       : undefined
   }

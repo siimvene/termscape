@@ -155,6 +155,20 @@ describe('isSafeLocalTranscriptPath', () => {
     expect(isSafeLocalTranscriptPath(legacy, home, ud)).toBe(true)
     expect(isSafeLocalTranscriptPath(`${legacy}/-repo/abc.jsonl`, home, ud)).toBe(true)
   })
+  it("accepts a co-located PEER's account transcript root with the same <id>/projects shape, nothing wider", () => {
+    const peer = '/Users/x/Library/Application Support/node-terminal'
+    const peerAcct = `${peer}/claude-accounts`
+    const withPeer = (p: string) => isSafeLocalTranscriptPath(p, home, ud, undefined, undefined, peer)
+    expect(withPeer(`${peerAcct}/a1/projects`)).toBe(true)
+    expect(withPeer(`${peerAcct}/a1/projects/-repo/s.jsonl`)).toBe(true)
+    expect(withPeer(`${peerAcct}/a1/.credentials.json`)).toBe(false)
+    expect(withPeer(`${peerAcct}/a1`)).toBe(false)
+    expect(withPeer(`${peer}/settings.json`)).toBe(false)
+    // Without the peer parameter the same paths stay refused (desktop shell, Linux server).
+    expect(isSafeLocalTranscriptPath(`${peerAcct}/a1/projects/s.jsonl`, home, ud)).toBe(false)
+    // The own root is unaffected by passing a peer.
+    expect(withPeer(`${acctRoot}/a1/projects/s.jsonl`)).toBe(true)
+  })
   it('accepts a valid account transcript root and paths under it', () => {
     expect(isSafeLocalTranscriptPath(`${acctRoot}/a1/projects`, home, ud)).toBe(true)
     expect(isSafeLocalTranscriptPath(`${acctRoot}/a1/projects/-repo/s.jsonl`, home, ud)).toBe(true)

@@ -360,7 +360,13 @@ paths:
   `NODETERM_PEER_USER_DATA` (the Mac launchd wrapper points it at the desktop's app-support dir) —
   so a phone COLD spawn of a desktop node runs under the node's real account. Spawn-side only:
   add/login/remove keep `claudeConfigDirFor` and never touch the peer tree. Tests:
-  `pty-account-fallback.test.ts`, `claude-config-dir.test.ts`. Still open on that topology: the
+  `pty-account-fallback.test.ts`, `claude-config-dir.test.ts`. The hook transcript-path jail
+  (`isSafeLocalTranscriptPath`) accepts the peer's `claude-accounts/<id>/projects` too, same shape,
+  or such a node's hook POSTs would be refused and it would show no status. Known limit (blind
+  security side-pass, MINOR, deferred): a node that GENUINELY fell back at a fresh spawn and is
+  reopened after a process restart reattaches warm and shows no fallback — the old code re-checked
+  the dir at reattach, which was a different guess, not the pane's real account; a true answer
+  would need the pane's env, not a client env. Still open on that topology: the
   server's own `settings.json` lists no accounts, so the phone's New Session sheet offers only the
   System account, and a Codex account-bound desktop node is still refused (`unavailable:
   'codex-account'`) — Codex homes are keyed by the instance's userData digest.
