@@ -538,14 +538,19 @@ export function startUsageService(opts: UsageServiceOptions = {}): UsageService 
     try {
       await providersInFlight
       providersAt = Date.now()
-      // A completed run re-flushes the mirror so freshly-landed Codex numbers reach the phone even
-      // when nothing (no open pill) asked for providers. `refreshProvidersIfStale` will see fresh
-      // Codex rows on the resulting flush and not kick another run — the flush→refresh→flush chain ends.
-      notifyCacheUpdate()
-      return providersCache
     } finally {
       providersInFlight = null
     }
+    // A completed run re-flushes the mirror so freshly-landed Codex numbers reach the phone even
+    // when nothing (no open pill) asked for providers. `refreshProvidersIfStale` will see fresh
+    // Codex rows on the resulting flush and not kick another run — the flush→refresh→flush chain
+    // ends. Notified AFTER the in-flight slot is cleared, deliberately: that refresh is a no-op while
+    // a run is in flight, so a notification sent from inside the try would make the flush it triggers
+    // refuse to act on an account set that changed while the billing providers were still settling —
+    // the cache would then hold a removed account (or miss a new one) until some unrelated later
+    // flush (cross-vendor review finding).
+    notifyCacheUpdate()
+    return providersCache
   }
 
   // The Codex-only refresh (mirror path): MERGES the fresh Codex rows into the cache, leaving every

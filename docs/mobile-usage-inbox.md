@@ -34,10 +34,12 @@ export interface MirrorFile {
 ```ts
 export interface MirrorUsage {
   updatedAt: number
-  accounts: MirrorUsageAccount[]   // system account first, then managed local accounts
+  accounts: MirrorUsageAccount[]   // per agent: system account first, then managed local accounts
+                                   // (all claude rows, then all codex rows)
 }
 export interface MirrorUsageAccount {
-  accountId: string | null         // null = system ~/.claude
+  accountId: string | null         // null = THIS agentId's system account (~/.claude for claude,
+                                   // the default CODEX_HOME for codex) — never "~/.claude" alone
   label: string | null             // account label from settings (managed accounts)
   email: string | null
   agentId: string                  // 'claude' | 'codex' — same shape for both
@@ -90,6 +92,11 @@ Rules:
   Codex leg for a changed account set joins that leg instead of being served the previous set's cache.
   The mirror's disk writes are serialized per path, so an older doc built before a run landed can
   never overwrite the fresher one written after it.
+  That chain is per PROCESS: the mirror has exactly one writer per data dir by design (the desktop
+  writes its userData file, a Server Edition writes its own `--data-dir` file), so two processes
+  sharing one data dir are not a supported pairing. A consumer keys rows by `agentId` AND
+  `accountId` (the phone uses `"<agentId>:<accountId>"`, system rows `"system:<agentId>"`):
+  Claude and Codex account ids come from independent id spaces, so `accountId` alone is not a key.
 - **SSH slices carry no `usage`** in v1 (`filterMirrorForNodes` drops it, like `settings`):
   a remote host's account credentials live on that host, so the desktop cannot answer for them.
   A host that runs nodeterm itself (server edition) writes its own mirror with its own usage.

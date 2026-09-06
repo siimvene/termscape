@@ -431,6 +431,44 @@ describe('providersSnapshot / refreshProvidersIfStale (mirror feed)', () => {
     expect(codexCalls()).toBe(2)
   })
 
+  it('an account set that changes DURING a full run is picked up by the flush that run triggers', async () => {
+    // The run captured set {system, a}; `b` appears while the billing providers are still settling.
+    // The completion notification must reach the mirror only after the in-flight slot is cleared,
+    // or the flush it triggers is refused by the in-flight guard and the cache keeps the old set
+    // until some unrelated later flush.
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    for (const f of ALL_OTHER) {
+      f.mockImplementationOnce(async () => {
+        await gate
+        return unavailableRow('slow')
+      })
+    }
+    let accounts = [{ id: 'a', home: '/isolated/a', label: 'Work' }]
+    let kicked = 0
+    service = startUsageService({
+      shouldPoll: () => false,
+      mirrorMayBeRead: () => true,
+      codexAccounts: () => accounts,
+      // The shells' mirror provider runs refreshProvidersIfStale on every flush; model that here.
+      onCacheUpdate: () => {
+        kicked++
+        service?.refreshProvidersIfStale()
+      }
+    })
+    const full = platform.handlers[IPC.usageProviders]() as Promise<ProviderUsage[]>
+    await settle()
+    expect(codexCalls()).toBe(2) // system + a landed; billing providers gated
+    accounts = [...accounts, { id: 'b', home: '/isolated/b', label: 'Personal' }]
+    release()
+    await full
+    await settle()
+    // The completion flush saw the changed fingerprint and kicked a Codex leg for {system, a, b}.
+    expect(kicked).toBeGreaterThanOrEqual(1)
+    expect(codexCalls()).toBe(5)
+    expect(codexRows(service.providersSnapshot()).map((r) => r.accountId)).toEqual([undefined, 'a', 'b'])
+  })
+
   it('a popover open DURING an in-flight Codex leg for a CHANGED account set is never served the previous set', async () => {
     let accounts = [{ id: 'a', home: '/isolated/a', label: 'Work' }]
     service = startUsageService({
