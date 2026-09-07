@@ -370,6 +370,9 @@ paths:
   topology: the server's transcript/session-name/context-link READERS (`transcript-index.ts` etc.)
   enumerate the server's own settings accounts only, so a peer-account node's transcript is not
   found by the browser find-bar / ⌘M (pre-existing for every desktop-spawned account node, deferred);
-  the server's own `settings.json` lists no accounts, so the phone's New Session sheet offers only
-  the System account; and a Codex account-bound desktop node is still refused (`unavailable:
-  'codex-account'`) — Codex homes are keyed by the instance's userData digest.
+  a Codex account-bound desktop node is still refused (`unavailable: 'codex-account'`) — Codex
+  homes are keyed by the instance's userData digest. The phone's New Session sheet gets the peer's
+  Claude accounts from `claude-accounts:peer-list` (`src/core/peer-claude-accounts.ts`, server-only
+  handler; read-only, filtered to spawnable rows: not pending, no `host`, dir present, safe id) and
+  unions them with `settings:load`'s list — the server's own settings list no accounts on this
+  topology, which left the sheet with only the System account (Siim, 2026-09-07).

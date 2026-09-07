@@ -44,6 +44,9 @@ export const IPC = {
   claudeAccountsWaitLogin: 'claude-accounts:wait-login',
   claudeAccountsCancelWait: 'claude-accounts:cancel-wait',
   claudeAccountsRemove: 'claude-accounts:remove',
+  /** Server Edition beside a desktop peer: the peer's managed Claude accounts a spawn here can run
+   *  under (read-only list; see `src/core/peer-claude-accounts.ts`). Not registered on desktop. */
+  claudeAccountsPeerList: 'claude-accounts:peer-list',
   // Machine-scoped managed Codex accounts (S6). Add/device-login/removal, plus the three-phase,
   // owner-authorized account switch (resume the SAME conversation id, never fork) and the
   // source-side leg of moving an idle conversation to an SSH account. See main/codex-accounts.ts.

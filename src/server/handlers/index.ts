@@ -7,6 +7,7 @@ import { GitService } from '../../core/git-service'
 import { generateCommitMessage } from '../../core/commit-message'
 import { registerFsHandlers } from '../../core/fs-handlers'
 import { claudeCliCaps, registerClaudeCliIpc } from '../../core/claude-cli'
+import { readPeerClaudeAccounts } from '../../core/peer-claude-accounts'
 import { registerGrokCliIpc } from '../../core/grok-cli'
 import { registerCodexIdentityIpc } from '../../core/codex-identity-caps'
 import { UNKNOWN_CODEX_IDENTITY_CAPS } from '@shared/types'
@@ -74,6 +75,13 @@ export function registerCoreHandlers(
   // The browser needs the REAL data dir: it is the writable base the worktree dialog derives its
   // default path from, and an empty answer there proposes `/worktrees/…` at the filesystem root.
   platform.handle(IPC.appUserDataDir, () => platform.userDataDir)
+
+  // Server beside a desktop peer (the phone-desktop topology): the peer's managed Claude accounts a
+  // spawn here can run under, so the phone's New Session sheet can offer them. Read-only, and an
+  // empty list wherever there is no peer. Not registered on desktop (its own settings list them).
+  platform.handle(IPC.claudeAccountsPeerList, () =>
+    platform.peerUserDataDir ? readPeerClaudeAccounts(platform.peerUserDataDir) : []
+  )
 
   // The browser needs the same `--permission-mode auto` version gate as desktop: the server's own
   // claude CLI is the one that will run the terminal nodes. Warm it so the first call is cached.

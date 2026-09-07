@@ -878,7 +878,7 @@ Inputs, all readable over the WS:
 | starting permission mode | `settings:load` → `claudePermissionMode`, overridden per project by the `Project.defaultPermissionMode` from `workspace:load` [src: src/renderer/state/permissionMode.ts] |
 | whether `--permission-mode auto` may be emitted | `claude-cli:caps` → `autoPermissionMode`. **CLAUDE only** — an old claude CLI exits 1 on the value, and generalizing this flag to another agent silently downgrades that agent's sessions [src: src/core/claude-cli.ts:30-43] |
 | whether `--session-id <uuid>` may be minted | `claude-cli:caps` → `sessionIdFlag` (feature-detected from `--help`, never a version floor: an unknown flag makes the CLI exit) |
-| which managed Claude account to run as | `settings:load` → `claudeAccounts` (skip any `pending` one, and any with a `host` — those live on an SSH host), defaulted per project by `Project.defaultAccountId` from `workspace:load`. Whatever is chosen goes into BOTH `pty:create` and the registration (§7.11.4) |
+| which managed Claude account to run as | `settings:load` → `claudeAccounts` (skip any `pending` one, and any with a `host` — those live on an SSH host), **unioned by id with `claude-accounts:peer-list`** (Server Edition beside a desktop peer: the desktop's managed Claude accounts this server can spawn under, already filtered to spawnable rows; `E_NO_HANDLER` / any failure ⇒ empty, never an error), defaulted per project by `Project.defaultAccountId` from `workspace:load`. Whatever is chosen goes into BOTH `pty:create` and the registration (§7.11.4) |
 
 The normative flag grammar is `assembleLaunchCommand` + `approvalFlags`
 [src: src/shared/agents/launch.ts:134-189; src/shared/agents/approval-mode.ts]. Two rules from it a
