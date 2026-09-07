@@ -434,6 +434,7 @@ change (broadcast from the session-name sweep, src/server/index.ts:359-379) — 
 | `workspace:probe-folder` | REQ | `[folder:String]` | — | not needed v0 |
 | `workspace:project-file-state` | REQ | `[cwd:String]` | `'present'\|'absent'\|'unreadable'` | not needed v0 |
 | `settings:load` | REQ | `[]` | `Settings` | read a handful of fields (§11.7) |
+| `claude-accounts:peer-list` | REQ | `[]` | `[{id, label, email?, createdAt?}]` | **Server Edition beside a desktop peer only.** The desktop's managed Claude accounts a spawn on this server resolves to the peer's dir (already filtered: not pending, no `host`, dir present, no same-id dir of the server's own). Read-only. Desktop / peer-less server: `E_NO_HANDLER` ⇒ treat as `[]`. Union with `settings:load → claudeAccounts` by id, settings rows first (§7.11.3) [src: src/core/peer-claude-accounts.ts] |
 | `settings:save` | REQ | `[Settings]` | null | **MUST NOT be called in v0** |
 | `workspace:register-node` | REQ | `[projectId, {id, title?, agentId?, accountId?}]` | `Bool` | make a session the phone STARTED into a node on that project's canvas (§7.11) |
 | `workspace:remove-node` | REQ | `[nodeId]` | `Bool` | take a node off its canvas — the second half of "End session", AFTER the kill (§7.11.4) |

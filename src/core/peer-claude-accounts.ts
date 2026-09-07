@@ -5,7 +5,11 @@
 // already resolvable here (`claudeConfigDirForSpawn` → `CorePlatform.peerUserDataDir`); this is the
 // matching directory listing. Read-only and tolerant: the peer's `settings.json` is that app's file,
 // never written here, and a row is offered only when it can actually be spawned — not pending, not
-// pinned to an SSH host, and its config dir present under the peer's `claude-accounts/`.
+// pinned to an SSH host, its config dir present under the peer's `claude-accounts/`, AND no dir of
+// the same id under THIS instance's own `claude-accounts/`: `claudeConfigDirForSpawn` prefers the
+// own dir when both exist, so advertising the peer's label for such an id would launch the
+// server's credentials under the desktop account's name (consort finding). What is offered is
+// exactly what a spawn would resolve to the peer.
 import * as fs from 'fs'
 import * as path from 'path'
 import { accountConfigDir, isSafeAccountId } from './claude-accounts-core'
@@ -18,7 +22,10 @@ export interface PeerClaudeAccount {
   createdAt?: number
 }
 
-export function readPeerClaudeAccounts(peerUserDataDir: string): PeerClaudeAccount[] {
+export function readPeerClaudeAccounts(
+  peerUserDataDir: string,
+  ownUserDataDir?: string
+): PeerClaudeAccount[] {
   let rows: unknown
   try {
     const raw = JSON.parse(fs.readFileSync(path.join(peerUserDataDir, 'settings.json'), 'utf8'))
@@ -31,10 +38,11 @@ export function readPeerClaudeAccounts(peerUserDataDir: string): PeerClaudeAccou
   for (const r of rows) {
     if (typeof r !== 'object' || r === null || Array.isArray(r)) continue
     const a = r as Record<string, unknown>
-    if (typeof a.id !== 'string' || !isSafeAccountId(a.id)) continue
+    if (typeof a.id !== 'string' || a.id.length > 128 || !isSafeAccountId(a.id)) continue
     if (a.pending === true) continue
     if (typeof a.host === 'string' && a.host.length > 0) continue
     if (!fs.existsSync(accountConfigDir(peerUserDataDir, a.id))) continue
+    if (ownUserDataDir && fs.existsSync(accountConfigDir(ownUserDataDir, a.id))) continue
     const row: PeerClaudeAccount = {
       id: a.id,
       label: typeof a.label === 'string' ? a.label.slice(0, 200) : a.id

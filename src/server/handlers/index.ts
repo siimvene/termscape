@@ -80,7 +80,9 @@ export function registerCoreHandlers(
   // spawn here can run under, so the phone's New Session sheet can offer them. Read-only, and an
   // empty list wherever there is no peer. Not registered on desktop (its own settings list them).
   platform.handle(IPC.claudeAccountsPeerList, () =>
-    platform.peerUserDataDir ? readPeerClaudeAccounts(platform.peerUserDataDir) : []
+    platform.peerUserDataDir
+      ? readPeerClaudeAccounts(platform.peerUserDataDir, platform.userDataDir)
+      : []
   )
 
   // The browser needs the same `--permission-mode auto` version gate as desktop: the server's own

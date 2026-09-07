@@ -22,6 +22,7 @@ describe('readPeerClaudeAccounts', () => {
       { id: 'remote', label: 'Remote', host: 'box' },
       { id: 'nodir', label: 'No dir' },
       { id: '../escape', label: 'Bad id' },
+      { id: 'i'.repeat(129), label: 'Over-long id' },
       { id: 'long', label: 'x'.repeat(500), email: 'y'.repeat(500) },
       'junk',
       null,
@@ -34,6 +35,20 @@ describe('readPeerClaudeAccounts', () => {
     expect(rows[0]).toEqual({ id: 'ok-1', label: 'Work', email: 'w@x', createdAt: 5 })
     expect(rows[1].label.length).toBe(200)
     expect(rows[1].email?.length).toBe(320)
+  })
+
+  it("an id this instance has its OWN dir for is not offered: the spawn would resolve to the own dir, not the peer's", () => {
+    const own = fs.mkdtempSync(path.join(os.tmpdir(), 'own-accts-'))
+    try {
+      write([{ id: 'shared', label: 'Desktop label' }, { id: 'peer-only', label: 'Peer' }])
+      dir('shared'); dir('peer-only')
+      fs.mkdirSync(path.join(own, 'claude-accounts', 'shared'), { recursive: true })
+      expect(readPeerClaudeAccounts(peer, own).map((r) => r.id)).toEqual(['peer-only'])
+      // Without an own dir to compare against, both are offered (the caller had no own tree).
+      expect(readPeerClaudeAccounts(peer).map((r) => r.id)).toEqual(['shared', 'peer-only'])
+    } finally {
+      fs.rmSync(own, { recursive: true, force: true })
+    }
   })
 
   it('label falls back to the id; absent / corrupt / foreign-shaped settings → []', () => {

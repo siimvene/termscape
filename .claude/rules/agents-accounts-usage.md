@@ -375,4 +375,8 @@ paths:
   Claude accounts from `claude-accounts:peer-list` (`src/core/peer-claude-accounts.ts`, server-only
   handler; read-only, filtered to spawnable rows: not pending, no `host`, dir present, safe id) and
   unions them with `settings:load`'s list — the server's own settings list no accounts on this
-  topology, which left the sheet with only the System account (Siim, 2026-09-07).
+  topology, which left the sheet with only the System account (Siim, 2026-09-07). An id the server
+  has its OWN dir for is never offered (the spawn would resolve to the own dir under the desktop
+  label; consort HIGH). Deferred, same review: a phone registration under a peer account gets the
+  agent brand color, not the account's configured color (`appendProjectNode` resolves colors from
+  the server's own settings only).
