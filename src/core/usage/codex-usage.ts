@@ -182,9 +182,12 @@ function snapshot(
   return { provider: 'codex', limits, account, accountId, updatedAt: Date.now(), status }
 }
 
-/** Tier 1: the endpoint the Codex CLI itself reads. */
-async function fetchViaBackend(home: string): Promise<ProviderUsage | null> {
-  const { accessToken, accountId } = await readCodexAuth(home)
+/** Tier 1: the endpoint the Codex CLI itself reads. `auth` is the ONE auth.json read the caller
+ *  already made (so the row's email and the token its limits were fetched with come from the same
+ *  snapshot — a `codex login` landing between two reads would otherwise pair account A's email with
+ *  account B's quota; consort finding); read here only when no caller snapshot is given. */
+async function fetchViaBackend(home: string, auth?: CodexAuth): Promise<ProviderUsage | null> {
+  const { accessToken, accountId } = auth ?? (await readCodexAuth(home))
   if (!accessToken) return null
 
   const headers: Record<string, string> = {
@@ -306,8 +309,9 @@ async function fetchViaAppServer(home: string): Promise<ProviderUsage | null> {
  * `identity` scopes the row to one managed account (S6 §4.3): its `id` is stamped as `accountId`
  * on EVERY return path — including `unavailable` — so a row read from account A's home is always
  * attributed to A and can never be mixed with, or mistaken for, another account or the un-owned
- * system row. Absent ⇒ the system account: `account: null`, `accountId: undefined` (un-owned stays
- * explicitly un-owned). The id is never used to build a path here — the caller already resolved
+ * system row. Absent ⇒ the system account: `accountId: undefined` (un-owned stays explicitly
+ * un-owned) and `account` = the email claim of the home's own id_token, or null when it carries
+ * none. The id is never used to build a path here — the caller already resolved
  * `home` from it through the validated account-home builders — so no id validation is duplicated.
  */
 export async function fetchCodexUsage(
@@ -316,13 +320,16 @@ export async function fetchCodexUsage(
 ): Promise<ProviderUsage> {
   // A managed account is named by its settings row. The SYSTEM account has no row, so it is named
   // by the email in its own `auth.json` id_token — otherwise the mirror row reached the phone as a
-  // bare "System account" next to Claude rows that all carry an email (Siim, 2026-09-07).
-  const account = identity
-    ? identity.email || identity.label || null
-    : (await readCodexAuth(home)).email
+  // bare "System account" next to Claude rows that all carry an email (Siim, 2026-09-07). ONE
+  // auth.json read serves both the name and the backend tier's token, so they cannot come from
+  // different logins. The app-server tier below reads auth.json itself (a subprocess), so that
+  // pairing is only as atomic as the CLI's own read — a `codex login` racing it is a known,
+  // self-healing window (the next refresh re-reads both).
+  const auth = await readCodexAuth(home)
+  const account = identity ? identity.email || identity.label || null : auth.email
   const accountId = identity?.id
   try {
-    const viaBackend = await fetchViaBackend(home)
+    const viaBackend = await fetchViaBackend(home, auth)
     if (viaBackend) return { ...viaBackend, account, accountId }
   } catch {
     // fall through to the app-server tier

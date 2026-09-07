@@ -77,7 +77,8 @@ Rules:
   then the Codex system row, then managed Codex rows. `label` and `email` of a managed row both come
   from the settings codex account list (the provider row's `account` is `email || label`, so it is
   never copied into `email` — an email-less account would otherwise show its label twice); the
-  system row has no settings entry and passes its own `account` through (null in production). A
+  system row has no settings entry and passes its own `account` through — the id_token email of
+  its home's `auth.json` (see above), null when the token carries none. A
   managed row whose account is no longer in the settings list (removed or pending between the run
   and the flush) is an orphan and gets `email: null` — it is not the system row, and its `account`
   is the same email-or-label field. A Codex row with **status `'unavailable'` (not signed in) is DROPPED** — the desktop hides such a
