@@ -335,8 +335,9 @@ export function buildMirrorUsage(
       // `p.account` is `identity.email || identity.label` for a managed row (fetchCodexUsage), so
       // reading it here would put an email-less account's LABEL into the email field and the phone
       // would print the label twice. The managed row's email comes from settings only; the system
-      // row has no settings entry, so its own field (null in production, the provider exposes no
-      // identity for the un-owned account) is all there is. A managed row whose account is no
+      // row has no settings entry, so its own field is all there is — and for Codex that field IS
+      // an email: the `email` claim of the id_token in the home's auth.json (display only, never
+      // verified; null when the token carries none). A managed row whose account is no
       // longer in settings (removed, or pending, between the run and this flush) is an orphan: it
       // is NOT the system row and its `account` is the same email-or-label field, so it gets null.
       email: acct ? (acct.email ?? null) : p.accountId == null ? (p.account ?? null) : null,
