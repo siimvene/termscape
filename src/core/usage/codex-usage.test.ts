@@ -210,16 +210,49 @@ describe('readCodexAuth', () => {
     )
     await expect(readCodexAuth(dir)).resolves.toEqual({
       accessToken: 'tok-abc',
-      accountId: 'acct-1'
+      accountId: 'acct-1',
+      email: null
     })
     fs.rmSync(dir, { recursive: true, force: true })
   })
 
   it('returns nulls for a missing or malformed file rather than throwing', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-auth-'))
-    await expect(readCodexAuth(dir)).resolves.toEqual({ accessToken: null, accountId: null })
+    await expect(readCodexAuth(dir)).resolves.toEqual({ accessToken: null, accountId: null, email: null })
     fs.writeFileSync(path.join(dir, 'auth.json'), 'not json')
-    await expect(readCodexAuth(dir)).resolves.toEqual({ accessToken: null, accountId: null })
+    await expect(readCodexAuth(dir)).resolves.toEqual({ accessToken: null, accountId: null, email: null })
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  const jwt = (claims: unknown): string =>
+    `eyJhbGciOiJSUzI1NiJ9.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.sig`
+
+  it('reads the signed-in email from the id_token claims (display only, unverified)', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-auth-'))
+    fs.writeFileSync(
+      path.join(dir, 'auth.json'),
+      JSON.stringify({ tokens: { access_token: 't', account_id: 'a', id_token: jwt({ email: 'me@example.com', sub: 'x' }) } })
+    )
+    expect((await readCodexAuth(dir)).email).toBe('me@example.com')
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('id_token without a string email, malformed, or over-long ⇒ null, never a throw', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-auth-'))
+    const write = (idToken: unknown) =>
+      fs.writeFileSync(path.join(dir, 'auth.json'), JSON.stringify({ tokens: { access_token: 't', id_token: idToken } }))
+    write(jwt({ sub: 'x' }))
+    expect((await readCodexAuth(dir)).email).toBeNull()
+    write(jwt({ email: 42 }))
+    expect((await readCodexAuth(dir)).email).toBeNull()
+    write('not.a.jwt.at.all')
+    expect((await readCodexAuth(dir)).email).toBeNull()
+    write('header.!!!notbase64json!!!.sig')
+    expect((await readCodexAuth(dir)).email).toBeNull()
+    write(jwt({ email: 'x'.repeat(400) }))
+    expect((await readCodexAuth(dir)).email).toBeNull()
+    write(12345)
+    expect((await readCodexAuth(dir)).email).toBeNull()
     fs.rmSync(dir, { recursive: true, force: true })
   })
 })
@@ -253,6 +286,27 @@ describe('fetchCodexUsage account identity', () => {
     expect(row.accountId).toBe('acc-1')
     expect(row.account).toBe('work@example.com')
     expect(row.limits.length).toBeGreaterThan(0)
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  it("the SYSTEM row (no identity) is named by its own auth.json id_token email", async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => ({ plan_type: 'pro', rate_limit: BACKEND_RATE_LIMIT })
+      }))
+    )
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-sys-'))
+    const idToken = `eyJhbGciOiJSUzI1NiJ9.${Buffer.from(JSON.stringify({ email: 'sys@example.com' })).toString('base64url')}.sig`
+    fs.writeFileSync(
+      path.join(dir, 'auth.json'),
+      JSON.stringify({ tokens: { access_token: 'tok', account_id: 'chatgpt-xyz', id_token: idToken } })
+    )
+    const row = await fetchCodexUsage(dir)
+    expect(row.status).toBe('ok')
+    expect(row.accountId).toBeUndefined() // still the un-owned system row
+    expect(row.account).toBe('sys@example.com')
     fs.rmSync(dir, { recursive: true, force: true })
   })
 

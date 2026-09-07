@@ -34,7 +34,7 @@ export interface MirrorFile {
 ```ts
 export interface MirrorUsage {
   updatedAt: number
-  accounts: MirrorUsageAccount[]   // per agent: system account first, then managed local accounts
+  accounts: MirrorUsageAccount[]   // per agent: system account first, then managed local accounts The Codex system row's `email` is the `email` claim of the `id_token` in that home's `auth.json` (base64url-decoded, never verified, display only); a home whose token carries no email keeps `email: null` and the phone falls back to "System account".
                                    // (all claude rows, then all codex rows)
 }
 export interface MirrorUsageAccount {

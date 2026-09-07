@@ -33,6 +33,27 @@ export function codexHome(): string {
 interface CodexAuth {
   accessToken: string | null
   accountId: string | null
+  /** The signed-in identity's email, from the `id_token` claims (display only, see below). */
+  email: string | null
+}
+
+/**
+ * The `email` claim of the OpenID `id_token` Codex stores next to its access token. DISPLAY ONLY:
+ * the payload is base64url-decoded, never verified — it names the row in the usage popover and the
+ * phone's usage list, it gates nothing (the backend gates on the access token, not on this). Null
+ * for anything that is not a three-part JWT with a JSON object payload carrying a string `email`.
+ */
+function emailFromIdToken(idToken: unknown): string | null {
+  if (typeof idToken !== 'string') return null
+  const parts = idToken.split('.')
+  if (parts.length !== 3) return null
+  try {
+    const claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8')) as unknown
+    const email = (claims as { email?: unknown } | null)?.email
+    return typeof email === 'string' && email.length > 0 && email.length <= 320 ? email : null
+  } catch {
+    return null
+  }
 }
 
 /** Read the access token Codex stores after `codex login`. Never written back. */
@@ -43,10 +64,11 @@ export async function readCodexAuth(home = codexHome()): Promise<CodexAuth> {
     const tokens = j.tokens as Record<string, any> | undefined
     return {
       accessToken: typeof tokens?.access_token === 'string' ? tokens.access_token : null,
-      accountId: typeof tokens?.account_id === 'string' ? tokens.account_id : null
+      accountId: typeof tokens?.account_id === 'string' ? tokens.account_id : null,
+      email: emailFromIdToken(tokens?.id_token)
     }
   } catch {
-    return { accessToken: null, accountId: null }
+    return { accessToken: null, accountId: null, email: null }
   }
 }
 
@@ -292,7 +314,12 @@ export async function fetchCodexUsage(
   home = codexHome(),
   identity?: { id?: string; label?: string | null; email?: string | null }
 ): Promise<ProviderUsage> {
-  const account = identity?.email || identity?.label || null
+  // A managed account is named by its settings row. The SYSTEM account has no row, so it is named
+  // by the email in its own `auth.json` id_token — otherwise the mirror row reached the phone as a
+  // bare "System account" next to Claude rows that all carry an email (Siim, 2026-09-07).
+  const account = identity
+    ? identity.email || identity.label || null
+    : (await readCodexAuth(home)).email
   const accountId = identity?.id
   try {
     const viaBackend = await fetchViaBackend(home)
