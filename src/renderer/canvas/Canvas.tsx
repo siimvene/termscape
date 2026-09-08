@@ -414,6 +414,7 @@ import {
   reconnectRelayTab,
   type RelayTab,
 } from '../session/relay-tab'
+import { spawnSlot, type Box as SpawnBox } from '../lib/spawnPlacement'
 import { buildBackgroundLinkMaps, buildContextLinkNote, buildLinkMap, buildNotePushMessage, classifyLink, hiddenLinkIds, linkIdsCoveredByRopes, pairKey, planBridges, type LinkEndpoint } from '../lib/noteLink'
 import {
   abandonLaunch,
@@ -9355,7 +9356,7 @@ export function Canvas() {
               : resolveNewNodeAccount(undefined, target, useSettings.getState().settings.claudeAccounts)
           const tgMode = tgIsTerminal ? undefined : projectPermissionMode(target, tgAgentId)
           const tgActive = target.id === tgStore.activeProjectId
-          // Placement: below the lowest existing node in the TARGET (placeBelow(src) is
+          // Placement: below the lowest existing node in the TARGET (a slot under the SOURCE is
           // meaningless in a project that does not contain the source). The live canvas is the
           // truthful node set for the active project, the serialized store for any other.
           const tgPlacedNodes = tgActive ? nodesRef.current : target.nodes
@@ -9642,8 +9643,8 @@ export function Canvas() {
       const sshFor = (cwd?: string) => nodeSshFor(ctlSsh, cwd)
       // Place opened nodes BELOW the source and rope them to it (source flow-out → target
       // flow-in), mirroring how subagent/loop nodes attach — so they read as "hanging off" the
-      // conversation instead of landing on top of unrelated nodes. `placeBelow` returns a node
-      // centerpoint; `i` fans multiple nodes out horizontally so they don't stack.
+      // conversation instead of landing on top of unrelated nodes. `dropBelow`/`slotFor` pick the
+      // slot (see spawnSlot above); the factories run with a placeholder centre.
       const srcW = src.measured?.width ?? (src.width as number) ?? 600
       const srcH = src.measured?.height ?? (src.height as number) ?? 400
       // src.position is group-relative when the agent sits inside a group frame — resolve the
@@ -9653,9 +9654,54 @@ export function Canvas() {
         x: src.position.x + (srcGroup?.position.x ?? 0),
         y: src.position.y + (srcGroup?.position.y ?? 0)
       }
-      const belowY = srcAbs.y + srcH + 80
       const edgeColor = agentConfig((src.data.agentId as string) ?? 'claude')?.color ?? '#d97757'
-      const placeBelow = (i = 0) => ({ x: srcAbs.x + srcW / 2 + i * 460, y: belowY + 210 })
+      // WHERE a spawned node lands: the first clear slot in the rows under the source, walking
+      // right, with EVERY existing node (frames included) and every slot this command already
+      // handed out as an obstacle — `spawnSlot` (lib/spawnPlacement). The old rule was one fixed
+      // spot under the source, fanned only by the index WITHIN a command, so each new call from
+      // the same conductor stacked its station on the previous one, on top of whatever frame sat
+      // there (2026-09-08). `taken` exists because the canvas has not seen this command's earlier
+      // nodes yet when the next one is placed (setNodes is async; the store re-reads fresh, but
+      // the accumulator keeps both surfaces on one rule).
+      const spawnBoxOf = (n: CanvasNode, all: CanvasNode[]): SpawnBox => {
+        const at = absolutePosition(n as FocusableNode, all as FocusableNode[])
+        return {
+          x: at.x,
+          y: at.y,
+          w: n.measured?.width ?? (n.width as number) ?? 600,
+          h: n.measured?.height ?? (n.height as number) ?? 400
+        }
+      }
+      const srcBox: SpawnBox = { x: srcAbs.x, y: srcAbs.y, w: srcW, h: srcH }
+      const taken: SpawnBox[] = []
+      /** Top-left of the next free slot of `size` under the source, in ROOT space. */
+      const slotFor = (size: { w: number; h: number }): { x: number; y: number } => {
+        const all = surface.nodes()
+        const slot = spawnSlot(srcBox, size, [...all.map((n) => spawnBoxOf(n, all)), ...taken])
+        taken.push({ ...slot, ...size })
+        return slot
+      }
+      /** A freshly built node (its factory ran with a placeholder centre) moved to its slot. Nodes
+       *  bound for a group frame skip this: `addGrouped` lays them out inside the frame. */
+      const dropBelow = <T extends CanvasNode>(node: T): T => {
+        const w = (node.width as number) ?? 600
+        const h = (node.height as number) ?? 400
+        return { ...node, position: slotFor({ w, h }) }
+      }
+      // `parentInto` off the SURFACE's nodes: the component-level one reads the live canvas, so a
+      // conductor sitting in a frame of a background project would have spawned an unparented node.
+      const parentIntoSurface = (node: CanvasNode, groupId: string): CanvasNode => {
+        const all = surface.nodes()
+        const group = all.find((n) => n.id === groupId)
+        if (!group) return node
+        const gp = absolutePosition(group as FocusableNode, all as FocusableNode[])
+        return {
+          ...node,
+          parentId: groupId,
+          extent: 'parent' as const,
+          position: { x: node.position.x - gp.x, y: node.position.y - gp.y }
+        }
+      }
       const connect = (newId: string) => surface.addRope(sourceNodeId, newId, edgeColor)
       // Draw real CONTEXT links (persisted `bridges`), not the display-only ropes `connect`
       // draws — a rope is lineage decoration, a bridge is what get-linked-context reads. This
@@ -9693,7 +9739,7 @@ export function Canvas() {
         // A node that arrives ALREADY parented (open-agent --group placed it into a frame with
         // relative coords) must pass through untouched — re-running parentInto would read its
         // relative position as absolute and land it off-frame.
-        const placed = node.parentId ? node : src.parentId ? parentInto(node, src.parentId) : node
+        const placed = node.parentId ? node : src.parentId ? parentIntoSurface(node, src.parentId) : node
         surface.setNodes((ns) => [...ns, placed])
         connect(placed.id)
         surface.markDirty()
@@ -9933,7 +9979,7 @@ export function Canvas() {
                 createTerminalNode(
                   surface.nodes().length + i,
                   termCwd,
-                  placeBelow(i),
+                  { x: 0, y: 0 },
                   args.cmd,
                   sshFor(termCwd)
                 ),
@@ -9942,7 +9988,7 @@ export function Canvas() {
                 intoGroupId
               )
               if (node.data.pendingLaunch) queuedIds.push(node.id)
-              return node
+              return intoGroupId ? node : dropBelow(node)
             }
             const ids = intoGroupId
               ? addGrouped(intoGroupId, count, make)
@@ -10086,7 +10132,7 @@ export function Canvas() {
                   agentId,
                   surface.nodes().length + i,
                   agentCwd,
-                  placeBelow(i),
+                  { x: 0, y: 0 },
                   args.prompt,
                   sshFor(agentCwd),
                   account,
@@ -10105,7 +10151,7 @@ export function Canvas() {
                 intoGroupId
               )
               if (node.data.pendingLaunch) queuedIds.push(node.id)
-              return node
+              return intoGroupId ? node : dropBelow(node)
             }
             const ids = intoGroupId
               ? addGrouped(intoGroupId, count, make)
@@ -10160,7 +10206,7 @@ export function Canvas() {
             // (`sshFs` routes fs.readBinary over the ControlMaster) — reading it locally would
             // either miss or, worse, open a same-named local file.
             const id = addAndConnect(
-              createEditorNode(surface.nodes().length, args.path, placeBelow(), !!ctlSsh)
+              dropBelow(createEditorNode(surface.nodes().length, args.path, { x: 0, y: 0 }, !!ctlSsh))
             )
             reply({ ok: true, message: `showing image ${id}${surface.offscreenNote}`, result: { id } })
             return
@@ -10176,7 +10222,7 @@ export function Canvas() {
             // same-named local file. Local projects allowlist the local path as before.
             if (!ctlSsh) await window.nodeTerminal.media.allow(args.path)
             const id = addAndConnect(
-              createVideoNode(surface.nodes().length, args.path, placeBelow(), !!ctlSsh)
+              dropBelow(createVideoNode(surface.nodes().length, args.path, { x: 0, y: 0 }, !!ctlSsh))
             )
             reply({ ok: true, message: `showing video ${id}${surface.offscreenNote}`, result: { id } })
             return
@@ -10203,7 +10249,7 @@ export function Canvas() {
             }
             // For an agent-provided --file (not html we just wrote), allowlist it first.
             if (webSrc.filePath && args.file) await window.nodeTerminal.media.allow(webSrc.filePath)
-            const id = addAndConnect(createWebNode(surface.nodes().length, webSrc, placeBelow()))
+            const id = addAndConnect(dropBelow(createWebNode(surface.nodes().length, webSrc, { x: 0, y: 0 })))
             reply({ ok: true, message: `showing web ${id}${surface.offscreenNote}`, result: { id } })
             return
           }
@@ -10227,7 +10273,9 @@ export function Canvas() {
               reply({ ok: false, error: "open-browser: this project's id cannot be used as a browser session key" })
               return
             }
-            const id = addAndConnect(createBrowserNode(surface.nodes().length, browserUrl, placeBelow(), partition))
+            const id = addAndConnect(
+              dropBelow(createBrowserNode(surface.nodes().length, browserUrl, { x: 0, y: 0 }, partition))
+            )
             // Return the project id + partition so main can record ownership in its in-memory
             // ledger (browser-control-ledger.ts). Main gates the claim on its OWN `verified` verdict
             // and keys it to the verified caller — these fields are descriptive (release-by-project,
@@ -10447,7 +10495,7 @@ export function Canvas() {
                 reviewAgent,
                 live.length + i,
                 targetCwd,
-                placeBelow(i),
+                { x: 0, y: 0 }, // provisional — see arrangeNodes below
                 verifyLensPrompt({
                   lens,
                   targetTitle,
@@ -10474,7 +10522,7 @@ export function Canvas() {
                       reviewAgent,
                       live.length + lenses.length,
                       targetCwd,
-                      placeBelow(lenses.length),
+                      { x: 0, y: 0 }, // provisional — see arrangeNodes below
                       verifySynthesisPrompt({
                         lenses,
                         targetTitle,
@@ -10646,7 +10694,7 @@ export function Canvas() {
                 memberAgent,
                 live.length + i,
                 srcCwd,
-                placeBelow(i),
+                { x: 0, y: 0 }, // provisional — see arrangeNodes below
                 r.prompt,
                 sshFor(srcCwd),
                 accountForSpawn(memberAgent, src.data.accountId as string | undefined),
@@ -10664,7 +10712,16 @@ export function Canvas() {
             const memberIds = members.map((m) => m.id)
             // One computed array: append → arrange in a grid below the conductor → wrap in a group.
             let next: CanvasNode[] = [...live, ...members]
-            next = arrangeNodes(next, memberIds, { layout: 'grid', origin: placeBelow(0) })
+            // One slot for the whole team, sized like the frame `groupSelectedNodes` will draw
+            // around the grid, so the frame — not just its first member — lands clear of everything.
+            const mW = (members[0]?.width as number) ?? 640
+            const mH = (members[0]?.height as number) ?? 440
+            const teamSize = groupSizeFor(members.length, mW, mH)
+            const teamSlot = slotFor({ w: teamSize.width, h: teamSize.height })
+            next = arrangeNodes(next, memberIds, {
+              layout: 'grid',
+              origin: { x: teamSlot.x + GROUP_PAD_X, y: teamSlot.y + GROUP_PAD_TOP }
+            })
             const groupCount = next.filter((nd) => nd.type === 'group').length
             const existingGroupIds = new Set(
               next.filter((node) => node.type === 'group').map((node) => node.id)
@@ -10822,14 +10879,12 @@ export function Canvas() {
               reply({ ok: false, error: `open-worktree: ${res.message}` })
               return
             }
-            // Fan successive frames out horizontally (frame width + gap) so several
-            // open-worktree calls in one orchestration land side by side, not stacked.
-            const groupFan = surface.nodes().filter(
-              (nd) => nd.type === 'group' && !nd.parentId
-            ).length
+            // The frame takes the next free slot under the source like any spawned node, so
+            // several open-worktree calls land side by side and never on an existing frame.
+            const frameSlot = slotFor({ w: WORKTREE_GROUP_SIZE.width, h: WORKTREE_GROUP_SIZE.height })
             const frameAt = {
-              x: placeBelow(0).x + groupFan * (WORKTREE_GROUP_SIZE.width + 60),
-              y: placeBelow(0).y
+              x: frameSlot.x + WORKTREE_GROUP_SIZE.width / 2,
+              y: frameSlot.y + WORKTREE_GROUP_SIZE.height / 2
             }
             const groupId = worktreeControlRef.current.attachWorktree(
               { groupId: bindGroupId, at: frameAt },
@@ -11021,7 +11076,7 @@ export function Canvas() {
               reply({ ok: false, error: `sticky: ${next.error}` })
               return
             }
-            const node = createStickyNode(surface.nodes().length, placeBelow())
+            const node = dropBelow(createStickyNode(surface.nodes().length, { x: 0, y: 0 }))
             // `oneLine` at the door, exactly as `rename`: this title is composed into `list`
             // output, the board and the phone.
             node.data.title = oneLine(parsed.ref) || 'Note'

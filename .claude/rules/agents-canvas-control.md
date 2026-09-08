@@ -213,6 +213,18 @@ paths:
   it. Anchoring outside the frame's right edge guarantees the sibling relationship geometrically;
   the nodes are created at top level so `groupSelectedNodes` wraps them into a top-level frame.
   Children are frame-relative, so repositioning the finished frame alone carries the whole panel.
+- **A spawned node takes the next FREE slot under its conductor** (2026-09-08; `spawnSlot` in
+  `lib/spawnPlacement.ts`, unit-tested; `dropBelow`/`slotFor` in the control handler). Every
+  open-*/show-*/sticky/spawn-team/open-worktree node used to land on ONE fixed spot under the
+  calling node, fanned only by the index within a single command — so a conductor's second, third
+  and fourth stations stacked on the first, on top of whatever frame sat under it ("they just pile
+  up"). The slot walk is rows-first (right along a row, then the next row down, then `freeSpot`'s
+  ring as the fallback) with every existing node in root space — frames included — plus the
+  slots the same command already handed out as obstacles. A team takes one slot sized like the
+  frame it will be wrapped in; a worktree frame takes one sized like itself. Nodes opened INTO a
+  frame (`--group`) skip this — `addGrouped` lays them out inside the frame. The factories run with
+  a placeholder centre and are moved afterwards, so a size change in one factory cannot desync the
+  slot from the node. `verify` keeps its own `verifyPanelOrigin` (beside the target's frame).
 - **A canvas-control call NEVER switches the user's view** (2026-09-08; `ControlSurface` in
   `Canvas.tsx`, `LIVE_ONLY_VERBS` in `lib/controlRouting.ts`, pinned by
   `control-no-travel.source.test.ts` + `controlRouting.test.ts`). Routing is by SOURCE, and the
