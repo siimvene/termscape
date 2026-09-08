@@ -224,7 +224,12 @@ paths:
   frame it will be wrapped in; a worktree frame takes one sized like itself. Nodes opened INTO a
   frame (`--group`) skip this — `addGrouped` lays them out inside the frame. The factories run with
   a placeholder centre and are moved afterwards, so a size change in one factory cannot desync the
-  slot from the node. `verify` keeps its own `verifyPanelOrigin` (beside the target's frame).
+  slot from the node; the slot is snapped to the grid when snap-to-grid is on (the factories'
+  own `placeNode` snaps, and the overwrite must not undo it), and it is the snapped box that is
+  reserved. `createGroupNode` takes a TOP-LEFT — a worktree frame gets its slot verbatim. `verify`
+  keeps its own `verifyPanelOrigin` (beside the target's frame). Hostile geometry (a project.json
+  carrying `1e309`) is refused inside `spawnSlot`: a non-finite obstacle is ignored, a non-finite
+  source falls back to the canvas origin — never a NaN position into the store.
 - **A canvas-control call NEVER switches the user's view** (2026-09-08; `ControlSurface` in
   `Canvas.tsx`, `LIVE_ONLY_VERBS` in `lib/controlRouting.ts`, pinned by
   `control-no-travel.source.test.ts` + `controlRouting.test.ts`). Routing is by SOURCE, and the

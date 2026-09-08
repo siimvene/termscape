@@ -9685,9 +9685,14 @@ export function Canvas() {
         }
         return obstacleCache
       }
-      /** Top-left of the next free slot of `size` under the source, in ROOT space. */
+      /** Top-left of the next free slot of `size` under the source, in ROOT space — snapped to
+       *  the grid when snap-to-grid is on, exactly as the factories' own `placeNode` snaps the
+       *  position `dropBelow` then overwrites (consort medium, 2026-09-08). Snapping moves a
+       *  slot by at most half a cell (12 px at the default 24), well inside the 60 px gap the
+       *  walk keeps, so a snapped slot is still clear; the RESERVED box is the snapped one. */
       const slotFor = (size: { w: number; h: number }): { x: number; y: number } => {
-        const slot = spawnSlot(srcBox, size, [...obstacles(), ...taken])
+        const raw = spawnSlot(srcBox, size, [...obstacles(), ...taken])
+        const slot = snapPointInRootSpace(raw, { x: 0, y: 0 }, snapGridNow())
         taken.push({ ...slot, ...size })
         return slot
       }
@@ -10901,11 +10906,10 @@ export function Canvas() {
             }
             // The frame takes the next free slot under the source like any spawned node, so
             // several open-worktree calls land side by side and never on an existing frame.
-            const frameSlot = slotFor({ w: WORKTREE_GROUP_SIZE.width, h: WORKTREE_GROUP_SIZE.height })
-            const frameAt = {
-              x: frameSlot.x + WORKTREE_GROUP_SIZE.width / 2,
-              y: frameSlot.y + WORKTREE_GROUP_SIZE.height / 2
-            }
+            // `createGroupNode` (via attachWorktree) takes the frame's TOP-LEFT, so the slot is
+            // passed verbatim — offsetting it as a centre put the real frame half a frame right and
+            // down of the box the walk had tested (consort medium, 2026-09-08).
+            const frameAt = slotFor({ w: WORKTREE_GROUP_SIZE.width, h: WORKTREE_GROUP_SIZE.height })
             const groupId = worktreeControlRef.current.attachWorktree(
               { groupId: bindGroupId, at: frameAt },
               worktreeFromCreate({ repoPath: repoRoot, mode: 'new', branch, baseRef, path: wtPath })
