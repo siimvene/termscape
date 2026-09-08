@@ -64,12 +64,12 @@ describe('the open-project dispatch block (source pins)', () => {
     expect(body).toContain('const resolvedCwd = args.cwd')
   })
 
-  it('persists after registering (writeDisk inside opFinish)', () => {
+  it('persists after registering (persist() inside opFinish — commits the active canvas before the whole-file save)', () => {
     const body = openProjectBody()
     const finishStart = body.indexOf('const opFinish')
     const finishEnd = body.indexOf('// The probe only matters')
     const finish = body.slice(finishStart, finishEnd)
-    expect(finish).toContain('writeDisk()')
+    expect(finish).toContain('persist()')
   })
 })
 
@@ -149,9 +149,9 @@ describe('the --project targeted-opens block (source pins)', () => {
     expect(body).toMatch(/flowToNodeStates\(\[armColdOpenHere\(node\)\]\)\[0\]/)
   })
 
-  it('the store path persists (writeDisk) and states the cold-open contract in the reply', () => {
+  it('the store path persists (persist(), never a bare writeDisk) and states the cold-open contract in the reply', () => {
     const body = targetedOpensBody()
-    expect(body).toContain('writeDisk()')
+    expect(body).toContain('persist()')
     expect(body).toContain('starts when that project is next viewed')
   })
 

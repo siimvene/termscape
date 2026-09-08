@@ -35,7 +35,7 @@ function caseBody(verb: string): string {
 
 /**
  * The body of an EARLY-HANDLED verb's block — `open-project` is dispatched before the
- * source-routing machinery (a STORE_ANSWERED_VERBS member, spec §2.3), so it has no `case` label.
+ * source-routing machinery (spec §2.3), so it has no `case` label.
  * Delimited by its `if (verb === '<verb>')` guard and the next section-comment rule (`// ──`),
  * the same way the switch slice above is delimited by the next case label.
  */

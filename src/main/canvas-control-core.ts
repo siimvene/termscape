@@ -308,6 +308,14 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '',
     ...dryRunDocLines(),
     '',
+    'Your calls NEVER switch the user\'s view. When your project is not the one on screen, the',
+    'node verbs (open/show/sticky/group/move/arrange/link/rename/board/assign/write/close) act on',
+    'it in the background: sessions you open there are queued and start when the user next views',
+    'that project (the reply says `queued`, and says where the node landed), nodes you place appear',
+    'then, and `list`/`board` read that project. Four verbs need the live canvas and are REFUSED',
+    'until the user opens your project — `open-worktree`, `close-worktree`, `branch`, `browser`;',
+    'the refusal names this, so do not retry it in a loop — tell the user.',
+    '',
     'Verbs:',
     '- `list` — current nodes (id, kind, title). Start here when you need a node id.',
     '- `help` — print the verb list. Answered by the shim itself, so it works even if the app is down.',
@@ -324,9 +332,9 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     `  status-reporting agent nodes (${statusAgents}, or custom agents based on them) may be waited on; a plain terminal never`,
     '  reports finishing, so waiting on one is refused. `--project <id>` opens the node(s) in another',
     '  project instead of yours. It accepts exactly two things — any other id is refused: your OWN',
-    '  project id, which behaves exactly as if the flag were omitted (a normal open, view switch',
-    '  included); or an id `open-project` returned to YOU in this session, which never switches the',
-    '  user\'s view. A session opened into a non-active project starts when the user next views that',
+    '  project id, which behaves exactly as if the flag were omitted (a normal open); or an id',
+    '  `open-project` returned to YOU in this session. Neither switches the user\'s view (no verb',
+    '  ever does). A session opened into a non-active project starts when the user next views that',
     '  project — do not poll for it. `--group`/`--after`/`--auto-close` cannot be combined with `--project`.',
     '  The reply reports whether anything actually started: `queued` is true (and `queuedIds`',
     '  lists which) when a node was opened ARMED — waiting on `--after`, on a worktree\'s',
@@ -720,6 +728,14 @@ value is allowed anywhere on the line, not only at the end.
 
 ${dryRunDocLines().join('\n')}
 
+Your calls NEVER switch the user's view. When your project is not the one on screen, the
+node verbs (open/show/sticky/group/move/arrange/link/rename/board/assign/write/close) act on
+it in the background: sessions you open there are queued and start when the user next views
+that project (the reply says \`queued\`, and says where the node landed), nodes you place appear
+then, and \`list\`/\`board\` read that project. Four verbs need the live canvas and are REFUSED
+until the user opens your project — \`open-worktree\`, \`close-worktree\`, \`branch\`, \`browser\`;
+the refusal names this, so do not retry it in a loop — tell the user.
+
 Verbs:
 - \`list\` — list current nodes (id, kind, title). Start here when you need a node id.
   A row ending **LAST TURN ERRORED** is a station whose last turn died on an API/model error:
@@ -747,8 +763,8 @@ Verbs:
   one successful turn releases everything armed behind it — or run the armed node yourself.
   \`--project <id>\` opens the node(s) in another project instead of yours. It accepts exactly
   two things — any other id is refused: your OWN project id, which behaves exactly as if the flag
-  were omitted (a normal open, view switch included); or an id \`open-project\` returned to YOU
-  in this session, which never switches the user's view. Defaults inside the target are the
+  were omitted (a normal open); or an id \`open-project\` returned to YOU in this session.
+  Neither switches the user's view (no verb ever does). Defaults inside the target are the
   TARGET project's (its cwd, its default account and permission mode). A session opened into a
   non-active project starts when the user next views that project — do not poll for it; the reply
   says so. \`--group\`/\`--after\`/\`--auto-close\` cannot be combined with \`--project\`.

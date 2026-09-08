@@ -238,8 +238,8 @@ import {
 import {
   routeControlSource,
   needsLiveCanvas,
+  liveOnlyRefusal,
   sourceIsControlCapable,
-  storedNodeListing,
   answerBrowserResolve,
   type BrowserResolveProject
 } from '../lib/controlRouting'
@@ -456,6 +456,7 @@ import { useEntitlement } from '../state/entitlement'
 import type { SshServer } from '@shared/ssh'
 import { sshHostKey } from '@shared/ssh'
 import type {
+  BridgeLink,
   CanvasNodeState,
   ClosedSessionEntry,
   NodeKind,
@@ -732,10 +733,53 @@ function armColdOpenHere<T extends { id: string; data: { initialCommand?: string
   return armed
 }
 
-// A canvas-control request whose source node lives in another project switches that project in
-// first, and the active-project effect hydrates React Flow ASYNCHRONOUSLY — so the handler waits
-// for the node to appear instead of reading an empty canvas one tick too early. Bounded well under
-// the CLI's 120s timeout: a canvas that never arrives becomes a plain "not on an open canvas".
+/**
+ * The bindings a canvas-control verb runs against. ONE verb implementation, TWO surfaces:
+ *
+ * - **live** — the active project's React Flow state (`nodesRef`/`setNodes`, the rope and bridge
+ *   edge states, `markDirty`, `deleteNodes`), when the source node is on screen.
+ * - **store** — the OWNING project's serialized nodes/ropes/bridges in the projects store, when the
+ *   source node lives in a project that is NOT on screen. A control call never switches the user's
+ *   view (the old rule travelled to the owning project first, and every background agent tidying
+ *   up after a finished task yanked the human away from their work — issue reported 2026-09-08);
+ *   the write lands in the same nodes the next whole-file save writes and the project load reads,
+ *   and a session node born here is armed for cold open (the `--project` contract): it starts
+ *   when that project is next viewed.
+ *
+ * Same verb code, different bindings — a second copy of each verb for the off-screen case is
+ * exactly the drift #532 warns about. The verbs that have NO store representation are refused
+ * up front instead (`LIVE_ONLY_VERBS` in lib/controlRouting).
+ */
+interface ControlSurface {
+  live: boolean
+  /** The project the verb acts on: the active one (live) or the source's owner (store). */
+  readonly projectId: string
+  project: () => Project | undefined
+  nodes: () => CanvasNode[]
+  setNodes: (next: CanvasNode[] | ((ns: CanvasNode[]) => CanvasNode[])) => void
+  ropes: () => readonly { source: string; target: string }[]
+  addRope: (source: string, target: string, color: string) => void
+  pruneRopes: (gone: Set<string>) => void
+  bridges: () => readonly { source: string; target: string }[]
+  addBridges: (edges: readonly BridgeLink[]) => void
+  markDirty: () => void
+  deleteNodes: (ids: string[]) => void
+  agentIdOf: (id: string) => AgentId | undefined
+  linkEndpointOf: (id: string) => LinkEndpoint | null
+  permissionMode: (agentId: AgentId) => AgentPermissionMode
+  cwdForNewNodeIn: (groupId: string) => Promise<string | undefined>
+  /** Appended to a reply that placed a NODE off screen ('' on the live surface). */
+  offscreenNote: string
+  /** Appended to a reply that opened SESSIONS off screen — they are queued ('' on the live surface). */
+  queuedNote: string
+}
+
+// A control call can land while the BOOT load of the owning project is still in flight — the very
+// moment a re-adopted agent starts talking again — and the active-project effect hydrates React
+// Flow ASYNCHRONOUSLY, so the handler waits for the node to appear instead of reading an empty
+// canvas one tick too early. Bounded well under the CLI's 120s timeout: a canvas that never
+// arrives becomes a plain "not on an open canvas". (This is the only wait left: a source in a
+// NON-active project is answered from the store, never switched to.)
 /**
  * Which projects have already shown their resume card THIS APP RUN. Module-level so it survives
  * Canvas re-renders and project switches, and IN-MEMORY on purpose: persisting it would leave one
@@ -744,17 +788,17 @@ function armColdOpenHere<T extends { id: string; data: { initialCommand?: string
  */
 const resumeCardShown = new Set<string>()
 
-const CONTROL_TRAVEL_TIMEOUT_MS = 8000
-const CONTROL_TRAVEL_POLL_MS = 60
+const CONTROL_HYDRATE_TIMEOUT_MS = 8000
+const CONTROL_HYDRATE_POLL_MS = 60
 async function waitForCanvasNode(
   find: () => CanvasNode | undefined,
-  timeoutMs = CONTROL_TRAVEL_TIMEOUT_MS
+  timeoutMs = CONTROL_HYDRATE_TIMEOUT_MS
 ): Promise<CanvasNode | undefined> {
   const deadline = Date.now() + timeoutMs
   for (;;) {
     const hit = find()
     if (hit || Date.now() >= deadline) return hit
-    await new Promise((r) => setTimeout(r, CONTROL_TRAVEL_POLL_MS))
+    await new Promise((r) => setTimeout(r, CONTROL_HYDRATE_POLL_MS))
   }
 }
 
@@ -898,6 +942,12 @@ export function Canvas() {
   // per project (`ropes`) so the lineage survives restarts; deletable like a context link.
   const [controlEdges, setControlEdges] = useState<Edge[]>([])
   const controlEdgesRef = useRef<Edge[]>([])
+  // Bumped by every STORE-side write to a background project's nodes or bridges (the control
+  // surface, `deleteStoredNodes`): the context-link map effect below merges background projects'
+  // links from the store but is keyed on the ACTIVE canvas, so without a nudge a link made off
+  // screen reached core's link files only at the next unrelated canvas change — the agent was
+  // told "linked" while the context CLI could not see it (consort HIGH, 2026-09-08).
+  const [storeLinkTick, setStoreLinkTick] = useState(0)
   controlEdgesRef.current = controlEdges
   // Nodes opened with `--auto-close yes` BY THIS PROCESS → the node that opened them. In memory on
   // purpose, never persisted: the flag authorizes closing a session without a confirm dialog, and
@@ -3469,8 +3519,9 @@ export function Canvas() {
     }
     const t = setTimeout(() => void window.nodeTerminal.contextLink.setLinks(map), 150)
     return () => clearTimeout(t)
-    // linkSessionSig is read only as an effect trigger — infoOf re-reads sessionIds via getState().
-  }, [linkEdges, nodes, setLinkEdges, agentIdOf, linkSessionSig])
+    // linkSessionSig and storeLinkTick are read only as effect triggers — infoOf re-reads
+    // sessionIds via getState(), and the background maps re-read the projects store.
+  }, [linkEdges, nodes, setLinkEdges, agentIdOf, linkSessionSig, storeLinkTick])
 
   // Reflect Claude nodes with unread output as a macOS Dock badge count (across all projects).
   // Subscribes to the derived count (a primitive), not the byId map, for the same reason as
@@ -5140,6 +5191,118 @@ export function Canvas() {
     [setNodes, markDirty, refreshWorktreeStore, releaseWorktreeBinding]
   )
 
+  /**
+   * `deleteNodes` for a project that is NOT on screen: the same teardown against the projects
+   * store instead of React Flow. tmux sessions are keyed by node id, so `transport.destroy` works
+   * for an unmounted node; agent status, the subagent fan-out, keep-alive, attach consent, launch
+   * consent and the closed-session ledgers are all dropped exactly as the live path drops them
+   * (issue #402 / review #363 M-1 / #531), group children are freed to absolute positions, and the
+   * ropes/bridges that named a deleted node are pruned (on the live canvas an effect does that).
+   * Worktree-bound frames never reach this path: `releaseWorktreeBinding` (archive hook, child
+   * cwd repair, git registration prune) runs against `useWorktrees`, which tracks the ACTIVE
+   * project only, so the control surface's `close` REFUSES a bound frame off screen and the
+   * sessions sidebar only ever closes single terminal nodes.
+   * Shared by the sessions sidebar's cross-project close and the store-backed control surface.
+   */
+  const deleteStoredNodes = useCallback(
+    (projectId: string, ids: string[]) => {
+      // Decided at CALL time, not when the caller chose the store: `close` sits behind a confirm
+      // dialog the user answers on their own clock, and switching TO that project meanwhile
+      // mounts the very nodes about to be torn down — this path would kill their tmux sessions
+      // and status while the store write got clobbered by the next commitActiveToStore, leaving
+      // live nodes with dead sessions (blind security pass, 2026-09-08). The live path is right
+      // for a live project.
+      if (projectId === useProjects.getState().activeProjectId) {
+        deleteNodes(ids)
+        return
+      }
+      const st = useProjects.getState()
+      const project = st.getProject(projectId)
+      if (!project) return
+      const set = new Set(ids)
+      const flow = nodeStatesToFlow(project.nodes)
+      for (const id of ids) {
+        autoCloseArmedRef.current.delete(id)
+        autoCloseReadRef.current.delete(id)
+        forgetArmed(id)
+        abandonLaunch(id)
+      }
+      const deletedAt = Date.now()
+      const closedSessionIdByNode = new Map<string, string>()
+      const closedEntries = buildClosedSessionEntries(
+        set,
+        flow,
+        deletedAt,
+        (nodeId) => {
+          const id = uuid()
+          closedSessionIdByNode.set(nodeId, id)
+          return id
+        },
+        (nodeId) => useAgentStatus.getState().byId[nodeId]?.sessionId
+      )
+      if (closedEntries.length) st.recordClosedSessions(projectId, closedEntries)
+      const snapshots = flow
+        .filter((n) => set.has(n.id))
+        .map((n) => {
+          const snap = snapshotNode(n, flow)
+          return snap ? { ...snap, closedSessionId: closedSessionIdByNode.get(n.id) } : snap
+        })
+        .filter((x): x is NonNullable<typeof x> => x !== null)
+      if (snapshots.length) {
+        useReopenHistory.getState().push({ kind: 'nodes', projectId, closedAt: deletedAt, nodes: snapshots })
+      }
+      for (const n of flow) {
+        if (!set.has(n.id)) continue
+        if (n.type === 'terminal') {
+          disposeTerminalOnUnmount(sessionForProject(projectId).id, n.id) // may be parked from a switch
+          transport.destroy(n.id)
+        }
+        useAgentStatus.getState().remove(n.id)
+        useAgentNodes.getState().clearForParent(n.id)
+        useAgentNodes.getState().clearLoop(n.id)
+        useWebviewKeepAlive.getState().drop(n.id)
+        clearAttachConsent(n.id)
+      }
+      const groupPos = new Map(
+        flow.filter((n) => set.has(n.id) && n.type === 'group').map((g) => [g.id, g.position])
+      )
+      const remaining = flow
+        .filter((n) => !set.has(n.id))
+        .map((n) =>
+          n.parentId && groupPos.has(n.parentId)
+            ? {
+                ...n,
+                parentId: undefined,
+                extent: undefined,
+                position: {
+                  x: n.position.x + groupPos.get(n.parentId)!.x,
+                  y: n.position.y + groupPos.get(n.parentId)!.y
+                }
+              }
+            : n
+        )
+      const names = (b: BridgeLink) => set.has(b.source) || set.has(b.target)
+      st.commitCanvas(
+        projectId,
+        flowToNodeStates(remaining),
+        project.viewport,
+        (project.bridges ?? []).filter((b) => !names(b)),
+        (project.ropes ?? []).filter((r) => !names(r))
+      )
+      // SSH project: `transport.destroy` reaches a REMOTE session only through a live client
+      // carrying `sshRemote`, which an unmounted node has not got — so the host's `nt-<id>` would
+      // keep running as an orphan after a "closed" reply (consort HIGH, 2026-09-08). Best-effort
+      // over the project's own ControlMaster, the same call `deleteProject` makes.
+      const terminalIds = flow.filter((n) => set.has(n.id) && n.type === 'terminal').map((n) => n.id)
+      if (project.ssh && terminalIds.length) {
+        void window.nodeTerminal.sshProject.killSessions(projectId, terminalIds).catch(() => {})
+      }
+      setStoreLinkTick((v) => v + 1)
+      void persist() // not a bare writeDisk — see the store surface's markDirty
+    },
+    [deleteNodes, persist]
+  )
+
   /** `canvas.deleteSelection` (Delete / Backspace): confirm-then-delete the selected nodes, or —
    *  with no node selected — drop the selected context link(s) / control rope(s). Returns whether
    *  the chord was CLAIMED: an empty selection claims nothing, so the key falls through to the
@@ -5792,10 +5955,6 @@ export function Canvas() {
     setWorktreeActionHandler(onWorktreeAction)
     return () => setWorktreeActionHandler(null)
   }, [onWorktreeAction])
-
-  // Same reason as worktreeControlRef below: the agent-control handler needs the CURRENT
-  // travelToProject (defined far below, after the project actions it composes).
-  const travelToProjectRef = useRef<(projectId: string) => void>(() => {})
 
   // Latest worktree callbacks for the agent-control handler. That effect mounts ONCE (empty
   // deps) and these callbacks' identities change with the active project (activeProjectId /
@@ -8911,17 +9070,24 @@ export function Canvas() {
   // two-and-a-half things ONLY the renderer knows: which project owns the source node, whether that
   // source is a control-capable agent, and whether the per-project browser-control capability is on
   // RIGHT NOW (read live via projectCapabilityGrantedFor). We answer over the SAME source routing
-  // every verb uses — travelling to the owning project so its <webview> guest is live for main to
-  // drive — and we NEVER run a CDP command. Main makes the security decision (owner + capability +
-  // the CDP allowlist) and does the driving itself (browser-drive.ts / browser-actions.ts).
+  // every verb uses and we NEVER run a CDP command. Main makes the security decision (owner +
+  // capability + the CDP allowlist) and does the driving itself (browser-drive.ts /
+  // browser-actions.ts). `browser` drives a <webview> guest that exists only while its node is
+  // mounted, i.e. only on the ACTIVE canvas — and the view never switches on an agent's behalf
+  // (`LIVE_ONLY_VERBS`), so a source in a background project gets a named refusal, not a trip.
   useEffect(() => {
     return api.onBrowserControlResolve(({ requestId, sourceNodeId, browserNodeId }) => {
       const { projects, activeProjectId } = useProjects.getState()
       const route = routeControlSource(projects, activeProjectId, sourceNodeId)
-      // Bring the owning project's canvas up so main can find the live guest (needsLiveCanvas is true
-      // for `browser`). A closed/blocked/unknown owner just yields the refusal below.
-      if (route.kind === 'switch' || route.kind === 'reopen') travelToProjectRef.current(route.projectId)
       const owner = projects.find((p) => p.nodes.some((n) => n.id === sourceNodeId))
+      if (route.kind === 'switch' || route.kind === 'reopen') {
+        api.sendBrowserControlResolveResult({
+          requestId,
+          ok: false,
+          refusal: liveOnlyRefusal('browser', oneLine(owner?.name ?? '') || route.projectId)
+        })
+        return
+      }
       // `browserNodeId` is passed so the answer can carry the browser node's title for the cookie
       // trace; the security decision main makes never reads it.
       const answer = answerBrowserResolve(owner as unknown as BrowserResolveProject | undefined, sourceNodeId, browserNodeId)
@@ -8948,7 +9114,7 @@ export function Canvas() {
       const DRY_RUN_PREFIX = 'DRY RUN — nothing was opened or changed.'
 
       // ── Agent messaging (`send`/`reply`) — handled BEFORE the source-routing machinery ──────
-      // These are STORE_ANSWERED_VERBS (lib/controlRouting): routing by source must never travel
+      // Dispatched before routing (lib/controlRouting): routing by source must never travel
       // to the sender's project (G5 — an off-canvas orchestrator would otherwise yank the human's
       // view on every message and clear an unread badge via `setActive` on the way), and the
       // delivery goes to a tmux PANE, not to a canvas, so no live canvas is needed at either end.
@@ -9017,7 +9183,7 @@ export function Canvas() {
       }
 
       // ── `open-project` (issue #338 Task 2.2) — handled BEFORE the source-routing machinery ──
-      // A STORE_ANSWERED_VERBS member for the G5 reason (controlRouting.ts): routing is by
+      // Dispatched before routing for the G5 reason (controlRouting.ts): routing is by
       // SOURCE, and travelling would yank the human's view to the CALLER's project on every
       // registration. Main already gated this request (gateOpenProject): the caller is verified,
       // local, under the grant cap, and `args.cwd` is the RESOLVED path (P7) — the raw argument
@@ -9060,7 +9226,7 @@ export function Canvas() {
             ...(adoptProbed ? { probed: adoptProbed } : {})
           })
           recordAttachConsent(sourceNodeId, r.project.id)
-          void writeDisk()
+          void persist() // not a bare writeDisk — see the store surface's markDirty
           reply({ ok: true, ...openProjectReply(r.project, r.created, r.adopted) })
         }
         // The probe only matters when no project owns this cwd yet (adopt-vs-create copy) — an
@@ -9109,7 +9275,8 @@ export function Canvas() {
       // travelling (B4): the live canvas owns the ACTIVE project (a store write there would be
       // clobbered by the next commitCanvas), the projects store owns every other. A target equal
       // to the caller's OWN project falls through to the legacy path unchanged — exactly as if
-      // the flag were omitted (B3a), travel included.
+      // the flag were omitted (B3a); that path answers from the owner's store when it is off
+      // screen (`ControlSurface`), so nothing travels in either branch.
       if (
         (verb === 'open-terminal' || verb === 'open-claude' || verb === 'open-agent') &&
         args.project !== undefined
@@ -9249,7 +9416,7 @@ export function Canvas() {
               node: flowToNodeStates([armColdOpenHere(node)])[0]
             })
           }
-          void writeDisk()
+          void persist() // not a bare writeDisk — see the store surface's markDirty
           reply({
             ok: true,
             message:
@@ -9277,125 +9444,176 @@ export function Canvas() {
       // project's tmux sessions keep running and are re-adopted on the next app start — so after a
       // restart the agents of every project the app did NOT come up on were answered by a canvas
       // that had never heard of them, and got the capability rejection below. Resolve the OWNING
-      // project and travel to it first (lib/controlRouting); `list` changes nothing, so it is
-      // answered out of that project's serialized nodes rather than yanking the user's view.
+      // project (lib/controlRouting) and answer from ITS store: **a control call never switches the
+      // user's view.** The old rule travelled to the owning project first, which yanked the human
+      // away from their work every time a background agent finished a task and tidied up after
+      // itself (opened its review node, filed its card, closed its stations). Every verb below runs
+      // against `surface` — see `ControlSurface`; sessions opened off screen are armed for cold
+      // open (the `--project` contract) and the reply says so (`queued`).
+      const liveSurface: ControlSurface = {
+        live: true,
+        get projectId() {
+          return useProjects.getState().activeProjectId
+        },
+        project: () => {
+          const st = useProjects.getState()
+          return st.getProject(st.activeProjectId ?? '')
+        },
+        nodes: () => nodesRef.current,
+        setNodes: (next) => setNodes(next),
+        ropes: () => controlEdgesRef.current,
+        addRope: (source, target, color) =>
+          setControlEdges((es) => [...es, ropeEdge(`ctrl-${source}-${target}`, source, target, color)]),
+        pruneRopes: (gone) =>
+          setControlEdges((es) => es.filter((e) => !gone.has(e.source) && !gone.has(e.target))),
+        bridges: () => linkEdgesRef.current,
+        addBridges: (edges) => setLinkEdges((es) => [...es, ...edges.map((e) => ({ ...e, type: 'default' }))]),
+        markDirty,
+        deleteNodes: (ids) => deleteNodes(ids),
+        agentIdOf,
+        linkEndpointOf,
+        permissionMode: (agentId) => activePermissionMode(agentId),
+        cwdForNewNodeIn: async (groupId) => worktreeControlRef.current.cwdForNewNodeIn(groupId),
+        offscreenNote: '',
+        queuedNote: ''
+      }
+      const storeSurfaceFor = (projectId: string): ControlSurface => {
+        const project = () => useProjects.getState().getProject(projectId)
+        const nodes = () => nodeStatesToFlow(project()?.nodes ?? [])
+        // ONE write path for nodes, ropes and bridges: `commitCanvas` keeps whatever it is not
+        // handed, and every patch is a function over a FRESH read, so successive writes in one
+        // verb (setNodes, then addRope, then addBridges) compose instead of clobbering each other.
+        // The surface was chosen when the request arrived, but a verb can await (media allow-
+        // listing, a prompt-file check, the write/close confirm dialog) and the user can switch
+        // TO this project meanwhile: then React Flow holds these nodes and would overwrite a
+        // bare store write at its next commitActiveToStore. So, decided at WRITE time: if the
+        // project is on screen by now, its live edits are serialized first, the patch lands on
+        // that, and the canvas is re-hydrated in place (camera kept) — the same reload an
+        // external file change uses (blind security pass, 2026-09-08).
+        const commit = (patch: {
+          nodes?: (cur: CanvasNode[]) => CanvasNode[]
+          ropes?: (cur: BridgeLink[]) => BridgeLink[]
+          bridges?: (cur: BridgeLink[]) => BridgeLink[]
+        }) => {
+          const nowActive = useProjects.getState().activeProjectId === projectId
+          if (nowActive) commitActiveToStore()
+          const p = project()
+          if (!p) return
+          useProjects
+            .getState()
+            .commitCanvas(
+              projectId,
+              patch.nodes ? flowToNodeStates(patch.nodes(nodeStatesToFlow(p.nodes))) : p.nodes,
+              p.viewport,
+              patch.bridges?.(p.bridges ?? []),
+              patch.ropes?.(p.ropes ?? [])
+            )
+          if (nowActive) reloadActiveProject()
+          setStoreLinkTick((v) => v + 1)
+        }
+        // The live `agentIdOf` minus the legacy tags fallback (`nodeStatesToFlow` already
+        // backfills `agentId` from the tag) — same hook-status fallback for a hand-launched CLI.
+        const storedAgentIdOf = (id: string): AgentId | undefined => {
+          const n = nodes().find((x) => x.id === id)
+          if (!n || n.type !== 'terminal') return undefined
+          return (n.data.agentId as AgentId | undefined) ?? useAgentStatus.getState().byId[id]?.agentId
+        }
+        // `oneLine` at the door: the name comes raw from the git-shared project file and these
+        // strings print into the calling agent's pane (a newline would forge a reply line).
+        const name = oneLine(project()?.name ?? '') || projectId
+        const where = `"${name}" is not on screen (the view never switches on an agent's behalf)`
+        return {
+          live: false,
+          projectId,
+          project,
+          nodes,
+          setNodes: (next) =>
+            commit({
+              nodes: (cur) => {
+                const arr = typeof next === 'function' ? next(cur) : next
+                const known = new Set(cur.map((n) => n.id))
+                // Cold-open arming is the safety net for EVERY session node born off screen:
+                // `flowToNodeStates` never serializes `initialCommand` (deliberately), so a node
+                // that reached the store un-armed would exist with no command behind it — never
+                // QUEUED, never started. `armAfter` arms the open verbs' nodes before they get
+                // here (so their replies can report `queuedIds`); this catches the rest
+                // (spawn-team's members).
+                return arr.map((n) =>
+                  known.has(n.id) || !n.data.initialCommand ? n : armColdOpenHere(n)
+                )
+              }
+            }),
+          ropes: () => project()?.ropes ?? [],
+          addRope: (source, target) =>
+            commit({ ropes: (cur) => [...cur, { id: `ctrl-${source}-${target}`, source, target }] }),
+          pruneRopes: (gone) =>
+            commit({ ropes: (cur) => cur.filter((r) => !gone.has(r.source) && !gone.has(r.target)) }),
+          bridges: () => project()?.bridges ?? [],
+          addBridges: (edges) =>
+            commit({
+              bridges: (cur) => [...cur, ...edges.map(({ id, source, target }) => ({ id, source, target }))]
+            }),
+          // `persist`, never a bare `writeDisk`: the whole-workspace save also carries the ACTIVE
+          // project's store copy, and `writeDisk` clears `dirty` when no edit raced it — so a
+          // background save that skipped `commitActiveToStore` wrote the user's canvas STALE and
+          // cancelled the autosave that would have fixed it (consort CRITICAL, 2026-09-08).
+          markDirty: () => void persist(),
+          deleteNodes: (ids) => deleteStoredNodes(projectId, ids),
+          agentIdOf: storedAgentIdOf,
+          linkEndpointOf: (id) => {
+            const n = nodes().find((x) => x.id === id)
+            if (!n) return null
+            const a = storedAgentIdOf(id)
+            return { kind: n.type ?? 'terminal', contextCapable: !!a && canContextLink(a) }
+          },
+          permissionMode: (agentId) => projectPermissionMode(project(), agentId),
+          cwdForNewNodeIn: async (groupId) => {
+            // The live rule (nearest ancestor frame that states a cwd: a worktree-bound frame's
+            // checkout, else the frame's own cwd) off the serialized tree. The live resolver's
+            // staleness guard is `useWorktrees.staleGroupIds`, which tracks the ACTIVE project only,
+            // so here the checkout is asked directly: a bound path whose directory is gone is
+            // treated as stale exactly as the live rule treats it (fall through to the frame's own
+            // cwd, then its parent), or a queued session would cold-start in a directory that does
+            // not exist and land in $HOME (consort HIGH, 2026-09-08). An existence check that
+            // itself errors fails OPEN (the path is kept), like the prompt-file check.
+            const all = nodes()
+            const seen = new Set<string>()
+            let cur: string | undefined = groupId
+            while (cur && !seen.has(cur)) {
+              seen.add(cur)
+              const g = all.find((n) => n.id === cur)
+              if (!g) return undefined
+              const wt = g.data.worktree as GroupWorktree | undefined
+              if (wt && !project()?.ssh && (await api.fs.exists(wt.path).catch(() => true))) return wt.path
+              if (g.data.cwd) return g.data.cwd as string
+              cur = g.parentId
+            }
+            return undefined
+          },
+          offscreenNote: ` — ${where}; it appears when that project is next viewed`,
+          queuedNote: `\nqueued: ${where} — the session(s) start when that project is next viewed`
+        }
+      }
       let src = nodesRef.current.find((n) => n.id === sourceNodeId)
+      let surface: ControlSurface = liveSurface
       if (!src) {
         const { projects, activeProjectId: activeId } = useProjects.getState()
         const route = routeControlSource(projects, activeId, sourceNodeId)
-        if (route.kind === 'switch' || route.kind === 'reopen') {
-          // `sticky` is store-answered like send/reply, for the same G5 reason (see
-          // STORE_ANSWERED_VERBS): its headline use is a SCHEDULED sync run, and travelling here
-          // would yank the human's view to the sync agent's project on every run. The write lands
-          // in the owning project's SERIALIZED nodes via `applyNodeMutation` — the same store the
-          // next whole-file save writes and the project load reads — then `writeDisk` persists it
-          // (the renameSession non-active branch's exact pattern). A note created this way skips
-          // the decorative rope edge; it appears when the project is next opened.
-          if (verb === 'sticky') {
-            const project = projects.find((p) => p.id === route.projectId)
-            const storedSrc = project?.nodes.find((n) => n.id === sourceNodeId)
-            if (!project || !storedSrc || !sourceIsControlCapable(storedSrc.agentId)) {
-              reply({ ok: false, error: 'source node is not a control-capable agent' })
-              return
-            }
-            const parsed = parseStickyArgs(args)
-            if ('error' in parsed) {
-              reply({ ok: false, error: `sticky: ${parsed.error}` })
-              return
-            }
-            const resolved = resolveStickyRef(
-              project.nodes.map((n) => ({
-                id: n.id,
-                sticky: (n.kind ?? 'terminal') === 'sticky',
-                title: n.title ?? ''
-              })),
-              parsed.ref
-            )
-            if ('error' in resolved) {
-              reply({ ok: false, error: `sticky: ${resolved.error}` })
-              return
-            }
-            const stamp = {
-              textUpdatedAt: Date.now(),
-              textUpdatedBy: oneLine(storedSrc.title ?? '') || sourceNodeId
-            }
-            if ('id' in resolved) {
-              const target = project.nodes.find((n) => n.id === resolved.id)
-              if (!target) {
-                reply({ ok: false, error: `sticky: no node with id ${resolved.id}` })
-                return
-              }
-              const next = applyStickyWrite(target.text ?? '', parsed.write)
-              if ('error' in next) {
-                reply({ ok: false, error: `sticky: ${next.error}` })
-                return
-              }
-              useProjects
-                .getState()
-                .applyNodeMutation(route.projectId, {
-                  op: 'upsert',
-                  node: { ...target, text: next.text, ...stamp }
-                })
-              void writeDisk()
-              reply({
-                ok: true,
-                message: `note "${target.title || 'Note'}" (${resolved.id}): ${
-                  next.mode === 'append' ? 'appended' : 'replaced'
-                }`
-              })
-              return
-            }
-            if (!parsed.create) {
-              reply({
-                ok: false,
-                error: `sticky: no note matches "${parsed.ref}" — check \`list\`, or pass --create yes to create it`
-              })
-              return
-            }
-            const next = applyStickyWrite('', parsed.write)
-            if ('error' in next) {
-              reply({ ok: false, error: `sticky: ${next.error}` })
-              return
-            }
-            // Below the stored source node — the live path's placeBelow, off serialized state.
-            // One-level parent resolution mirrors the live path's srcGroup handling.
-            const parent = storedSrc.parentId
-              ? project.nodes.find((n) => n.id === storedSrc.parentId)
-              : undefined
-            const center = {
-              x: storedSrc.position.x + (parent?.position.x ?? 0) + (storedSrc.size?.width ?? 600) / 2,
-              y: storedSrc.position.y + (parent?.position.y ?? 0) + (storedSrc.size?.height ?? 400) + 290
-            }
-            const node = createStickyNode(project.nodes.length, center)
-            node.data.title = oneLine(parsed.ref) || 'Note'
-            node.data.text = next.text
-            node.data.textUpdatedAt = stamp.textUpdatedAt
-            node.data.textUpdatedBy = stamp.textUpdatedBy
-            useProjects
-              .getState()
-              .applyNodeMutation(route.projectId, { op: 'upsert', node: flowToNodeStates([node])[0] })
-            void writeDisk()
-            reply({ ok: true, message: `created note "${node.data.title}" (${node.id})` })
-            return
-          }
-          if (!needsLiveCanvas(verb)) {
-            const rows = storedNodeListing(projects.find((p) => p.id === route.projectId)?.nodes ?? [])
-            reply({
-              ok: true,
-              result: rows,
-              message: rows.map((n) => `${n.id} [${n.kind}] ${n.title}`).join('\n')
-            })
-            return
-          }
-          travelToProjectRef.current(route.projectId)
-        }
-        // Wait for the node to show up on the canvas: after a travel, because the active-project
-        // effect hydrates React Flow a tick later; on `active`, because a control call can land
-        // while the BOOT load of the owning project is still in flight — the very moment a
-        // re-adopted agent starts talking again. `unknown`/`blocked` have no canvas to wait for.
-        if (route.kind !== 'unknown' && route.kind !== 'blocked') {
+        if (route.kind === 'active') {
+          // The owning project IS active but its boot load is still hydrating React Flow.
           src = await waitForCanvasNode(() => nodesRef.current.find((n) => n.id === sourceNodeId))
+        } else if (route.kind === 'switch' || route.kind === 'reopen') {
+          // A closed project (`reopen`) still holds its nodes in the store and its sessions still
+          // run; it is answered exactly like an open background project — and stays closed.
+          if (needsLiveCanvas(verb)) {
+            const owner = projects.find((p) => p.id === route.projectId)
+            reply({ ok: false, error: liveOnlyRefusal(verb, oneLine(owner?.name ?? '') || route.projectId) })
+            return
+          }
+          surface = storeSurfaceFor(route.projectId)
+          src = surface.nodes().find((n) => n.id === sourceNodeId)
         }
+        // `unknown` / `blocked` (its files are unreadable) have no canvas to answer from.
       }
       if (!src) {
         reply({ ok: false, error: 'source node is not on an open canvas' })
@@ -9419,10 +9637,7 @@ export function Canvas() {
       // got it right; every control verb passed `undefined` and got it wrong.) The factory reads
       // the node's cwd out of `remoteCwd`, so the effective cwd is threaded through there —
       // otherwise `--cwd` would be silently replaced by the project root.
-      const ctlProject = (() => {
-        const st = useProjects.getState()
-        return st.getProject(st.activeProjectId ?? '')
-      })()
+      const ctlProject = surface.project()
       const ctlSsh = ctlProject?.ssh
       const sshFor = (cwd?: string) => nodeSshFor(ctlSsh, cwd)
       // Place opened nodes BELOW the source and rope them to it (source flow-out → target
@@ -9433,7 +9648,7 @@ export function Canvas() {
       const srcH = src.measured?.height ?? (src.height as number) ?? 400
       // src.position is group-relative when the agent sits inside a group frame — resolve the
       // absolute position first so placements land below the agent regardless of grouping.
-      const srcGroup = src.parentId ? nodesRef.current.find((n) => n.id === src.parentId) : undefined
+      const srcGroup = src.parentId ? surface.nodes().find((n) => n.id === src.parentId) : undefined
       const srcAbs = {
         x: src.position.x + (srcGroup?.position.x ?? 0),
         y: src.position.y + (srcGroup?.position.y ?? 0)
@@ -9441,8 +9656,7 @@ export function Canvas() {
       const belowY = srcAbs.y + srcH + 80
       const edgeColor = agentConfig((src.data.agentId as string) ?? 'claude')?.color ?? '#d97757'
       const placeBelow = (i = 0) => ({ x: srcAbs.x + srcW / 2 + i * 460, y: belowY + 210 })
-      const connect = (newId: string) =>
-        setControlEdges((es) => [...es, ropeEdge(`ctrl-${sourceNodeId}-${newId}`, sourceNodeId, newId, edgeColor)])
+      const connect = (newId: string) => surface.addRope(sourceNodeId, newId, edgeColor)
       // Draw real CONTEXT links (persisted `bridges`), not the display-only ropes `connect`
       // draws — a rope is lineage decoration, a bridge is what get-linked-context reads. This
       // is what lets an orchestrator fan IN: read back what the nodes it opened produced.
@@ -9463,11 +9677,11 @@ export function Canvas() {
         targetIds: string[],
         lookup: (id: string) => LinkEndpoint | null = linkEndpointOf
       ) => {
-        const plan = planBridges(fromId, targetIds, lookup, [...linkEdgesRef.current, ...drawn])
+        const plan = planBridges(fromId, targetIds, lookup, [...surface.bridges(), ...drawn])
         if (plan.edges.length) {
           drawn.push(...plan.edges)
-          setLinkEdges((es) => [...es, ...plan.edges.map((e) => ({ ...e, type: 'default' }))])
-          markDirty()
+          surface.addBridges(plan.edges)
+          surface.markDirty()
         }
         return plan
       }
@@ -9480,9 +9694,9 @@ export function Canvas() {
         // relative coords) must pass through untouched — re-running parentInto would read its
         // relative position as absolute and land it off-frame.
         const placed = node.parentId ? node : src.parentId ? parentInto(node, src.parentId) : node
-        setNodes((ns) => [...ns, placed])
+        surface.setNodes((ns) => [...ns, placed])
         connect(placed.id)
-        markDirty()
+        surface.markDirty()
         return placed.id
       }
       // Grid slots INSIDE a group frame (open-agent --group): 2 columns of terminal-sized
@@ -9506,7 +9720,7 @@ export function Canvas() {
       // group frame. Returns its id, or null with the error already replied.
       const resolveIntoGroup = (): string | null | undefined => {
         if (!args.group) return undefined
-        const g = nodesRef.current.find((nd) => nd.id === args.group)
+        const g = surface.nodes().find((nd) => nd.id === args.group)
         if (!g || g.type !== 'group') {
           reply({ ok: false, error: `${verb}: --group must name an existing group frame` })
           return null
@@ -9524,12 +9738,12 @@ export function Canvas() {
         const ids = (args.after ?? '').split(',').map((s) => s.trim()).filter(Boolean)
         if (ids.length === 0) return undefined
         for (const depId of ids) {
-          const dep = nodesRef.current.find((nd) => nd.id === depId)
+          const dep = surface.nodes().find((nd) => nd.id === depId)
           if (!dep) {
             reply({ ok: false, error: `${verb}: --after names no existing node (${depId})` })
             return null
           }
-          const depAgent = agentIdOf(depId)
+          const depAgent = surface.agentIdOf(depId)
           if (!depAgent || !hasHooks(depAgent)) {
             reply({
               ok: false,
@@ -9561,12 +9775,7 @@ export function Canvas() {
           (id) => settings.codexAccounts.some((a) => a.id === id)
         )
         if (capabilityAgentId(targetAgentId) !== 'claude') return inherited
-        const projStore = useProjects.getState()
-        return resolveNewNodeAccount(
-          inherited,
-          projStore.getProject(projStore.activeProjectId ?? ''),
-          settings.claudeAccounts
-        )
+        return resolveNewNodeAccount(inherited, surface.project(), settings.claudeAccounts)
       }
       // Hold a freshly-built node's launch instead of running it on open. The factories already
       // composed the exact command (agent CLI + permission-mode flag + prompt, or --cmd), so it
@@ -9585,6 +9794,10 @@ export function Canvas() {
       ): CanvasNode => {
         const command = node.data.initialCommand as string | undefined
         if (!command) return node
+        // Off screen there is no mount path to deliver `initialCommand`: a node whose wait is
+        // already over is armed for COLD open instead (the `--project` contract — it starts when
+        // the project is next viewed), so the reply can report it as `queued` truthfully.
+        const settle = (n: CanvasNode): CanvasNode => (surface.live ? n : armColdOpenHere(n))
         // A group counts while its launch is still PENDING (the ack — and with it `waitForSetup` —
         // has not come back yet; holding is the safe side of that unknown, and a non-waiting ack
         // releases these again) or while its acked run said `waitForSetup` and has not finished.
@@ -9594,19 +9807,19 @@ export function Canvas() {
             setupWaitGroupsRef.current.has(intoGroup)) &&
           !setupDoneForGroup(intoGroup)
         const awaitSetupGroup = holdsForSetup ? intoGroup ?? undefined : undefined
-        if (!after.length && !awaitSetupGroup) return node
+        if (!after.length && !awaitSetupGroup) return settle(node)
         // If the wait is ALREADY over, don't arm at all — leave the command as the node's
         // `initialCommand` so its own mount path delivers it through `writeWhenShellReady`
         // (which waits for the shell prompt and echo-verifies). Arming would instead hand
         // delivery to the canvas effect, which would race the node's PTY into existence and
         // could fire into a session that does not exist yet.
-        const live = new Set([...nodesRef.current.map((nd) => nd.id), ...(extraLive ?? [])])
+        const live = new Set([...surface.nodes().map((nd) => nd.id), ...(extraLive ?? [])])
         const unmet = unmetDeps(
           { id: node.id, data: { pendingLaunch: { after, command } } },
           useAgentStatus.getState().byId,
           live
         )
-        if (!unmet.length && !awaitSetupGroup) return node
+        if (!unmet.length && !awaitSetupGroup) return settle(node)
         // Armed HERE, by this process, on the user's own canvas-control call — the one provenance
         // that may auto-fire (see `wasArmedThisSession`; a loaded/peer launch needs ▶ Run now).
         const armed = { after, command, ...(awaitSetupGroup ? { awaitSetupGroup } : {}) }
@@ -9617,7 +9830,7 @@ export function Canvas() {
       // clamp children landing outside it), then drop each node into the next grid slot
       // after the existing children. Shared by the terminal and agent open verbs.
       const addGrouped = (groupId: string, count: number, make: (i: number) => CanvasNode): string[] => {
-        const existing = nodesRef.current.filter((nd) => nd.parentId === groupId).length
+        const existing = surface.nodes().filter((nd) => nd.parentId === groupId).length
         const ids: string[] = []
         for (let i = 0; i < count; i++) {
           const node = make(i)
@@ -9625,7 +9838,7 @@ export function Canvas() {
           const h = (node.height as number) ?? 400
           if (i === 0) {
             const need = groupSizeFor(existing + count, w, h)
-            setNodes((ns) =>
+            surface.setNodes((ns) =>
               ns.map((nd) =>
                 nd.id === groupId
                   ? {
@@ -9658,7 +9871,7 @@ export function Canvas() {
             // separately would be seven round trips to learn the one thing that changes what it
             // does next.
             const st = useAgentStatus.getState().byId
-            const list = nodesRef.current.map((n) => ({
+            const list = surface.nodes().map((n) => ({
               id: n.id,
               kind: n.type,
               title: n.data.title as string,
@@ -9682,7 +9895,7 @@ export function Canvas() {
             const intoGroupId = resolveIntoGroup()
             if (intoGroupId === null) return // bad --group, already replied
             const groupCwd = intoGroupId
-              ? worktreeControlRef.current.cwdForNewNodeIn(intoGroupId)
+              ? await surface.cwdForNewNodeIn(intoGroupId)
               : undefined
             const after = resolveAfter()
             if (after === null) return // bad --after, already replied
@@ -9718,7 +9931,7 @@ export function Canvas() {
             const make = (i: number): CanvasNode => {
               const node = armAfter(
                 createTerminalNode(
-                  nodesRef.current.length + i,
+                  surface.nodes().length + i,
                   termCwd,
                   placeBelow(i),
                   args.cmd,
@@ -9738,7 +9951,8 @@ export function Canvas() {
               ok: true,
               message:
                 `opened ${count} terminal(s): ${ids.join(', ')}` +
-                (after?.length ? `\nwaiting for ${after.join(', ')} before running` : ''),
+                (after?.length ? `\nwaiting for ${after.join(', ')} before running` : '') +
+                surface.queuedNote,
               result: {
                 ids,
                 id: ids[0],
@@ -9761,12 +9975,11 @@ export function Canvas() {
             const intoGroupId = resolveIntoGroup()
             if (intoGroupId === null) return // bad --group, already replied
             const groupCwd = intoGroupId
-              ? worktreeControlRef.current.cwdForNewNodeIn(intoGroupId)
+              ? await surface.cwdForNewNodeIn(intoGroupId)
               : undefined
             // Inherit the source node's managed account, else the project default, else system —
             // but ONLY within the target agent's own provider (accountForSpawn), so a Claude
             // conductor's account never leaks into a codex node and trips its fail-closed scope gate.
-            const projStore = useProjects.getState()
             const account = accountForSpawn(agentId, src.data.accountId as string | undefined)
             const after = resolveAfter()
             if (after === null) return // bad --after, already replied
@@ -9788,7 +10001,7 @@ export function Canvas() {
             }
             // …and the CONDUCTOR must be able to read: a grok/copilot caller gets no bridge either
             // (bridgeTo refuses its endpoint), so its stations could never be consumed.
-            const conductorAgent = agentIdOf(sourceNodeId)
+            const conductorAgent = surface.agentIdOf(sourceNodeId)
             if (wantAutoClose && !(conductorAgent && canContextLink(conductorAgent))) {
               reply({
                 ok: false,
@@ -9871,16 +10084,16 @@ export function Canvas() {
               const node = armAfter(
                 createAgentNode(
                   agentId,
-                  nodesRef.current.length + i,
+                  surface.nodes().length + i,
                   agentCwd,
                   placeBelow(i),
                   args.prompt,
                   sshFor(agentCwd),
                   account,
-                  activePermissionMode(agentId),
-                  // Same project the account funnel above resolves from: the canvas the verb runs
-                  // on, whose `.nodeterm/settings.json` launch command applies to what it opens.
-                  projStore.activeProjectId,
+                  surface.permissionMode(agentId),
+                  // Same project the account funnel above resolves from: the project the verb runs
+                  // against, whose `.nodeterm/settings.json` launch command applies to what it opens.
+                  surface.projectId,
                   // `--model` is a pass-through: `withAgentModel` re-validates the value at the
                   // interpolation site and emits nothing for an agent outside MODEL_SWITCH_CAPABLE,
                   // so an unsupported agent's command line stays byte-identical.
@@ -9905,10 +10118,10 @@ export function Canvas() {
             // resolve their endpoints from `agentId` rather than the not-yet-updated canvas.
             const openedEndpoint = (id: string): LinkEndpoint | null =>
               id === sourceNodeId
-                ? linkEndpointOf(id)
+                ? surface.linkEndpointOf(id)
                 : ids.includes(id)
                   ? { kind: 'terminal', contextCapable: canContextLink(agentId) }
-                  : linkEndpointOf(id)
+                  : surface.linkEndpointOf(id)
             const bridged = bridgeTo(sourceNodeId, ids, openedEndpoint).linked
             // A dependency is also a READING relationship: the whole reason to wait for a
             // station is to consume what it produced. So `--after` additionally bridges each new
@@ -9924,7 +10137,8 @@ export function Canvas() {
                 (after?.length
                   ? `\nwaiting for ${after.join(', ')} before running` +
                     (depLinked.length ? ` (and linked to read them)` : '')
-                  : ''),
+                  : '') +
+                surface.queuedNote,
               result: {
                 ids,
                 linked: bridged,
@@ -9946,9 +10160,9 @@ export function Canvas() {
             // (`sshFs` routes fs.readBinary over the ControlMaster) — reading it locally would
             // either miss or, worse, open a same-named local file.
             const id = addAndConnect(
-              createEditorNode(nodesRef.current.length, args.path, placeBelow(), !!ctlSsh)
+              createEditorNode(surface.nodes().length, args.path, placeBelow(), !!ctlSsh)
             )
-            reply({ ok: true, message: `showing image ${id}`, result: { id } })
+            reply({ ok: true, message: `showing image ${id}${surface.offscreenNote}`, result: { id } })
             return
           }
           case 'show-video': {
@@ -9962,9 +10176,9 @@ export function Canvas() {
             // same-named local file. Local projects allowlist the local path as before.
             if (!ctlSsh) await window.nodeTerminal.media.allow(args.path)
             const id = addAndConnect(
-              createVideoNode(nodesRef.current.length, args.path, placeBelow(), !!ctlSsh)
+              createVideoNode(surface.nodes().length, args.path, placeBelow(), !!ctlSsh)
             )
-            reply({ ok: true, message: `showing video ${id}`, result: { id } })
+            reply({ ok: true, message: `showing video ${id}${surface.offscreenNote}`, result: { id } })
             return
           }
           case 'show-web': {
@@ -9989,8 +10203,8 @@ export function Canvas() {
             }
             // For an agent-provided --file (not html we just wrote), allowlist it first.
             if (webSrc.filePath && args.file) await window.nodeTerminal.media.allow(webSrc.filePath)
-            const id = addAndConnect(createWebNode(nodesRef.current.length, webSrc, placeBelow()))
-            reply({ ok: true, message: `showing web ${id}`, result: { id } })
+            const id = addAndConnect(createWebNode(surface.nodes().length, webSrc, placeBelow()))
+            reply({ ok: true, message: `showing web ${id}${surface.offscreenNote}`, result: { id } })
             return
           }
           case 'open-browser': {
@@ -10013,17 +10227,21 @@ export function Canvas() {
               reply({ ok: false, error: "open-browser: this project's id cannot be used as a browser session key" })
               return
             }
-            const id = addAndConnect(createBrowserNode(nodesRef.current.length, browserUrl, placeBelow(), partition))
+            const id = addAndConnect(createBrowserNode(surface.nodes().length, browserUrl, placeBelow(), partition))
             // Return the project id + partition so main can record ownership in its in-memory
             // ledger (browser-control-ledger.ts). Main gates the claim on its OWN `verified` verdict
             // and keys it to the verified caller — these fields are descriptive (release-by-project,
             // the indicator), never the authorization boundary.
-            reply({ ok: true, message: `opened browser ${id}`, result: { id, projectId: ctlProject?.id, partition } })
+            reply({
+              ok: true,
+              message: `opened browser ${id}${surface.offscreenNote}`,
+              result: { id, projectId: ctlProject?.id, partition }
+            })
             return
           }
           case 'group': {
             const ids = (args.nodes ?? '').split(',').map((s) => s.trim()).filter(Boolean)
-            const live = nodesRef.current as CanvasNode[]
+            const live = surface.nodes() as CanvasNode[]
             const resolvable = ids.filter((id) => live.some((node) => node.id === id))
             if (resolvable.length === 0) {
               reply({ ok: false, error: 'group: none of the given node ids exist' })
@@ -10044,8 +10262,8 @@ export function Canvas() {
                 nd.id === groupNode.id ? { ...nd, data: { ...nd.data, title: args.label } } : nd
               )
             }
-            setNodes(grouped)
-            markDirty()
+            surface.setNodes(grouped)
+            surface.markDirty()
             const skippedGrouped = ids.length - resolvable.length
             const groupNote = skippedGrouped > 0 ? ` (${skippedGrouped} unknown id(s) skipped)` : ''
             reply({
@@ -10057,15 +10275,15 @@ export function Canvas() {
           }
           case 'ungroup': {
             const gid = (args.group ?? '').trim()
-            const live = nodesRef.current as CanvasNode[]
+            const live = surface.nodes() as CanvasNode[]
             const frame = live.find((nd) => nd.id === gid && nd.type === 'group')
             if (!frame) {
               reply({ ok: false, error: `ungroup: --group names no group frame (${gid || 'missing'})` })
               return
             }
             const freed = live.filter((nd) => nd.parentId === gid).map((nd) => nd.id)
-            setNodes(ungroupNodes(live, gid))
-            markDirty()
+            surface.setNodes(ungroupNodes(live, gid))
+            surface.markDirty()
             reply({ ok: true, message: `ungrouped ${gid}, freed ${freed.length} node(s)`, result: { freed } })
             return
           }
@@ -10075,7 +10293,7 @@ export function Canvas() {
             // deliberately won't do. `reparentNode` keeps each node's ROOT-space position fixed
             // and refuses a cycle (a frame into itself or its own descendant).
             const ids = (args.nodes ?? '').split(',').map((s) => s.trim()).filter(Boolean)
-            const live = nodesRef.current as CanvasNode[]
+            const live = surface.nodes() as CanvasNode[]
             const rawTarget = (args.group ?? '').trim().toLowerCase()
             const toTop = !rawTarget || rawTarget === 'top' || rawTarget === 'none' || rawTarget === 'ungrouped'
             const targetGroup = toTop ? null : args.group!.trim()
@@ -10107,8 +10325,8 @@ export function Canvas() {
             for (const g of affected) {
               if (next.some((n) => n.parentId === g)) next = fitGroupToChildren(next, g, snapGridNow())
             }
-            setNodes(next)
-            markDirty()
+            surface.setNodes(next)
+            surface.markDirty()
             const where = targetGroup ? `into ${targetGroup}` : 'to the top level'
             reply({ ok: true, message: `moved ${moved.length} node(s) ${where}`, result: { moved, group: targetGroup } })
             return
@@ -10116,7 +10334,7 @@ export function Canvas() {
           case 'arrange':
           case 'align': {
             const ids = (args.nodes ?? '').split(',').map((s) => s.trim()).filter(Boolean)
-            const live = nodesRef.current as CanvasNode[]
+            const live = surface.nodes() as CanvasNode[]
             const edge = (['left', 'right', 'top', 'bottom', 'hcenter', 'vcenter'] as const).find((e2) => e2 === args.edge)
             if (verb === 'align' && !edge) {
               reply({ ok: false, error: 'align requires --edge left|right|top|bottom|hcenter|vcenter' })
@@ -10144,8 +10362,8 @@ export function Canvas() {
             // Tidying a frame's children usually leaves the frame oversized (it was sized to their
             // old scattered spots) — shrink it to hug the new layout. Top-level sets have no frame.
             if (container) next = fitGroupToChildren(next, container, snapGridNow())
-            setNodes(next)
-            markDirty()
+            surface.setNodes(next)
+            surface.markDirty()
             const how = verb === 'arrange' ? `as ${layout}` : `to ${edge}`
             reply({ ok: true, message: `${verb === 'arrange' ? 'arranged' : 'aligned'} ${ids.length} node(s) ${how}`, result: { count: ids.length, container } })
             return
@@ -10159,7 +10377,7 @@ export function Canvas() {
               reply({ ok: false, error: 'link requires --to <id,id>' })
               return
             }
-            if (!linkEndpointOf(from)) {
+            if (!surface.linkEndpointOf(from)) {
               reply({ ok: false, error: `link: --from names no existing node (${from})` })
               return
             }
@@ -10188,12 +10406,12 @@ export function Canvas() {
             // is composed from the two primitives already built — `--after` and the context
             // bridge; `verify` is the shape, not new machinery.
             const targetId = (args.node ?? '').trim()
-            const target = nodesRef.current.find((nd) => nd.id === targetId)
+            const target = surface.nodes().find((nd) => nd.id === targetId)
             if (!target) {
               reply({ ok: false, error: `verify: --node names no existing node (${targetId})` })
               return
             }
-            const targetAgent = agentIdOf(targetId)
+            const targetAgent = surface.agentIdOf(targetId)
             if (!targetAgent || !canContextLink(targetAgent)) {
               reply({
                 ok: false,
@@ -10214,8 +10432,7 @@ export function Canvas() {
             const { shimPath: vShim } = await window.nodeTerminal.contextLink.info()
             const targetTitle = (target.data.title as string) || targetId
             const targetCwd = target.data.cwd as string | undefined
-            const live = nodesRef.current as CanvasNode[]
-            const vStore = useProjects.getState()
+            const live = surface.nodes() as CanvasNode[]
             // Reviewers inherit the TARGET's account, not the caller's: they read that node's
             // transcript, which is resolved inside its own account dir — but only when the target's
             // account belongs to the REVIEWER's provider (accountForSpawn). A codex reviewer of a
@@ -10224,7 +10441,7 @@ export function Canvas() {
             const vAccount = accountForSpawn(reviewAgent, target.data.accountId as string | undefined)
             // Every node in the panel (reviewers + judge) runs `reviewAgent`, so one resolution
             // serves them all — gated on that agent, not on the caller's.
-            const vMode = activePermissionMode(reviewAgent)
+            const vMode = surface.permissionMode(reviewAgent)
             const reviewers = lenses.map((lens, i) => {
               const node = createAgentNode(
                 reviewAgent,
@@ -10242,7 +10459,7 @@ export function Canvas() {
                 sshFor(targetCwd),
                 vAccount,
                 vMode,
-                vStore.activeProjectId
+                surface.projectId
               )
               return armAfter(
                 { ...node, data: { ...node.data, title: `Verify: ${lens}`, titleAuto: false } },
@@ -10267,7 +10484,7 @@ export function Canvas() {
                       sshFor(targetCwd),
                       vAccount,
                       vMode,
-                      vStore.activeProjectId
+                      surface.projectId
                     )
                     return { ...j, data: { ...j.data, title: 'Verify: verdict', titleAuto: false } }
                   })(),
@@ -10337,24 +10554,25 @@ export function Canvas() {
                 ? { ...nd, position: dest, data: { ...nd.data, title: args.label || `Verify: ${targetTitle}` } }
                 : nd
             )
-            setNodes(next)
+            surface.setNodes(next)
             panelIds.forEach((pid) => connect(pid))
             // Same-tick lookup: the panel is not on the canvas yet (setNodes is async).
             const panelEndpoint = (id: string): LinkEndpoint | null =>
               panelIds.includes(id)
                 ? { kind: 'terminal', contextCapable: canContextLink(reviewAgent) }
-                : linkEndpointOf(id)
+                : surface.linkEndpointOf(id)
             for (const rid of reviewerIds) bridgeTo(rid, [targetId], panelEndpoint)
             bridgeTo(sourceNodeId, panelIds, panelEndpoint)
             if (judge) bridgeTo(judge.id, reviewerIds, panelEndpoint)
-            markDirty()
+            surface.markDirty()
             reply({
               ok: true,
               message:
                 `verifying ${targetTitle} (${targetId}) with ${lenses.length} lens(es): ${lenses.join(', ')}` +
                 `\nreviewers: ${reviewerIds.join(', ')}` +
                 (judge ? `\nverdict node (runs after all reviewers): ${judge.id}` : '') +
-                `\nthey start when ${targetId} goes idle`,
+                `\nthey start when ${targetId} goes idle` +
+                surface.queuedNote,
               result: {
                 groupId: vGroup.id,
                 targetId,
@@ -10414,8 +10632,7 @@ export function Canvas() {
               })
               return
             }
-            const live = nodesRef.current as CanvasNode[]
-            const teamStore = useProjects.getState()
+            const live = surface.nodes() as CanvasNode[]
             // Build members; fixed role titles pin the node name (titleAuto off).
             const members = roles.map((r, i) => {
               // Roles may name different agents, so BOTH the mode and the inherited account are
@@ -10433,8 +10650,8 @@ export function Canvas() {
                 r.prompt,
                 sshFor(srcCwd),
                 accountForSpawn(memberAgent, src.data.accountId as string | undefined),
-                activePermissionMode(memberAgent),
-                teamStore.activeProjectId,
+                surface.permissionMode(memberAgent),
+                surface.projectId,
                 // Per-role model, so one team can mix tiers in a single call. A role naming a
                 // model its agent cannot switch simply launches bare (withAgentModel no-ops).
                 r.model,
@@ -10459,27 +10676,36 @@ export function Canvas() {
             next = next.map((nd) =>
               nd.id === teamGroup.id ? { ...nd, data: { ...nd.data, title: args.label || 'Team' } } : nd
             )
-            setNodes(next)
+            surface.setNodes(next)
             memberIds.forEach((mid) => connect(mid))
             // …and CONTEXT-link each member back to the conductor, so the fan-out has a fan-in:
             // once a member is done, the conductor reads what it produced via get-linked-context
             // instead of asking the user to relay it. Members whose agent isn't context-capable
             // (a custom agent) just keep the display rope.
             const memberEndpoint = (id: string): LinkEndpoint | null => {
-              if (id === sourceNodeId) return linkEndpointOf(id)
+              if (id === sourceNodeId) return surface.linkEndpointOf(id)
               const m = members.find((x) => x.id === id)
               if (!m) return null
               const a = m.data.agentId as AgentId | undefined
               return { kind: m.type ?? 'terminal', contextCapable: !!a && canContextLink(a) }
             }
             const bridged = bridgeTo(sourceNodeId, memberIds, memberEndpoint).linked
-            markDirty()
+            surface.markDirty()
             reply({
               ok: true,
               message:
                 `spawned ${memberIds.length} member(s) in group ${teamGroup.id}: ${memberIds.join(', ')}` +
-                (bridged.length ? `\ncontext-linked to you: ${bridged.join(', ')}` : ''),
-              result: { groupId: teamGroup.id, memberIds, linked: bridged }
+                (bridged.length ? `\ncontext-linked to you: ${bridged.join(', ')}` : '') +
+                surface.queuedNote,
+              // Members are opened un-armed on the live canvas (they start on mount); off screen
+              // the surface cold-arms every one of them, so the whole team is QUEUED (#569 item 1).
+              result: {
+                groupId: teamGroup.id,
+                memberIds,
+                linked: bridged,
+                queued: !surface.live,
+                queuedIds: surface.live ? [] : memberIds
+              }
             })
             return
           }
@@ -10487,8 +10713,7 @@ export function Canvas() {
             // Mirrors createWorktreeAndGroup/attachWorktree minus the dialog: create the git
             // worktree (new branch off base), then wrap a bound group frame below the source
             // (or bind an existing empty group via --group).
-            const projStore = useProjects.getState()
-            const project = projStore.getProject(projStore.activeProjectId ?? '')
+            const project = surface.project()
             if (project?.ssh) {
               reply({ ok: false, error: WORKTREE_SSH_NOTICE })
               return
@@ -10505,7 +10730,7 @@ export function Canvas() {
             }
             let bindGroupId: string | null = null
             if (args.group) {
-              const g = nodesRef.current.find((nd) => nd.id === args.group)
+              const g = surface.nodes().find((nd) => nd.id === args.group)
               if (!g || g.type !== 'group' || g.data.worktree) {
                 reply({ ok: false, error: 'open-worktree: --group must name an existing group without a worktree' })
                 return
@@ -10524,7 +10749,7 @@ export function Canvas() {
             const baseRes = resolveWorktreeBase(
               args.base,
               branch,
-              nodesRef.current.map((nd) => ({
+              surface.nodes().map((nd) => ({
                 id: nd.id,
                 parentId: nd.parentId,
                 worktree: nd.data.worktree as GroupWorktree | undefined
@@ -10599,7 +10824,7 @@ export function Canvas() {
             }
             // Fan successive frames out horizontally (frame width + gap) so several
             // open-worktree calls in one orchestration land side by side, not stacked.
-            const groupFan = nodesRef.current.filter(
+            const groupFan = surface.nodes().filter(
               (nd) => nd.type === 'group' && !nd.parentId
             ).length
             const frameAt = {
@@ -10625,13 +10850,13 @@ export function Canvas() {
           }
           case 'close-worktree': {
             const id = args.group ?? ''
-            const g = nodesRef.current.find((nd) => nd.id === id)
+            const g = surface.nodes().find((nd) => nd.id === id)
             if (!g || g.type !== 'group' || !g.data.worktree) {
               reply({ ok: false, error: `close-worktree: ${id} is not a worktree-bound group` })
               return
             }
             const mode = args.mode ?? 'unbind'
-            const sshProject = !!useProjects.getState().getProject(useProjects.getState().activeProjectId ?? '')?.ssh
+            const sshProject = !!surface.project()?.ssh
             if (mode !== 'unbind' && sshProject) {
               reply({ ok: false, error: WORKTREE_SSH_NOTICE })
               return
@@ -10661,7 +10886,7 @@ export function Canvas() {
           }
           case 'branch': {
             const id = args.node ?? ''
-            const target = nodesRef.current.find((nd) => nd.id === id)
+            const target = surface.nodes().find((nd) => nd.id === id)
             if (!target) {
               reply({ ok: false, error: `branch: no node with id ${id}` })
               return
@@ -10688,7 +10913,7 @@ export function Canvas() {
             // THIRD session, and read back by the phone, push alerts and the board log. Landing it
             // clean at the door is what keeps a control character out of all of them at once.
             const title = oneLine(args.title ?? '')
-            const target = nodesRef.current.find((nd) => nd.id === id)
+            const target = surface.nodes().find((nd) => nd.id === id)
             if (!target) {
               reply({ ok: false, error: `rename: no node with id ${id}` })
               return
@@ -10701,10 +10926,10 @@ export function Canvas() {
             const prevTitle = (target.data.title as string) ?? ''
             // Same semantics as renameSession: an explicit rename takes ownership of the
             // name (titleAuto off) and mirrors it into a rename-capable agent's session.
-            setNodes((ns) =>
+            surface.setNodes((ns) =>
               ns.map((nd) => (nd.id === id ? { ...nd, data: { ...nd.data, title, titleAuto: false } } : nd))
             )
-            markDirty()
+            surface.markDirty()
             const agentId = target.data.agentId as AgentId | undefined
             if (agentId && canRename(agentId) && title) {
               // Gated twice: on the pane's owner (an agent that opens a node and renames it in the
@@ -10736,7 +10961,7 @@ export function Canvas() {
               return
             }
             const resolved = resolveStickyRef(
-              nodesRef.current.map((nd) => ({
+              surface.nodes().map((nd) => ({
                 id: nd.id,
                 sticky: nd.type === 'sticky',
                 title: (nd.data.title as string) ?? ''
@@ -10748,7 +10973,7 @@ export function Canvas() {
               return
             }
             if ('id' in resolved) {
-              const target = nodesRef.current.find((nd) => nd.id === resolved.id)
+              const target = surface.nodes().find((nd) => nd.id === resolved.id)
               if (!target) {
                 reply({ ok: false, error: `sticky: no node with id ${resolved.id}` })
                 return
@@ -10763,7 +10988,7 @@ export function Canvas() {
                 return
               }
               const stamp = { textUpdatedAt: Date.now(), textUpdatedBy: srcTitle }
-              setNodes((ns) =>
+              surface.setNodes((ns) =>
                 ns.map((nd) => {
                   if (nd.id !== resolved.id) return nd
                   const fresh = applyStickyWrite((nd.data.text as string) ?? '', parsed.write)
@@ -10773,7 +10998,7 @@ export function Canvas() {
                   return { ...nd, data: { ...nd.data, text: fresh.text, ...stamp } }
                 })
               )
-              markDirty()
+              surface.markDirty()
               reply({
                 ok: true,
                 message: `note "${(target.data.title as string) || 'Note'}" (${resolved.id}): ${
@@ -10796,7 +11021,7 @@ export function Canvas() {
               reply({ ok: false, error: `sticky: ${next.error}` })
               return
             }
-            const node = createStickyNode(nodesRef.current.length, placeBelow())
+            const node = createStickyNode(surface.nodes().length, placeBelow())
             // `oneLine` at the door, exactly as `rename`: this title is composed into `list`
             // output, the board and the phone.
             node.data.title = oneLine(parsed.ref) || 'Note'
@@ -10804,7 +11029,7 @@ export function Canvas() {
             node.data.textUpdatedAt = Date.now()
             node.data.textUpdatedBy = srcTitle
             const newId = addAndConnect(node)
-            reply({ ok: true, message: `created note "${node.data.title}" (${newId})` })
+            reply({ ok: true, message: `created note "${node.data.title}" (${newId})${surface.offscreenNote}` })
             return
           }
           case 'write': {
@@ -10886,9 +11111,9 @@ export function Canvas() {
               reply({ ok: false, error: 'close requires --node <id,id> and/or --spawned yes' })
               return
             }
-            const live = new Set(nodesRef.current.map((n) => n.id))
+            const live = new Set(surface.nodes().map((n) => n.id))
             const spawned = wantSpawned
-              ? controlEdgesRef.current
+              ? surface.ropes()
                   .filter((r) => r.source === sourceNodeId && r.target !== sourceNodeId)
                   .map((r) => r.target)
               : []
@@ -10901,6 +11126,24 @@ export function Canvas() {
                 message: wantSpawned && !listed.length ? 'nothing to close — no open nodes spawned by you' : 'nothing to close — no such node(s)'
               })
               return
+            }
+            // A worktree-bound frame's teardown owes `releaseWorktreeBinding` (archive hook, the
+            // children's cwd repair, git's registration prune), which runs against the ACTIVE
+            // project's worktree registry — off screen the binding would simply vanish and its
+            // children keep pointing at a dead checkout (consort HIGH, 2026-09-08). Refused, named,
+            // and the view still does not switch.
+            if (!surface.live) {
+              const bound = targets.filter((id) => !!surface.nodes().find((n) => n.id === id)?.data.worktree)
+              if (bound.length) {
+                reply({
+                  ok: false,
+                  error:
+                    `close: ${bound.join(', ')} ${bound.length === 1 ? 'is a worktree-bound frame' : 'are worktree-bound frames'}, ` +
+                    "and releasing a worktree binding needs its project on screen — the view never switches on an agent's behalf; " +
+                    'ask the user to open the project, or close the nodes inside the frame instead'
+                })
+                return
+              }
             }
             // One confirm dialog at a time (see `write`): reject rather than orphan a pending one —
             // or stack this one over a destructive dialog the user then cannot see. Gated on the
@@ -10915,7 +11158,7 @@ export function Canvas() {
             // hidden behind a count is one the user never consented to. Titles are attacker-
             // controlled strings, so the id is what a user can trust. `.confirm__msg` scrolls.
             const titleOf = (id: string): string =>
-              ((nodesRef.current.find((n) => n.id === id)?.data.title as string | undefined) || id)
+              ((surface.nodes().find((n) => n.id === id)?.data.title as string | undefined) || id)
             const shown = targets.map((id) => `"${titleOf(id)}" (${id})`)
             const what =
               targets.length === 1
@@ -10932,9 +11175,9 @@ export function Canvas() {
                 // Canonical teardown: deleteNodes() destroys the local tmux session (remote-guarded),
                 // drops persisted agentStatus, and reparents any group children. Don't hand-roll it.
                 const gone = new Set(targets)
-                deleteNodes(targets)
+                surface.deleteNodes(targets)
                 for (const id of targets) autoCloseArmedRef.current.delete(id)
-                setControlEdges((es) => es.filter((e) => !gone.has(e.source) && !gone.has(e.target)))
+                surface.pruneRopes(gone)
                 reply({ ok: true, message: `closed ${targets.length}: ${targets.join(', ')}` })
               },
               onCancel: () => reply({ ok: false, error: 'denied by user' })
@@ -10942,14 +11185,14 @@ export function Canvas() {
             return
           }
           case 'board': {
-            // Read-only snapshot of the CURRENTLY OPEN project's kanban board: columns + the
+            // Read-only snapshot of the surface project's kanban board: columns + the
             // session cards filed in each, plus the virtual Ungrouped column. The board's cards
             // ARE the canvas session nodes (toKanbanSession), derived live — the board file only
             // stores column assignments, so a session with no/dangling assignment sits Ungrouped.
             const store = useProjects.getState()
-            const pid = store.activeProjectId
+            const pid = surface.projectId
             const board = store.getProject(pid ?? '')?.kanban
-            const sessions = nodesRef.current
+            const sessions = surface.nodes()
               .map(toKanbanSession)
               .filter((s): s is KanbanSession => s !== null)
             const titleOf = new Map(sessions.map((s) => [s.id, s.title || 'Untitled']))
@@ -10995,13 +11238,13 @@ export function Canvas() {
             // board's own scope note called out as missing. Board metadata ONLY: assignNode writes
             // an assignment, it never touches the canvas node, its group, or the running session.
             const nodeId = (args.node ?? '').trim()
-            const target = nodesRef.current.find((n) => n.id === nodeId)
+            const target = surface.nodes().find((n) => n.id === nodeId)
             if (!target || toKanbanSession(target) === null) {
               reply({ ok: false, error: `assign: --node names no session card (${nodeId || 'missing'})` })
               return
             }
             const store = useProjects.getState()
-            const pid = store.activeProjectId
+            const pid = surface.projectId
             if (!pid) {
               reply({ ok: false, error: 'assign: no active project' })
               return
@@ -11024,12 +11267,12 @@ export function Canvas() {
             const before = (args.before ?? '').trim() || null
             const next = assignNode(prev, nodeId, columnId, before)
             store.setProjectKanban(pid, next)
-            markDirty()
+            surface.markDirty()
             // Board-log the move through the same diff funnel the UI uses (card-moved), so the
             // board feed reads identically whether a person or an agent moved the card. cardTitle
             // returns '' ONLY for a dead node; a live card with no title maps to 'Untitled'.
             const cardTitle = (id: string): string => {
-              const n = nodesRef.current.find((x) => x.id === id)
+              const n = surface.nodes().find((x) => x.id === id)
               const card = n ? toKanbanSession(n) : null
               return card ? card.title || 'Untitled' : ''
             }
@@ -11072,22 +11315,8 @@ export function Canvas() {
         confirmLabel: 'End session',
         danger: true,
         onConfirm: () => {
-          if (projectId === activeProjectId) {
-            deleteNodes([id])
-          } else {
-            disposeTerminalOnUnmount(sessionForProject(projectId).id, id) // node may be parked from the project switch
-            transport.destroy(id)
-            useAgentStatus.getState().remove(id)
-            // Unmount no longer clears the fan-out (issue #402), so this cross-project delete
-            // must — the node unmounted at the project switch with its cards kept in the store.
-            useAgentNodes.getState().clearForParent(id)
-            // Same teardown symmetry as deleteNodes (review #363 M-1): the attach-consent
-            // mirror dies with the node.
-            clearAttachConsent(id)
-            useWebviewKeepAlive.getState().drop(id)
-            useProjects.getState().removeNode(projectId, id)
-            void writeDisk()
-          }
+          if (projectId === activeProjectId) deleteNodes([id])
+          else deleteStoredNodes(projectId, [id])
           // The session-memory panel's remote leg (see `killSessionById`): the local destroy above
           // cannot reach a HOST's tmux session unless a live client carries `sshRemote`. Runs only
           // after the user confirmed, which is why it is a callback and not done at the call site.
@@ -11096,7 +11325,7 @@ export function Canvas() {
         }
       })
     },
-    [activeProjectId, deleteNodes, writeDisk]
+    [activeProjectId, deleteNodes, deleteStoredNodes]
   )
 
   /**
@@ -12384,12 +12613,6 @@ export function Canvas() {
     },
     [reopenProject, switchProject]
   )
-  // Latest project-travel callback for the agent-control handler: that effect mounts ONCE (empty
-  // deps), so it cannot close over this callback — same reason as worktreeControlRef.
-  useEffect(() => {
-    travelToProjectRef.current = travelToProject
-  })
-
   // Jump to the node a peer is focused on. focusNodeById already handles the same-project focus and
   // the switch to another OPEN project; the closed-project case has to reopen the tab first and let
   // the active-project effect finish the focus (pendingFocusRef, same mechanism as a notification).

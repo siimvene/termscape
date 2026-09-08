@@ -213,6 +213,47 @@ paths:
   it. Anchoring outside the frame's right edge guarantees the sibling relationship geometrically;
   the nodes are created at top level so `groupSelectedNodes` wraps them into a top-level frame.
   Children are frame-relative, so repositioning the finished frame alone carries the whole panel.
+- **A canvas-control call NEVER switches the user's view** (2026-09-08; `ControlSurface` in
+  `Canvas.tsx`, `LIVE_ONLY_VERBS` in `lib/controlRouting.ts`, pinned by
+  `control-no-travel.source.test.ts` + `controlRouting.test.ts`). Routing is by SOURCE, and the
+  old rule travelled to the source's project before running any verb outside a five-verb
+  store-answered list — so an agent finishing a task in a background project and tidying up after
+  itself (`open-agent` for its consort reviewer, `verify`, `assign` to file its card, `close` on
+  its stations) yanked the human's view away from their work, intermittently and disorientingly
+  (Siim, 2026-09-08). Every verb now runs against a `ControlSurface`: the live React Flow bindings
+  when the source is on screen, the OWNING project's serialized nodes/ropes/bridges when it is not
+  — same verb code, different bindings, so the two cannot drift (#532). `commitCanvas` is the one
+  store write path (nodes/ropes/bridges, each read fresh so successive writes in one verb
+  compose); a session node born off screen is cold-armed (`armColdOpenHere`, the `--project`
+  contract) both in `armAfter` and as a safety net in the store surface's `setNodes`, because
+  `flowToNodeStates` never serializes `initialCommand`; the reply says `queued`/`queuedIds` and
+  where the node landed. `close` off screen goes through `deleteStoredNodes` — the same teardown
+  `deleteNodes` does (destroy, status, fan-out, keep-alive, consents, closed-session ledgers,
+  child freeing, rope/bridge pruning) plus `sshProject.killSessions` on an SSH project (an
+  unmounted node has no client carrying `sshRemote`, so `transport.destroy` alone left the host's
+  `nt-<id>` running); a worktree-bound FRAME is refused off screen, because
+  `releaseWorktreeBinding` runs against `useWorktrees`, which tracks the ACTIVE project only. The
+  sessions sidebar's cross-project close uses the same helper. Four rules the consort panel
+  (Codex gpt-5.6-sol, 2026-09-08) forced, all pinned: (1) a store-side write persists through
+  `persist()`, never a bare `writeDisk()` — the latter clears `dirty` on an unchanged generation,
+  so a background save that skipped `commitActiveToStore` wrote the user's canvas STALE and
+  cancelled the autosave that would have fixed it; (2) every store write is decided at WRITE time
+  (`commit` re-checks `activeProjectId`: if the user switched TO the project during an await or a
+  confirm dialog, the live edits are serialized first and the canvas re-hydrated in place;
+  `deleteStoredNodes` delegates to `deleteNodes` then); (3) a store write bumps `storeLinkTick`,
+  because the context-link map effect merges background projects' bridges from the store but is
+  keyed on the active canvas — without the nudge an off-screen `link` reported success while the
+  context CLI could not see it; (4) the store resolver for `--group` asks the filesystem whether a
+  bound worktree path still exists (the live resolver's `staleGroupIds` is active-project-only).
+  KNOWN LIMIT, shared with every store path (`sticky`, `--project`, the sidebar's background
+  rename/close): canvas sync publishes the ACTIVE React Flow only, so a relay peer learns about
+  a background-project mutation at that project's next whole-file save, not live.
+  Only the verbs with NO store representation are refused (never travelled to), with a message
+  that says the view will not switch: `open-worktree`/`close-worktree` (the worktree registry is
+  active-project-scoped), `branch` (restarts a live pane), `browser` (drives a mounted
+  `<webview>`; its resolve round-trip answers the same refusal). `travelToProjectRef` is gone;
+  presence travel (the facepile) still switches, because a human clicked. Do not reintroduce a
+  travel for a verb that "needs" the canvas — give it a store path or add it to the refused set.
 - **Both skill bodies steer fan-out to canvas nodes** (2026-09-02, pinned by
   `canvas-control-core.test.ts`): an agent's own in-process subagents (Agent/Task tool) surface only as
   ephemeral cards (see the subagent-visualization bullet in `agents.md`) — gone on the parent's next

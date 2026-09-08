@@ -669,6 +669,16 @@ describe('open-project + --project docs land with the dispatch (issue #338, spec
     }
   })
 
+  it('both bodies state the no-travel contract: node verbs act on an off-screen project in the background, four verbs are refused', () => {
+    for (const [name, body] of bodies) {
+      expect(body, name).toMatch(/Your calls NEVER switch the user's view/)
+      expect(body, name).toMatch(/sessions you open there are queued and start when the user next views/)
+      // The live-only set, spelled out for the agent — LIVE_ONLY_VERBS in controlRouting.ts.
+      expect(body, name).toMatch(/`open-worktree`, `close-worktree`, `branch`, `browser`/)
+      expect(body, name).toMatch(/do not retry it in a loop/)
+    }
+  })
+
   it('the orchestration recipe gains the multi-repo pattern', () => {
     for (const [name, body] of bodies) {
       expect(body, name).toContain('one project per repository')
@@ -685,7 +695,7 @@ describe('the --project clause tells the truth about travel (review #363 I-1 + M
     ['instructions', buildCanvasControlInstructions('/x/shim.sh')]
   ]
 
-  it('no-travel is promised ONLY for a returned id; own id is documented as flag-omitted (travel included)', () => {
+  it('own id is documented as flag-omitted, and NEITHER id switches the view (no verb does, 2026-09-08)', () => {
     for (const [name, body] of bodies) {
       // The clause slice: from the `--project` flag doc to the open-project entry that follows
       // it in both bodies — anchored, so a caveat cannot drift into another paragraph (the
@@ -695,17 +705,13 @@ describe('the --project clause tells the truth about travel (review #363 I-1 + M
       expect(start, `${name}: clause start`).toBeGreaterThan(-1)
       expect(end, `${name}: clause before the open-project entry`).toBeGreaterThan(start)
       const clause = body.slice(start, end)
-      // Own id ≡ the flag omitted, view switch included — the REAL behavior (Canvas.tsx's
-      // own-id leg falls through to the legacy path, travel included; pinned in
-      // control-open-project.source.test.ts). The doc must say the same, not more.
+      // Own id ≡ the flag omitted — the REAL behavior (Canvas.tsx's own-id leg falls through to
+      // the legacy path). Since 2026-09-08 that path answers from the owner's STORE when it is off
+      // screen (`ControlSurface`, pinned in control-no-travel.source.test.ts), so the old "view
+      // switch included" caveat would now be a lie and must be gone.
       expect(clause, name).toMatch(/behaves exactly as if the flag\s+were omitted/)
-      expect(clause, name).toMatch(/view switch\s+included/)
-      // The no-travel promise exists only attached to the RETURNED id…
-      expect(clause, name).toMatch(
-        /returned to YOU\s+in this session, which never switches the\s+user'?s view/
-      )
-      // …and the old universal phrasing ("without switching the user's view", said of the whole
-      // flag) is gone from the body entirely.
+      expect(clause, name).not.toMatch(/view switch/)
+      expect(clause, name).toMatch(/Neither switches the user's view \(no verb\s+ever does\)/)
       expect(body, name).not.toMatch(/without switching/)
       // M-3: the do-not-poll caveat and the refusal rule live in the clause ITSELF — dropping
       // them here while the recipe's copy survives is red.
