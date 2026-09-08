@@ -31,7 +31,7 @@ import type { NotPermittedReason } from './agent-message-decide'
  * ── THREE SURFACES ──────────────────────────────────────────────────────────────────────────────
  *
  * - **Desktop (Electron):** the caller. It passes `useProjects.getState().projects`, the same
- *   serialized array `routeControlSource` and `storedNodeListing` already read.
+ *   serialized array `routeControlSource` and the store-backed control surface already read.
  * - **Server Edition:** ships, unused — messaging does not exist there (Task 5.3). Pure, with no
  *   electron or main-shell import, so it ships on both shells like everything else in `src/core`.
  * - **Mobile (phone):** never a sender, so it never calls this. A phone-spawned node IS a valid

@@ -10,8 +10,8 @@
 // in the live canvas alone therefore rejected every agent outside the project the app happened to
 // come up on — reported as "source node is not a control-capable agent", which is what a node
 // carrying a non-control agent gets, so the failure read as a lost capability rather than as the
-// wrong canvas answering. Resolve the OWNING project instead, then travel to it (or, for a verb
-// that reads and changes nothing, answer straight out of its serialized nodes).
+// wrong canvas answering. Resolve the OWNING project instead and answer out of ITS serialized
+// nodes — never by switching the user's view to it (see LIVE_ONLY_VERBS below for the contract).
 
 import { canControlCanvas, type AgentId } from '@shared/agents/config'
 import { projectTravel } from './presenceTravel'
@@ -28,20 +28,15 @@ export interface ControlProject {
   nodes: readonly { id: string }[]
 }
 
-/** A serialized node, as the projects store keeps them for non-active projects. */
-export interface StoredNode {
-  id: string
-  kind?: string
-  title?: string
-}
-
 /**
  * Where a control request must be applied:
  * - `active`  — the source is on the live canvas (or its project is already active): apply here.
- * - `switch`  — an open project's canvas: activate that tab first.
- * - `reopen`  — a closed project (its sessions still run): restore the tab, then activate it.
- * - `blocked` — a project whose files are unreadable: travelling there would show an empty canvas.
+ * - `switch`  — an open project that is NOT on screen: answer from its serialized store.
+ * - `reopen`  — a closed project (its sessions still run): answer from its store; it stays closed.
+ * - `blocked` — a project whose files are unreadable: there is no store to answer from.
  * - `unknown` — no open project owns this node id.
+ * The kind names are the ones `projectTravel` (presence) uses, because the ownership rule is the
+ * same; what Canvas DOES with `switch`/`reopen` here is answer from the store, never travel.
  */
 export type ControlRoute =
   | { kind: 'active' }
@@ -70,62 +65,52 @@ export function routeControlSource(
 }
 
 /**
- * Verbs that are answered from the SERIALIZED store instead of the live canvas.
+ * Verbs that can ONLY run against the LIVE canvas — and are therefore REFUSED (never travelled to)
+ * when their source node lives in a project that is not on screen.
  *
- * `list` reads names only, and it is the verb an agent calls most — answering it out of the store
- * keeps a background agent's polling from yanking the user's view to another project tab on every
- * call.
+ * The contract, in one sentence: **a canvas-control call never switches the user's view.** Routing
+ * is by SOURCE (`routeControlSource(projects, activeId, sourceNodeId)`), so the old "travel to the
+ * owning project first" rule meant that any agent in a background project issuing a verb yanked
+ * the human away from whatever they were doing — most visibly at the end of a task, when an
+ * orchestrator opens its review node, moves its kanban card, or closes its stations. Every verb
+ * that creates, reads or edits NODES is now answered from the owning project's SERIALIZED store
+ * (`Canvas.tsx`'s store-backed `ControlSurface`): the write lands in the same nodes the next
+ * whole-file save writes and the project load reads, and a session opened this way is armed for
+ * cold open — it starts when that project is next viewed, exactly the `--project` contract.
  *
- * `send`/`reply` are here for a stronger reason than politeness, and it is worth being precise
- * about WHICH travel this prevents: routing here is by SOURCE
- * (`routeControlSource(projects, activeId, sourceNodeId)`), so what the declaration stops is a trip
- * to the SENDER's project — which an off-canvas orchestrator would otherwise trigger on every
- * message it sent, hijacking the human's view on a background agent's say-so and clearing that
- * node's unread badge via `setActive` on the way (G5). A delivery goes to a tmux PANE, not to a
- * canvas, so it needs no live canvas at either end.
+ * What stays here is what has no store representation at all:
+ * - `open-worktree` / `close-worktree` — the worktree registry (`useWorktrees`) and the
+ *   project-setup runs are bound to the ACTIVE project's checkout; a binding minted for a project
+ *   that is not loaded would be reconciled against the wrong repo.
+ * - `branch` — restarts a RUNNING session's pane through the live node's own restart path.
+ * - `browser` — drives a real `<webview>` guest, which exists only while its node is mounted.
  *
- * The other half — never travelling to the TARGET's project — is not this function's doing. It
- * comes from `resolveDeliveryScope` (`src/core/agents/agent-message-scope.ts`) taking the
- * serialized store and having no live-node parameter at all, so there is nothing to travel toward.
- *
- * LIVE AS OF PR 5: Canvas.tsx's dispatch handles `send`/`reply` BEFORE its source-routing
- * machinery, so neither `routeControlSource` nor any travel runs for them — the declaration here
- * and that early-exit are the same decision stated once each, and `controlRouting.test.ts` pins
- * this half.
+ * `send`/`reply`/`open-project` never reach the routing at all (Canvas.tsx dispatches them before
+ * it), so they are not listed; the membership below is what `Canvas.tsx` consults AFTER the
+ * source has been routed to a non-active project.
  */
-/*
- * `sticky` is store-answered for the send/reply reason, not the list reason: its headline use is
- * a SCHEDULED agent rewriting one note every few minutes, and routing is by SOURCE — so a live
- * requirement would yank the human's view to the sync agent's project on every run (G5), which is
- * exactly the behaviour that gets the sync loop turned off. The write lands in the owning
- * project's serialized nodes (`applyNodeMutation`, the same path peer mutations take) when that
- * project is not the active one; the live canvas handles it when it is.
- */
-/*
- * `open-project` (issue #338) is store-answered for the G5 reason in its sharpest form: its
- * headline caller is a background orchestrator registering one repo after another, and routing is
- * by SOURCE — a live requirement would yank the human's view to the CALLER's project on every
- * registration (and clear its unread badge via `setActive` on the way). The verb acts on the
- * projects STORE through the non-activating `registerProject`, and its consent dialog is
- * app-global (`ConfirmState` overlays the window), so no live canvas is needed at either end.
- * Canvas.tsx handles it BEFORE the source-routing machinery — this declaration and that
- * early-exit are the same decision stated once each (spec §2.3, P6), pinned by
- * `controlRouting.test.ts`.
- */
-const STORE_ANSWERED_VERBS: ReadonlySet<string> = new Set([
-  'list',
-  'send',
-  'reply',
-  'sticky',
-  'open-project'
+export const LIVE_ONLY_VERBS: ReadonlySet<string> = new Set([
+  'open-worktree',
+  'close-worktree',
+  'branch',
+  'browser'
 ])
 
 /**
- * Does this verb have to run against the LIVE canvas? Everything that creates, moves, writes to or
- * closes a node does.
+ * Does this verb have to run against the LIVE canvas? True only for `LIVE_ONLY_VERBS`; everything
+ * else is store-answerable when its source is off screen.
  */
 export function needsLiveCanvas(verb: string): boolean {
-  return !STORE_ANSWERED_VERBS.has(verb)
+  return LIVE_ONLY_VERBS.has(verb)
+}
+
+/** The refusal a live-only verb gets from a background project: named, terminal (the cause does
+ *  not clear on its own), and explicit that the canvas will NOT switch on the agent's behalf. */
+export function liveOnlyRefusal(verb: string, projectName: string): string {
+  return (
+    `${verb}: this project ("${projectName}") is not on screen, and ${verb} needs its live canvas — ` +
+    "the view never switches on an agent's behalf; ask the user to open the project first"
+  )
 }
 
 /**
@@ -203,12 +188,4 @@ export function answerBrowserResolve(
     sourceTitle: typeof node.title === 'string' ? node.title : '',
     browserTitle: typeof browserNode?.title === 'string' ? browserNode.title : ''
   }
-}
-
-/** `list`'s rows, built from serialized nodes — the same shape the live canvas answers with
- *  (`n.type` is the persisted `kind`, `n.data.title` the persisted `title`). */
-export function storedNodeListing(
-  nodes: readonly StoredNode[]
-): { id: string; kind: string; title: string }[] {
-  return nodes.map((n) => ({ id: n.id, kind: n.kind ?? 'terminal', title: n.title ?? '' }))
 }

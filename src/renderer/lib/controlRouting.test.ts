@@ -2,8 +2,9 @@ import { describe, it, expect } from 'vitest'
 import {
   routeControlSource,
   needsLiveCanvas,
+  liveOnlyRefusal,
+  LIVE_ONLY_VERBS,
   sourceIsControlCapable,
-  storedNodeListing,
   answerBrowserResolve,
   type ControlProject,
   type BrowserResolveProject
@@ -64,41 +65,66 @@ describe('routeControlSource', () => {
   })
 })
 
-describe('needsLiveCanvas', () => {
-  it('is false for the read-only listing verb', () => {
-    expect(needsLiveCanvas('list')).toBe(false)
-  })
-
-  it('is true for every verb that mutates the canvas', () => {
-    for (const verb of ['open-terminal', 'spawn-team', 'write', 'close', 'board', 'assign']) {
-      expect(needsLiveCanvas(verb)).toBe(true)
+describe("needsLiveCanvas — a control call never switches the user's view", () => {
+  // THE BUG (2026-09-08): routing is by SOURCE, and every verb outside a short store-answered list
+  // used to TRAVEL to the source's project first. So an agent finishing a task in a background
+  // project and tidying up after itself — opening its review node, filing its kanban card,
+  // closing its stations — yanked the human's view away from whatever they were working on. The
+  // contract is now inverted: everything is answered from the owning project's serialized store,
+  // and only the verbs with NO store representation are refused (never travelled to).
+  it('is false for every node-creating, node-editing and node-reading verb', () => {
+    for (const verb of [
+      'list',
+      'open-terminal',
+      'open-claude',
+      'open-agent',
+      'spawn-team',
+      'verify',
+      'show-image',
+      'show-video',
+      'show-web',
+      'open-browser',
+      'group',
+      'ungroup',
+      'move',
+      'arrange',
+      'align',
+      'link',
+      'rename',
+      'sticky',
+      'write',
+      'close',
+      'board',
+      'assign'
+    ]) {
+      expect(needsLiveCanvas(verb), verb).toBe(false)
     }
   })
 
-  it('is false for send and reply — a delivery must never travel the camera', () => {
+  it('is false for send, reply and open-project too — they are dispatched before routing', () => {
     // Routing here is by SOURCE, so what this stops is a trip to the SENDER's project — which an
-    // off-canvas orchestrator would otherwise trigger on every message it sent, hijacking the
-    // human's view and clearing an unread badge via `setActive` on the way (G5). Never travelling
-    // to the TARGET's project is a different guarantee, and it belongs to `resolveDeliveryScope`.
+    // off-canvas orchestrator would otherwise trigger on every message it sent (G5). Never
+    // travelling to the TARGET's project is a different guarantee, and it belongs to
+    // `resolveDeliveryScope`.
     expect(needsLiveCanvas('send')).toBe(false)
     expect(needsLiveCanvas('reply')).toBe(false)
-  })
-
-  it('is false for sticky — a scheduled note sync must never travel the camera either', () => {
-    // Same G5 shape as send/reply: routing is by SOURCE, and the verb's headline use is a cron
-    // agent rewriting one note every few minutes. The non-active write path goes through the
-    // projects store (`applyNodeMutation`), not the live canvas.
-    expect(needsLiveCanvas('sticky')).toBe(false)
-  })
-
-  it('is false for open-project — registering a project must never travel the camera (issue #338)', () => {
-    // The G5 argument one more time: routing is by SOURCE, and open-project's headline caller is
-    // a background orchestrator registering repos one after another — travelling would yank the
-    // human's view to the CALLER's project on every call. The verb acts on the projects STORE
-    // (registerProject, non-activating by construction), so no live canvas is needed at either
-    // end; this membership and Canvas.tsx's early-exit dispatch are the same decision stated once
-    // each (spec §2.3, P6).
     expect(needsLiveCanvas('open-project')).toBe(false)
+  })
+
+  it('is true ONLY for the verbs with no store representation', () => {
+    // open-worktree / close-worktree: the worktree registry and the project-setup runs are bound
+    // to the ACTIVE project's checkout. branch: restarts a RUNNING pane through the live node.
+    // browser: drives a <webview> guest that exists only while its node is mounted.
+    expect([...LIVE_ONLY_VERBS].sort()).toEqual(['branch', 'browser', 'close-worktree', 'open-worktree'])
+    for (const verb of LIVE_ONLY_VERBS) expect(needsLiveCanvas(verb), verb).toBe(true)
+  })
+
+  it('a live-only verb from a background project gets a named, terminal refusal that says the view will not switch', () => {
+    const msg = liveOnlyRefusal('open-worktree', 'kvart')
+    expect(msg).toContain('open-worktree')
+    expect(msg).toContain('"kvart"')
+    expect(msg).toContain('not on screen')
+    expect(msg).toContain("never switches on an agent's behalf")
   })
 })
 
@@ -120,13 +146,11 @@ describe('sourceIsControlCapable', () => {
 })
 
 describe('the `browser` verb needs the LIVE canvas', () => {
-  it('needsLiveCanvas(browser) is true — the node lives in a specific project canvas, like open-browser', () => {
-    // It drives a real <webview> that only exists on the live canvas; it is NOT store-answerable.
+  it('needsLiveCanvas(browser) is true, and open-browser (which only CREATES a node) is store-answerable', () => {
+    // `browser` drives a real <webview> that only exists on the live canvas; it is NOT
+    // store-answerable. `open-browser` merely places a node, which the store can hold.
     expect(needsLiveCanvas('browser')).toBe(true)
-    expect(needsLiveCanvas('open-browser')).toBe(true)
-    // Contrast with the store-answered verbs.
-    expect(needsLiveCanvas('list')).toBe(false)
-    expect(needsLiveCanvas('send')).toBe(false)
+    expect(needsLiveCanvas('open-browser')).toBe(false)
   })
 })
 
@@ -194,21 +218,5 @@ describe('answerBrowserResolve — the renderer answers ONLY what it alone knows
   it('a non-control-capable source is reported as such (main turns it into the refusal)', () => {
     const p = proj({ nodes: [{ id: 'x-1', agentId: 'cursor' }], agentBrowserControl: true, capabilityAck: { agentBrowserControl: 'kept' } })
     expect(answerBrowserResolve(p, 'x-1')).toMatchObject({ ok: true, sourceControlCapable: false })
-  })
-})
-
-describe('storedNodeListing', () => {
-  it('renders serialized nodes in the same shape the live canvas answers `list` with', () => {
-    expect(
-      storedNodeListing([
-        { id: 'term-b-1', kind: 'terminal', title: 'Claude Code' },
-        { id: 'sticky-b-2', kind: 'sticky' },
-        { id: 'term-b-3' }
-      ])
-    ).toEqual([
-      { id: 'term-b-1', kind: 'terminal', title: 'Claude Code' },
-      { id: 'sticky-b-2', kind: 'sticky', title: '' },
-      { id: 'term-b-3', kind: 'terminal', title: '' }
-    ])
   })
 })

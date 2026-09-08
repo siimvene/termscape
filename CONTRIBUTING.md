@@ -92,6 +92,13 @@ lane unaffected.
   consent to this fork being public rests on that. `license.test.ts` (upstream's, verbatim) and
   `license.ungate.test.ts` cover both halves.
 
+- **A canvas-control verb never switches the active project.** An agent in a background project
+  is answered from that project's serialized store (`ControlSurface` in `Canvas.tsx`); sessions it
+  opens are cold-armed and start when the user next views that project. If a verb genuinely
+  cannot run against the store, add it to `LIVE_ONLY_VERBS` (`src/renderer/lib/controlRouting.ts`)
+  so it is refused with a message — never call `switchProject`/`reopenProject`/`setActive` from
+  the control handler. `control-no-travel.source.test.ts` fails your PR if you do.
+
 - **Never call the user's machine a Mac in user-visible copy.** Use `thisMachine()` /
   `thisMachineCap()` / `machineNoun()` from `src/renderer/lib/machineName.ts` — "this Mac" on
   macOS, "this PC" on Windows, "this computer" elsewhere and in any Server Edition browser tab
