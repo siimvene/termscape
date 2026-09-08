@@ -9649,11 +9649,10 @@ export function Canvas() {
       const srcH = src.measured?.height ?? (src.height as number) ?? 400
       // src.position is group-relative when the agent sits inside a group frame — resolve the
       // absolute position first so placements land below the agent regardless of grouping.
-      const srcGroup = src.parentId ? surface.nodes().find((n) => n.id === src.parentId) : undefined
-      const srcAbs = {
-        x: src.position.x + (srcGroup?.position.x ?? 0),
-        y: src.position.y + (srcGroup?.position.y ?? 0)
-      }
+      // The FULL parent chain (frames nest), resolved the same way every obstacle is below — a
+      // conductor two frames deep must walk its slots in the same coordinate space as the nodes
+      // it is compared against (blind security pass, 2026-09-08).
+      const srcAbs = absolutePosition(src as FocusableNode, surface.nodes() as FocusableNode[])
       const edgeColor = agentConfig((src.data.agentId as string) ?? 'claude')?.color ?? '#d97757'
       // WHERE a spawned node lands: the first clear slot in the rows under the source, walking
       // right, with EVERY existing node (frames included) and every slot this command already
@@ -9674,10 +9673,21 @@ export function Canvas() {
       }
       const srcBox: SpawnBox = { x: srcAbs.x, y: srcAbs.y, w: srcW, h: srcH }
       const taken: SpawnBox[] = []
+      // Built ONCE per command: the canvas does not change between the slots one command hands
+      // out (`taken` carries this command's own nodes), and rebuilding the root-space boxes per
+      // spawned node — with the store surface re-hydrating `nodes()` each time — made a
+      // `spawn-team` of eight quadratic in the canvas size (blind security pass, 2026-09-08).
+      let obstacleCache: SpawnBox[] | null = null
+      const obstacles = (): SpawnBox[] => {
+        if (!obstacleCache) {
+          const all = surface.nodes()
+          obstacleCache = all.map((n) => spawnBoxOf(n, all))
+        }
+        return obstacleCache
+      }
       /** Top-left of the next free slot of `size` under the source, in ROOT space. */
       const slotFor = (size: { w: number; h: number }): { x: number; y: number } => {
-        const all = surface.nodes()
-        const slot = spawnSlot(srcBox, size, [...all.map((n) => spawnBoxOf(n, all)), ...taken])
+        const slot = spawnSlot(srcBox, size, [...obstacles(), ...taken])
         taken.push({ ...slot, ...size })
         return slot
       }
@@ -10714,13 +10724,23 @@ export function Canvas() {
             let next: CanvasNode[] = [...live, ...members]
             // One slot for the whole team, sized like the frame `groupSelectedNodes` will draw
             // around the grid, so the frame — not just its first member — lands clear of everything.
+            // The reservation mirrors the grid `arrangeNodes` lays out (~square: ceil(sqrt(n))
+            // columns, 40 px gaps) plus the frame's fit padding (GROUP_PAD, or one snap cell, on
+            // every side, and the header on top) — reserving `groupSizeFor`'s two-column cell
+            // grid instead under-reserved a team of five or more (blind security pass, 2026-09-08).
             const mW = (members[0]?.width as number) ?? 640
             const mH = (members[0]?.height as number) ?? 440
-            const teamSize = groupSizeFor(members.length, mW, mH)
-            const teamSlot = slotFor({ w: teamSize.width, h: teamSize.height })
+            const teamCols = Math.max(1, Math.ceil(Math.sqrt(members.length)))
+            const teamRows = Math.ceil(members.length / teamCols)
+            const teamPad = Math.max(28, snapGridNow()) // 28 = workspace.ts GROUP_PAD, the frame fit's own padding
+            const teamSize = {
+              w: teamCols * mW + (teamCols - 1) * 40 + teamPad * 2,
+              h: teamRows * mH + (teamRows - 1) * 40 + teamPad * 2 + GROUP_PAD_TOP
+            }
+            const teamSlot = slotFor(teamSize)
             next = arrangeNodes(next, memberIds, {
               layout: 'grid',
-              origin: { x: teamSlot.x + GROUP_PAD_X, y: teamSlot.y + GROUP_PAD_TOP }
+              origin: { x: teamSlot.x + teamPad, y: teamSlot.y + teamPad + GROUP_PAD_TOP }
             })
             const groupCount = next.filter((nd) => nd.type === 'group').length
             const existingGroupIds = new Set(

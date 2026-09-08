@@ -26,6 +26,16 @@ export const SPAWN_MAX_ROWS = 6
 const overlaps = (a: Box, b: Box, gap: number): boolean =>
   a.x < b.x + b.w + gap && a.x + a.w + gap > b.x && a.y < b.y + b.h + gap && a.y + a.h + gap > b.y
 
+/** Geometry reaches this module from the git-shared project file and from canvas peers, neither
+ *  validated upstream: `JSON.parse('1e309')` is Infinity, and a NaN/Infinity anywhere in a box makes
+ *  every comparison false — a non-finite SOURCE would answer the first cell as "clear" and hand back
+ *  a NaN position that `setNodes` accepts and the store persists (a blank, unpannable canvas), while
+ *  a non-finite OBSTACLE (width Infinity) overlaps every cell and silently reverts every spawn to
+ *  the pile-up (blind security pass, 2026-09-08). So both are refused here: a hostile obstacle is
+ *  ignored, a hostile source falls back to the canvas origin. */
+export const finiteBox = (b: Box): boolean =>
+  Number.isFinite(b.x) && Number.isFinite(b.y) && Number.isFinite(b.w) && Number.isFinite(b.h) && b.w >= 0 && b.h >= 0
+
 /**
  * The top-left of the first clear `size` slot in the rows under `source`: left-aligned with the
  * source, walking RIGHT along a row (`SPAWN_MAX_COLS` cells), then the next row down. Rows first
@@ -46,10 +56,15 @@ export function spawnSlot(
   obstacles: readonly Box[],
   gap = SPAWN_GAP
 ): { x: number; y: number } {
+  if (!(Number.isFinite(size.w) && Number.isFinite(size.h) && size.w >= 0 && size.h >= 0)) {
+    size = { w: 600, h: 400 }
+  }
+  const src = finiteBox(source) ? source : { x: 0, y: 0, w: 0, h: 0 }
+  const safe = obstacles.filter(finiteBox)
   const clear = (x: number, y: number): boolean =>
-    !obstacles.some((b) => overlaps({ x, y, w: size.w, h: size.h }, b, gap))
-  const x0 = source.x
-  const y0 = source.y + source.h + SPAWN_ROW_GAP
+    !safe.some((b) => overlaps({ x, y, w: size.w, h: size.h }, b, gap))
+  const x0 = src.x
+  const y0 = src.y + src.h + SPAWN_ROW_GAP
   for (let row = 0; row < SPAWN_MAX_ROWS; row++) {
     const y = y0 + row * (size.h + gap)
     for (let col = 0; col < SPAWN_MAX_COLS; col++) {
@@ -57,5 +72,5 @@ export function spawnSlot(
       if (clear(x, y)) return { x, y }
     }
   }
-  return freeSpot([...obstacles], { x: x0, y: y0 }, size, gap)
+  return freeSpot(safe, { x: x0, y: y0 }, size, gap)
 }

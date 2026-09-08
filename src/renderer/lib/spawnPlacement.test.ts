@@ -48,6 +48,21 @@ describe('spawnSlot — where an agent-opened node lands', () => {
     expect(next).toEqual({ x: src.x + sticky.w + SPAWN_GAP, y: rowY })
   })
 
+  it('a non-finite SOURCE (hostile project.json) yields a finite slot at the canvas origin, never NaN', () => {
+    const bad: Box = { x: Number.POSITIVE_INFINITY, y: 100, w: 640, h: 440 }
+    const slot = spawnSlot(bad, size, [])
+    expect(Number.isFinite(slot.x) && Number.isFinite(slot.y)).toBe(true)
+    expect(slot).toEqual({ x: 0, y: SPAWN_ROW_GAP })
+    const nan: Box = { x: 100, y: Number.NaN, w: 640, h: 440 }
+    const s2 = spawnSlot(nan, size, [])
+    expect(Number.isFinite(s2.x) && Number.isFinite(s2.y)).toBe(true)
+  })
+
+  it('a non-finite OBSTACLE (width Infinity) is ignored instead of blocking every cell', () => {
+    const wall: Box = { x: -1e9, y: -1e9, w: Number.POSITIVE_INFINITY, h: Number.POSITIVE_INFINITY }
+    expect(spawnSlot(src, size, [src, wall])).toEqual({ x: src.x, y: rowY })
+  })
+
   it('never returns an overlap while a clear spot exists (the freeSpot fallback past the grid)', () => {
     // Pack the whole grid under the source; the answer must still be clear of everything.
     const taken: Box[] = [src]
