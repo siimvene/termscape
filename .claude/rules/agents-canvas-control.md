@@ -229,8 +229,25 @@ paths:
   `flowToNodeStates` never serializes `initialCommand`; the reply says `queued`/`queuedIds` and
   where the node landed. `close` off screen goes through `deleteStoredNodes` — the same teardown
   `deleteNodes` does (destroy, status, fan-out, keep-alive, consents, closed-session ledgers,
-  child freeing, rope/bridge pruning) minus the worktree-binding release, which `useWorktrees`
-  can only do for the ACTIVE project; the sessions sidebar's cross-project close uses it too.
+  child freeing, rope/bridge pruning) plus `sshProject.killSessions` on an SSH project (an
+  unmounted node has no client carrying `sshRemote`, so `transport.destroy` alone left the host's
+  `nt-<id>` running); a worktree-bound FRAME is refused off screen, because
+  `releaseWorktreeBinding` runs against `useWorktrees`, which tracks the ACTIVE project only. The
+  sessions sidebar's cross-project close uses the same helper. Four rules the consort panel
+  (Codex gpt-5.6-sol, 2026-09-08) forced, all pinned: (1) a store-side write persists through
+  `persist()`, never a bare `writeDisk()` — the latter clears `dirty` on an unchanged generation,
+  so a background save that skipped `commitActiveToStore` wrote the user's canvas STALE and
+  cancelled the autosave that would have fixed it; (2) every store write is decided at WRITE time
+  (`commit` re-checks `activeProjectId`: if the user switched TO the project during an await or a
+  confirm dialog, the live edits are serialized first and the canvas re-hydrated in place;
+  `deleteStoredNodes` delegates to `deleteNodes` then); (3) a store write bumps `storeLinkTick`,
+  because the context-link map effect merges background projects' bridges from the store but is
+  keyed on the active canvas — without the nudge an off-screen `link` reported success while the
+  context CLI could not see it; (4) the store resolver for `--group` asks the filesystem whether a
+  bound worktree path still exists (the live resolver's `staleGroupIds` is active-project-only).
+  KNOWN LIMIT, shared with every store path (`sticky`, `--project`, the sidebar's background
+  rename/close): canvas sync publishes the ACTIVE React Flow only, so a relay peer learns about
+  a background-project mutation at that project's next whole-file save, not live.
   Only the verbs with NO store representation are refused (never travelled to), with a message
   that says the view will not switch: `open-worktree`/`close-worktree` (the worktree registry is
   active-project-scoped), `branch` (restarts a live pane), `browser` (drives a mounted

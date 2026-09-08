@@ -767,7 +767,7 @@ interface ControlSurface {
   agentIdOf: (id: string) => AgentId | undefined
   linkEndpointOf: (id: string) => LinkEndpoint | null
   permissionMode: (agentId: AgentId) => AgentPermissionMode
-  cwdForNewNodeIn: (groupId: string) => string | undefined
+  cwdForNewNodeIn: (groupId: string) => Promise<string | undefined>
   /** Appended to a reply that placed a NODE off screen ('' on the live surface). */
   offscreenNote: string
   /** Appended to a reply that opened SESSIONS off screen — they are queued ('' on the live surface). */
@@ -942,6 +942,12 @@ export function Canvas() {
   // per project (`ropes`) so the lineage survives restarts; deletable like a context link.
   const [controlEdges, setControlEdges] = useState<Edge[]>([])
   const controlEdgesRef = useRef<Edge[]>([])
+  // Bumped by every STORE-side write to a background project's nodes or bridges (the control
+  // surface, `deleteStoredNodes`): the context-link map effect below merges background projects'
+  // links from the store but is keyed on the ACTIVE canvas, so without a nudge a link made off
+  // screen reached core's link files only at the next unrelated canvas change — the agent was
+  // told "linked" while the context CLI could not see it (consort HIGH, 2026-09-08).
+  const [storeLinkTick, setStoreLinkTick] = useState(0)
   controlEdgesRef.current = controlEdges
   // Nodes opened with `--auto-close yes` BY THIS PROCESS → the node that opened them. In memory on
   // purpose, never persisted: the flag authorizes closing a session without a confirm dialog, and
@@ -3513,8 +3519,9 @@ export function Canvas() {
     }
     const t = setTimeout(() => void window.nodeTerminal.contextLink.setLinks(map), 150)
     return () => clearTimeout(t)
-    // linkSessionSig is read only as an effect trigger — infoOf re-reads sessionIds via getState().
-  }, [linkEdges, nodes, setLinkEdges, agentIdOf, linkSessionSig])
+    // linkSessionSig and storeLinkTick are read only as effect triggers — infoOf re-reads
+    // sessionIds via getState(), and the background maps re-read the projects store.
+  }, [linkEdges, nodes, setLinkEdges, agentIdOf, linkSessionSig, storeLinkTick])
 
   // Reflect Claude nodes with unread output as a macOS Dock badge count (across all projects).
   // Subscribes to the derived count (a primitive), not the byId map, for the same reason as
@@ -5191,9 +5198,10 @@ export function Canvas() {
    * consent and the closed-session ledgers are all dropped exactly as the live path drops them
    * (issue #402 / review #363 M-1 / #531), group children are freed to absolute positions, and the
    * ropes/bridges that named a deleted node are pruned (on the live canvas an effect does that).
-   * One difference, deliberate: a deleted worktree-bound frame does NOT release its binding here —
-   * `useWorktrees` tracks the ACTIVE project only, so the orphan is reconciled when that project is
-   * next switched to (the same window `deleteNodes`' comment describes for a missed refresh).
+   * Worktree-bound frames never reach this path: `releaseWorktreeBinding` (archive hook, child
+   * cwd repair, git registration prune) runs against `useWorktrees`, which tracks the ACTIVE
+   * project only, so the control surface's `close` REFUSES a bound frame off screen and the
+   * sessions sidebar only ever closes single terminal nodes.
    * Shared by the sessions sidebar's cross-project close and the store-backed control surface.
    */
   const deleteStoredNodes = useCallback(
@@ -5281,9 +5289,18 @@ export function Canvas() {
         (project.bridges ?? []).filter((b) => !names(b)),
         (project.ropes ?? []).filter((r) => !names(r))
       )
-      void writeDisk()
+      // SSH project: `transport.destroy` reaches a REMOTE session only through a live client
+      // carrying `sshRemote`, which an unmounted node has not got — so the host's `nt-<id>` would
+      // keep running as an orphan after a "closed" reply (consort HIGH, 2026-09-08). Best-effort
+      // over the project's own ControlMaster, the same call `deleteProject` makes.
+      const terminalIds = flow.filter((n) => set.has(n.id) && n.type === 'terminal').map((n) => n.id)
+      if (project.ssh && terminalIds.length) {
+        void window.nodeTerminal.sshProject.killSessions(projectId, terminalIds).catch(() => {})
+      }
+      setStoreLinkTick((v) => v + 1)
+      void persist() // not a bare writeDisk — see the store surface's markDirty
     },
-    [deleteNodes, writeDisk]
+    [deleteNodes, persist]
   )
 
   /** `canvas.deleteSelection` (Delete / Backspace): confirm-then-delete the selected nodes, or —
@@ -9209,7 +9226,7 @@ export function Canvas() {
             ...(adoptProbed ? { probed: adoptProbed } : {})
           })
           recordAttachConsent(sourceNodeId, r.project.id)
-          void writeDisk()
+          void persist() // not a bare writeDisk — see the store surface's markDirty
           reply({ ok: true, ...openProjectReply(r.project, r.created, r.adopted) })
         }
         // The probe only matters when no project owns this cwd yet (adopt-vs-create copy) — an
@@ -9399,7 +9416,7 @@ export function Canvas() {
               node: flowToNodeStates([armColdOpenHere(node)])[0]
             })
           }
-          void writeDisk()
+          void persist() // not a bare writeDisk — see the store surface's markDirty
           reply({
             ok: true,
             message:
@@ -9456,7 +9473,7 @@ export function Canvas() {
         agentIdOf,
         linkEndpointOf,
         permissionMode: (agentId) => activePermissionMode(agentId),
-        cwdForNewNodeIn: (groupId) => worktreeControlRef.current.cwdForNewNodeIn(groupId),
+        cwdForNewNodeIn: async (groupId) => worktreeControlRef.current.cwdForNewNodeIn(groupId),
         offscreenNote: '',
         queuedNote: ''
       }
@@ -9492,6 +9509,7 @@ export function Canvas() {
               patch.ropes?.(p.ropes ?? [])
             )
           if (nowActive) reloadActiveProject()
+          setStoreLinkTick((v) => v + 1)
         }
         // The live `agentIdOf` minus the legacy tags fallback (`nodeStatesToFlow` already
         // backfills `agentId` from the tag) — same hook-status fallback for a hand-launched CLI.
@@ -9535,9 +9553,11 @@ export function Canvas() {
             commit({
               bridges: (cur) => [...cur, ...edges.map(({ id, source, target }) => ({ id, source, target }))]
             }),
-          // The store IS the truth for a non-active project (no commitActiveToStore needed — that
-          // only serializes the ACTIVE project's React Flow nodes); persist the whole workspace.
-          markDirty: () => void writeDisk(),
+          // `persist`, never a bare `writeDisk`: the whole-workspace save also carries the ACTIVE
+          // project's store copy, and `writeDisk` clears `dirty` when no edit raced it — so a
+          // background save that skipped `commitActiveToStore` wrote the user's canvas STALE and
+          // cancelled the autosave that would have fixed it (consort CRITICAL, 2026-09-08).
+          markDirty: () => void persist(),
           deleteNodes: (ids) => deleteStoredNodes(projectId, ids),
           agentIdOf: storedAgentIdOf,
           linkEndpointOf: (id) => {
@@ -9547,11 +9567,15 @@ export function Canvas() {
             return { kind: n.type ?? 'terminal', contextCapable: !!a && canContextLink(a) }
           },
           permissionMode: (agentId) => projectPermissionMode(project(), agentId),
-          cwdForNewNodeIn: (groupId) => {
+          cwdForNewNodeIn: async (groupId) => {
             // The live rule (nearest ancestor frame that states a cwd: a worktree-bound frame's
-            // checkout, else the frame's own cwd) off the serialized tree. No staleness check —
-            // `useWorktrees` tracks the ACTIVE project only; a background project's registry is
-            // not loaded, and a path is the honest answer over a silent fallback to the root.
+            // checkout, else the frame's own cwd) off the serialized tree. The live resolver's
+            // staleness guard is `useWorktrees.staleGroupIds`, which tracks the ACTIVE project only,
+            // so here the checkout is asked directly: a bound path whose directory is gone is
+            // treated as stale exactly as the live rule treats it (fall through to the frame's own
+            // cwd, then its parent), or a queued session would cold-start in a directory that does
+            // not exist and land in $HOME (consort HIGH, 2026-09-08). An existence check that
+            // itself errors fails OPEN (the path is kept), like the prompt-file check.
             const all = nodes()
             const seen = new Set<string>()
             let cur: string | undefined = groupId
@@ -9560,7 +9584,7 @@ export function Canvas() {
               const g = all.find((n) => n.id === cur)
               if (!g) return undefined
               const wt = g.data.worktree as GroupWorktree | undefined
-              if (wt && !project()?.ssh) return wt.path
+              if (wt && !project()?.ssh && (await api.fs.exists(wt.path).catch(() => true))) return wt.path
               if (g.data.cwd) return g.data.cwd as string
               cur = g.parentId
             }
@@ -9871,7 +9895,7 @@ export function Canvas() {
             const intoGroupId = resolveIntoGroup()
             if (intoGroupId === null) return // bad --group, already replied
             const groupCwd = intoGroupId
-              ? surface.cwdForNewNodeIn(intoGroupId)
+              ? await surface.cwdForNewNodeIn(intoGroupId)
               : undefined
             const after = resolveAfter()
             if (after === null) return // bad --after, already replied
@@ -9951,7 +9975,7 @@ export function Canvas() {
             const intoGroupId = resolveIntoGroup()
             if (intoGroupId === null) return // bad --group, already replied
             const groupCwd = intoGroupId
-              ? surface.cwdForNewNodeIn(intoGroupId)
+              ? await surface.cwdForNewNodeIn(intoGroupId)
               : undefined
             // Inherit the source node's managed account, else the project default, else system —
             // but ONLY within the target agent's own provider (accountForSpawn), so a Claude
@@ -11102,6 +11126,24 @@ export function Canvas() {
                 message: wantSpawned && !listed.length ? 'nothing to close — no open nodes spawned by you' : 'nothing to close — no such node(s)'
               })
               return
+            }
+            // A worktree-bound frame's teardown owes `releaseWorktreeBinding` (archive hook, the
+            // children's cwd repair, git's registration prune), which runs against the ACTIVE
+            // project's worktree registry — off screen the binding would simply vanish and its
+            // children keep pointing at a dead checkout (consort HIGH, 2026-09-08). Refused, named,
+            // and the view still does not switch.
+            if (!surface.live) {
+              const bound = targets.filter((id) => !!surface.nodes().find((n) => n.id === id)?.data.worktree)
+              if (bound.length) {
+                reply({
+                  ok: false,
+                  error:
+                    `close: ${bound.join(', ')} ${bound.length === 1 ? 'is a worktree-bound frame' : 'are worktree-bound frames'}, ` +
+                    "and releasing a worktree binding needs its project on screen — the view never switches on an agent's behalf; " +
+                    'ask the user to open the project, or close the nodes inside the frame instead'
+                })
+                return
+              }
             }
             // One confirm dialog at a time (see `write`): reject rather than orphan a pending one —
             // or stack this one over a destructive dialog the user then cannot see. Gated on the

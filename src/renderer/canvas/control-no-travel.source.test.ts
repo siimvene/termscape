@@ -83,6 +83,21 @@ describe('canvas control never switches the active project (source pins)', () =>
     expect(reads, 'nodesRef.current reads after surface selection').toBeLessThanOrEqual(1)
   })
 
+  it('a store-side write persists through `persist`, never a bare `writeDisk`', () => {
+    // `writeDisk` clears `dirty` when no edit raced the save; a background save that skipped
+    // `commitActiveToStore` wrote the user's ACTIVE canvas stale and cancelled the autosave that
+    // would have fixed it (consort CRITICAL, 2026-09-08).
+    const body = controlHandler()
+    expect(body).toContain('markDirty: () => void persist()')
+    const from = body.indexOf('let surface: ControlSurface = liveSurface')
+    expect(body.slice(from)).not.toContain('void writeDisk()')
+    const del = src.indexOf('const deleteStoredNodes = useCallback(')
+    expect(del).toBeGreaterThan(-1)
+    const delBody = src.slice(del, src.indexOf('/** `canvas.deleteSelection`', del))
+    expect(delBody).toContain('void persist()')
+    expect(delBody).not.toContain('void writeDisk()')
+  })
+
   it('the browser resolve round-trip refuses an off-screen source instead of travelling', () => {
     const body = browserResolve()
     expect(body).not.toContain('travelToProject')
