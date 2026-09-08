@@ -5198,6 +5198,16 @@ export function Canvas() {
    */
   const deleteStoredNodes = useCallback(
     (projectId: string, ids: string[]) => {
+      // Decided at CALL time, not when the caller chose the store: `close` sits behind a confirm
+      // dialog the user answers on their own clock, and switching TO that project meanwhile
+      // mounts the very nodes about to be torn down — this path would kill their tmux sessions
+      // and status while the store write got clobbered by the next commitActiveToStore, leaving
+      // live nodes with dead sessions (blind security pass, 2026-09-08). The live path is right
+      // for a live project.
+      if (projectId === useProjects.getState().activeProjectId) {
+        deleteNodes(ids)
+        return
+      }
       const st = useProjects.getState()
       const project = st.getProject(projectId)
       if (!project) return
@@ -5273,7 +5283,7 @@ export function Canvas() {
       )
       void writeDisk()
     },
-    [writeDisk]
+    [deleteNodes, writeDisk]
   )
 
   /** `canvas.deleteSelection` (Delete / Backspace): confirm-then-delete the selected nodes, or —
@@ -9057,7 +9067,7 @@ export function Canvas() {
         api.sendBrowserControlResolveResult({
           requestId,
           ok: false,
-          refusal: liveOnlyRefusal('browser', owner?.name ?? route.projectId)
+          refusal: liveOnlyRefusal('browser', oneLine(owner?.name ?? '') || route.projectId)
         })
         return
       }
@@ -9454,20 +9464,34 @@ export function Canvas() {
         const project = () => useProjects.getState().getProject(projectId)
         const nodes = () => nodeStatesToFlow(project()?.nodes ?? [])
         // ONE write path for nodes, ropes and bridges: `commitCanvas` keeps whatever it is not
-        // handed, and every read above is fresh off the store, so successive writes in one verb
-        // (setNodes, then addRope, then addBridges) compose instead of clobbering each other.
-        const commit = (patch: { nodes?: CanvasNode[]; ropes?: BridgeLink[]; bridges?: BridgeLink[] }) => {
+        // handed, and every patch is a function over a FRESH read, so successive writes in one
+        // verb (setNodes, then addRope, then addBridges) compose instead of clobbering each other.
+        // The surface was chosen when the request arrived, but a verb can await (media allow-
+        // listing, a prompt-file check, the write/close confirm dialog) and the user can switch
+        // TO this project meanwhile: then React Flow holds these nodes and would overwrite a
+        // bare store write at its next commitActiveToStore. So, decided at WRITE time: if the
+        // project is on screen by now, its live edits are serialized first, the patch lands on
+        // that, and the canvas is re-hydrated in place (camera kept) — the same reload an
+        // external file change uses (blind security pass, 2026-09-08).
+        const commit = (patch: {
+          nodes?: (cur: CanvasNode[]) => CanvasNode[]
+          ropes?: (cur: BridgeLink[]) => BridgeLink[]
+          bridges?: (cur: BridgeLink[]) => BridgeLink[]
+        }) => {
+          const nowActive = useProjects.getState().activeProjectId === projectId
+          if (nowActive) commitActiveToStore()
           const p = project()
           if (!p) return
           useProjects
             .getState()
             .commitCanvas(
               projectId,
-              patch.nodes ? flowToNodeStates(patch.nodes) : p.nodes,
+              patch.nodes ? flowToNodeStates(patch.nodes(nodeStatesToFlow(p.nodes))) : p.nodes,
               p.viewport,
-              patch.bridges,
-              patch.ropes
+              patch.bridges?.(p.bridges ?? []),
+              patch.ropes?.(p.ropes ?? [])
             )
+          if (nowActive) reloadActiveProject()
         }
         // The live `agentIdOf` minus the legacy tags fallback (`nodeStatesToFlow` already
         // backfills `agentId` from the tag) — same hook-status fallback for a hand-launched CLI.
@@ -9476,38 +9500,40 @@ export function Canvas() {
           if (!n || n.type !== 'terminal') return undefined
           return (n.data.agentId as AgentId | undefined) ?? useAgentStatus.getState().byId[id]?.agentId
         }
-        const name = project()?.name ?? projectId
+        // `oneLine` at the door: the name comes raw from the git-shared project file and these
+        // strings print into the calling agent's pane (a newline would forge a reply line).
+        const name = oneLine(project()?.name ?? '') || projectId
         const where = `"${name}" is not on screen (the view never switches on an agent's behalf)`
         return {
           live: false,
           projectId,
           project,
           nodes,
-          setNodes: (next) => {
-            const cur = nodes()
-            const arr = typeof next === 'function' ? next(cur) : next
-            const known = new Set(cur.map((n) => n.id))
-            // Cold-open arming is the safety net for EVERY session node born off screen:
-            // `flowToNodeStates` never serializes `initialCommand` (deliberately), so a node that
-            // reached the store un-armed would exist with no command behind it — never QUEUED,
-            // never started. `armAfter` arms the open verbs' nodes before they get here (so their
-            // replies can report `queuedIds`); this catches the rest (spawn-team's members).
+          setNodes: (next) =>
             commit({
-              nodes: arr.map((n) => (known.has(n.id) || !n.data.initialCommand ? n : armColdOpenHere(n)))
-            })
-          },
+              nodes: (cur) => {
+                const arr = typeof next === 'function' ? next(cur) : next
+                const known = new Set(cur.map((n) => n.id))
+                // Cold-open arming is the safety net for EVERY session node born off screen:
+                // `flowToNodeStates` never serializes `initialCommand` (deliberately), so a node
+                // that reached the store un-armed would exist with no command behind it — never
+                // QUEUED, never started. `armAfter` arms the open verbs' nodes before they get
+                // here (so their replies can report `queuedIds`); this catches the rest
+                // (spawn-team's members).
+                return arr.map((n) =>
+                  known.has(n.id) || !n.data.initialCommand ? n : armColdOpenHere(n)
+                )
+              }
+            }),
           ropes: () => project()?.ropes ?? [],
           addRope: (source, target) =>
-            commit({ ropes: [...(project()?.ropes ?? []), { id: `ctrl-${source}-${target}`, source, target }] }),
+            commit({ ropes: (cur) => [...cur, { id: `ctrl-${source}-${target}`, source, target }] }),
           pruneRopes: (gone) =>
-            commit({ ropes: (project()?.ropes ?? []).filter((r) => !gone.has(r.source) && !gone.has(r.target)) }),
+            commit({ ropes: (cur) => cur.filter((r) => !gone.has(r.source) && !gone.has(r.target)) }),
           bridges: () => project()?.bridges ?? [],
           addBridges: (edges) =>
             commit({
-              bridges: [
-                ...(project()?.bridges ?? []),
-                ...edges.map(({ id, source, target }) => ({ id, source, target }))
-              ]
+              bridges: (cur) => [...cur, ...edges.map(({ id, source, target }) => ({ id, source, target }))]
             }),
           // The store IS the truth for a non-active project (no commitActiveToStore needed — that
           // only serializes the ACTIVE project's React Flow nodes); persist the whole workspace.
@@ -9557,7 +9583,7 @@ export function Canvas() {
           // run; it is answered exactly like an open background project — and stays closed.
           if (needsLiveCanvas(verb)) {
             const owner = projects.find((p) => p.id === route.projectId)
-            reply({ ok: false, error: liveOnlyRefusal(verb, owner?.name ?? route.projectId) })
+            reply({ ok: false, error: liveOnlyRefusal(verb, oneLine(owner?.name ?? '') || route.projectId) })
             return
           }
           surface = storeSurfaceFor(route.projectId)
