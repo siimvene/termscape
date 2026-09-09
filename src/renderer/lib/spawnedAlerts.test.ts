@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest'
-import { decideDoneAlert, shouldAutoClose, spawnedBy, spawnerOf } from './spawnedAlerts'
+import {
+  decideDoneAlert,
+  resolveAutoClose,
+  shouldAutoClose,
+  spawnedBy,
+  spawnerOf,
+  stationHoldsWork,
+  sweepFinishedStations
+} from './spawnedAlerts'
 import type { AgentState } from '@shared/agents/normalize'
 
 const agents = new Set(['conductor', 'w1', 'w2', 'w3', 'other'])
@@ -135,6 +143,10 @@ describe('shouldAutoClose', () => {
   it('ignores reads by anyone but the spawner (a reviewer reading the same node)', () => {
     expect(shouldAutoClose({ ...base, readerId: 'w2' })).toBe(false)
   })
+  it('refuses while the station still OWNS work — a kill is not an /exit', () => {
+    expect(shouldAutoClose({ ...base, holdsWork: () => true })).toBe(false)
+    expect(shouldAutoClose({ ...base, holdsWork: () => false })).toBe(true)
+  })
   it('binds consent to the node that ARMED it: a rewritten rope nominating another verified reader gets nothing', () => {
     // Peer rewrote the rope so `other` now looks like w1's spawner; `other` reads it. The in-memory
     // arming still names `conductor`, so the read does not close.
@@ -142,5 +154,117 @@ describe('shouldAutoClose', () => {
     expect(shouldAutoClose({ ...base, readerId: 'other', ropes: rewritten })).toBe(false)
     // And the opener without its rope (user deleted the edge) closes nothing either.
     expect(shouldAutoClose({ ...base, ropes: rewritten })).toBe(false)
+  })
+})
+
+describe('resolveAutoClose', () => {
+  it('defaults to the SETTING when the flag is absent, and says so (no capability refusal owed)', () => {
+    expect(resolveAutoClose(undefined, true)).toEqual({ wanted: true, explicit: false })
+    expect(resolveAutoClose(undefined, false)).toEqual({ wanted: false, explicit: false })
+  })
+  it('an explicit no/false/off/0 opts a station out even when the setting is on', () => {
+    for (const v of ['no', 'false', 'off', '0', ' No ']) {
+      expect(resolveAutoClose(v, true)).toEqual({ wanted: false, explicit: true })
+    }
+  })
+  it('an explicit yes forces it on even when the setting is off', () => {
+    for (const v of ['yes', 'true', 'on']) {
+      expect(resolveAutoClose(v, false)).toEqual({ wanted: true, explicit: true })
+    }
+  })
+  it('a bare flag (empty value) is "not passed" — the shim-wide contract — and reads as the setting', () => {
+    expect(resolveAutoClose('', true)).toEqual({ wanted: true, explicit: false })
+    expect(resolveAutoClose('  ', false)).toEqual({ wanted: false, explicit: false })
+  })
+})
+
+describe('sweepFinishedStations', () => {
+  const NOW = 10_000_000
+  const IDLE = 30 * 60_000
+  const base = {
+    ropes,
+    isAgentNode,
+    onCanvas: () => true,
+    stateOf: states({ conductor: 'done', w1: 'done', w2: 'done', w3: 'done' }),
+    idleSince: () => NOW - IDLE - 1,
+    isArmed: () => false,
+    declined: new Set<string>(),
+    now: NOW,
+    idleMs: IDLE,
+    firstSeenAt: () => NOW - IDLE - 1
+  }
+  it('collects every finished, idle station under an idle conductor, grouped by conductor', () => {
+    expect(sweepFinishedStations(base)).toEqual([{ spawner: 'conductor', ids: ['w1', 'w2', 'w3'] }])
+  })
+  it('never lists a station that is live, armed behind --after, or not idle long enough', () => {
+    expect(sweepFinishedStations({ ...base, stateOf: states({ conductor: 'done', w1: 'working', w2: 'done', w3: 'blocked' }) }))
+      .toEqual([{ spawner: 'conductor', ids: ['w2'] }])
+    expect(sweepFinishedStations({ ...base, isArmed: (id) => id === 'w2' }))
+      .toEqual([{ spawner: 'conductor', ids: ['w1', 'w3'] }])
+    expect(sweepFinishedStations({ ...base, idleSince: (id) => (id === 'w1' ? NOW - 1000 : NOW - IDLE - 1) }))
+      .toEqual([{ spawner: 'conductor', ids: ['w2', 'w3'] }])
+  })
+  it('lists nothing while the CONDUCTOR is live or freshly idle — it may still be reading its stations', () => {
+    expect(sweepFinishedStations({ ...base, stateOf: states({ conductor: 'working', w1: 'done', w2: 'done', w3: 'done' }) })).toEqual([])
+    expect(sweepFinishedStations({ ...base, idleSince: (id) => (id === 'conductor' ? NOW - 1000 : NOW - IDLE - 1) })).toEqual([])
+  })
+  it('treats an UNKNOWN state as idle from when the sweep FIRST SAW the node — the restart case, where no state survives', () => {
+    const fresh = { ...base, stateOf: states({}), idleSince: () => undefined, firstSeenAt: () => NOW - IDLE }
+    expect(sweepFinishedStations(fresh)).toEqual([{ spawner: 'conductor', ids: ['w1', 'w2', 'w3'] }])
+    expect(sweepFinishedStations({ ...fresh, firstSeenAt: () => NOW - IDLE + 1 })).toEqual([])
+    // Per node, not per sweep: a member that arrived a minute ago is not "idle 30 min" because the
+    // app launched an hour ago.
+    expect(sweepFinishedStations({ ...fresh, firstSeenAt: (id) => (id === 'w2' ? NOW - 60_000 : NOW - IDLE) }))
+      .toEqual([{ spawner: 'conductor', ids: ['w1', 'w3'] }])
+  })
+  it('skips declined ids, nodes off the active canvas, and non-agent lineage', () => {
+    expect(sweepFinishedStations({ ...base, declined: new Set(['w2']) })).toEqual([{ spawner: 'conductor', ids: ['w1', 'w3'] }])
+    expect(sweepFinishedStations({ ...base, onCanvas: (id) => id !== 'w3' })).toEqual([{ spawner: 'conductor', ids: ['w1', 'w2'] }])
+    // `term` (plain terminal) and `other` (browser-popup lineage) never appear.
+    expect(sweepFinishedStations(base).flatMap((g) => g.ids)).not.toContain('term')
+  })
+})
+
+describe('stationHoldsWork', () => {
+  // w1 is itself a conductor of two nested stations.
+  const nested = [...ropes, { source: 'w1', target: 'n1' }, { source: 'w1', target: 'n2' }]
+  const isAgent = (id: string): boolean => isAgentNode(id) || id === 'n1' || id === 'n2'
+  const base = { nodeId: 'w1', ropes: nested, isAgentNode: isAgent, stateOf: states({ n1: 'done', n2: 'done' }), hasInFlight: () => false }
+  it('is false for a finished station with finished children and nothing in flight', () => {
+    expect(stationHoldsWork(base)).toBe(false)
+  })
+  it('is true for the three Eco facts the caller folds into hasInFlight', () => {
+    expect(stationHoldsWork({ ...base, hasInFlight: (id) => id === 'w1' })).toBe(true)
+  })
+  it('is true while any spawned child of its own is live or armed — a nested conductor waits for its stations', () => {
+    for (const live of ['working', 'blocked', 'waiting'] as const) {
+      expect(stationHoldsWork({ ...base, stateOf: states({ n1: 'done', n2: live }) })).toBe(true)
+    }
+    expect(stationHoldsWork({ ...base, isArmed: (id) => id === 'n2' })).toBe(true)
+  })
+  it('ignores children that are not agent nodes, and unknown children are not live (the --after rule)', () => {
+    expect(stationHoldsWork({ ...base, stateOf: states({}) })).toBe(false)
+    expect(stationHoldsWork({ ...base, ropes: [...nested, { source: 'w1', target: 'term' }], stateOf: states({ term: 'working' }) })).toBe(false)
+  })
+})
+
+describe('sweepFinishedStations — holdsWork', () => {
+  const NOW = 10_000_000
+  const IDLE = 30 * 60_000
+  const base = {
+    ropes,
+    isAgentNode,
+    onCanvas: () => true,
+    stateOf: states({ conductor: 'done', w1: 'done', w2: 'done', w3: 'done' }),
+    idleSince: () => NOW - IDLE - 1,
+    isArmed: () => false,
+    declined: new Set<string>(),
+    now: NOW,
+    idleMs: IDLE,
+    firstSeenAt: () => NOW - IDLE - 1
+  }
+  it('treats a station that still owns work as live, and a conductor that does as not idle', () => {
+    expect(sweepFinishedStations({ ...base, holdsWork: (id) => id === 'w2' })).toEqual([{ spawner: 'conductor', ids: ['w1', 'w3'] }])
+    expect(sweepFinishedStations({ ...base, holdsWork: (id) => id === 'conductor' })).toEqual([])
   })
 })

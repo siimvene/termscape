@@ -1452,6 +1452,16 @@ export interface Settings {
    *  alert when the conductor's last live station finishes. Needs-you alerts are never quieted.
    *  Off = every node alerts as before (renderer/lib/spawnedAlerts.ts). */
   quietSpawnedNodes: boolean
+  /** Stations an agent opens via canvas control (open-agent / open-claude / spawn-team / verify)
+   *  close themselves once they are done AND their opener has read them over a context link —
+   *  the `--auto-close` contract, now the DEFAULT (`--auto-close no` per open keeps a station the
+   *  agent will keep talking to). The app also offers — one dialog, every target listed by title
+   *  and id — to close finished stations that sat idle for 30 min with an idle conductor: the two
+   *  cases auto-close cannot see (an app restart drops the in-memory arming while tmux keeps the
+   *  sessions; a conductor that read its results from git or files never touches the link).
+   *  Off = nothing closes unless an agent says `--auto-close yes` or `close`.
+   *  renderer/lib/spawnedAlerts.ts. */
+  autoCloseSpawnedNodes: boolean
   /** User-defined agents (BYO CLI) appended to the Add menus. */
   customAgents: CustomAgent[]
   /** One gateway root + non-secret credential reference used by model-switch-capable harnesses. */
@@ -1665,6 +1675,7 @@ export const DEFAULT_SETTINGS: Settings = {
   soundEffects: true,
   soundVolume: 0.5,
   quietSpawnedNodes: true,
+  autoCloseSpawnedNodes: true,
   customAgents: [],
   modelGateway: { baseUrl: '', apiKey: '' },
   agentLaunchCommands: {},

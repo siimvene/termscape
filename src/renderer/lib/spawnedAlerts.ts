@@ -140,6 +140,10 @@ export function shouldAutoClose(input: {
    */
   verifiedSince: (id: string) => number | undefined
   isAgentNode: (id: string) => boolean
+  /** Does the station still OWN work past its foreground `done` (`stationHoldsWork`)? A close is
+   *  a kill, so a background task, a recurring job, a live subagent or a live spawned child of its
+   *  own all refuse it — the read is kept and retried (Codex panel, 2026-09-09). */
+  holdsWork?: (id: string) => boolean
 }): boolean {
   const opener = input.armedBy(input.nodeId)
   if (!opener || opener !== input.readerId) return false
@@ -147,5 +151,126 @@ export function shouldAutoClose(input: {
   if (!input.isVerified(input.nodeId)) return false
   const since = input.verifiedSince(input.nodeId)
   if (since === undefined || since > input.requestedAt) return false
+  if (input.holdsWork?.(input.nodeId)) return false
   return spawnerOf(input.nodeId, input.ropes, input.isAgentNode) === input.readerId
+}
+
+/**
+ * Work a station can own past a foreground `done`, i.e. what a teardown would silently kill. The
+ * first three are the facts Eco's hibernation refuses on (renderer/lib/hibernationCandidates.ts,
+ * where each is argued): a recurring job (`agentStatus.loop`), a background shell launched with no
+ * turn since (`backgroundTaskAt`), a subagent card not done — the caller folds those into
+ * `hasInFlight`. The fourth only a teardown (not an `/exit`) creates: LIVE SPAWNED STATIONS of the
+ * node's own. A nested conductor A (opened by C, opener of B) that finishes while B still runs
+ * must not be closed on C's read: deleting A prunes A→B's rope and bridge, and B keeps running
+ * with no reader, no lineage, and no way into the aggregate alert or the sweep (Codex panel,
+ * 2026-09-09). A child that is armed behind `--after` is live too (a known "will run later").
+ */
+export function stationHoldsWork(input: {
+  nodeId: string
+  ropes: readonly RopeLike[]
+  isAgentNode: (id: string) => boolean
+  stateOf: (id: string) => AgentState | undefined
+  isArmed?: (id: string) => boolean
+  hasInFlight: (id: string) => boolean
+}): boolean {
+  if (input.hasInFlight(input.nodeId)) return true
+  for (const child of spawnedBy(input.nodeId, input.ropes, input.isAgentNode)) {
+    const st = input.stateOf(child)
+    if (st === 'working' || st === 'blocked' || st === 'waiting' || input.isArmed?.(child)) return true
+  }
+  return false
+}
+
+/**
+ * `--auto-close` resolution. The flag used to be opt-in per open, and the measured result was a
+ * canvas of finished stations nobody closed (2026-09-09: 23 idle CLIs from one conductor over 8
+ * cycles, 120–270 MB each, 2 to 42 h old): the rule text told the opener to tear down and the
+ * opener moved on to its next cycle. So the DEFAULT is the setting (`autoCloseSpawnedNodes`, on
+ * unless the user turns it off) and the flag is the per-open override: `--auto-close no` keeps a
+ * station the agent intends to converse with (`done` is the end of a TURN — a closed station
+ * cannot take a follow-up `send`). A bare `--auto-close` (empty value) is "not passed", the
+ * shim-wide contract every flag follows (`projectTargetFlagRefusal`), so it reads as the setting.
+ * `explicit` tells the caller whether a capability refusal is owed: an explicit yes on an agent
+ * that could never close is an error the agent should hear; a defaulted arm on such an agent is
+ * simply not armed.
+ */
+export function resolveAutoClose(
+  raw: string | undefined,
+  defaultOn: boolean
+): { wanted: boolean; explicit: boolean } {
+  if (raw === undefined || raw.trim() === '') return { wanted: defaultOn, explicit: false }
+  const v = raw.trim().toLowerCase()
+  const off = v === 'no' || v === 'false' || v === 'off' || v === '0'
+  return { wanted: !off, explicit: true }
+}
+
+/** How long a finished station (and its conductor) must sit idle before the app offers to close
+ *  it: long enough that a conductor reading its stations one by one between turns is never
+ *  interrupted, short enough that a pile does not survive a working day. */
+export const SPAWNED_IDLE_SWEEP_MS = 30 * 60_000
+
+export interface SweepGroup {
+  spawner: string
+  ids: string[]
+}
+
+/**
+ * The idle sweep: finished stations auto-close cannot reach. Auto-close fires on ONE signal —
+ * the opener's linked read after a verified `done` — and two real cases never produce it: an app
+ * RESTART (the arming is in-memory by design, tmux continuity keeps every session), and a
+ * conductor that consumed results some other way (git, files, a brief the station wrote). This
+ * sweep is the backstop for both, and it is NOT destructive on its own: the caller shows ONE
+ * confirm dialog listing every candidate by title and id, and the user's click is the consent —
+ * so, unlike `shouldAutoClose`, no verified-done proof is demanded here.
+ *
+ * A candidate is a spawned agent node (rope from a live agent conductor) that is not live (state
+ * neither working/blocked/waiting nor armed behind `--after`), idle for `idleMs`, whose
+ * conductor is likewise not live and idle for `idleMs`, and that the user has not declined this
+ * session. "Idle since" is the node's own clock when it has one, else `firstSeenAt` — when the
+ * sweep first saw THAT node on a canvas: a node that has reported nothing since launch is measured
+ * from launch (the restart case, where every state is unknown until the next hook fires), and a
+ * node that appeared hours later (a cold-open member before its first hook) from its own arrival,
+ * never from the sweep's start (blind security pass, 2026-09-09). A conductor that was
+ * deleted has had its ropes pruned, so its orphans are not "spawned" any more and are not seen
+ * here — `close --node` or the UI, as before.
+ */
+export function sweepFinishedStations(input: {
+  ropes: readonly RopeLike[]
+  isAgentNode: (id: string) => boolean
+  /** Nodes the sweep may act on — the ACTIVE canvas (a delete must run where the project is on screen). */
+  onCanvas: (id: string) => boolean
+  stateOf: (id: string) => AgentState | undefined
+  /** When the node's current state was last asserted, if known. */
+  idleSince: (id: string) => number | undefined
+  /** Does the node hold an un-fired `pendingLaunch` (armed behind `--after`)? */
+  isArmed: (id: string) => boolean
+  declined: ReadonlySet<string>
+  now: number
+  idleMs: number
+  /** When the sweep first observed the node (per node), for nodes with no status clock at all. */
+  firstSeenAt: (id: string) => number
+  /** `stationHoldsWork`: a station that still owns work is live for the sweep too. */
+  holdsWork?: (id: string) => boolean
+}): SweepGroup[] {
+  const live = (id: string): boolean => {
+    const st = input.stateOf(id)
+    return (
+      st === 'working' || st === 'blocked' || st === 'waiting' || input.isArmed(id) || !!input.holdsWork?.(id)
+    )
+  }
+  const idle = (id: string): boolean =>
+    !live(id) && input.now - (input.idleSince(id) ?? input.firstSeenAt(id)) >= input.idleMs
+  const groups = new Map<string, string[]>()
+  for (const r of input.ropes) {
+    const id = r.target
+    if (id === r.source || !input.isAgentNode(r.source) || !input.isAgentNode(id)) continue
+    if (!input.onCanvas(id) || input.declined.has(id)) continue
+    if (spawnerOf(id, input.ropes, input.isAgentNode) !== r.source) continue
+    if (!idle(id) || !idle(r.source)) continue
+    const list = groups.get(r.source) ?? []
+    if (!list.includes(id)) list.push(id)
+    groups.set(r.source, list)
+  }
+  return Array.from(groups, ([spawner, ids]) => ({ spawner, ids }))
 }
