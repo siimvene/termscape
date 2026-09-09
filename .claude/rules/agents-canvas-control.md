@@ -489,4 +489,17 @@ paths:
   `"title" (id)` rows (it could never hide a real one — every target is listed with its id).
   Not covered, on purpose: a conductor that was deleted (its ropes are pruned, so its orphans are
   not "spawned" any more) and background projects until they are viewed. Setting off = the
-  pre-2026-09 behaviour end to end.
+  pre-2026-09 behaviour end to end — including for stations already armed by the default:
+  `autoCloseArmedRef` records `{opener, explicit}` and `tryAutoClose` skips a defaulted arm while
+  the setting is off, so "off" never has to wait for the next open (Codex panel, 2026-09-09).
+  **A close is a kill, not an `/exit`, so both teardown sites refuse a station that still OWNS
+  work** (`stationHoldsWork`; `Canvas.stationHoldsWorkNow` builds the facts): the three Eco
+  facts (`hibernationCandidates.ts` — a recurring `loop`, a `backgroundTaskAt` with no turn since,
+  a subagent card not done) plus the one only a teardown creates — LIVE SPAWNED STATIONS of the
+  node's own. A nested conductor A (opened by C, opener of B) that finishes while B runs must not
+  be closed on C's read: deleting A prunes A→B's rope and bridge and B keeps running with no
+  reader, no lineage, and no way into the aggregate alert or the sweep. `shouldAutoClose` keeps
+  the read and the canvas-change effect retries once the work is gone; the sweep counts such a
+  station as live. The sweep's confirm also RE-DERIVES its set from fresh facts, restricted to
+  the ids the dialog showed: a dialog can sit open for minutes, and a station that started a new
+  turn, was armed, or picked up work meanwhile simply stays.

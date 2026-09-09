@@ -343,6 +343,7 @@ import {
   decideDoneAlert,
   resolveAutoClose,
   shouldAutoClose,
+  stationHoldsWork,
   sweepFinishedStations,
   SPAWNED_IDLE_SWEEP_MS,
   type RopeLike
@@ -972,7 +973,11 @@ export function Canvas() {
   // recorded too, not only the target: the consume signal is a context-link read, and the reader
   // must be this exact node — a rope alone is peer-writable and could nominate another verified
   // reader as "spawner" (consort re-review 2026-09-02). See spawnedAlerts.ts `shouldAutoClose`.
-  const autoCloseArmedRef = useRef<Map<string, string>>(new Map())
+  // Value: the OPENER (the only node whose read may release it) and whether the arm was an
+  // explicit `--auto-close yes` or the setting's default — a defaulted arm goes inert the moment
+  // the user turns the setting off ("off means nothing closes unless asked"); an explicit one
+  // keeps the contract the agent asked for.
+  const autoCloseArmedRef = useRef<Map<string, { opener: string; explicit: boolean }>>(new Map())
   // The latest VERIFIED content read of each armed node (from `agent:linked-read`), kept until the
   // node closes or a newer read replaces it. Kept rather than consumed on arrival because the
   // decision can be undecidable at that moment — the node lives in a project that is not the one
@@ -10203,7 +10208,9 @@ export function Canvas() {
               : Array.from({ length: count }, (_, i) => addAndConnect(make(i)))
             // Armed in THIS process only (see autoCloseArmedRef) — this is the consent to close
             // without a dialog, and it is never written to the project file.
-            if (wantAutoClose) for (const id of ids) autoCloseArmedRef.current.set(id, sourceNodeId)
+            if (wantAutoClose)
+              for (const id of ids)
+                autoCloseArmedRef.current.set(id, { opener: sourceNodeId, explicit: autoCloseChoice.explicit })
             // Context-link the new session(s) back to the opener (same rationale as spawn-team:
             // the fan-out needs a fan-in). The nodes were added via setNodes in this tick, so
             // resolve their endpoints from `agentId` rather than the not-yet-updated canvas.
@@ -10685,7 +10692,9 @@ export function Canvas() {
             // left to the idle sweep. The JUDGE's read of a reviewer is deliberately NOT a release:
             // `shouldAutoClose` binds the reader to the node that armed it AND to the rope's source,
             // and nominating a sibling as reader would loosen that second lock.
-            if (panelArmed) for (const pid of panelIds) autoCloseArmedRef.current.set(pid, sourceNodeId)
+            if (panelArmed)
+              for (const pid of panelIds)
+                autoCloseArmedRef.current.set(pid, { opener: sourceNodeId, explicit: panelAutoClose.explicit })
             surface.markDirty()
             reply({
               ok: true,
@@ -10847,7 +10856,7 @@ export function Canvas() {
               for (const m of members) {
                 const a = m.data.agentId as AgentId | undefined
                 if (a && hasHooks(a) && canContextLink(a)) {
-                  autoCloseArmedRef.current.set(m.id, sourceNodeId)
+                  autoCloseArmedRef.current.set(m.id, { opener: sourceNodeId, explicit: teamAutoClose.explicit })
                   teamArmed.push(m.id)
                 } else {
                   teamKept.push(m.id)
@@ -12120,25 +12129,61 @@ export function Canvas() {
   // opened the node (autoCloseArmedRef), which is the consent; a flag from disk never arms.
   // Canonical teardown via deleteNodes (tmux kill, status drop, group reparent), ropes pruned
   // the same way the `close` verb prunes them.
+  // "Still owns work" for a station whose foreground state is done — the three facts Eco refuses
+  // on (hibernationCandidates.ts: recurring `loop`, a background shell with no turn since, a
+  // subagent card not done) folded into `hasInFlight`, plus live spawned stations of its own
+  // (spawnedAlerts.ts `stationHoldsWork`). Read fresh every time: these are transient facts.
+  const stationHoldsWorkNow = useCallback(
+    (
+      nodeId: string,
+      lineage: { ropes: readonly RopeLike[]; isAgentNode: (id: string) => boolean },
+      isArmed: (id: string) => boolean
+    ): boolean => {
+      const cs = useAgentStatus.getState()
+      const liveParents = new Set<string>()
+      for (const v of Object.values(useAgentNodes.getState().byId)) {
+        if (v.state !== 'done') liveParents.add(v.parentNodeId)
+      }
+      return stationHoldsWork({
+        nodeId,
+        ropes: lineage.ropes,
+        isAgentNode: lineage.isAgentNode,
+        stateOf: (id) => cs.byId[id]?.state,
+        isArmed,
+        hasInFlight: (id) => {
+          const st = cs.byId[id]
+          return !!st?.loop || st?.backgroundTaskAt !== undefined || liveParents.has(id)
+        }
+      })
+    },
+    []
+  )
   const tryAutoClose = useCallback(
     (nodeId: string): void => {
       const armed = autoCloseArmedRef.current
+      const arm = armed.get(nodeId)
       const read = autoCloseReadRef.current.get(nodeId)
-      if (!armed.has(nodeId) || !read) return
+      if (!arm || !read) return
+      // A defaulted arm is inert while the setting is off; an explicit `--auto-close yes` stands.
+      if (!arm.explicit && !useSettings.getState().settings.autoCloseSpawnedNodes) return
       const cs = useAgentStatus.getState()
       const lineage = spawnLineage()
+      const isArmed = (id: string): boolean => !!nodesRef.current.find((n) => n.id === id)?.data.pendingLaunch
       const ok = shouldAutoClose({
         nodeId,
         readerId: read.readerId,
         requestedAt: read.requestedAt,
-        armedBy: (id) => armed.get(id),
+        armedBy: (id) => armed.get(id)?.opener,
         ropes: lineage.ropes,
         stateOf: (id) => cs.byId[id]?.state,
         // Both proofs a destructive consumer needs and a badge never did (spawnedAlerts.ts):
         // a token-verified `done`, whose PROOF (not merely its transition) predates the read.
         isVerified: (id) => cs.byId[id]?.stateVerified === true,
         verifiedSince: (id) => cs.byId[id]?.stateVerifiedAt,
-        isAgentNode: lineage.isAgentNode
+        isAgentNode: lineage.isAgentNode,
+        // A close is a kill: a station that still owns work keeps its read and is retried from
+        // the canvas-change effect once that work is gone.
+        holdsWork: (id) => stationHoldsWorkNow(id, lineage, isArmed)
       })
       if (!ok) return
       // Decided, but deletion is a canvas operation on the project ON SCREEN, and only while the
@@ -12154,7 +12199,7 @@ export function Canvas() {
       deleteNodes([nodeId])
       setControlEdges((es) => es.filter((r) => r.source !== nodeId && r.target !== nodeId))
     },
-    [deleteNodes, spawnLineage]
+    [deleteNodes, spawnLineage, stationHoldsWorkNow]
   )
   useEffect(() => {
     return api.onLinkedRead((e) => {
@@ -12206,7 +12251,10 @@ export function Canvas() {
   const sweepFirstSeenRef = useRef<Map<string, number>>(new Map())
   useEffect(() => {
     if (!autoCloseSpawnedNodes) return
-    const tick = (): void => {
+    // Fresh facts every call — used once to build the dialog and AGAIN when the user confirms,
+    // restricted to the ids the dialog showed: the dialog may sit open for minutes, and a station
+    // that started a new turn, was armed, or picked up work in that time is no longer a target.
+    const collect = (restrictTo?: ReadonlySet<string>): { groups: ReturnType<typeof sweepFinishedStations>; titleOf: (id: string) => string } => {
       const now = Date.now()
       const onCanvas = new Map(nodesRef.current.map((n) => [n.id, n] as const))
       const seen = sweepFirstSeenRef.current
@@ -12215,31 +12263,37 @@ export function Canvas() {
       for (const [id, until] of Array.from(sweepSnoozedRef.current)) {
         if (until <= now) sweepSnoozedRef.current.delete(id)
       }
-      if (confirmBusy()) return
-      if (!canCreateOnCanvas(nodesProjectIdRef.current, useProjects.getState().activeProjectId)) return
       const cs = useAgentStatus.getState()
       const lineage = spawnLineage()
+      const isArmed = (id: string): boolean => !!onCanvas.get(id)?.data.pendingLaunch
       const skip = new Set<string>([...sweepDeclinedRef.current, ...sweepSnoozedRef.current.keys()])
       const groups = sweepFinishedStations({
         ropes: lineage.ropes,
         isAgentNode: lineage.isAgentNode,
-        onCanvas: (id) => onCanvas.has(id),
+        onCanvas: (id) => onCanvas.has(id) && (!restrictTo || restrictTo.has(id)),
         stateOf: (id) => cs.byId[id]?.state,
         idleSince: (id) => cs.byId[id]?.stateVerifiedAt ?? cs.byId[id]?.lastEventAt,
-        isArmed: (id) => !!onCanvas.get(id)?.data.pendingLaunch,
+        isArmed,
         declined: skip,
         now,
         idleMs: SPAWNED_IDLE_SWEEP_MS,
-        firstSeenAt: (id) => seen.get(id) ?? now
+        firstSeenAt: (id) => seen.get(id) ?? now,
+        holdsWork: (id) => stationHoldsWorkNow(id, lineage, isArmed)
       })
-      if (!groups.length) return
-      const oneLine = (id: string): string => {
+      const titleOf = (id: string): string => {
         const raw = ((onCanvas.get(id)?.data.title as string | undefined) || id).replace(/\s+/g, ' ').trim()
         return raw.length > 80 ? `${raw.slice(0, 79)}…` : raw
       }
+      return { groups, titleOf }
+    }
+    const tick = (): void => {
+      if (confirmBusy()) return
+      if (!canCreateOnCanvas(nodesProjectIdRef.current, useProjects.getState().activeProjectId)) return
+      const { groups, titleOf } = collect()
+      if (!groups.length) return
       const targets = groups.flatMap((g) => g.ids)
       const lines = groups.map(
-        (g) => `recorded as opened by "${oneLine(g.spawner)}":\n${g.ids.map((id) => `  "${oneLine(id)}" (${id})`).join('\n')}`
+        (g) => `recorded as opened by "${titleOf(g.spawner)}":\n${g.ids.map((id) => `  "${titleOf(id)}" (${id})`).join('\n')}`
       )
       const mins = Math.round(SPAWNED_IDLE_SWEEP_MS / 60_000)
       const one = targets.length === 1
@@ -12255,12 +12309,16 @@ export function Canvas() {
         danger: true,
         onConfirm: () => {
           setConfirm(null)
-          // The dialog may have sat across a project switch: re-check the epoch, and delete only
-          // what the canvas still holds (deleteNodes ignores ids it cannot see).
+          // The dialog may have sat across a project switch or a new turn: re-check the epoch and
+          // re-derive the set from FRESH facts, restricted to what the dialog showed. Anything that
+          // woke up, was armed, or picked up work meanwhile simply stays.
           if (!canCreateOnCanvas(nodesProjectIdRef.current, useProjects.getState().activeProjectId)) return
-          const gone = new Set(targets)
-          deleteNodes(targets)
-          for (const id of targets) {
+          const shown = new Set(targets)
+          const still = collect(shown).groups.flatMap((g) => g.ids)
+          if (!still.length) return
+          const gone = new Set(still)
+          deleteNodes(still)
+          for (const id of still) {
             autoCloseArmedRef.current.delete(id)
             autoCloseReadRef.current.delete(id)
             sweepFirstSeenRef.current.delete(id)
@@ -12278,7 +12336,7 @@ export function Canvas() {
     }
     const t = setInterval(tick, 60_000)
     return () => clearInterval(t)
-  }, [autoCloseSpawnedNodes, confirmBusy, deleteNodes, spawnLineage, setConfirm])
+  }, [autoCloseSpawnedNodes, confirmBusy, deleteNodes, spawnLineage, setConfirm, stationHoldsWorkNow])
 
   // Safety net for a lost Stop POST / crashed CLI: decay working entries that saw no hook
   // event at all for STALE_WORKING_MS (the sweep itself is cheap; see agentStatus.ts).

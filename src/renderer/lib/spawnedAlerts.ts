@@ -140,6 +140,10 @@ export function shouldAutoClose(input: {
    */
   verifiedSince: (id: string) => number | undefined
   isAgentNode: (id: string) => boolean
+  /** Does the station still OWN work past its foreground `done` (`stationHoldsWork`)? A close is
+   *  a kill, so a background task, a recurring job, a live subagent or a live spawned child of its
+   *  own all refuse it — the read is kept and retried (Codex panel, 2026-09-09). */
+  holdsWork?: (id: string) => boolean
 }): boolean {
   const opener = input.armedBy(input.nodeId)
   if (!opener || opener !== input.readerId) return false
@@ -147,7 +151,35 @@ export function shouldAutoClose(input: {
   if (!input.isVerified(input.nodeId)) return false
   const since = input.verifiedSince(input.nodeId)
   if (since === undefined || since > input.requestedAt) return false
+  if (input.holdsWork?.(input.nodeId)) return false
   return spawnerOf(input.nodeId, input.ropes, input.isAgentNode) === input.readerId
+}
+
+/**
+ * Work a station can own past a foreground `done`, i.e. what a teardown would silently kill. The
+ * first three are the facts Eco's hibernation refuses on (renderer/lib/hibernationCandidates.ts,
+ * where each is argued): a recurring job (`agentStatus.loop`), a background shell launched with no
+ * turn since (`backgroundTaskAt`), a subagent card not done — the caller folds those into
+ * `hasInFlight`. The fourth only a teardown (not an `/exit`) creates: LIVE SPAWNED STATIONS of the
+ * node's own. A nested conductor A (opened by C, opener of B) that finishes while B still runs
+ * must not be closed on C's read: deleting A prunes A→B's rope and bridge, and B keeps running
+ * with no reader, no lineage, and no way into the aggregate alert or the sweep (Codex panel,
+ * 2026-09-09). A child that is armed behind `--after` is live too (a known "will run later").
+ */
+export function stationHoldsWork(input: {
+  nodeId: string
+  ropes: readonly RopeLike[]
+  isAgentNode: (id: string) => boolean
+  stateOf: (id: string) => AgentState | undefined
+  isArmed?: (id: string) => boolean
+  hasInFlight: (id: string) => boolean
+}): boolean {
+  if (input.hasInFlight(input.nodeId)) return true
+  for (const child of spawnedBy(input.nodeId, input.ropes, input.isAgentNode)) {
+    const st = input.stateOf(child)
+    if (st === 'working' || st === 'blocked' || st === 'waiting' || input.isArmed?.(child)) return true
+  }
+  return false
 }
 
 /**
@@ -218,10 +250,14 @@ export function sweepFinishedStations(input: {
   idleMs: number
   /** When the sweep first observed the node (per node), for nodes with no status clock at all. */
   firstSeenAt: (id: string) => number
+  /** `stationHoldsWork`: a station that still owns work is live for the sweep too. */
+  holdsWork?: (id: string) => boolean
 }): SweepGroup[] {
   const live = (id: string): boolean => {
     const st = input.stateOf(id)
-    return st === 'working' || st === 'blocked' || st === 'waiting' || input.isArmed(id)
+    return (
+      st === 'working' || st === 'blocked' || st === 'waiting' || input.isArmed(id) || !!input.holdsWork?.(id)
+    )
   }
   const idle = (id: string): boolean =>
     !live(id) && input.now - (input.idleSince(id) ?? input.firstSeenAt(id)) >= input.idleMs

@@ -409,8 +409,11 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '  Stations you open (open-claude/open-agent/spawn-team/verify) close THEMSELVES by default once',
     '  done AND you have read them with the linked-context CLI (no dialog; a user setting). Pass',
     '  `--auto-close no` for a station you will keep talking to — done is the end of a TURN, and a',
-    '  closed station cannot take a follow-up `send`. `--auto-close yes` forces it on (refused for',
-    '  agents that never report status). Finished stations idle 30 min with an idle conductor are',
+    '  closed station cannot take a follow-up `send`. `--auto-close yes` forces it on; it is refused',
+    '  unless both you and the station report status AND can read each other over a context link',
+    '  (grok/copilot report status but have no link). A station is never closed while it still owns',
+    '  work: a background task, a recurring job, a live subagent, or live stations of its own.',
+    '  Finished stations idle 30 min with an idle conductor are',
     '  offered to the user for closing in one dialog; a declined set is not asked about again.',
     '  Nodes you open alert the USER only once, when the last of them finishes — you read the rest.',
     '  Both ask the user to confirm a dialog and may be denied. Read WHICH answer came back:',
@@ -889,8 +892,11 @@ Verbs:
   you have read it with the linked-context CLI (summary/transcript/terminal — \`list\` does not
   count), in that order. Pass \`--auto-close no\` for a station you intend to keep talking to:
   done is the end of a TURN, and a closed station cannot take a follow-up \`send\`. \`--auto-close
-  yes\` forces it on and is refused for agents that never report status (a plain terminal could
-  never become "done"). Its transcript stays on disk; only the node goes. Stations that finish
+  yes\` forces it on; it is refused unless both you and the station report status AND can read
+  each other over a context link (a plain terminal could never become "done"; grok/copilot report
+  status but have no link). A station is never closed while it still owns work — a background
+  task, a recurring job, a live subagent, or live stations of its own (a nested conductor waits
+  for its children). Its transcript stays on disk; only the node goes. Stations that finish
   and sit idle for 30 min while their conductor is idle too (after an app restart, or when you
   read their results elsewhere) are offered to the user for closing in ONE dialog.
   Alerts: a node YOU opened does not chirp/badge/notify the user when it finishes — you are its

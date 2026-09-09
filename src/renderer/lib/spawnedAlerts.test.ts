@@ -5,6 +5,7 @@ import {
   shouldAutoClose,
   spawnedBy,
   spawnerOf,
+  stationHoldsWork,
   sweepFinishedStations
 } from './spawnedAlerts'
 import type { AgentState } from '@shared/agents/normalize'
@@ -142,6 +143,10 @@ describe('shouldAutoClose', () => {
   it('ignores reads by anyone but the spawner (a reviewer reading the same node)', () => {
     expect(shouldAutoClose({ ...base, readerId: 'w2' })).toBe(false)
   })
+  it('refuses while the station still OWNS work — a kill is not an /exit', () => {
+    expect(shouldAutoClose({ ...base, holdsWork: () => true })).toBe(false)
+    expect(shouldAutoClose({ ...base, holdsWork: () => false })).toBe(true)
+  })
   it('binds consent to the node that ARMED it: a rewritten rope nominating another verified reader gets nothing', () => {
     // Peer rewrote the rope so `other` now looks like w1's spawner; `other` reads it. The in-memory
     // arming still names `conductor`, so the read does not close.
@@ -217,5 +222,49 @@ describe('sweepFinishedStations', () => {
     expect(sweepFinishedStations({ ...base, onCanvas: (id) => id !== 'w3' })).toEqual([{ spawner: 'conductor', ids: ['w1', 'w2'] }])
     // `term` (plain terminal) and `other` (browser-popup lineage) never appear.
     expect(sweepFinishedStations(base).flatMap((g) => g.ids)).not.toContain('term')
+  })
+})
+
+describe('stationHoldsWork', () => {
+  // w1 is itself a conductor of two nested stations.
+  const nested = [...ropes, { source: 'w1', target: 'n1' }, { source: 'w1', target: 'n2' }]
+  const isAgent = (id: string): boolean => isAgentNode(id) || id === 'n1' || id === 'n2'
+  const base = { nodeId: 'w1', ropes: nested, isAgentNode: isAgent, stateOf: states({ n1: 'done', n2: 'done' }), hasInFlight: () => false }
+  it('is false for a finished station with finished children and nothing in flight', () => {
+    expect(stationHoldsWork(base)).toBe(false)
+  })
+  it('is true for the three Eco facts the caller folds into hasInFlight', () => {
+    expect(stationHoldsWork({ ...base, hasInFlight: (id) => id === 'w1' })).toBe(true)
+  })
+  it('is true while any spawned child of its own is live or armed — a nested conductor waits for its stations', () => {
+    for (const live of ['working', 'blocked', 'waiting'] as const) {
+      expect(stationHoldsWork({ ...base, stateOf: states({ n1: 'done', n2: live }) })).toBe(true)
+    }
+    expect(stationHoldsWork({ ...base, isArmed: (id) => id === 'n2' })).toBe(true)
+  })
+  it('ignores children that are not agent nodes, and unknown children are not live (the --after rule)', () => {
+    expect(stationHoldsWork({ ...base, stateOf: states({}) })).toBe(false)
+    expect(stationHoldsWork({ ...base, ropes: [...nested, { source: 'w1', target: 'term' }], stateOf: states({ term: 'working' }) })).toBe(false)
+  })
+})
+
+describe('sweepFinishedStations — holdsWork', () => {
+  const NOW = 10_000_000
+  const IDLE = 30 * 60_000
+  const base = {
+    ropes,
+    isAgentNode,
+    onCanvas: () => true,
+    stateOf: states({ conductor: 'done', w1: 'done', w2: 'done', w3: 'done' }),
+    idleSince: () => NOW - IDLE - 1,
+    isArmed: () => false,
+    declined: new Set<string>(),
+    now: NOW,
+    idleMs: IDLE,
+    firstSeenAt: () => NOW - IDLE - 1
+  }
+  it('treats a station that still owns work as live, and a conductor that does as not idle', () => {
+    expect(sweepFinishedStations({ ...base, holdsWork: (id) => id === 'w2' })).toEqual([{ spawner: 'conductor', ids: ['w1', 'w3'] }])
+    expect(sweepFinishedStations({ ...base, holdsWork: (id) => id === 'conductor' })).toEqual([])
   })
 })
