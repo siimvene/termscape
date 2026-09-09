@@ -406,8 +406,12 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '- `write --node <id> --text "..."` / `close --node <id,id>` — type into a node / close node(s).',
     '  `close --spawned yes` closes every node YOU opened that is still on the canvas (add --node for',
     '  extras); one dialog for the whole set. Close your stations once you have read their results.',
-    '  `--auto-close yes` on open-claude/open-agent makes a station close ITSELF once it is done AND',
-    '  you have read it with the linked-context CLI (no dialog; agents that report status only).',
+    '  Stations you open (open-claude/open-agent/spawn-team/verify) close THEMSELVES by default once',
+    '  done AND you have read them with the linked-context CLI (no dialog; a user setting). Pass',
+    '  `--auto-close no` for a station you will keep talking to — done is the end of a TURN, and a',
+    '  closed station cannot take a follow-up `send`. `--auto-close yes` forces it on (refused for',
+    '  agents that never report status). Finished stations idle 30 min with an idle conductor are',
+    '  offered to the user for closing in one dialog; a declined set is not asked about again.',
     '  Nodes you open alert the USER only once, when the last of them finishes — you read the rest.',
     '  Both ask the user to confirm a dialog and may be denied. Read WHICH answer came back:',
     '  `denied by user` is a decision and is FINAL — never re-ask — while `no answer within 120s`',
@@ -880,10 +884,15 @@ Verbs:
   others. Nodes you open are yours to take down: once you have read a station's result through
   the linked context, close it — a finished station left open is a live process the user has to
   find and close by hand, and a fan-out of them was measured as the dominant clutter on a canvas.
-  \`--auto-close yes\` on \`open-claude\`/\`open-agent\` does this for you: the station closes ITSELF (no
-  dialog) once it is done AND you have read it with the linked-context CLI (summary/transcript/
-  terminal — \`list\` does not count), in that order. Refused for agents that never report status
-  (a plain terminal could never become "done"). Its transcript stays on disk; only the node goes.
+  Auto-close does this for you, and it is the DEFAULT (a user setting): a station you open with
+  \`open-claude\`/\`open-agent\`/\`spawn-team\`/\`verify\` closes ITSELF (no dialog) once it is done AND
+  you have read it with the linked-context CLI (summary/transcript/terminal — \`list\` does not
+  count), in that order. Pass \`--auto-close no\` for a station you intend to keep talking to:
+  done is the end of a TURN, and a closed station cannot take a follow-up \`send\`. \`--auto-close
+  yes\` forces it on and is refused for agents that never report status (a plain terminal could
+  never become "done"). Its transcript stays on disk; only the node goes. Stations that finish
+  and sit idle for 30 min while their conductor is idle too (after an app restart, or when you
+  read their results elsewhere) are offered to the user for closing in ONE dialog.
   Alerts: a node YOU opened does not chirp/badge/notify the user when it finishes — you are its
   reader. The user hears ONE aggregate alert when the last of your open stations finishes. A
   station that needs input (permission, question) still alerts the user immediately.

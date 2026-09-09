@@ -339,7 +339,14 @@ import { SubagentNode } from '../nodes/SubagentNode'
 import { LoopNode } from '../nodes/LoopNode'
 import { buildFanoutChildren, isCompactFanout } from '../lib/fanoutGroup'
 import type { AgentState, NormalizedAgentEvent } from '@shared/agents/normalize'
-import { decideDoneAlert, shouldAutoClose, type RopeLike } from '../lib/spawnedAlerts'
+import {
+  decideDoneAlert,
+  resolveAutoClose,
+  shouldAutoClose,
+  sweepFinishedStations,
+  SPAWNED_IDLE_SWEEP_MS,
+  type RopeLike
+} from '../lib/spawnedAlerts'
 import {
   computeWorktreePath,
   resolveWorktreePath,
@@ -10048,8 +10055,24 @@ export function Canvas() {
             // the context link (spawnedAlerts.ts `shouldAutoClose`). Only hook-reporting agents can
             // ever be `done`, so for anything else the node would simply never close — refuse up
             // front, like `--after` refuses a plain-terminal dependency.
-            const autoCloseRaw = args['auto-close']
-            const wantAutoClose = !!autoCloseRaw && autoCloseRaw !== 'no' && autoCloseRaw !== 'false'
+            // The DEFAULT is the setting (on): the station is released by its opener's read unless
+            // the caller says `--auto-close no` — a station it will keep talking to (spawnedAlerts.ts
+            // `resolveAutoClose`). The capability refusals below are owed only to an EXPLICIT yes;
+            // a defaulted arm on a pair that could never close is simply not armed. (`--project`
+            // to ANOTHER project never reaches here — its branch returns above — so a defaulted
+            // arm always lands in the caller's own canvas, where the consent lives.)
+            const autoCloseChoice = resolveAutoClose(
+              args['auto-close'],
+              useSettings.getState().settings.autoCloseSpawnedNodes
+            )
+            const conductorAgent = surface.agentIdOf(sourceNodeId)
+            const autoCloseCapable =
+              hasHooks(agentId) &&
+              canContextLink(agentId) &&
+              !!conductorAgent &&
+              canContextLink(conductorAgent)
+            const wantAutoClose =
+              autoCloseChoice.wanted && (autoCloseChoice.explicit || autoCloseCapable)
             if (wantAutoClose && !(hasHooks(agentId) && canContextLink(agentId))) {
               // Two capabilities, both needed: status hooks (else never `done`) AND context links
               // (else the conductor can never READ it — grok/copilot report status but get no
@@ -10062,7 +10085,6 @@ export function Canvas() {
             }
             // …and the CONDUCTOR must be able to read: a grok/copilot caller gets no bridge either
             // (bridgeTo refuses its endpoint), so its stations could never be consumed.
-            const conductorAgent = surface.agentIdOf(sourceNodeId)
             if (wantAutoClose && !(conductorAgent && canContextLink(conductorAgent))) {
               reply({
                 ok: false,
@@ -10199,13 +10221,15 @@ export function Canvas() {
                   ? `\nwaiting for ${after.join(', ')} before running` +
                     (depLinked.length ? ` (and linked to read them)` : '')
                   : '') +
+                (wantAutoClose ? '\nauto-close armed: closes once done AND read by you (pass --auto-close no to keep it)' : '') +
                 surface.queuedNote,
               result: {
                 ids,
                 linked: bridged,
                 after: after ?? [],
                 queued: queuedIds.length > 0,
-                queuedIds
+                queuedIds,
+                autoClose: wantAutoClose
               }
             })
             return
@@ -10627,6 +10651,23 @@ export function Canvas() {
             for (const rid of reviewerIds) bridgeTo(rid, [targetId], panelEndpoint)
             bridgeTo(sourceNodeId, panelIds, panelEndpoint)
             if (judge) bridgeTo(judge.id, reviewerIds, panelEndpoint)
+            // The panel follows the auto-close default too, every node armed to the CALLER: the
+            // verdict node closes once the conductor has read it; a reviewer closes only if the
+            // conductor reads that reviewer directly (it usually reads the verdict), and is otherwise
+            // left to the idle sweep. The JUDGE's read of a reviewer is deliberately NOT a release:
+            // `shouldAutoClose` binds the reader to the node that armed it AND to the rope's source,
+            // and nominating a sibling as reader would loosen that second lock.
+            const panelAutoClose = resolveAutoClose(
+              args['auto-close'],
+              useSettings.getState().settings.autoCloseSpawnedNodes
+            )
+            const panelConductor = surface.agentIdOf(sourceNodeId)
+            const panelArmed =
+              panelAutoClose.wanted &&
+              hasHooks(reviewAgent) &&
+              !!panelConductor &&
+              canContextLink(panelConductor)
+            if (panelArmed) for (const pid of panelIds) autoCloseArmedRef.current.set(pid, sourceNodeId)
             surface.markDirty()
             reply({
               ok: true,
@@ -10635,13 +10676,15 @@ export function Canvas() {
                 `\nreviewers: ${reviewerIds.join(', ')}` +
                 (judge ? `\nverdict node (runs after all reviewers): ${judge.id}` : '') +
                 `\nthey start when ${targetId} goes idle` +
+                (panelArmed ? '\nauto-close armed: each panel node closes once done AND read by you' : '') +
                 surface.queuedNote,
               result: {
                 groupId: vGroup.id,
                 targetId,
                 lenses,
                 reviewerIds,
-                judgeId: judge?.id ?? null
+                judgeId: judge?.id ?? null,
+                autoClose: panelArmed
               }
             })
             return
@@ -10760,6 +10803,25 @@ export function Canvas() {
             )
             surface.setNodes(next)
             memberIds.forEach((mid) => connect(mid))
+            // Members follow the same auto-close default as open-agent (the setting; `--auto-close
+            // no` opts the whole team out). Armed for the CAPABLE subset — status hooks + context
+            // links on the member, context links on the conductor — so a mixed team never errors,
+            // it just keeps the members it could never close.
+            const teamAutoClose = resolveAutoClose(
+              args['auto-close'],
+              useSettings.getState().settings.autoCloseSpawnedNodes
+            )
+            const teamConductor = surface.agentIdOf(sourceNodeId)
+            const teamArmed: string[] = []
+            if (teamAutoClose.wanted && teamConductor && canContextLink(teamConductor)) {
+              for (const m of members) {
+                const a = m.data.agentId as AgentId | undefined
+                if (a && hasHooks(a) && canContextLink(a)) {
+                  autoCloseArmedRef.current.set(m.id, sourceNodeId)
+                  teamArmed.push(m.id)
+                }
+              }
+            }
             // …and CONTEXT-link each member back to the conductor, so the fan-out has a fan-in:
             // once a member is done, the conductor reads what it produced via get-linked-context
             // instead of asking the user to relay it. Members whose agent isn't context-capable
@@ -10778,6 +10840,7 @@ export function Canvas() {
               message:
                 `spawned ${memberIds.length} member(s) in group ${teamGroup.id}: ${memberIds.join(', ')}` +
                 (bridged.length ? `\ncontext-linked to you: ${bridged.join(', ')}` : '') +
+                (teamArmed.length ? `\nauto-close armed (they close once done AND read by you): ${teamArmed.join(', ')}` : '') +
                 surface.queuedNote,
               // Members are opened un-armed on the live canvas (they start on mount); off screen
               // the surface cold-arms every one of them, so the whole team is QUEUED (#569 item 1).
@@ -10785,6 +10848,7 @@ export function Canvas() {
                 groupId: teamGroup.id,
                 memberIds,
                 linked: bridged,
+                autoClose: teamArmed,
                 queued: !surface.live,
                 queuedIds: surface.live ? [] : memberIds
               }
@@ -12081,6 +12145,77 @@ export function Canvas() {
     }
     for (const id of Array.from(autoCloseReadRef.current.keys())) tryAutoClose(id)
   }, [nodes, tryAutoClose, spawnLineage])
+
+  // THE IDLE SWEEP — the backstop for the two cases auto-close cannot reach (spawnedAlerts.ts
+  // `sweepFinishedStations`): an app restart (the arming is in-memory by design; tmux continuity
+  // keeps the sessions) and a conductor that read its results elsewhere (git, files). Every
+  // minute, on the ACTIVE canvas only (a delete must run where the project is on screen — the
+  // same epoch predicate `tryAutoClose` guards with), it collects finished stations idle past
+  // SPAWNED_IDLE_SWEEP_MS whose conductor is idle too, and asks ONCE for the whole set: one
+  // dialog, every target by title AND id (the `close --spawned` shape — never "and N more"), and
+  // `requestedBy` set so it is answered by a click, never by an Enter aimed at a terminal. A
+  // declined id is not asked about again this session; new candidates still are. Governed by the
+  // same setting as the arming default, so "off" restores the old behaviour entirely.
+  const autoCloseSpawnedNodes = useSettings((s) => s.settings.autoCloseSpawnedNodes)
+  const sweepDeclinedRef = useRef<Set<string>>(new Set())
+  const sweepStartedAtRef = useRef<number>(Date.now())
+  useEffect(() => {
+    if (!autoCloseSpawnedNodes) return
+    const tick = (): void => {
+      if (confirmBusy()) return
+      if (!canCreateOnCanvas(nodesProjectIdRef.current, useProjects.getState().activeProjectId)) return
+      const cs = useAgentStatus.getState()
+      const lineage = spawnLineage()
+      const onCanvas = new Map(nodesRef.current.map((n) => [n.id, n] as const))
+      const groups = sweepFinishedStations({
+        ropes: lineage.ropes,
+        isAgentNode: lineage.isAgentNode,
+        onCanvas: (id) => onCanvas.has(id),
+        stateOf: (id) => cs.byId[id]?.state,
+        idleSince: (id) => cs.byId[id]?.stateVerifiedAt ?? cs.byId[id]?.lastEventAt,
+        isArmed: (id) => !!onCanvas.get(id)?.data.pendingLaunch,
+        declined: sweepDeclinedRef.current,
+        now: Date.now(),
+        idleMs: SPAWNED_IDLE_SWEEP_MS,
+        fallbackSince: sweepStartedAtRef.current
+      })
+      if (!groups.length) return
+      const titleOf = (id: string): string =>
+        ((onCanvas.get(id)?.data.title as string | undefined) || id)
+      const targets = groups.flatMap((g) => g.ids)
+      const lines = groups.map(
+        (g) =>
+          `opened by "${titleOf(g.spawner)}":\n${g.ids.map((id) => `  "${titleOf(id)}" (${id})`).join('\n')}`
+      )
+      const mins = Math.round(SPAWNED_IDLE_SWEEP_MS / 60_000)
+      const one = targets.length === 1
+      setConfirm({
+        message:
+          `${targets.length} finished ${one ? 'station' : 'stations'} an agent opened ${one ? 'has' : 'have'} been idle for over ${mins} min, ` +
+          `and so ${one ? 'has its' : 'have their'} conductor${groups.length === 1 ? '' : 's'}:\n${lines.join('\n')}\n` +
+          `Close ${one ? 'it' : 'them'}? ${one ? 'Its transcript stays' : 'Their transcripts stay'} on disk.`,
+        requestedBy: 'the idle sweep',
+        confirmLabel: one ? 'Close' : `Close ${targets.length}`,
+        cancelLabel: 'Keep',
+        danger: true,
+        onConfirm: () => {
+          setConfirm(null)
+          const gone = new Set(targets)
+          deleteNodes(targets)
+          for (const id of targets) {
+            autoCloseArmedRef.current.delete(id)
+            autoCloseReadRef.current.delete(id)
+          }
+          setControlEdges((es) => es.filter((r) => !gone.has(r.source) && !gone.has(r.target)))
+        },
+        onCancel: () => {
+          for (const id of targets) sweepDeclinedRef.current.add(id)
+        }
+      })
+    }
+    const t = setInterval(tick, 60_000)
+    return () => clearInterval(t)
+  }, [autoCloseSpawnedNodes, confirmBusy, deleteNodes, spawnLineage, setConfirm])
 
   // Safety net for a lost Stop POST / crashed CLI: decay working entries that saw no hook
   // event at all for STALE_WORKING_MS (the sweep itself is cheap; see agentStatus.ts).

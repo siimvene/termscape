@@ -442,3 +442,36 @@ paths:
   included — during a switch the incoming nodes are in the store before the live refs), live refs
   winning, ropes deduplicated by pair; and the retry effect prunes armed/read entries for nodes
   that exist in no project.
+- **Auto-close is the DEFAULT, and an idle sweep backs it up** (2026-09-09; setting
+  `autoCloseSpawnedNodes`, on; pure logic + tests in `renderer/lib/spawnedAlerts.ts`). Measured
+  before: one conductor left 23 finished stations across 8 cycles (120–270 MB each, ~4 GB, 2 to
+  42 h old) — the rule above told the opener to tear down, and it moved on to its next cycle every
+  time. A default in the handler works where a sentence in the skill text demonstrably did not.
+  `resolveAutoClose(raw, setting)`: absent flag ⇒ the setting, `explicit:false`; `no|false|off|0`
+  ⇒ off; anything else (a bare flag included) ⇒ on, `explicit:true`. The capability refusals
+  (status hooks + context links on the station, context links on the caller) are owed only to an
+  EXPLICIT yes — a defaulted arm on a pair that could never close is silently not armed, so a
+  grok conductor or a custom agent keeps working. `spawn-team` and `verify` take the flag too:
+  the team arms its capable subset (reported as `autoClose` ids); the panel arms every node to
+  the CALLER — the verdict closes when the conductor reads it, a reviewer only if the conductor
+  reads that reviewer; the judge's read of a reviewer is deliberately NOT a release, because
+  `shouldAutoClose` binds the reader to the node that armed it AND to the rope's source, and
+  nominating a sibling as reader would loosen that second lock. A cross-project `--project` open
+  never reaches the arming (its branch returns first), so a defaulted arm always lands in the
+  caller's own canvas. The opt-out matters: `done` is the end of a TURN, so a station the
+  conductor intends to `send` follow-ups to must be opened `--auto-close no`.
+  **The sweep** (`sweepFinishedStations`, a 60 s tick in Canvas, ACTIVE canvas only under the same
+  epoch predicate as `tryAutoClose`) exists for the two cases the linked-read signal can never
+  produce: an app RESTART (`autoCloseArmedRef` is in-memory by design; tmux continuity keeps every
+  session) and a conductor that consumed results elsewhere (git, files, a brief). A candidate is a
+  spawned agent node that is not live (working/blocked/waiting or armed behind `--after`), idle
+  ≥ `SPAWNED_IDLE_SWEEP_MS` (30 min) on `stateVerifiedAt ?? lastEventAt`, under a conductor that
+  is likewise not live and idle ≥ 30 min. An UNKNOWN state counts as idle from the sweep's start —
+  after a relaunch no state survives, so this is the only clock the restart case has; a long
+  hook-silent tool call can therefore be listed, which is why the sweep is not destructive on its
+  own: ONE dialog per tick lists every target by title and id (the `close --spawned` shape), the
+  click is the consent (no verified-done proof demanded, unlike `shouldAutoClose`),
+  `requestedBy` is set so an Enter aimed at a terminal never answers it, and a declined id is not
+  asked about again this session. Not covered, on purpose: a conductor that was deleted (its
+  ropes are pruned, so its orphans are not "spawned" any more) and background projects until
+  they are viewed. Setting off = the pre-2026-09 behaviour end to end.

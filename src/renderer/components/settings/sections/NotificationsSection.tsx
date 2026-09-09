@@ -20,6 +20,10 @@ const ROWS = {
     title: 'Quiet nodes opened by an agent',
     keywords: ['quiet', 'spawned', 'agent', 'orchestrator', 'conductor', 'fan-out', 'team', 'spawn-team', 'verify', 'workers', 'stations', 'aggregate', 'notification', 'sound', 'unread']
   },
+  autoCloseSpawned: {
+    title: 'Close finished stations opened by an agent',
+    keywords: ['auto-close', 'autoclose', 'close', 'finished', 'done', 'idle', 'stale', 'spawned', 'agent', 'orchestrator', 'conductor', 'fan-out', 'team', 'spawn-team', 'verify', 'workers', 'stations', 'sweep', 'cleanup', 'clutter', 'memory']
+  },
   mobilePush: {
     title: 'Send push notifications to your paired phone',
     keywords: ['push', 'phone', 'mobile', 'apns', 'ios', 'notification', 'approval', 'question', 'done', 'completed', 'needs you', 'live activity', 'live activities', 'dynamic island', 'lock screen', 'presence', 'idle', 'hold', 'defer', 'at this computer']
@@ -32,6 +36,7 @@ export function NotificationsSection({ isActive }: { isActive: boolean }): React
   const soundEffects = useSettings((s) => s.settings.soundEffects)
   const soundVolume = useSettings((s) => s.settings.soundVolume)
   const quietSpawnedNodes = useSettings((s) => s.settings.quietSpawnedNodes)
+  const autoCloseSpawnedNodes = useSettings((s) => s.settings.autoCloseSpawnedNodes)
   const mobilePushEnabled = useSettings((s) => s.settings.mobilePushEnabled)
   const mobilePushNeedsYou = useSettings((s) => s.settings.mobilePushNeedsYou)
   const mobilePushDone = useSettings((s) => s.settings.mobilePushDone)
@@ -149,6 +154,19 @@ export function NotificationsSection({ isActive }: { isActive: boolean }): React
               checked={quietSpawnedNodes}
               ariaLabel="Quiet nodes opened by an agent"
               onChange={(on) => update({ quietSpawnedNodes: on })}
+            />
+          }
+        />
+      </SearchableRow>
+      <SearchableRow {...ROWS.autoCloseSpawned}>
+        <FieldRow
+          label="Close finished stations opened by an agent"
+          description="A session an orchestrating agent opened closes itself once it is done and that agent has read its result (its transcript stays on disk). Finished stations that then sit idle for 30 minutes with an idle conductor — after a restart, or when the agent read the results elsewhere — are offered for closing in one dialog that lists each of them. An agent keeps a session it will keep talking to with --auto-close no."
+          control={
+            <Switch
+              checked={autoCloseSpawnedNodes}
+              ariaLabel="Close finished stations opened by an agent"
+              onChange={(on) => update({ autoCloseSpawnedNodes: on })}
             />
           }
         />

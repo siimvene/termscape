@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { decideDoneAlert, shouldAutoClose, spawnedBy, spawnerOf } from './spawnedAlerts'
+import {
+  decideDoneAlert,
+  resolveAutoClose,
+  shouldAutoClose,
+  spawnedBy,
+  spawnerOf,
+  sweepFinishedStations
+} from './spawnedAlerts'
 import type { AgentState } from '@shared/agents/normalize'
 
 const agents = new Set(['conductor', 'w1', 'w2', 'w3', 'other'])
@@ -142,5 +149,65 @@ describe('shouldAutoClose', () => {
     expect(shouldAutoClose({ ...base, readerId: 'other', ropes: rewritten })).toBe(false)
     // And the opener without its rope (user deleted the edge) closes nothing either.
     expect(shouldAutoClose({ ...base, ropes: rewritten })).toBe(false)
+  })
+})
+
+describe('resolveAutoClose', () => {
+  it('defaults to the SETTING when the flag is absent, and says so (no capability refusal owed)', () => {
+    expect(resolveAutoClose(undefined, true)).toEqual({ wanted: true, explicit: false })
+    expect(resolveAutoClose(undefined, false)).toEqual({ wanted: false, explicit: false })
+  })
+  it('an explicit no/false/off/0 opts a station out even when the setting is on', () => {
+    for (const v of ['no', 'false', 'off', '0', ' No ']) {
+      expect(resolveAutoClose(v, true)).toEqual({ wanted: false, explicit: true })
+    }
+  })
+  it('an explicit yes (or a bare flag) forces it on even when the setting is off', () => {
+    for (const v of ['yes', 'true', '', 'on']) {
+      expect(resolveAutoClose(v, false)).toEqual({ wanted: true, explicit: true })
+    }
+  })
+})
+
+describe('sweepFinishedStations', () => {
+  const NOW = 10_000_000
+  const IDLE = 30 * 60_000
+  const base = {
+    ropes,
+    isAgentNode,
+    onCanvas: () => true,
+    stateOf: states({ conductor: 'done', w1: 'done', w2: 'done', w3: 'done' }),
+    idleSince: () => NOW - IDLE - 1,
+    isArmed: () => false,
+    declined: new Set<string>(),
+    now: NOW,
+    idleMs: IDLE,
+    fallbackSince: NOW - IDLE - 1
+  }
+  it('collects every finished, idle station under an idle conductor, grouped by conductor', () => {
+    expect(sweepFinishedStations(base)).toEqual([{ spawner: 'conductor', ids: ['w1', 'w2', 'w3'] }])
+  })
+  it('never lists a station that is live, armed behind --after, or not idle long enough', () => {
+    expect(sweepFinishedStations({ ...base, stateOf: states({ conductor: 'done', w1: 'working', w2: 'done', w3: 'blocked' }) }))
+      .toEqual([{ spawner: 'conductor', ids: ['w2'] }])
+    expect(sweepFinishedStations({ ...base, isArmed: (id) => id === 'w2' }))
+      .toEqual([{ spawner: 'conductor', ids: ['w1', 'w3'] }])
+    expect(sweepFinishedStations({ ...base, idleSince: (id) => (id === 'w1' ? NOW - 1000 : NOW - IDLE - 1) }))
+      .toEqual([{ spawner: 'conductor', ids: ['w2', 'w3'] }])
+  })
+  it('lists nothing while the CONDUCTOR is live or freshly idle — it may still be reading its stations', () => {
+    expect(sweepFinishedStations({ ...base, stateOf: states({ conductor: 'working', w1: 'done', w2: 'done', w3: 'done' }) })).toEqual([])
+    expect(sweepFinishedStations({ ...base, idleSince: (id) => (id === 'conductor' ? NOW - 1000 : NOW - IDLE - 1) })).toEqual([])
+  })
+  it('treats an UNKNOWN state as idle from the sweep start — the restart case, where no state survives', () => {
+    const fresh = { ...base, stateOf: states({}), idleSince: () => undefined, fallbackSince: NOW - IDLE }
+    expect(sweepFinishedStations(fresh)).toEqual([{ spawner: 'conductor', ids: ['w1', 'w2', 'w3'] }])
+    expect(sweepFinishedStations({ ...fresh, fallbackSince: NOW - IDLE + 1 })).toEqual([])
+  })
+  it('skips declined ids, nodes off the active canvas, and non-agent lineage', () => {
+    expect(sweepFinishedStations({ ...base, declined: new Set(['w2']) })).toEqual([{ spawner: 'conductor', ids: ['w1', 'w3'] }])
+    expect(sweepFinishedStations({ ...base, onCanvas: (id) => id !== 'w3' })).toEqual([{ spawner: 'conductor', ids: ['w1', 'w2'] }])
+    // `term` (plain terminal) and `other` (browser-popup lineage) never appear.
+    expect(sweepFinishedStations(base).flatMap((g) => g.ids)).not.toContain('term')
   })
 })
