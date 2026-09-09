@@ -612,6 +612,14 @@ interface ConfirmState {
   /** Set when an AGENT asked for this dialog: it is answered by an explicit click, never by an
    *  Enter the user aimed at their terminal (see components/confirm-key). */
   requestedBy?: string
+  /** `false` for a dialog that appears UNSOLICITED under the user's hands (the idle sweep): no
+   *  button takes focus on mount, so a Tab (shell completion) cannot walk focus onto the
+   *  destructive button for the next native Enter/Space to activate — a path confirm-key never
+   *  sees. Default true (the `autoFocusButtons` default of ConfirmDialog). */
+  autoFocusButtons?: boolean
+  /** When set, Escape and an overlay click call THIS instead of `onCancel` (ConfirmDialog's
+   *  `onDismiss`): a non-answer, for a dialog whose cancel button is itself a recorded decision. */
+  onDismiss?: () => void
 }
 interface RemoveState {
   groupId: string
@@ -10516,6 +10524,26 @@ export function Canvas() {
             }
             const lenses = parseLenses(args.lenses)
             const wantJudge = (args.synthesis ?? 'on').trim().toLowerCase() !== 'off'
+            // Auto-close follows the setting here too; decided before any panel node exists so an
+            // explicit yes on a pair that could never close is refused (open-agent parity) rather
+            // than opening a panel and then silently keeping it.
+            const panelAutoClose = resolveAutoClose(
+              args['auto-close'],
+              useSettings.getState().settings.autoCloseSpawnedNodes
+            )
+            const panelConductor = surface.agentIdOf(sourceNodeId)
+            const panelCanClose =
+              hasHooks(reviewAgent) && !!panelConductor && canContextLink(panelConductor)
+            if (panelAutoClose.wanted && panelAutoClose.explicit && !panelCanClose) {
+              reply({
+                ok: false,
+                error: hasHooks(reviewAgent)
+                  ? `--auto-close needs the CALLER to support context links (it must read the panel to release it); "${panelConductor ?? 'this node'}" does not`
+                  : `--auto-close needs a panel agent that reports status; "${reviewAgent}" does not, so the panel could never close`
+              })
+              return
+            }
+            const panelArmed = panelAutoClose.wanted && panelCanClose
             const { shimPath: vShim } = await window.nodeTerminal.contextLink.info()
             const targetTitle = (target.data.title as string) || targetId
             const targetCwd = target.data.cwd as string | undefined
@@ -10657,16 +10685,6 @@ export function Canvas() {
             // left to the idle sweep. The JUDGE's read of a reviewer is deliberately NOT a release:
             // `shouldAutoClose` binds the reader to the node that armed it AND to the rope's source,
             // and nominating a sibling as reader would loosen that second lock.
-            const panelAutoClose = resolveAutoClose(
-              args['auto-close'],
-              useSettings.getState().settings.autoCloseSpawnedNodes
-            )
-            const panelConductor = surface.agentIdOf(sourceNodeId)
-            const panelArmed =
-              panelAutoClose.wanted &&
-              hasHooks(reviewAgent) &&
-              !!panelConductor &&
-              canContextLink(panelConductor)
             if (panelArmed) for (const pid of panelIds) autoCloseArmedRef.current.set(pid, sourceNodeId)
             surface.markDirty()
             reply({
@@ -10738,6 +10756,23 @@ export function Canvas() {
               })
               return
             }
+            // Auto-close follows the same default as open-agent (the setting; `--auto-close no`
+            // opts the whole team out). Decided HERE, before a single node exists, because an
+            // explicit yes with a caller that could never read its members is refused the way
+            // open-agent refuses it — and a refusal after setNodes would leave the team behind.
+            const teamAutoClose = resolveAutoClose(
+              args['auto-close'],
+              useSettings.getState().settings.autoCloseSpawnedNodes
+            )
+            const teamConductor = surface.agentIdOf(sourceNodeId)
+            const teamConductorCanRead = !!teamConductor && canContextLink(teamConductor)
+            if (teamAutoClose.wanted && teamAutoClose.explicit && !teamConductorCanRead) {
+              reply({
+                ok: false,
+                error: `--auto-close needs the CALLER to support context links (it must read the members to release them); "${teamConductor ?? 'this node'}" does not`
+              })
+              return
+            }
             const live = surface.nodes() as CanvasNode[]
             // Build members; fixed role titles pin the node name (titleAuto off).
             const members = roles.map((r, i) => {
@@ -10803,22 +10838,19 @@ export function Canvas() {
             )
             surface.setNodes(next)
             memberIds.forEach((mid) => connect(mid))
-            // Members follow the same auto-close default as open-agent (the setting; `--auto-close
-            // no` opts the whole team out). Armed for the CAPABLE subset — status hooks + context
-            // links on the member, context links on the conductor — so a mixed team never errors,
-            // it just keeps the members it could never close.
-            const teamAutoClose = resolveAutoClose(
-              args['auto-close'],
-              useSettings.getState().settings.autoCloseSpawnedNodes
-            )
-            const teamConductor = surface.agentIdOf(sourceNodeId)
+            // Armed for the CAPABLE subset — status hooks + context links on the member (the
+            // conductor was checked above) — so a mixed team never errors: it keeps the members it
+            // could never close and NAMES them in the reply.
             const teamArmed: string[] = []
-            if (teamAutoClose.wanted && teamConductor && canContextLink(teamConductor)) {
+            const teamKept: string[] = []
+            if (teamAutoClose.wanted && teamConductorCanRead) {
               for (const m of members) {
                 const a = m.data.agentId as AgentId | undefined
                 if (a && hasHooks(a) && canContextLink(a)) {
                   autoCloseArmedRef.current.set(m.id, sourceNodeId)
                   teamArmed.push(m.id)
+                } else {
+                  teamKept.push(m.id)
                 }
               }
             }
@@ -10841,6 +10873,7 @@ export function Canvas() {
                 `spawned ${memberIds.length} member(s) in group ${teamGroup.id}: ${memberIds.join(', ')}` +
                 (bridged.length ? `\ncontext-linked to you: ${bridged.join(', ')}` : '') +
                 (teamArmed.length ? `\nauto-close armed (they close once done AND read by you): ${teamArmed.join(', ')}` : '') +
+                (teamKept.length ? `\nnot auto-closable (agent reports no status or has no context link): ${teamKept.join(', ')}` : '') +
                 surface.queuedNote,
               // Members are opened un-armed on the live canvas (they start on mount); off screen
               // the surface cold-arms every one of them, so the whole team is QUEUED (#569 item 1).
@@ -12152,21 +12185,41 @@ export function Canvas() {
   // minute, on the ACTIVE canvas only (a delete must run where the project is on screen — the
   // same epoch predicate `tryAutoClose` guards with), it collects finished stations idle past
   // SPAWNED_IDLE_SWEEP_MS whose conductor is idle too, and asks ONCE for the whole set: one
-  // dialog, every target by title AND id (the `close --spawned` shape — never "and N more"), and
-  // `requestedBy` set so it is answered by a click, never by an Enter aimed at a terminal. A
-  // declined id is not asked about again this session; new candidates still are. Governed by the
-  // same setting as the arming default, so "off" restores the old behaviour entirely.
+  // dialog, every target by title AND id (the `close --spawned` shape — never "and N more").
+  //
+  // This dialog appears UNSOLICITED under the user's hands, so it is answered by a click and
+  // nothing else: `requestedBy` disarms Enter (confirm-key), and `autoFocusButtons:false` keeps
+  // every button unfocused on mount — otherwise a Tab meant for shell completion walks focus onto
+  // "Close N" and the next native Enter/Space activates it, a path confirm-key never sees (blind
+  // security pass, 2026-09-09). Three answers, three memories: "Close" deletes; "Keep" DECLINES
+  // those ids for the session; Escape / a click outside (`onDismiss`, a non-answer — an Esc aimed
+  // at vim) only SNOOZES them for one idle period, so a stray key neither kills nor silences.
+  // Titles come from the peer-writable project file, so they are flattened to one line and capped
+  // before they print: a title with a newline could otherwise forge extra `"title" (id)` rows.
+  // Governed by the same setting as the arming default, so "off" restores the old behaviour.
   const autoCloseSpawnedNodes = useSettings((s) => s.settings.autoCloseSpawnedNodes)
   const sweepDeclinedRef = useRef<Set<string>>(new Set())
-  const sweepStartedAtRef = useRef<number>(Date.now())
+  const sweepSnoozedRef = useRef<Map<string, number>>(new Map())
+  // Per-node first-sight clock for nodes with no status clock at all (nothing reported since
+  // launch): a node that appears hours after launch is measured from its own arrival, never from
+  // the sweep's start.
+  const sweepFirstSeenRef = useRef<Map<string, number>>(new Map())
   useEffect(() => {
     if (!autoCloseSpawnedNodes) return
     const tick = (): void => {
+      const now = Date.now()
+      const onCanvas = new Map(nodesRef.current.map((n) => [n.id, n] as const))
+      const seen = sweepFirstSeenRef.current
+      for (const id of onCanvas.keys()) if (!seen.has(id)) seen.set(id, now)
+      for (const id of Array.from(seen.keys())) if (!onCanvas.has(id)) seen.delete(id)
+      for (const [id, until] of Array.from(sweepSnoozedRef.current)) {
+        if (until <= now) sweepSnoozedRef.current.delete(id)
+      }
       if (confirmBusy()) return
       if (!canCreateOnCanvas(nodesProjectIdRef.current, useProjects.getState().activeProjectId)) return
       const cs = useAgentStatus.getState()
       const lineage = spawnLineage()
-      const onCanvas = new Map(nodesRef.current.map((n) => [n.id, n] as const))
+      const skip = new Set<string>([...sweepDeclinedRef.current, ...sweepSnoozedRef.current.keys()])
       const groups = sweepFinishedStations({
         ropes: lineage.ropes,
         isAgentNode: lineage.isAgentNode,
@@ -12174,18 +12227,19 @@ export function Canvas() {
         stateOf: (id) => cs.byId[id]?.state,
         idleSince: (id) => cs.byId[id]?.stateVerifiedAt ?? cs.byId[id]?.lastEventAt,
         isArmed: (id) => !!onCanvas.get(id)?.data.pendingLaunch,
-        declined: sweepDeclinedRef.current,
-        now: Date.now(),
+        declined: skip,
+        now,
         idleMs: SPAWNED_IDLE_SWEEP_MS,
-        fallbackSince: sweepStartedAtRef.current
+        firstSeenAt: (id) => seen.get(id) ?? now
       })
       if (!groups.length) return
-      const titleOf = (id: string): string =>
-        ((onCanvas.get(id)?.data.title as string | undefined) || id)
+      const oneLine = (id: string): string => {
+        const raw = ((onCanvas.get(id)?.data.title as string | undefined) || id).replace(/\s+/g, ' ').trim()
+        return raw.length > 80 ? `${raw.slice(0, 79)}…` : raw
+      }
       const targets = groups.flatMap((g) => g.ids)
       const lines = groups.map(
-        (g) =>
-          `opened by "${titleOf(g.spawner)}":\n${g.ids.map((id) => `  "${titleOf(id)}" (${id})`).join('\n')}`
+        (g) => `recorded as opened by "${oneLine(g.spawner)}":\n${g.ids.map((id) => `  "${oneLine(id)}" (${id})`).join('\n')}`
       )
       const mins = Math.round(SPAWNED_IDLE_SWEEP_MS / 60_000)
       const one = targets.length === 1
@@ -12193,23 +12247,32 @@ export function Canvas() {
         message:
           `${targets.length} finished ${one ? 'station' : 'stations'} an agent opened ${one ? 'has' : 'have'} been idle for over ${mins} min, ` +
           `and so ${one ? 'has its' : 'have their'} conductor${groups.length === 1 ? '' : 's'}:\n${lines.join('\n')}\n` +
-          `Close ${one ? 'it' : 'them'}? ${one ? 'Its transcript stays' : 'Their transcripts stay'} on disk.`,
+          `Close ${one ? 'it' : 'them'}? ${one ? 'Its transcript stays' : 'Their transcripts stay'} on disk. Keep = do not ask about these again.`,
         requestedBy: 'the idle sweep',
+        autoFocusButtons: false,
         confirmLabel: one ? 'Close' : `Close ${targets.length}`,
         cancelLabel: 'Keep',
         danger: true,
         onConfirm: () => {
           setConfirm(null)
+          // The dialog may have sat across a project switch: re-check the epoch, and delete only
+          // what the canvas still holds (deleteNodes ignores ids it cannot see).
+          if (!canCreateOnCanvas(nodesProjectIdRef.current, useProjects.getState().activeProjectId)) return
           const gone = new Set(targets)
           deleteNodes(targets)
           for (const id of targets) {
             autoCloseArmedRef.current.delete(id)
             autoCloseReadRef.current.delete(id)
+            sweepFirstSeenRef.current.delete(id)
           }
           setControlEdges((es) => es.filter((r) => !gone.has(r.source) && !gone.has(r.target)))
         },
         onCancel: () => {
           for (const id of targets) sweepDeclinedRef.current.add(id)
+        },
+        onDismiss: () => {
+          const until = Date.now() + SPAWNED_IDLE_SWEEP_MS
+          for (const id of targets) sweepSnoozedRef.current.set(id, until)
         }
       })
     }
@@ -13924,11 +13987,20 @@ export function Canvas() {
           // The user did not open this one — an agent did. It appeared under their hands, so it is
           // answered by a click, never by a keystroke aimed somewhere else (components/confirm-key).
           enterConfirms={!confirm.requestedBy}
+          autoFocusButtons={confirm.autoFocusButtons ?? true}
           onConfirm={confirm.onConfirm}
           onCancel={() => {
             confirm.onCancel?.()
             setConfirm(null)
           }}
+          onDismiss={
+            confirm.onDismiss
+              ? () => {
+                  confirm.onDismiss?.()
+                  setConfirm(null)
+                }
+              : undefined
+          }
         />
       )}
 

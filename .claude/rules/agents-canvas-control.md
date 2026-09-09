@@ -447,12 +447,16 @@ paths:
   before: one conductor left 23 finished stations across 8 cycles (120–270 MB each, ~4 GB, 2 to
   42 h old) — the rule above told the opener to tear down, and it moved on to its next cycle every
   time. A default in the handler works where a sentence in the skill text demonstrably did not.
-  `resolveAutoClose(raw, setting)`: absent flag ⇒ the setting, `explicit:false`; `no|false|off|0`
-  ⇒ off; anything else (a bare flag included) ⇒ on, `explicit:true`. The capability refusals
+  `resolveAutoClose(raw, setting)`: absent flag — or a bare one, an empty value being "not
+  passed" for every shim flag (`projectTargetFlagRefusal`) — ⇒ the setting, `explicit:false`;
+  `no|false|off|0` ⇒ off; anything else ⇒ on, `explicit:true`. The capability refusals
   (status hooks + context links on the station, context links on the caller) are owed only to an
   EXPLICIT yes — a defaulted arm on a pair that could never close is silently not armed, so a
-  grok conductor or a custom agent keeps working. `spawn-team` and `verify` take the flag too:
-  the team arms its capable subset (reported as `autoClose` ids); the panel arms every node to
+  grok conductor or a custom agent keeps working. `spawn-team` and `verify` take the flag too,
+  resolved BEFORE any node is added so an explicit yes on an incapable caller is refused the way
+  open-agent refuses it (a refusal after setNodes would leave the team behind): the team arms
+  its capable subset (reported as `autoClose` ids, the rest named as not auto-closable); the
+  panel arms every node to
   the CALLER — the verdict closes when the conductor reads it, a reviewer only if the conductor
   reads that reviewer; the judge's read of a reviewer is deliberately NOT a release, because
   `shouldAutoClose` binds the reader to the node that armed it AND to the rope's source, and
@@ -471,7 +475,18 @@ paths:
   hook-silent tool call can therefore be listed, which is why the sweep is not destructive on its
   own: ONE dialog per tick lists every target by title and id (the `close --spawned` shape), the
   click is the consent (no verified-done proof demanded, unlike `shouldAutoClose`),
-  `requestedBy` is set so an Enter aimed at a terminal never answers it, and a declined id is not
-  asked about again this session. Not covered, on purpose: a conductor that was deleted (its
-  ropes are pruned, so its orphans are not "spawned" any more) and background projects until
-  they are viewed. Setting off = the pre-2026-09 behaviour end to end.
+  `requestedBy` is set so an Enter aimed at a terminal never answers it, and `autoFocusButtons`
+  is off so a Tab meant for shell completion cannot walk focus onto "Close N" for the next native
+  Enter/Space to activate (blind security pass, 2026-09-09 — the window-listener path confirm-key
+  guards is not the only one; `ConfirmState.autoFocusButtons`/`onDismiss` were added for this).
+  Three answers, three memories: Close deletes (after re-checking the epoch — the dialog may have
+  sat across a project switch); Keep DECLINES those ids for the session; Escape / a click outside
+  (`onDismiss`, a non-answer — an Esc aimed at vim) only SNOOZES them for one idle period, so a
+  stray key neither kills nor silences. The idle clock for a node with no status at all is
+  per-node first sight (`sweepFirstSeenRef`), never the sweep's start: a member that appears hours
+  after launch is not "idle 30 min" on arrival. Titles are peer-writable strings: flattened to one
+  line and capped before they print, so a title carrying a newline cannot forge extra
+  `"title" (id)` rows (it could never hide a real one — every target is listed with its id).
+  Not covered, on purpose: a conductor that was deleted (its ropes are pruned, so its orphans are
+  not "spawned" any more) and background projects until they are viewed. Setting off = the
+  pre-2026-09 behaviour end to end.

@@ -162,10 +162,14 @@ describe('resolveAutoClose', () => {
       expect(resolveAutoClose(v, true)).toEqual({ wanted: false, explicit: true })
     }
   })
-  it('an explicit yes (or a bare flag) forces it on even when the setting is off', () => {
-    for (const v of ['yes', 'true', '', 'on']) {
+  it('an explicit yes forces it on even when the setting is off', () => {
+    for (const v of ['yes', 'true', 'on']) {
       expect(resolveAutoClose(v, false)).toEqual({ wanted: true, explicit: true })
     }
+  })
+  it('a bare flag (empty value) is "not passed" — the shim-wide contract — and reads as the setting', () => {
+    expect(resolveAutoClose('', true)).toEqual({ wanted: true, explicit: false })
+    expect(resolveAutoClose('  ', false)).toEqual({ wanted: false, explicit: false })
   })
 })
 
@@ -182,7 +186,7 @@ describe('sweepFinishedStations', () => {
     declined: new Set<string>(),
     now: NOW,
     idleMs: IDLE,
-    fallbackSince: NOW - IDLE - 1
+    firstSeenAt: () => NOW - IDLE - 1
   }
   it('collects every finished, idle station under an idle conductor, grouped by conductor', () => {
     expect(sweepFinishedStations(base)).toEqual([{ spawner: 'conductor', ids: ['w1', 'w2', 'w3'] }])
@@ -199,10 +203,14 @@ describe('sweepFinishedStations', () => {
     expect(sweepFinishedStations({ ...base, stateOf: states({ conductor: 'working', w1: 'done', w2: 'done', w3: 'done' }) })).toEqual([])
     expect(sweepFinishedStations({ ...base, idleSince: (id) => (id === 'conductor' ? NOW - 1000 : NOW - IDLE - 1) })).toEqual([])
   })
-  it('treats an UNKNOWN state as idle from the sweep start — the restart case, where no state survives', () => {
-    const fresh = { ...base, stateOf: states({}), idleSince: () => undefined, fallbackSince: NOW - IDLE }
+  it('treats an UNKNOWN state as idle from when the sweep FIRST SAW the node — the restart case, where no state survives', () => {
+    const fresh = { ...base, stateOf: states({}), idleSince: () => undefined, firstSeenAt: () => NOW - IDLE }
     expect(sweepFinishedStations(fresh)).toEqual([{ spawner: 'conductor', ids: ['w1', 'w2', 'w3'] }])
-    expect(sweepFinishedStations({ ...fresh, fallbackSince: NOW - IDLE + 1 })).toEqual([])
+    expect(sweepFinishedStations({ ...fresh, firstSeenAt: () => NOW - IDLE + 1 })).toEqual([])
+    // Per node, not per sweep: a member that arrived a minute ago is not "idle 30 min" because the
+    // app launched an hour ago.
+    expect(sweepFinishedStations({ ...fresh, firstSeenAt: (id) => (id === 'w2' ? NOW - 60_000 : NOW - IDLE) }))
+      .toEqual([{ spawner: 'conductor', ids: ['w1', 'w3'] }])
   })
   it('skips declined ids, nodes off the active canvas, and non-agent lineage', () => {
     expect(sweepFinishedStations({ ...base, declined: new Set(['w2']) })).toEqual([{ spawner: 'conductor', ids: ['w1', 'w3'] }])

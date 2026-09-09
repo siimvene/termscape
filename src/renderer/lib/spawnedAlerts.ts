@@ -157,7 +157,8 @@ export function shouldAutoClose(input: {
  * opener moved on to its next cycle. So the DEFAULT is the setting (`autoCloseSpawnedNodes`, on
  * unless the user turns it off) and the flag is the per-open override: `--auto-close no` keeps a
  * station the agent intends to converse with (`done` is the end of a TURN — a closed station
- * cannot take a follow-up `send`). A bare `--auto-close` reads as yes.
+ * cannot take a follow-up `send`). A bare `--auto-close` (empty value) is "not passed", the
+ * shim-wide contract every flag follows (`projectTargetFlagRefusal`), so it reads as the setting.
  * `explicit` tells the caller whether a capability refusal is owed: an explicit yes on an agent
  * that could never close is an error the agent should hear; a defaulted arm on such an agent is
  * simply not armed.
@@ -166,7 +167,7 @@ export function resolveAutoClose(
   raw: string | undefined,
   defaultOn: boolean
 ): { wanted: boolean; explicit: boolean } {
-  if (raw === undefined) return { wanted: defaultOn, explicit: false }
+  if (raw === undefined || raw.trim() === '') return { wanted: defaultOn, explicit: false }
   const v = raw.trim().toLowerCase()
   const off = v === 'no' || v === 'false' || v === 'off' || v === '0'
   return { wanted: !off, explicit: true }
@@ -194,9 +195,11 @@ export interface SweepGroup {
  * A candidate is a spawned agent node (rope from a live agent conductor) that is not live (state
  * neither working/blocked/waiting nor armed behind `--after`), idle for `idleMs`, whose
  * conductor is likewise not live and idle for `idleMs`, and that the user has not declined this
- * session. "Idle since" is the node's own clock when it has one, else `fallbackSince` (the
- * sweep's start): a node that has reported nothing at all since launch is measured from there —
- * the restart case, where every state is unknown until the next hook fires. A conductor that was
+ * session. "Idle since" is the node's own clock when it has one, else `firstSeenAt` — when the
+ * sweep first saw THAT node on a canvas: a node that has reported nothing since launch is measured
+ * from launch (the restart case, where every state is unknown until the next hook fires), and a
+ * node that appeared hours later (a cold-open member before its first hook) from its own arrival,
+ * never from the sweep's start (blind security pass, 2026-09-09). A conductor that was
  * deleted has had its ropes pruned, so its orphans are not "spawned" any more and are not seen
  * here — `close --node` or the UI, as before.
  */
@@ -213,14 +216,15 @@ export function sweepFinishedStations(input: {
   declined: ReadonlySet<string>
   now: number
   idleMs: number
-  fallbackSince: number
+  /** When the sweep first observed the node (per node), for nodes with no status clock at all. */
+  firstSeenAt: (id: string) => number
 }): SweepGroup[] {
   const live = (id: string): boolean => {
     const st = input.stateOf(id)
     return st === 'working' || st === 'blocked' || st === 'waiting' || input.isArmed(id)
   }
   const idle = (id: string): boolean =>
-    !live(id) && input.now - (input.idleSince(id) ?? input.fallbackSince) >= input.idleMs
+    !live(id) && input.now - (input.idleSince(id) ?? input.firstSeenAt(id)) >= input.idleMs
   const groups = new Map<string, string[]>()
   for (const r of input.ropes) {
     const id = r.target
