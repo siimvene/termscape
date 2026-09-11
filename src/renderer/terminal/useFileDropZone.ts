@@ -4,6 +4,7 @@ import { acceptsFileDrag } from './file-drop'
 export interface FileDropZone {
   /** True while a file drag is over the zone — drive the "Drop to insert path" overlay off this. */
   dropping: boolean
+  onDragEnter: (e: React.DragEvent) => void
   onDragOver: (e: React.DragEvent) => void
   onDragLeave: (e: React.DragEvent) => void
   onDrop: (e: React.DragEvent) => void
@@ -29,12 +30,18 @@ export function useFileDropZone(onFiles: (files: File[]) => void): FileDropZone 
     setDropping(false)
   }, [])
 
-  const onDragOver = useCallback((e: React.DragEvent) => {
+  // Arm (preventDefault) as soon as a file drag is over us and latch it active for the rest of the
+  // drag. `dragenter` fires the instant the pointer crosses ANY edge into the zone, one tick before
+  // the first `dragover`, so latching here makes the whole body a real drop target from the moment
+  // of entry — a drop released over the top of the terminal is accepted the same as one over the
+  // input line, instead of relying on the first `dragover` tick surviving the intermittent-`types`
+  // flake (see acceptsFileDrag). Both events share this handler.
+  const accept = useCallback((e: React.DragEvent) => {
     if (!acceptsFileDrag(Array.from(e.dataTransfer.types), activeRef.current)) return
     e.preventDefault()
     e.dataTransfer.dropEffect = 'copy'
     activeRef.current = true
-    setDropping((d) => d || true)
+    setDropping(true)
   }, [])
 
   const onDragLeave = useCallback(
@@ -70,5 +77,5 @@ export function useFileDropZone(onFiles: (files: File[]) => void): FileDropZone 
     }
   }, [dropping, clear])
 
-  return { dropping, onDragOver, onDragLeave, onDrop }
+  return { dropping, onDragEnter: accept, onDragOver: accept, onDragLeave, onDrop }
 }

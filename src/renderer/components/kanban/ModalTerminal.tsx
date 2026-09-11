@@ -479,6 +479,7 @@ export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch }: Moda
   return (
     <div
       className={`kanban-modal__termwrap${drop.dropping ? ' kanban-modal__termwrap--drop' : ''}`}
+      onDragEnter={drop.onDragEnter}
       onDragOver={drop.onDragOver}
       onDragLeave={drop.onDragLeave}
       onDrop={drop.onDrop}
