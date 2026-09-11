@@ -5316,6 +5316,7 @@ export function TerminalNode({
         className={`term-node__body${drop.dropping ? ' dropping' : ''}`}
         onMouseEnter={onBodyEnter}
         onMouseLeave={onBodyLeave}
+        onDragEnter={drop.onDragEnter}
         onDragOver={drop.onDragOver}
         onDragLeave={drop.onDragLeave}
         onDrop={drop.onDrop}
