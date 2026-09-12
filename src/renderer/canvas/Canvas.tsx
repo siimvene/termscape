@@ -371,6 +371,7 @@ import {
   canvasImageFiles,
   canvasImageSink,
   clipboardImages,
+  fileNavigationGuard,
   localPathsForFiles,
   pasteHasText,
   pastedFiles
@@ -3563,16 +3564,32 @@ export function Canvas() {
 
   // Prevent a stray file drop (outside a terminal body) from navigating the whole window to
   // the dropped file. Terminal nodes handle their own drop and stopPropagation, so this only
-  // catches drops on empty canvas / other UI.
+  // catches drops on empty canvas / other UI. Latched (see fileNavigationGuard): a `drop` tick
+  // whose `dataTransfer.types` flakes empty must still be prevented, or the navigation this guard
+  // exists to stop slips through and unloads the workspace. This reliable dragover-arming also
+  // makes the window a drop target for the whole drag, so the canvas image/folder drop handlers
+  // below (which read files at drop time) fire even on a flaked dragover tick.
   useEffect(() => {
-    const prevent = (e: DragEvent) => {
-      if (Array.from(e.dataTransfer?.types ?? []).includes('Files')) e.preventDefault()
+    const guard = fileNavigationGuard()
+    // The reset listeners (`drop`, `dragend`, `dragleave`) run in CAPTURE so a child that
+    // stopPropagation's the event can't hide it from the guard — useFileDropZone.onDrop does exactly
+    // that, and a future handler could do it for dragleave/dragend too. Without a reliable reset the
+    // dragover latch leaks past a terminal file-drop and the next text drag is wrongly prevented.
+    // `dragleave` clears only when the drag left the WINDOW (relatedTarget null) — an external Finder
+    // drag that leaves without dropping fires no dragend. (`dragover` stays on bubble: it must run
+    // AFTER a node's own dragover, and nothing swallows it.)
+    const onDragLeave = (e: DragEvent) => {
+      if (!e.relatedTarget) guard.endDrag()
     }
-    window.addEventListener('dragover', prevent)
-    window.addEventListener('drop', prevent)
+    window.addEventListener('dragover', guard.dragOver)
+    window.addEventListener('drop', guard.drop, { capture: true })
+    window.addEventListener('dragend', guard.endDrag, { capture: true })
+    window.addEventListener('dragleave', onDragLeave, { capture: true })
     return () => {
-      window.removeEventListener('dragover', prevent)
-      window.removeEventListener('drop', prevent)
+      window.removeEventListener('dragover', guard.dragOver)
+      window.removeEventListener('drop', guard.drop, { capture: true })
+      window.removeEventListener('dragend', guard.endDrag, { capture: true })
+      window.removeEventListener('dragleave', onDragLeave, { capture: true })
     }
   }, [])
 

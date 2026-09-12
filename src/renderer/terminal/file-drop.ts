@@ -21,6 +21,59 @@ export function acceptsFileDrag(types: readonly string[], alreadyActive: boolean
   return alreadyActive || types.includes('Files')
 }
 
+/** The minimum an event needs for the window file-drop guard — a DragEvent satisfies both. */
+type DragOverEvent = {
+  preventDefault: () => void
+  dataTransfer: { types: readonly string[] } | null
+}
+type DropEvent = {
+  preventDefault: () => void
+  dataTransfer: { files: { length: number } } | null
+}
+
+/**
+ * Window-level guard that keeps an unhandled file drop from navigating the whole window to the
+ * dropped `file://` (which unloads the workspace). Wire it as:
+ *   window 'dragover'            -> dragOver
+ *   window 'drop' { capture:true } -> drop
+ *   window 'dragend'             -> endDrag
+ *   window 'dragleave'           -> endDrag ONLY when the drag left the window (relatedTarget null)
+ *
+ * The real protection is on `dragover`: the browser navigates on a file drop unless a dragover
+ * `preventDefault`'d first, and macOS/Electron report `dataTransfer.types` INTERMITTENTLY mid-drag
+ * (see acceptsFileDrag) — so a blind tick would drop the guard and let the navigation through.
+ * `dragOver` therefore latches on the first tick that advertises files and keeps preventing
+ * default for the rest of the drag.
+ *
+ * That latch MUST be cleared between drags, or the next NON-file drag (dragging selected text into
+ * an input or editor) gets preventDefault'd and its native drop is canceled. Two things make the
+ * clear reliable: `drop` is registered in the CAPTURE phase, so it fires even for a drop a node
+ * handled and `stopPropagation`'d (useFileDropZone does), and `endDrag` runs on `dragend` plus a
+ * window-leaving `dragleave` (an external Finder drag that leaves without dropping fires no
+ * `dragend` here). `drop` decides from the event's own `files` — a drop that actually fires carries
+ * them, so it needs no latch — then clears it.
+ */
+export function fileNavigationGuard(): {
+  dragOver: (e: DragOverEvent) => void
+  drop: (e: DropEvent) => void
+  endDrag: () => void
+} {
+  let armed = false
+  return {
+    dragOver(e) {
+      armed = acceptsFileDrag(e.dataTransfer?.types ?? [], armed)
+      if (armed) e.preventDefault()
+    },
+    drop(e) {
+      if ((e.dataTransfer?.files.length ?? 0) > 0) e.preventDefault()
+      armed = false
+    },
+    endDrag() {
+      armed = false
+    }
+  }
+}
+
 /** Extension for a clipboard blob that arrives with no filename, keyed off its MIME type. A
  *  screenshot is `image/png` with an empty `name`, and an agent asked to look at `pasted-<ts>`
  *  with no suffix has to guess what it is holding. */
