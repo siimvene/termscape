@@ -3571,15 +3571,22 @@ export function Canvas() {
   // below (which read files at drop time) fire even on a flaked dragover tick.
   useEffect(() => {
     const guard = fileNavigationGuard()
-    window.addEventListener('dragover', guard.prevent)
-    window.addEventListener('drop', guard.prevent)
-    window.addEventListener('drop', guard.reset)
-    window.addEventListener('dragend', guard.reset)
+    // `drop` in CAPTURE so it still fires for a drop a terminal node handled and stopPropagation'd
+    // (useFileDropZone.onDrop does) — otherwise the dragover latch would never clear after a
+    // terminal file-drop and the next text drag would be wrongly prevented. `dragleave` clears only
+    // when the drag left the window (an external drag that leaves without dropping fires no dragend).
+    const onDragLeave = (e: DragEvent) => {
+      if (!e.relatedTarget) guard.endDrag()
+    }
+    window.addEventListener('dragover', guard.dragOver)
+    window.addEventListener('drop', guard.drop, { capture: true })
+    window.addEventListener('dragend', guard.endDrag)
+    window.addEventListener('dragleave', onDragLeave)
     return () => {
-      window.removeEventListener('dragover', guard.prevent)
-      window.removeEventListener('drop', guard.prevent)
-      window.removeEventListener('drop', guard.reset)
-      window.removeEventListener('dragend', guard.reset)
+      window.removeEventListener('dragover', guard.dragOver)
+      window.removeEventListener('drop', guard.drop, { capture: true })
+      window.removeEventListener('dragend', guard.endDrag)
+      window.removeEventListener('dragleave', onDragLeave)
     }
   }, [])
 

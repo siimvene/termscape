@@ -29,42 +29,64 @@ describe('acceptsFileDrag', () => {
 })
 
 describe('fileNavigationGuard', () => {
-  const ev = (types: string[]) => {
+  const over = (types: string[]) => {
+    const prevented = { v: false }
+    return { preventDefault: () => (prevented.v = true), dataTransfer: { types }, prevented }
+  }
+  const drop = (fileCount: number) => {
     const prevented = { v: false }
     return {
       preventDefault: () => (prevented.v = true),
-      dataTransfer: { types },
+      dataTransfer: { files: { length: fileCount } },
       prevented
     }
   }
 
   it('does not touch a drag that never advertises files', () => {
     const g = fileNavigationGuard()
-    const over = ev(['text/plain'])
-    g.prevent(over)
-    const drop = ev([])
-    g.prevent(drop)
-    expect(over.prevented.v).toBe(false)
-    expect(drop.prevented.v).toBe(false)
+    const o = over(['text/plain'])
+    g.dragOver(o)
+    const d = drop(0)
+    g.drop(d)
+    expect(o.prevented.v).toBe(false)
+    expect(d.prevented.v).toBe(false)
   })
 
-  it('prevents the drop even when its own tick flakes empty, once armed on an earlier tick', () => {
-    // The dangerous case: a file dragover armed the guard, but the terminating `drop` reports no
-    // types. Without the latch this drop would navigate the window to the file:// and unload the
-    // workspace.
+  it('keeps preventing dragover after a types tick flakes empty, once armed', () => {
+    // The dangerous case: a file dragover armed the guard, then a tick reports no types. Dropping
+    // the guard here would let the browser navigate the window to the file:// and unload the
+    // workspace, since dragover-preventDefault is what suppresses that navigation.
     const g = fileNavigationGuard()
-    g.prevent(ev(['Files'])) // arming dragover
-    const drop = ev([])
-    g.prevent(drop)
-    expect(drop.prevented.v).toBe(true)
+    g.dragOver(over(['Files'])) // arming tick
+    const blind = over([])
+    g.dragOver(blind)
+    expect(blind.prevented.v).toBe(true)
   })
 
-  it('clears after a drag ends so a later non-file drag is left alone', () => {
+  it('prevents a file drop from its own files, needing no latch', () => {
     const g = fileNavigationGuard()
-    g.prevent(ev(['Files']))
-    g.reset() // drop / dragend
-    const next = ev(['text/plain'])
-    g.prevent(next)
+    const d = drop(1)
+    g.drop(d)
+    expect(d.prevented.v).toBe(true)
+  })
+
+  it('clears the latch on drop so a later non-file drag is left alone (the leak regression)', () => {
+    // Without the clear, the latch armed by the file drag stays true and the next text drag's
+    // dragover is wrongly prevented, canceling native text drops into inputs/editors.
+    const g = fileNavigationGuard()
+    g.dragOver(over(['Files']))
+    g.drop(drop(1))
+    const next = over(['text/plain'])
+    g.dragOver(next)
+    expect(next.prevented.v).toBe(false)
+  })
+
+  it('clears the latch on endDrag (dragend / window-leaving dragleave)', () => {
+    const g = fileNavigationGuard()
+    g.dragOver(over(['Files']))
+    g.endDrag()
+    const next = over(['text/plain'])
+    g.dragOver(next)
     expect(next.prevented.v).toBe(false)
   })
 })

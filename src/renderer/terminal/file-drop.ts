@@ -21,38 +21,55 @@ export function acceptsFileDrag(types: readonly string[], alreadyActive: boolean
   return alreadyActive || types.includes('Files')
 }
 
-/** The minimum an event needs for the window file-drop guard — a DragEvent satisfies it. */
-type FileDragEvent = {
+/** The minimum an event needs for the window file-drop guard — a DragEvent satisfies both. */
+type DragOverEvent = {
   preventDefault: () => void
   dataTransfer: { types: readonly string[] } | null
+}
+type DropEvent = {
+  preventDefault: () => void
+  dataTransfer: { files: { length: number } } | null
 }
 
 /**
  * Window-level guard that keeps an unhandled file drop from navigating the whole window to the
- * dropped `file://` (which unloads the workspace). Register `prevent` on window `dragover` AND
- * `drop`, and `reset` on `drop` AND `dragend`.
+ * dropped `file://` (which unloads the workspace). Wire it as:
+ *   window 'dragover'            -> dragOver
+ *   window 'drop' { capture:true } -> drop
+ *   window 'dragend'             -> endDrag
+ *   window 'dragleave'           -> endDrag ONLY when the drag left the window (relatedTarget null)
  *
- * It cannot re-decide "is this a file drag?" from `dataTransfer.types` per tick, for the same
- * reason `acceptsFileDrag` cannot: macOS/Electron report that list INTERMITTENTLY mid-drag, so a
- * blind `drop` tick would fail to `preventDefault` and let the navigation through — the one
- * outcome this guard exists to stop. So it latches on the first tick that advertises files and
- * keeps preventing default for the rest of the drag. A genuine non-file drag never latches and is
- * left untouched; a stale latch that outlives an external drag which left the window is harmless
- * (an unhandled non-file drop has no useful default to suppress) and is cleared by the next drag's
- * first tick regardless.
+ * The real protection is on `dragover`: the browser navigates on a file drop unless a dragover
+ * `preventDefault`'d first, and macOS/Electron report `dataTransfer.types` INTERMITTENTLY mid-drag
+ * (see acceptsFileDrag) — so a blind tick would drop the guard and let the navigation through.
+ * `dragOver` therefore latches on the first tick that advertises files and keeps preventing
+ * default for the rest of the drag.
+ *
+ * That latch MUST be cleared between drags, or the next NON-file drag (dragging selected text into
+ * an input or editor) gets preventDefault'd and its native drop is canceled. Two things make the
+ * clear reliable: `drop` is registered in the CAPTURE phase, so it fires even for a drop a node
+ * handled and `stopPropagation`'d (useFileDropZone does), and `endDrag` runs on `dragend` plus a
+ * window-leaving `dragleave` (an external Finder drag that leaves without dropping fires no
+ * `dragend` here). `drop` decides from the event's own `files` — a drop that actually fires carries
+ * them, so it needs no latch — then clears it.
  */
 export function fileNavigationGuard(): {
-  prevent: (e: FileDragEvent) => void
-  reset: () => void
+  dragOver: (e: DragOverEvent) => void
+  drop: (e: DropEvent) => void
+  endDrag: () => void
 } {
-  let fileDrag = false
+  let armed = false
   return {
-    prevent(e) {
-      fileDrag = acceptsFileDrag(e.dataTransfer?.types ?? [], fileDrag)
-      if (fileDrag) e.preventDefault()
+    dragOver(e) {
+      armed = acceptsFileDrag(e.dataTransfer?.types ?? [], armed)
+      if (armed) e.preventDefault()
     },
-    reset() {
-      fileDrag = false
+    drop(e) {
+      if ((e.dataTransfer?.files.length ?? 0) > 0) e.preventDefault()
+      armed = false
+    },
+    endDrag() {
+      armed = false
     }
   }
 }
