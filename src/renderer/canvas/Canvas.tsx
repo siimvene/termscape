@@ -371,6 +371,7 @@ import {
   canvasImageFiles,
   canvasImageSink,
   clipboardImages,
+  fileNavigationGuard,
   localPathsForFiles,
   pasteHasText,
   pastedFiles
@@ -3563,16 +3564,22 @@ export function Canvas() {
 
   // Prevent a stray file drop (outside a terminal body) from navigating the whole window to
   // the dropped file. Terminal nodes handle their own drop and stopPropagation, so this only
-  // catches drops on empty canvas / other UI.
+  // catches drops on empty canvas / other UI. Latched (see fileNavigationGuard): a `drop` tick
+  // whose `dataTransfer.types` flakes empty must still be prevented, or the navigation this guard
+  // exists to stop slips through and unloads the workspace. This reliable dragover-arming also
+  // makes the window a drop target for the whole drag, so the canvas image/folder drop handlers
+  // below (which read files at drop time) fire even on a flaked dragover tick.
   useEffect(() => {
-    const prevent = (e: DragEvent) => {
-      if (Array.from(e.dataTransfer?.types ?? []).includes('Files')) e.preventDefault()
-    }
-    window.addEventListener('dragover', prevent)
-    window.addEventListener('drop', prevent)
+    const guard = fileNavigationGuard()
+    window.addEventListener('dragover', guard.prevent)
+    window.addEventListener('drop', guard.prevent)
+    window.addEventListener('drop', guard.reset)
+    window.addEventListener('dragend', guard.reset)
     return () => {
-      window.removeEventListener('dragover', prevent)
-      window.removeEventListener('drop', prevent)
+      window.removeEventListener('dragover', guard.prevent)
+      window.removeEventListener('drop', guard.prevent)
+      window.removeEventListener('drop', guard.reset)
+      window.removeEventListener('dragend', guard.reset)
     }
   }, [])
 

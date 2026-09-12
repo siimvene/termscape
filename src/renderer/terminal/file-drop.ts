@@ -21,6 +21,42 @@ export function acceptsFileDrag(types: readonly string[], alreadyActive: boolean
   return alreadyActive || types.includes('Files')
 }
 
+/** The minimum an event needs for the window file-drop guard — a DragEvent satisfies it. */
+type FileDragEvent = {
+  preventDefault: () => void
+  dataTransfer: { types: readonly string[] } | null
+}
+
+/**
+ * Window-level guard that keeps an unhandled file drop from navigating the whole window to the
+ * dropped `file://` (which unloads the workspace). Register `prevent` on window `dragover` AND
+ * `drop`, and `reset` on `drop` AND `dragend`.
+ *
+ * It cannot re-decide "is this a file drag?" from `dataTransfer.types` per tick, for the same
+ * reason `acceptsFileDrag` cannot: macOS/Electron report that list INTERMITTENTLY mid-drag, so a
+ * blind `drop` tick would fail to `preventDefault` and let the navigation through — the one
+ * outcome this guard exists to stop. So it latches on the first tick that advertises files and
+ * keeps preventing default for the rest of the drag. A genuine non-file drag never latches and is
+ * left untouched; a stale latch that outlives an external drag which left the window is harmless
+ * (an unhandled non-file drop has no useful default to suppress) and is cleared by the next drag's
+ * first tick regardless.
+ */
+export function fileNavigationGuard(): {
+  prevent: (e: FileDragEvent) => void
+  reset: () => void
+} {
+  let fileDrag = false
+  return {
+    prevent(e) {
+      fileDrag = acceptsFileDrag(e.dataTransfer?.types ?? [], fileDrag)
+      if (fileDrag) e.preventDefault()
+    },
+    reset() {
+      fileDrag = false
+    }
+  }
+}
+
 /** Extension for a clipboard blob that arrives with no filename, keyed off its MIME type. A
  *  screenshot is `image/png` with an empty `name`, and an agent asked to look at `pasted-<ts>`
  *  with no suffix has to guess what it is holding. */

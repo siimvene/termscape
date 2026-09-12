@@ -5,6 +5,7 @@ import {
   canvasImageSink,
   clipboardImages,
   escapeDroppedPath,
+  fileNavigationGuard,
   localPathsForFiles,
   pasteHasText,
   pastedFiles,
@@ -24,6 +25,47 @@ describe('acceptsFileDrag', () => {
     // The macOS/Electron flake: a mid-drag dragover reports no types. Re-deciding from types
     // alone would reject the drop here and wedge the overlay; the active latch keeps it accepted.
     expect(acceptsFileDrag([], true)).toBe(true)
+  })
+})
+
+describe('fileNavigationGuard', () => {
+  const ev = (types: string[]) => {
+    const prevented = { v: false }
+    return {
+      preventDefault: () => (prevented.v = true),
+      dataTransfer: { types },
+      prevented
+    }
+  }
+
+  it('does not touch a drag that never advertises files', () => {
+    const g = fileNavigationGuard()
+    const over = ev(['text/plain'])
+    g.prevent(over)
+    const drop = ev([])
+    g.prevent(drop)
+    expect(over.prevented.v).toBe(false)
+    expect(drop.prevented.v).toBe(false)
+  })
+
+  it('prevents the drop even when its own tick flakes empty, once armed on an earlier tick', () => {
+    // The dangerous case: a file dragover armed the guard, but the terminating `drop` reports no
+    // types. Without the latch this drop would navigate the window to the file:// and unload the
+    // workspace.
+    const g = fileNavigationGuard()
+    g.prevent(ev(['Files'])) // arming dragover
+    const drop = ev([])
+    g.prevent(drop)
+    expect(drop.prevented.v).toBe(true)
+  })
+
+  it('clears after a drag ends so a later non-file drag is left alone', () => {
+    const g = fileNavigationGuard()
+    g.prevent(ev(['Files']))
+    g.reset() // drop / dragend
+    const next = ev(['text/plain'])
+    g.prevent(next)
+    expect(next.prevented.v).toBe(false)
   })
 })
 
