@@ -127,7 +127,13 @@ paths:
     from the one shown at click (via `usage.refresh`, not `fetch` — fetch serves a 5-min cache) and
     clears silently on timeout (re-picking the same org is a valid outcome). LOCAL only, like the
     popover button: disabled inside an SSH project, where "switch account" is ambiguous between this
-    machine's `~/.claude` and the host's. Known limit (measured 2026-09-17): the row's email is
+    machine's `~/.claude` and the host's. The in-flight wait lives in the `useSystemAccount` store
+    (`startSwitch`), not in AccountsSection, and is a process-wide singleton: the switch closes the
+    Settings overlay (unmounting the section), so a component-local flag would leak its poll and a
+    reopened Settings would offer the button again and start a second `claude /login` + poll — the
+    store flag instead keeps the button disabled and the "waiting for login…" line shown across the
+    close/reopen, and a second click while one is in flight returns `'busy'` and is a no-op.
+    Known limit (measured 2026-09-17): the row's email is
     decoration from `~/.claude.json`, the numbers come from the Keychain token; the two CAN diverge
     (identity file said one org, token was another's), so a real switch can still read
     "unchanged" until the row identity is derived from the token.

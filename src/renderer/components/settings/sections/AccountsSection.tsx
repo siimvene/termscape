@@ -26,7 +26,6 @@ import {
   raceLoginCapture
 } from '../../../lib/accountHeal'
 import { codexAccountSelectable } from '../../../canvas/codex-account-switch'
-import { waitForSystemAccountChange } from '../../../lib/systemAccountSwitch'
 import { AccountIdentityPills } from '../../AccountIdentityPills'
 import { ConfirmDialog } from '../../ConfirmDialog'
 import { SettingsSection } from '../SettingsSection'
@@ -213,25 +212,12 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
   const systemLabelSetting = useSettings((s) => s.settings.systemAccountLabel)
   const systemEmail = useSystemAccount((s) => s.email)
   useEffect(() => useSystemAccount.getState().ensure(), [])
-  // The system row's own login state — the same honest "waiting for login…" line the managed
-  // rows have. Cleared silently on timeout: re-picking the same org is a valid outcome, so
-  // "not captured" would be a lie half the time (see lib/systemAccountSwitch.ts).
-  const [systemWait, setSystemWait] = useState(false)
-  const switchSystemAccount = async (): Promise<void> => {
-    const before = useSystemAccount.getState().email
-    setSystemWait(true)
-    // Same channel the usage popover's "⇄ Switch account…" uses: Canvas opens a terminal running
-    // `claude /login` under the SYSTEM env (no accountId) and closes this overlay so it is seen.
-    window.dispatchEvent(new CustomEvent('nodeterm:switch-system-account'))
-    try {
-      await waitForSystemAccountChange({
-        before,
-        readEmail: () => useSystemAccount.getState().refresh()
-      })
-    } finally {
-      setSystemWait(false)
-    }
-  }
+  // The system row's own login state — the same honest "waiting for login…" line the managed rows
+  // have. It lives in the store, not here: dispatching the switch closes the Settings overlay and
+  // unmounts this section, so a component-local flag would die mid-flight, the poll would run on
+  // orphaned, and a reopened Settings would re-enable the button and start a SECOND login + poll.
+  // `startSwitch` is a process-wide singleton — a second click while one is in flight is a no-op.
+  const systemWait = useSystemAccount((s) => s.switching)
   const activeProjectId = useProjects((s) => s.activeProjectId)
   const activeProject = useProjects((s) => s.projects.find((p) => p.id === activeProjectId))
   // The active project's SSH host key (`user@host`), when it's a connected SSH project. Present →
@@ -761,7 +747,7 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
                       'uses — running sessions carry on under the new one. Managed accounts keep ' +
                       'their own logins.'
                 }
-                onClick={() => void switchSystemAccount()}
+                onClick={() => void useSystemAccount.getState().startSwitch()}
               >
                 {systemEmail ? 'Sign in / switch' : 'Sign in'}
               </Button>

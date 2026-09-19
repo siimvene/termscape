@@ -52,7 +52,7 @@ beforeEach(() => {
 afterEach(() => {
   window.removeEventListener('nodeterm:switch-system-account', onSwitch)
   useSettings.setState({ settings: DEFAULT_SETTINGS })
-  useSystemAccount.setState({ email: null, loaded: false })
+  useSystemAccount.setState({ email: null, loaded: false, switching: false })
 })
 
 describe('AccountsSection — the system account is a normal row', () => {
@@ -78,5 +78,35 @@ describe('AccountsSection — the system account is a normal row', () => {
     expect(host.textContent).toContain('waiting for login…')
     expect(button(host, 'Sign in / switch')!.disabled).toBe(true)
     act(() => root.unmount())
+  })
+
+  // The wait is a process singleton in the store, not a component-local flag. A second attempt
+  // while one is in flight must not spawn a second `claude /login` node + a second poll against
+  // the same ~/.claude — it returns 'busy' and dispatches nothing.
+  it('refuses a second switch while one is in flight: no second event', async () => {
+    void useSystemAccount.getState().startSwitch()
+    expect(switches).toBe(1)
+    const second = await useSystemAccount.getState().startSwitch()
+    expect(second).toBe('busy')
+    expect(switches).toBe(1)
+  })
+
+  // The switch closes the Settings overlay, which unmounts this section. Because the flag lives in
+  // the store, a reopened Settings still shows the disabled button and the waiting line for the
+  // whole in-flight window — the reopened row cannot start a second login.
+  it('survives the overlay closing: after unmount + remount mid-flight, still disabled and waiting', async () => {
+    const first = render()
+    await act(async () => {
+      button(first.host, 'Sign in / switch')!.click()
+    })
+    expect(switches).toBe(1)
+    // Overlay closes → section unmounts while the switch is still in flight.
+    act(() => first.root.unmount())
+    // Reopen Settings → a fresh AccountsSection reads the same store.
+    const again = render()
+    expect(again.host.textContent).toContain('waiting for login…')
+    expect(button(again.host, 'Sign in / switch')!.disabled).toBe(true)
+    expect(switches).toBe(1)
+    act(() => again.root.unmount())
   })
 })

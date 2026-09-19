@@ -15,6 +15,12 @@
  * outcome, and a stale `~/.claude.json` (measured 2026-09-17: identity file said one org, the
  * Keychain token was another's) also reads as unchanged. Callers clear the waiting line and say
  * nothing; the popover / pill keep telling the truth about what the credential resolves to.
+ *
+ * The wait is a process singleton, owned by `useSystemAccount.startSwitch` rather than the
+ * Settings component that starts it: the switch closes the Settings overlay (unmounting that
+ * component), so a component-local wait would leak its poll and a reopened Settings could start a
+ * second one. Cost is bounded regardless: one `readEmail` per `intervalMs` until `timeoutMs`, so
+ * at the defaults (10 s / 5 min) at most 30 `usage.refresh` calls before it gives up.
  */
 export interface SystemAccountSwitchDeps {
   /** Resolve the system account's current email (null when signed out / unreadable). */
