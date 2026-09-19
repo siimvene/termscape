@@ -134,17 +134,42 @@ describe('the confirm-gated set and the dispatch that reads it stay in agreement
       // answers a background agent in its own project without moving the user's tab, so reading
       // the project on screen would weigh the wrong project's waiver and the wrong project's
       // permission mode.
-      expect(body).toMatch(/controlConfirmDecision\(verb, ctlProject\?\.id\)/)
+      // The third arg is OPTIONAL: `close` passes a `derived` flag (its targets can come from
+      // forgeable ropes), `write` does not. Both must still route through the shared table.
+      expect(body).toMatch(/controlConfirmDecision\(verb, ctlProject\?\.id[,)]/)
       // A skip must announce itself. `waivedNotice` is what puts the action on screen when the
       // dialog is gone; without it a waiver makes destructive work silent.
       expect(body).toContain('waivedNotice(')
-      // And the dialog it raises must offer the app-run waiver, gated on the same table.
-      expect(body).toContain('waiveVerb: isWaivableVerb(verb) ? verb : undefined')
+      // And the dialog it raises must offer the app-run waiver, gated on the shared table —
+      // either the plain `isWaivableVerb` or its call-aware form `isWaivableCall` (which also
+      // refuses a derived target set). Never an inline condition here.
+      expect(body).toMatch(/waiveVerb: isWaivable\w+\([^)]*verb[^?]*\? verb : undefined/)
       // The request deadline, so an abandoned dialog cannot hold `confirmBusy` for the app run.
       expect(body).toContain('expiresAt: confirmExpiresAt(')
       expect(body).toContain('onExpire:')
     })
   }
+
+  it('a DERIVED close (--spawned / ropes) is never waived and offers no waiver checkbox', () => {
+    // The threat: `close --spawned` builds its target set from `surface.ropes()`, loaded verbatim
+    // from the git-shared, peer-forgeable `.nodeterm/project.json`. A forged conductor→victim rope
+    // can put the user's own live node into that set, and the dialog listing every id is the only
+    // consent in front of the kill — so a waiver must NOT be able to remove it. The rule lives in
+    // one place (@shared/control-confirm's `isWaivableCall`); the case just has to pass the flag.
+    const body = caseBody('close')
+    // The flag is derived from `--spawned`, computed once and fed to BOTH the skip decision and the
+    // dialog's checkbox offer, so the two cannot disagree.
+    expect(body).toContain('const derivedTargets = wantSpawned')
+    expect(body).toContain('controlConfirmDecision(verb, ctlProject?.id, derivedTargets)')
+    expect(body).toContain('waiveVerb: isWaivableCall(verb, { derived: derivedTargets }) ? verb : undefined')
+  })
+
+  it('an explicit-id close and write stay plainly waivable — their targets are named, not derived', () => {
+    // Upstream's feature is kept for the calls whose targets the agent NAMED: a `close --node a,b,c`
+    // (derivedTargets false when `--spawned` is absent) and every `write --node`.
+    expect(caseBody('write')).toContain('waiveVerb: isWaivableVerb(verb) ? verb : undefined')
+    expect(caseBody('write')).toContain('controlConfirmDecision(verb, ctlProject?.id)')
+  })
 
   it('open-project raises the SAME dialog but can never be waived', () => {
     // It is outside CONFIRM_WAIVABLE_VERBS on purpose (it registers a new directory and records a

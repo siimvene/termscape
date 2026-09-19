@@ -40,7 +40,15 @@ export function controlConfirmDecision(
    * `project.defaultPermissionMode` is per project and reading the active one would weigh the
    * wrong project's Bypass.
    */
-  projectId?: string
+  projectId?: string,
+  /**
+   * True when this call's target set was DERIVED from store/peer data (`close --spawned` / ropes)
+   * rather than named explicitly by the agent. Passed straight through to `decideControlConfirm`,
+   * which never waives a derived call — the git-shared ropes are forgeable, so the dialog is the
+   * only consent (@shared/control-confirm's `isWaivableCall`). Defaults to false for the callers
+   * whose targets are always explicit (`write`).
+   */
+  derived?: boolean
 ): ControlConfirmDecision {
   const { settings } = useSettings.getState()
   const { getProject, activeProjectId } = useProjects.getState()
@@ -52,7 +60,8 @@ export function controlConfirmDecision(
     persisted: activeControlConfirmWaivers(),
     projectId: pid,
     permissionMode: mode,
-    permissionModeSource: source
+    permissionModeSource: source,
+    derived
   })
 }
 

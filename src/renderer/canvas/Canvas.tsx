@@ -574,6 +574,7 @@ import { useExpiringDialog } from '../lib/useExpiringDialog'
 import {
   confirmExpiresAt,
   isWaivableVerb,
+  isWaivableCall,
   waivedNotice,
   CONTROL_REQUEST_TIMEOUT_MS
 } from '@shared/control-confirm'
@@ -12378,10 +12379,18 @@ export function Canvas() {
               surface.pruneRopes(gone)
               reply({ ok: true, message: `closed ${targets.length}: ${targets.join(', ')}` })
             }
-            // Waived? Same decision table as `write` (@shared/control-confirm). `ctlProject?.id`,
-            // not the active project: the per-project waiver belongs to the project this call ACTS
-            // ON, which off screen need not be the one displayed.
-            const closeWaiver = controlConfirmDecision(verb, ctlProject?.id)
+            // A close whose target set is DERIVED — built from `--spawned`/ropes rather than from
+            // ids the agent named — is NEVER waived, whatever waiver exists (@shared/control-confirm's
+            // `isWaivableCall`, the ONE place the rule lives). Ropes load verbatim from the
+            // git-shared, peer-forgeable `.nodeterm/project.json`, so a forged conductor→victim rope
+            // can put the user's own live node into a `--spawned` set; the dialog that lists every
+            // target id is the only consent in front of that kill, and a waiver would take it away.
+            // An explicit `close --node a,b,c` stays waivable as upstream designed.
+            const derivedTargets = wantSpawned
+            // Waived? Same decision table as `write` (@shared/control-confirm), plus `derivedTargets`.
+            // `ctlProject?.id`, not the active project: the per-project waiver belongs to the project
+            // this call ACTS ON, which off screen need not be the one displayed.
+            const closeWaiver = controlConfirmDecision(verb, ctlProject?.id, derivedTargets)
             if (closeWaiver.via) {
               // A waived destructive action still ANNOUNCES itself, and names the waiver that let
               // it through. Losing the dialog must not mean losing the record.
@@ -12425,7 +12434,10 @@ export function Canvas() {
               requestedBy: srcTitle,
               confirmLabel: targets.length === 1 ? 'Close' : `Close ${targets.length}`,
               danger: true,
-              waiveVerb: isWaivableVerb(verb) ? verb : undefined,
+              // No "don't ask again" checkbox for a DERIVED close: it is unwaivable (above), so
+              // offering it would promise a waiver the decision table refuses to honour. Same
+              // predicate the skip decision reads, so the offer and the decision cannot drift.
+              waiveVerb: isWaivableCall(verb, { derived: derivedTargets }) ? verb : undefined,
               waiveProjectId: ctlProject?.id,
               waiveProjectName: ctlProject?.name,
               expiresAt: confirmExpiresAt(Date.now()),

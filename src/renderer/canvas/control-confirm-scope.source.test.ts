@@ -99,8 +99,10 @@ describe('the "Don’t ask again" scope (source pins)', () => {
 
   it('the gate is asked about the CALLER’s project, in both destructive cases', () => {
     // The per-project waiver AND the permission mode the bypass lock reads both belong to the
-    // project the call acts on. Off canvas that is not the active one.
-    expect(countOf(src, 'controlConfirmDecision(verb, ctlProject?.id)')).toBe(2)
+    // project the call acts on. Off canvas that is not the active one. Prefix-matched because
+    // `close` now passes a third arg (`derivedTargets`) while `write` does not — both still key on
+    // `ctlProject?.id`.
+    expect(countOf(src, 'controlConfirmDecision(verb, ctlProject?.id')).toBe(2)
     expect(src).not.toMatch(/controlConfirmDecision\(verb\)/)
   })
 

@@ -66,6 +66,26 @@ export function isWaivableVerb(verb: string): boolean {
 }
 
 /**
+ * May THIS PARTICULAR call's confirm be waived? The verb must be in the waivable table AND the
+ * call must not have built its target set from store/peer data.
+ *
+ * The one axis `isWaivableVerb` cannot express, and the ONE place the "derived close" rule lives —
+ * `decideControlConfirm` gates on it below, and the dispatch offers the dialog's waiver checkbox on
+ * it, so the two cannot drift. `close --spawned yes` (and any ropes-/store-derived selection)
+ * builds its targets from `.nodeterm/project.json`, which is git-shared and peer-forgeable; a
+ * forged conductor→victim rope can therefore put the user's own live node into the set, and the
+ * dialog that lists every target id is the ONLY consent standing in front of that kill. So a
+ * derived target set is NEVER waivable, whatever waiver exists — the same "the dialog is the
+ * consent" reasoning that keeps `close --spawned` listing every id and never an "and N more".
+ * `close --node a,b,c`, whose ids the agent NAMED explicitly, is not derived and stays waivable as
+ * upstream designed. `derived` is meaningless for the non-target verbs (`write` acts on one named
+ * `--node`), so it simply defaults to false there.
+ */
+export function isWaivableCall(verb: string, opts?: { derived?: boolean }): boolean {
+  return isWaivableVerb(verb) && !opts?.derived
+}
+
+/**
  * The persisted (machine-local) half of the waivers — `settings.controlConfirmWaivers`.
  *
  * NEVER `project.json`. A permission mode already travels through a git-shared project file, and
@@ -167,10 +187,22 @@ export function decideControlConfirm(input: {
   /** The mode a session launched right now would start in, and who chose it. */
   permissionMode?: AgentPermissionMode
   permissionModeSource?: PermissionModeSource
+  /**
+   * True when this call's TARGET SET was derived from store/peer data rather than named by the
+   * agent — a `close --spawned yes` / ropes selection out of the git-shared, peer-forgeable
+   * `.nodeterm/project.json`. A derived call is never waived (`isWaivableCall`): the dialog listing
+   * every target id is the only consent in front of a forged conductor→victim rope. Absent ⇒ the
+   * call named its own targets (an explicit-id `close --node`, a `write --node`) and stays waivable.
+   */
+  derived?: boolean
 }): ControlConfirmDecision {
-  const { verb, sessionWaived, persisted, projectId, permissionMode, permissionModeSource } = input
-  // The gate that outranks every waiver: this verb's confirm is not the user's to waive.
-  if (!isWaivableVerb(verb)) return ASK
+  const { verb, sessionWaived, persisted, projectId, permissionMode, permissionModeSource, derived } =
+    input
+  // The gate that outranks every waiver: neither an unwaivable verb NOR a derived-target call is
+  // the user's to waive. `isWaivableCall` is the ONE place both facts are weighed (@shared) — the
+  // dispatch offers the dialog's checkbox on the same predicate, so a skip here and the offer there
+  // can never disagree.
+  if (!isWaivableCall(verb, { derived })) return ASK
   if (sessionWaived?.has(verb)) return { skip: true, via: 'session' }
   // Narrowest persisted grant before the widest: a user with both set has said something true
   // about this project AND something true about the machine, and naming the narrower one in the

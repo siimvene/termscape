@@ -7,6 +7,7 @@ import {
   decideControlConfirm,
   expiredDialogNotice,
   isWaivableVerb,
+  isWaivableCall,
   pruneControlConfirmWaivers,
   sanitizeControlConfirmWaivers,
   waivedNotice
@@ -134,6 +135,61 @@ describe('the bypassPermissions branch needs BOTH locks', () => {
         }).skip
       ).toBe(false)
     }
+  })
+})
+
+describe('a DERIVED close is never waived — the ropes it targets are forgeable', () => {
+  // The threat: `close --spawned` builds its target set from `.nodeterm/project.json` ropes, which
+  // are git-shared and peer-writable. A forged conductor→victim rope can put the user's own live
+  // node into that set, and the dialog listing every id is the only consent in front of the kill.
+  // A waiver would take that dialog away, so a derived call must ASK regardless of any waiver.
+  it('isWaivableCall: waivable verb, but not once the targets are derived', () => {
+    expect(isWaivableCall('close')).toBe(true)
+    expect(isWaivableCall('close', { derived: false })).toBe(true)
+    expect(isWaivableCall('close', { derived: true })).toBe(false)
+    // Still gated by the verb table — an unwaivable verb is unwaivable, derived or not.
+    expect(isWaivableCall('open-project', { derived: false })).toBe(false)
+  })
+
+  it('asks under a session waiver when derived, skips when the ids were named explicitly', () => {
+    const sessionWaived = new Set(['close'])
+    expect(decideControlConfirm({ verb: 'close', sessionWaived, derived: true })).toEqual({
+      skip: false,
+      via: null
+    })
+    // The explicit-id close (upstream's feature) is untouched.
+    expect(decideControlConfirm({ verb: 'close', sessionWaived, derived: false })).toEqual({
+      skip: true,
+      via: 'session'
+    })
+    expect(decideControlConfirm({ verb: 'close', sessionWaived }).skip).toBe(true)
+  })
+
+  it('asks under a per-project waiver when derived', () => {
+    const persisted = { projects: { p1: ['close'] } }
+    expect(
+      decideControlConfirm({ verb: 'close', persisted, projectId: 'p1', derived: true }).skip
+    ).toBe(false)
+    expect(
+      decideControlConfirm({ verb: 'close', persisted, projectId: 'p1', derived: false }).via
+    ).toBe('project')
+  })
+
+  it('asks under a permanent (always) waiver when derived', () => {
+    const persisted = { always: ['close'] }
+    expect(decideControlConfirm({ verb: 'close', persisted, derived: true }).skip).toBe(false)
+    expect(decideControlConfirm({ verb: 'close', persisted, derived: false }).via).toBe('always')
+  })
+
+  it('asks under the bypass pair when derived', () => {
+    const bypass = {
+      verb: 'close',
+      persisted: { bypassMode: true },
+      permissionMode: 'bypassPermissions',
+      permissionModeSource: 'global'
+    } as const
+    expect(decideControlConfirm({ ...bypass, derived: true }).skip).toBe(false)
+    expect(decideControlConfirm({ ...bypass, derived: false }).via).toBe('bypass')
   })
 })
 

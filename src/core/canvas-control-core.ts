@@ -484,7 +484,9 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '  canvas: an unknown one refuses the whole request and closes nothing, naming the ids it could',
     '  not find. `close --spawned yes` closes every node YOU opened that is still on the canvas (add',
     '  --node for extras); one dialog for the whole set. Close your stations once you have read',
-    '  their results.',
+    '  their results. A "don\'t ask again" waiver covers an EXPLICIT-ids close only (`close --node`);',
+    '  a `--spawned`/derived close ALWAYS shows the dialog, because its target list comes from',
+    '  project data a peer can forge.',
     '  Stations you open (open-claude/open-agent/spawn-team/verify) close THEMSELVES by default once',
     '  done AND you have read them with the linked-context CLI (no dialog; a user setting). Pass',
     '  `--auto-close no` for a station you will keep talking to — done is the end of a TURN, and a',
@@ -1023,7 +1025,9 @@ Verbs:
   canvas: an unknown one refuses the whole request and closes NOTHING, naming the ids it could not
   find. \`--spawned yes\` means every node YOU opened
   (open-claude / open-agent / spawn-team / verify) that is still on the canvas; \`--node\` adds
-  others. Nodes you open are yours to take down: once you have read a station's result through
+  others. A "don't ask again" waiver covers an EXPLICIT-ids close only (\`close --node <id,id>\`); a
+  \`--spawned\`/derived close ALWAYS shows the dialog, because its targets come from project data a
+  peer can forge. Nodes you open are yours to take down: once you have read a station's result through
   the linked context, close it — a finished station left open is a live process the user has to
   find and close by hand, and a fan-out of them was measured as the dominant clutter on a canvas.
   Auto-close does this for you, and it is the DEFAULT (a user setting): a station you open with
