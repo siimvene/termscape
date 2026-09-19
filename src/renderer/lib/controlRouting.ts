@@ -15,6 +15,7 @@
 
 import { canControlCanvas, type AgentId } from '@shared/agents/config'
 import { projectTravel } from './presenceTravel'
+import { liveOnlyVerbs } from '@shared/control-off-screen'
 import {
   projectCapabilityGrantedFor,
   type CapabilityAckMap
@@ -93,7 +94,10 @@ export function routeControlSource(
  * The richer shared four-set table (`offScreenDisposition`/`offScreenRefusal`/`canColdOpen`/…) is
  * re-exported below for callers that classify a verb; the live-only gate uses this pair.
  *
- * What stays here is what has no store representation at all:
+ * What stays here is what has no store representation at all — and it is NOT re-typed here: the set
+ * is DERIVED from the shared table's refusal keys (`liveOnlyVerbs()` over `OFF_SCREEN_REFUSALS`), so
+ * the four verbs the dispatch gates on and the four the agent-facing help calls "refused off screen"
+ * are one list. They are:
  * - `open-worktree` / `close-worktree` — the worktree registry (`useWorktrees`) and the
  *   project-setup runs are bound to the ACTIVE project's checkout; a binding minted for a project
  *   that is not loaded would be reconciled against the wrong repo.
@@ -104,12 +108,7 @@ export function routeControlSource(
  * it), so they are not listed; the membership below is what `Canvas.tsx` consults AFTER the
  * source has been routed to a non-active project.
  */
-export const LIVE_ONLY_VERBS: ReadonlySet<string> = new Set([
-  'open-worktree',
-  'close-worktree',
-  'branch',
-  'browser'
-])
+export const LIVE_ONLY_VERBS: ReadonlySet<string> = new Set(liveOnlyVerbs())
 
 /**
  * Does this verb have to run against the LIVE canvas? True only for `LIVE_ONLY_VERBS`; everything
@@ -142,6 +141,7 @@ export {
   offScreenRefusal,
   offScreenGuidanceLines,
   controlVerbSetsForTests,
+  liveOnlyVerbs,
   type OffScreenDisposition
 } from '@shared/control-off-screen'
 

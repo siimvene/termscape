@@ -10584,6 +10584,25 @@ export function Canvas() {
       const ctlProject = surface.project()
       const ctlSsh = ctlProject?.ssh
       const sshFor = (cwd?: string) => nodeSshFor(ctlSsh, cwd)
+      // A prompt too long for a typed line goes into a file the pane's own shell reads (#706).
+      // See lib/promptSpill.ts for the budget and for why an SSH project is excluded: the file
+      // would land on THIS machine while the pane runs on the host. Fails open in every
+      // direction — a spill we cannot perform returns the prompt inline, exactly as before, and
+      // command-delivery refuses a truncated line rather than submitting half of it. The spilled
+      // file is a real upload (`files.saveUpload`), so an off-screen launch that armColdOpenHere
+      // holds in `pendingLaunch` keeps a `promptFile` path that still resolves when the project is
+      // next shown — the surface's `ctlSsh`/`ctlProject` are the TARGET project's, so the SSH
+      // exclusion is evaluated against the machine the pane will actually run on.
+      const spillLongPrompt = async (
+        prompt: string | undefined
+      ): Promise<{ prompt?: string; promptFile?: string }> => {
+        if (!shouldSpillPrompt(prompt, !ctlSsh)) return { prompt }
+        const path = await spillPromptToFile(prompt as string, {
+          saveUpload: (n, d) => api.files.saveUpload(n, d),
+          encodeBase64: encodeUtf8Base64
+        })
+        return path ? { promptFile: path } : { prompt }
+      }
       // Place opened nodes BELOW the source and rope them to it (source flow-out → target
       // flow-in), mirroring how subagent/loop nodes attach — so they read as "hanging off" the
       // conversation instead of landing on top of unrelated nodes. `dropBelow`/`slotFor` pick the
@@ -11116,6 +11135,10 @@ export function Canvas() {
               })
               return
             }
+            // A `--prompt` over the typed-line budget is spilled to a file and delivered through
+            // the same `"$(cat …)"` substitution `--prompt-file` uses (#706). An explicit
+            // `--prompt-file` already took that route and is passed through untouched.
+            const promptLaunch = await spillLongPrompt(promptFile ? undefined : args.prompt)
             // See the same list in open-terminal: which of these nodes end up ARMED is
             // `armAfter`'s per-node decision, recorded as it builds them.
             const queuedIds: string[] = []
@@ -11126,7 +11149,7 @@ export function Canvas() {
                   surface.nodes().length + i,
                   agentCwd,
                   { x: 0, y: 0 },
-                  args.prompt,
+                  promptLaunch.prompt,
                   sshFor(agentCwd),
                   account,
                   surface.permissionMode(agentId),
@@ -11137,7 +11160,7 @@ export function Canvas() {
                   // interpolation site and emits nothing for an agent outside MODEL_SWITCH_CAPABLE,
                   // so an unsupported agent's command line stays byte-identical.
                   args.model,
-                  promptFile
+                  promptFile ?? promptLaunch.promptFile
                 ),
                 after ?? [],
                 undefined,
@@ -11528,24 +11551,38 @@ export function Canvas() {
             // Every node in the panel (reviewers + judge) runs `reviewAgent`, so one resolution
             // serves them all — gated on that agent, not on the caller's.
             const vMode = surface.permissionMode(reviewAgent)
+            // A lens brief assembles to MORE than a typed line can carry — measured 1045 and 1044
+            // bytes for the `security` and `tests` defaults against a 1024-byte macOS MAX_CANON,
+            // with a nine-character node title and no `--focus` at all (#706). So every panel
+            // prompt goes through the spill before a node is built, and the awaits are done up
+            // front because the factories below are synchronous.
+            const lensLaunches = await Promise.all(
+              lenses.map((lens) =>
+                spillLongPrompt(
+                  verifyLensPrompt({
+                    lens,
+                    targetTitle,
+                    targetId,
+                    agentId: reviewAgent,
+                    shimPath: vShim,
+                    focus: args.focus
+                  })
+                )
+              )
+            )
             const reviewers = lenses.map((lens, i) => {
               const node = createAgentNode(
                 reviewAgent,
                 live.length + i,
                 targetCwd,
                 { x: 0, y: 0 }, // provisional — see arrangeNodes below
-                verifyLensPrompt({
-                  lens,
-                  targetTitle,
-                  targetId,
-                  agentId: reviewAgent,
-                  shimPath: vShim,
-                  focus: args.focus
-                }),
+                lensLaunches[i].prompt,
                 sshFor(targetCwd),
                 vAccount,
                 vMode,
-                surface.projectId
+                surface.projectId,
+                undefined,
+                lensLaunches[i].promptFile
               )
               return armAfter(
                 { ...node, data: { ...node.data, title: `Verify: ${lens}`, titleAuto: false } },
@@ -11553,6 +11590,14 @@ export function Canvas() {
               )
             })
             const reviewerIds = reviewers.map((r) => r.id)
+            const judgeLaunch = await spillLongPrompt(
+              verifySynthesisPrompt({
+                lenses,
+                targetTitle,
+                agentId: reviewAgent,
+                shimPath: vShim
+              })
+            )
             const judge = wantJudge
               ? armAfter(
                   (() => {
@@ -11561,16 +11606,13 @@ export function Canvas() {
                       live.length + lenses.length,
                       targetCwd,
                       { x: 0, y: 0 }, // provisional — see arrangeNodes below
-                      verifySynthesisPrompt({
-                        lenses,
-                        targetTitle,
-                        agentId: reviewAgent,
-                        shimPath: vShim
-                      }),
+                      judgeLaunch.prompt,
                       sshFor(targetCwd),
                       vAccount,
                       vMode,
-                      surface.projectId
+                      surface.projectId,
+                      undefined,
+                      judgeLaunch.promptFile
                     )
                     return { ...j, data: { ...j.data, title: 'Verify: verdict', titleAuto: false } }
                   })(),
@@ -11752,6 +11794,12 @@ export function Canvas() {
               return
             }
             const live = surface.nodes() as CanvasNode[]
+            // Same typed-line budget as open-agent (#706): a role brief long enough to truncate
+            // the launch line is spilled to a file first. A role that named its own promptFile
+            // is passed through untouched. Awaited up front — the factory below is synchronous.
+            const roleLaunches = await Promise.all(
+              roles.map((r) => (r.promptFile ? spillLongPrompt(undefined) : spillLongPrompt(r.prompt)))
+            )
             // Build members; fixed role titles pin the node name (titleAuto off).
             const members = roles.map((r, i) => {
               // Roles may name different agents, so BOTH the mode and the inherited account are
@@ -11766,7 +11814,7 @@ export function Canvas() {
                 live.length + i,
                 srcCwd,
                 { x: 0, y: 0 }, // provisional — see arrangeNodes below
-                r.prompt,
+                roleLaunches[i].prompt,
                 sshFor(srcCwd),
                 accountForSpawn(memberAgent, src.data.accountId as string | undefined),
                 surface.permissionMode(memberAgent),
@@ -11776,7 +11824,7 @@ export function Canvas() {
                 r.model,
                 // Per-role promptFile (parser-validated + existence-checked above); wins over
                 // `prompt` in the assembler.
-                r.promptFile
+                r.promptFile ?? roleLaunches[i].promptFile
               )
               return r.title ? { ...node, data: { ...node.data, title: r.title, titleAuto: false } } : node
             })

@@ -51,8 +51,8 @@ describe('every control verb has an off-screen disposition, and none of them tra
     // screen" alone does not say which of the user's projects to ask for, and a refusal that does
     // not say "nothing was changed" leaves an orchestrator unable to tell a refusal from a
     // half-applied call.
-    const msg = offScreenRefusal('arrange', 'api-server')
-    expect(msg).toContain('arrange')
+    const msg = offScreenRefusal('open-worktree', 'api-server')
+    expect(msg).toContain('open-worktree')
     expect(msg).toContain('"api-server"')
     expect(msg).toContain('nothing was changed')
     // Unnamed project (unreadable file, a race with a close) still answers — it never throws and
@@ -98,18 +98,11 @@ describe('every control verb has an off-screen disposition, and none of them tra
   })
 })
 
-/** The verbs that deliberately refuse off screen, each with its reason in `OFF_SCREEN_REFUSALS`. */
+/** The verbs that deliberately refuse off screen, each with its reason in `OFF_SCREEN_REFUSALS`.
+ *  This fork refuses exactly the four live-only verbs — the ones with no serialized counterpart at
+ *  all. The layout verbs (group/ungroup/move/arrange/align) are answered against the store, and the
+ *  panel verbs (verify/spawn-team) cold-arm their nodes there, so none of those refuse. */
 const REFUSERS = new Set([
-  // Structural: they re-fit frames / lay out from MEASURED node sizes, which only a rendered
-  // canvas has.
-  'group',
-  'ungroup',
-  'move',
-  'arrange',
-  'align',
-  // Compose --after arming and bridges over nodes created in the same tick, against the live canvas.
-  'verify',
-  'spawn-team',
   // Parks the original session's terminal, which must be mounted.
   'branch',
   // The worktree store is epoch-scoped to the active project.

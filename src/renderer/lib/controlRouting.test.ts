@@ -141,16 +141,21 @@ describe("needsLiveCanvas — a control call never switches the user's view", ()
 })
 
 describe('canColdOpen — an OPEN is answered out of the store, not by moving the user', () => {
-  it('is true for exactly the three node-opening verbs', () => {
+  it('is true for the node-opening verbs AND for verify/spawn-team, which also cold-arm nodes', () => {
     expect(canColdOpen('open-terminal')).toBe(true)
     expect(canColdOpen('open-claude')).toBe(true)
     expect(canColdOpen('open-agent')).toBe(true)
+    // `verify`/`spawn-team` CREATE session nodes too, and this fork arms them for cold open through
+    // the store surface (Canvas.tsx's `ControlSurface` arms every un-armed node it commits). So the
+    // help calls them "answered off screen (queued)", not "refused".
+    expect(canColdOpen('verify')).toBe(true)
+    expect(canColdOpen('spawn-team')).toBe(true)
   })
 
   it('is false for every verb that acts on nodes which already exist', () => {
-    // These read live canvas state the serialized copy does not carry — measured sizes, worktree
-    // staleness, the React Flow edge arrays — so they keep travelling. Widening this set is a
-    // behaviour change per verb, never a tidy-up.
+    // These reach a pane, a store writer, the board, or the serialized nodes' geometry — none
+    // CREATES a session, so none cold-opens. (The layout verbs are answered off screen all the
+    // same; they are `stored-node`, not `cold-open` — see the disposition table below.)
     for (const verb of [
       'write',
       'close',
@@ -162,8 +167,6 @@ describe('canColdOpen — an OPEN is answered out of the store, not by moving th
       'link',
       'rename',
       'color',
-      'verify',
-      'spawn-team',
       'open-worktree',
       'open-browser',
       'browser',
@@ -361,33 +364,48 @@ describe('storedNodeListing', () => {
 describe('the off-screen disposition table (the verbs that used to travel)', () => {
   it('the verbs that act on existing nodes are answered from the store, not by travelling', () => {
     // The field report: the user was typing in another project, a background agent issued a
-    // `close`, and the app switched their tab. These seven reach a pane, a store writer or the
-    // board file — none of them needs React Flow — so none of them has any business moving a
-    // camera to get there.
-    for (const v of ['write', 'close', 'rename', 'color', 'link', 'board', 'assign']) {
+    // `close`, and the app switched their tab. These reach a pane, a store writer, the board file,
+    // or the serialized nodes' geometry (the layout verbs) — none of them needs React Flow — so
+    // none of them has any business moving a camera to get there.
+    for (const v of [
+      'write',
+      'close',
+      'rename',
+      'color',
+      'link',
+      'board',
+      'assign',
+      'group',
+      'ungroup',
+      'move',
+      'arrange',
+      'align'
+    ]) {
       expect(answersFromStoredNodes(v), v).toBe(true)
       expect(offScreenDisposition(v), v).toEqual({ kind: 'stored-node' })
     }
   })
 
-  it('the structural verbs refuse, and each says WHY in its own words', () => {
+  it('only the four live-only verbs refuse, and each says WHY in its own words', () => {
     // A refusal an agent can act on beats hijacking the human's screen. The reasons are per verb
-    // because the caller's next move differs: an `arrange` can wait for the human, a `branch`
-    // cannot happen at all until that terminal is mounted.
+    // because the caller's next move differs: an `open-worktree` can wait for the human, a `branch`
+    // cannot happen at all until that terminal is mounted. This fork refuses exactly the four verbs
+    // with NO serialized counterpart; everything else is answered off screen (above).
     const why = (v: string) => {
       const d = offScreenDisposition(v)
       expect(d.kind, v).toBe('refuse')
       return d.kind === 'refuse' ? d.why : ''
     }
-    expect(why('arrange')).toMatch(/measured/)
-    expect(why('group')).toMatch(/measured/)
     expect(why('branch')).toMatch(/parks the original/)
-    expect(why('verify')).toMatch(/live canvas/)
     expect(why('open-worktree')).toMatch(/worktree store/)
+    expect(why('close-worktree')).toMatch(/worktree store/)
     expect(why('browser')).toMatch(/webview/)
-    // …and no two structural verbs share a copy-pasted sentence that names the wrong mechanism.
-    expect(why('move')).toContain('reparenting')
-    expect(why('align')).toContain('aligning')
+    // The layout and panel verbs upstream refused are ANSWERED here, not refused.
+    expect(offScreenDisposition('arrange').kind).toBe('stored-node')
+    expect(offScreenDisposition('group').kind).toBe('stored-node')
+    expect(offScreenDisposition('move').kind).toBe('stored-node')
+    expect(offScreenDisposition('verify').kind).toBe('cold-open')
+    expect(offScreenDisposition('spawn-team').kind).toBe('cold-open')
   })
 
   it('an unknown verb refuses — the fail-closed direction', () => {
@@ -412,9 +430,9 @@ describe('the off-screen disposition table (the verbs that used to travel)', () 
   })
 
   it('the refusal sentence names the project, the reason and the fact that nothing happened', () => {
-    const msg = offScreenRefusal('group', 'web-app')
-    expect(msg.startsWith('group: project "web-app" is not on screen')).toBe(true)
-    expect(msg).toContain('measured node sizes')
+    const msg = offScreenRefusal('open-worktree', 'web-app')
+    expect(msg.startsWith('open-worktree: project "web-app" is not on screen')).toBe(true)
+    expect(msg).toContain('worktree store')
     expect(msg).toContain('Open that project and run this again')
     expect(msg).toContain('nothing was changed')
   })

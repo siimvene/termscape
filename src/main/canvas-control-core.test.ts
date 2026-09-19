@@ -825,14 +825,16 @@ describe('open-project + --project docs land with the dispatch (issue #338, spec
     }
   })
 
-  // (The fork's earlier "four verbs are refused" no-travel test was retired in the merge: it pinned
-  // the old narrow LIVE_ONLY_VERBS list (open-worktree/close-worktree/branch/browser) and intro
-  // phrasing "Your calls NEVER switch the user's view". The adopted shared four-set model
-  // (@shared/control-off-screen) REVERSES that scope — group/ungroup/move/arrange/align/verify/
-  // spawn-team also refuse off screen now — so that prose would be wrong. The view invariant is
-  // pinned instead by 'both bodies render the OFF-SCREEN table, and render it from the table'
-  // below (NO VERB EVER SWITCHES THE USER'S VIEW, data-derived answered/refused sets) and by
-  // 'both agent-facing texts state the Server creator-ownership and inert-boot contract'.)
+  // (The fork's off-screen scope is the SINGLE source of truth again: the shared table
+  // (@shared/control-off-screen) refuses exactly the four live-only verbs
+  // (open-worktree/close-worktree/branch/browser), and `controlRouting.ts` derives its narrow
+  // `LIVE_ONLY_VERBS`/`needsLiveCanvas` gate from those same keys (`liveOnlyVerbs()`). The merge
+  // had briefly REVERSED the scope in the shared table only — the generated help said
+  // group/ungroup/move/arrange/align/verify/spawn-team refuse off screen while the dispatch
+  // store-answered them — which is the drift this restores. The view invariant is pinned by 'both
+  // bodies render the OFF-SCREEN table, and render it from the table' below (NO VERB EVER SWITCHES
+  // THE USER'S VIEW, data-derived answered/refused sets) and by 'both agent-facing texts state the
+  // Server creator-ownership and inert-boot contract'.)
 
   it('tells the agent that opened nodes AND --after stations are already linked — nothing to `link`', () => {
     for (const [name, body] of bodies) {
@@ -951,8 +953,10 @@ describe('the --project clause tells the truth about travel (review #363 I-1 + M
         expect(offScreenDisposition(v).kind, v).not.toBe('refuse')
       }
       // Every refused verb is named AND carries its own reason — a bare list would tell an agent
-      // that `branch` and `arrange` fail for the same cause, and they do not.
-      for (const v of ['group', 'ungroup', 'move', 'arrange', 'align', 'verify', 'spawn-team', 'branch', 'open-worktree', 'close-worktree', 'browser']) {
+      // that `branch` and `open-worktree` fail for the same cause, and they do not. This fork
+      // refuses exactly the four live-only verbs; the layout/panel verbs upstream refused are
+      // store-answered / cold-open here and appear in the `answered` list above instead.
+      for (const v of ['branch', 'open-worktree', 'close-worktree', 'browser']) {
         const d = offScreenDisposition(v)
         expect(d.kind, v).toBe('refuse')
         if (d.kind !== 'refuse') continue

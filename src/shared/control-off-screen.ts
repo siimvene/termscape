@@ -118,17 +118,27 @@ export function needsLiveCanvas(verb: string): boolean {
  * same G5 hijack `send`/`reply`/`sticky` are declared here to avoid; the difference is only that an
  * open needs somewhere to put the node, and a project's serialized nodes are somewhere.
  *
- * Deliberately NOT here: every verb that acts on nodes that already exist. Those split between
- * the FOURTH set below (`STORED_NODE_VERBS` — they reach a pane, a store writer or a board, none
- * of which needs React Flow) and an outright refusal (`OFF_SCREEN_REFUSALS` — the structural verbs
- * read live canvas state the serialized copy does not carry: measured node sizes, worktree
- * staleness, a mounted webview). Neither travels. The verbs that create a node with no session
- * behind it are the third set below.
+ * Deliberately NOT here: every verb that acts on nodes that already exist. In this fork those go
+ * to the FOURTH set below (`STORED_NODE_VERBS` — a pane, a store writer, a board, or the layout
+ * verbs applied to the serialized nodes, none of which needs React Flow). Only the four verbs with
+ * no store representation at all (`OFF_SCREEN_REFUSALS` — a live terminal to park, the active
+ * project's worktree store, a mounted webview) refuse. Neither travels. The verbs that create a
+ * node with no session behind it are the third set below.
  */
 const COLD_OPENABLE_VERBS: ReadonlySet<string> = new Set([
   'open-terminal',
   'open-claude',
-  'open-agent'
+  'open-agent',
+  // `verify` and `spawn-team` also CREATE session nodes, and this fork arms them for cold open the
+  // same way — routing is by SOURCE and only the four `OFF_SCREEN_REFUSALS` verbs are live-only, so
+  // a panel or a team opened from a background project is BUILT into the owning project's serialized
+  // nodes and each member's launch is held in `pendingLaunch` (Canvas.tsx's store `ControlSurface`
+  // arms every un-armed node it commits — "this catches the rest (spawn-team's members)"). Upstream
+  // refused them off screen because it had no store surface; the fork does, so they belong here with
+  // the other opens, not in the refusal set. The `--after` graph they compose is armed on the
+  // owning canvas the same way a single cold open's `--after` is.
+  'verify',
+  'spawn-team'
 ])
 
 export function canColdOpen(verb: string): boolean {
@@ -182,7 +192,7 @@ export function answersOffCanvas(verb: string): boolean {
  * they did not make. Twenty-one verbs did it; the two carve-outs above were added without anyone
  * noticing the rest, because nothing pinned the whole table.
  *
- * WHAT MAKES THESE FOUR-PLUS-THREE ANSWERABLE OFF SCREEN: none of them needs React Flow. Each one
+ * WHAT MAKES THESE ANSWERABLE OFF SCREEN: none of them needs React Flow. Each one
  * reaches something that is screen-independent and has a serialized counterpart:
  *
  *   - `write` reaches a tmux PANE through main and never touches the canvas at all — it does not
@@ -198,11 +208,15 @@ export function answersOffCanvas(verb: string): boolean {
  *   - `board` is a read, and `assign` writes board METADATA through `setProjectKanban`. Both used
  *     to read `activeProjectId`, which off canvas was a second bug hiding behind the first: after
  *     the travel the two projects were the same, so the wrong read was never wrong in practice.
+ *   - the layout verbs (`group`/`ungroup`/`move`/`arrange`/`align`) rewrite node parenting and
+ *     position, which this fork applies to the SERIALIZED nodes via the store `ControlSurface`
+ *     (`surface.setNodes` → `commitCanvas`), laying out from the persisted sizes rather than the
+ *     measured ones upstream refused for.
  *
- * Deliberately NOT here — and these REFUSE rather than travel, see `offScreenDisposition`: the
- * structural verbs. A refusal an agent can act on is strictly better than hijacking the human's
- * screen, and every one of these would have to guess at something the serialized copy does not
- * carry.
+ * Deliberately NOT here — and these REFUSE rather than travel, see `offScreenDisposition`: the four
+ * `OFF_SCREEN_REFUSALS` verbs (`branch`, `open-worktree`, `close-worktree`, `browser`), the only
+ * ones with no serialized counterpart at all. A refusal an agent can act on is strictly better than
+ * hijacking the human's screen.
  */
 const STORED_NODE_VERBS: ReadonlySet<string> = new Set([
   'write',
@@ -211,7 +225,19 @@ const STORED_NODE_VERBS: ReadonlySet<string> = new Set([
   'color',
   'link',
   'board',
-  'assign'
+  'assign',
+  // The layout verbs act on nodes that already exist, and this fork answers them off screen too:
+  // routing is by SOURCE and only the four `OFF_SCREEN_REFUSALS` verbs are live-only, so a `group`/
+  // `move`/`arrange`/`align`/`ungroup` from a background project is applied to the owning project's
+  // SERIALIZED nodes through Canvas.tsx's store `ControlSurface` (`surface.setNodes` → `commitCanvas`).
+  // Upstream refused them because it laid out from MEASURED node sizes that only a rendered canvas
+  // carries; the fork's store surface lays out from the PERSISTED sizes instead, so the refusal
+  // reason no longer holds and they are answered rather than refused.
+  'group',
+  'ungroup',
+  'move',
+  'arrange',
+  'align'
 ])
 
 export function answersFromStoredNodes(verb: string): boolean {
@@ -228,22 +254,15 @@ export function answersFromStoredNodes(verb: string): boolean {
  * verb unable to act, it says so.
  */
 const OFF_SCREEN_REFUSALS: Readonly<Record<string, string>> = {
-  // The five structural verbs rewrite the WHOLE node array through React Flow's parent/extent
-  // model and re-fit frames from MEASURED sizes (`nodeW`/`nodeH` prefer `measured` over the
-  // persisted `size`), which the serialized copy does not carry — nothing rendered it. Laying a
-  // canvas out to geometry the user would not get on screen, and round-tripping every node
-  // through the serializers to persist it, is drift no reply could report.
-  group: 'grouping re-fits frames from measured node sizes, which only a rendered canvas has',
-  ungroup: 'ungrouping re-fits frames from measured node sizes, which only a rendered canvas has',
-  move: 'reparenting re-fits both frames from measured node sizes, which only a rendered canvas has',
-  arrange: 'arranging lays nodes out from measured node sizes, which only a rendered canvas has',
-  align: 'aligning lays nodes out from measured node sizes, which only a rendered canvas has',
-  // Both compose `--after` arming and context bridges over nodes created in the SAME tick, and
-  // check each dep against the live canvas before arming it. A cold open defers ONE node's launch;
-  // these defer a graph, and an armed station is fired by the live canvas effect.
-  verify: 'a review panel arms its reviewers against the live canvas',
-  'spawn-team': 'a team arms its members against the live canvas',
-  // branchClaude parks the ORIGINAL node's live terminal and resumes it in the new one. Off screen
+  // THE FORK'S FOUR LIVE-ONLY VERBS, and the ONLY verbs refused off screen. Everything else is
+  // store-answered / cold-open / stored-node above, because canvas control here never switches the
+  // user's view and a background project is answered from its serialized store. These four have NO
+  // store representation at all, so a refusal (named, terminal, actionable) is the honest answer.
+  // `controlRouting.ts` derives its NARROW `LIVE_ONLY_VERBS`/`needsLiveCanvas` — the gate the
+  // dispatch actually reads — from exactly these keys (`liveOnlyVerbs()`), so the table an agent is
+  // shown and the routing it hits cannot drift apart.
+  //
+  // branchClaude parks the ORIGINAL node's live terminal and resumes it in the new one; off screen
   // there is no live terminal to park.
   branch: 'branching parks the original session, which needs its terminal mounted',
   // The worktree store is epoch-scoped to the ACTIVE project, so off canvas its repoRoot and
@@ -253,6 +272,15 @@ const OFF_SCREEN_REFUSALS: Readonly<Record<string, string>> = {
   // The CDP driving in main needs a mounted <webview> guest. Placing a browser node
   // (`open-browser`) does not and is in OFF_CANVAS_VERBS; navigating one does.
   browser: 'driving a browser node needs its webview mounted'
+}
+
+/**
+ * The verbs that cannot be answered while their own project is off screen — the fork's four
+ * live-only verbs, and the single source `controlRouting.ts` builds its narrow routing gate from.
+ * Kept here, beside the reasons, so the help an agent reads and the dispatch it hits are one table.
+ */
+export function liveOnlyVerbs(): string[] {
+  return Object.keys(OFF_SCREEN_REFUSALS)
 }
 
 /**
