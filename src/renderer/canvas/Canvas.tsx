@@ -4577,6 +4577,10 @@ export function Canvas() {
       // so the user actually sees the login node they must interact with. Same rationale as the
       // Settings-overlay close in the add-account listeners above.
       if (pid && isKanbanOpen(pid)) useViewMode.getState().toggle(pid)
+      // Also reachable from the system row in Settings → Accounts (its "Sign in / switch"
+      // button) — the full-screen overlay would hide the login node otherwise, same as the
+      // add-account listeners above.
+      setSettingsOpen(false)
     }
     window.addEventListener('nodeterm:switch-system-account', onSwitchSystemAccount)
     return () => window.removeEventListener('nodeterm:switch-system-account', onSwitchSystemAccount)

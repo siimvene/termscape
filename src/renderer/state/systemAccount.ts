@@ -12,6 +12,9 @@ interface SystemAccountState {
   /** Guard so the lazy fetch runs once per app session (main caches the underlying lookup). */
   loaded: boolean
   ensure(): void
+  /** Re-resolve NOW, bypassing main's 5-minute usage cache — after a `claude /login` under
+   *  `~/.claude` the cached row still names the previous identity. Returns the fresh email. */
+  refresh(): Promise<string | null>
 }
 
 export const useSystemAccount = create<SystemAccountState>((set, get) => ({
@@ -24,5 +27,11 @@ export const useSystemAccount = create<SystemAccountState>((set, get) => ({
       .fetch()
       .then((u) => set({ email: u?.email ?? null }))
       .catch(() => {})
+  },
+  async refresh() {
+    const u = await window.nodeTerminal.usage.refresh()
+    const email = u?.email ?? null
+    set({ email, loaded: true })
+    return email
   }
 }))

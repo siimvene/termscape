@@ -116,6 +116,21 @@ paths:
     — the remote conf must NOT get these names: a remote attach client's env is the login
     shell's, and the copy/strip would run against that wrong environment (pinned in
     `ssh.test.ts`).
+  - **The system account is a normal row in Settings → Accounts (2026-09-17).** It carries the
+    same login affordance as a managed row ("Sign in / switch"), dispatching the SAME
+    `nodeterm:switch-system-account` event the usage popover's "⇄ Switch account…" fires (one
+    listener in Canvas.tsx spawns the SYSTEM-scoped `claude /login` node and closes the Settings
+    overlay so the node is seen). Why: the system login was the one Claude auth with no in-app path
+    from Accounts, so it read as "the account you can't manage here" and sent people to a shell.
+    Its wait is NOT `waitLogin`-shaped: a machine already logged in satisfies "has an oauthAccount"
+    before the user types, so `lib/systemAccountSwitch.ts` waits for the RESOLVED email to differ
+    from the one shown at click (via `usage.refresh`, not `fetch` — fetch serves a 5-min cache) and
+    clears silently on timeout (re-picking the same org is a valid outcome). LOCAL only, like the
+    popover button: disabled inside an SSH project, where "switch account" is ambiguous between this
+    machine's `~/.claude` and the host's. Known limit (measured 2026-09-17): the row's email is
+    decoration from `~/.claude.json`, the numbers come from the Keychain token; the two CAN diverge
+    (identity file said one org, token was another's), so a real switch can still read
+    "unchanged" until the row identity is derived from the token.
   - **Login flow** — Settings → Accounts → **Add** creates a `pending` account and drops a canvas
     **login node** that runs `claude /login` under the account dir. Core polls the dir's
     `.claude.json` (`LOGIN_POLL_MS` 2 s, up to `LOGIN_TIMEOUT_MS` 5 min) for `oauthAccount.email`;

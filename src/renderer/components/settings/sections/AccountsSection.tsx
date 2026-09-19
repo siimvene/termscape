@@ -26,6 +26,7 @@ import {
   raceLoginCapture
 } from '../../../lib/accountHeal'
 import { codexAccountSelectable } from '../../../canvas/codex-account-switch'
+import { waitForSystemAccountChange } from '../../../lib/systemAccountSwitch'
 import { AccountIdentityPills } from '../../AccountIdentityPills'
 import { ConfirmDialog } from '../../ConfirmDialog'
 import { SettingsSection } from '../SettingsSection'
@@ -212,6 +213,25 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
   const systemLabelSetting = useSettings((s) => s.settings.systemAccountLabel)
   const systemEmail = useSystemAccount((s) => s.email)
   useEffect(() => useSystemAccount.getState().ensure(), [])
+  // The system row's own login state — the same honest "waiting for login…" line the managed
+  // rows have. Cleared silently on timeout: re-picking the same org is a valid outcome, so
+  // "not captured" would be a lie half the time (see lib/systemAccountSwitch.ts).
+  const [systemWait, setSystemWait] = useState(false)
+  const switchSystemAccount = async (): Promise<void> => {
+    const before = useSystemAccount.getState().email
+    setSystemWait(true)
+    // Same channel the usage popover's "⇄ Switch account…" uses: Canvas opens a terminal running
+    // `claude /login` under the SYSTEM env (no accountId) and closes this overlay so it is seen.
+    window.dispatchEvent(new CustomEvent('nodeterm:switch-system-account'))
+    try {
+      await waitForSystemAccountChange({
+        before,
+        readEmail: () => useSystemAccount.getState().refresh()
+      })
+    } finally {
+      setSystemWait(false)
+    }
+  }
   const activeProjectId = useProjects((s) => s.activeProjectId)
   const activeProject = useProjects((s) => s.projects.find((p) => p.id === activeProjectId))
   // The active project's SSH host key (`user@host`), when it's a connected SSH project. Present →
@@ -719,6 +739,32 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
                 </span>
               </div>
               {systemEmail ? <p className="text-[12px] text-muted">{systemEmail}</p> : null}
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              {systemWait ? (
+                <span className="inline-flex items-center gap-1.5 text-[12px] text-muted">
+                  <span className="ui-spinner" aria-hidden />
+                  waiting for login…
+                </span>
+              ) : null}
+              {/* Same affordance as a managed row's "Sign in again", so the system account is not
+                  the one login that has to happen somewhere else. LOCAL only, like the popover's
+                  button: inside an SSH project "switch account" would be ambiguous between this
+                  machine's ~/.claude and the host's, and the listener spawns locally regardless. */}
+              <Button
+                disabled={systemWait || !!activeHostKey}
+                title={
+                  activeHostKey
+                    ? `Switch the system account from a project on ${thisMachine()} — this row is ${thisMachine()}'s ~/.claude, not ${activeHostKey}'s`
+                    : 'Opens `claude /login` in a terminal for the system account (~/.claude). ' +
+                      'Completing it switches the org/account every node without a managed account ' +
+                      'uses — running sessions carry on under the new one. Managed accounts keep ' +
+                      'their own logins.'
+                }
+                onClick={() => void switchSystemAccount()}
+              >
+                {systemEmail ? 'Sign in / switch' : 'Sign in'}
+              </Button>
             </div>
           </div>
 
