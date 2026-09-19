@@ -30,31 +30,16 @@ paths:
   the relay server may rate-limit free hosts independently — a client-side gate must NOT be
   reintroduced to work around a backend refusal (fix the backend policy instead).
 
-
----
-
-## Upstream v0.3.7 merge additions (9e76faf84a5f..upstream/main (v0.3.7))
-
-> Appended verbatim during the v0.3.7 upstream merge (2026-09-20). Upstream keeps ONE CLAUDE.md;
-> the fork keeps this subsystem's deep reference in this rule file, so its new material lands
-> here rather than re-inlining the root. New/changed text only; `[~ replaced N base line(s)
-> here]` marks where upstream reworded text this file already carries above — reconcile at leisure.
-
-### From CLAUDE.md § Remote access (phone relay)
-
-- **A Windows desktop pairs relay-only — no SSH key, and do not "fix" that by writing one.** The
-  phone's direct-SSH path is POSIX sh + tmux end to end (nodeterm-ios `HostCommands`, `TmuxBinary`,
-  the typed `tmux new-session -A` attach, workspace paths with no `%APPDATA%` candidate). Windows
-  OpenSSH hands out `cmd.exe`, and sessions live in the session host, which nothing on the phone
-  can attach to over SSH. So on win32 `createPairingService` installs no key, the QR carries
-  `"ssh":false`, the QR is gated on the RELAY instead of sshd (`shared/pairing-gate.ts`), and a
-  failed relay mint pairs NOTHING (502 to the phone, `reason:'relay-failed'` to the UI) instead of
-  the SSH platforms' LAN-only degrade. **A key sshd accepts makes things worse, not better**: the
-  phone tries SSH before the relay, so a working key pins it to a path that cannot work, where a
-  rejected one lets it fall through. Issue #758's `administrators_authorized_keys` rule is detected
-  (`main/windows-ssh-keys.ts`) only to explain the missing key; revoke still sweeps that file IN
-  PLACE (a temp + rename would swap its Administrators+SYSTEM ACL for the directory's, and sshd
-  would then refuse every admin key in it). Relay attach on Windows rests on the session host
-  being packaged (#575, shipped by #579): without that bundle `pty.attach` spawns a new plain shell
-  instead of joining the node's session, while `sessionExists` still answers "warm".
-
+- **A Windows desktop pairs relay-only — no SSH key; don't "fix" that by writing one.** The phone's
+  direct-SSH path is POSIX sh + tmux end to end, but Windows OpenSSH hands out `cmd.exe` and
+  sessions live in the session host, which nothing on the phone can SSH-attach to. So on win32
+  `createPairingService` installs no key, the QR carries `"ssh":false` and is gated on the RELAY
+  not sshd (`shared/pairing-gate.ts`), and a failed relay mint pairs NOTHING (502 to the phone,
+  `reason:'relay-failed'` to the UI) instead of the SSH platforms' LAN-only degrade. A key sshd
+  accepts is worse, not better: the phone tries SSH before the relay, so a working key pins it to a
+  path that cannot work while a rejected one falls through. Issue #758's
+  `administrators_authorized_keys` rule is detected (`main/windows-ssh-keys.ts`) only to explain the
+  missing key; revoke sweeps that file IN PLACE (a temp+rename would swap its Administrators+SYSTEM
+  ACL for the directory's and sshd would then refuse every admin key in it). Relay attach on Windows
+  needs the session host packaged (#575, shipped by #579), else `pty.attach` spawns a new plain
+  shell instead of joining the node's session while `sessionExists` still answers "warm".

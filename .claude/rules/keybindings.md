@@ -126,9 +126,37 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
 
 ## Window chrome (menu, intercepted chords, stand-down) — bullet moved from the Canvas section
 
-- **Window chrome**: macOS integrated title bar (`titleBarStyle: 'hiddenInset'`); the tab
-  bar (`TabBar.tsx`) is the drag region with the `nodeterm` logo + a rounded pill of project
-  tabs. Cmd+M is intercepted in `main/keydown-intercept.ts` (`before-input-event`, installed from
+- **Window chrome**: macOS integrated title bar (`titleBarStyle: 'hiddenInset'`); the tab bar
+  (`TabBar.tsx`) is the drag region with the `TermscapeMark` + a **Chrome-style scrolling tab
+  strip** (2026-09-16): inactive tabs flat with a 1px divider that drops on both sides of a
+  hovered/active tab, hover is an inset pill, and the active tab is `--canvas-bg` with rounded top
+  corners + two concave flares (`.tab.active::after`) so it merges into the surface below (also the
+  kanban overlay colour). In LIGHT the strip steps back to `--surface-deep` (`--tabbar-bg`),
+  because `--panel` and `--canvas-bg` are one value apart there and a canvas-coloured tab would
+  vanish. **A tab is as wide as its own NAME and never shrinks** (`max-width: var(--tab-max)` 260px,
+  `flex: 0 0 auto`; the name ellipsises only at that cap): the strip SCROLLS when tabs stop
+  fitting. This is the deliberate departure from Chrome (which shrinks to keep every tab reachable):
+  here the sessions sidebar and ⌘1..9 reach a project without the strip, so a readable name beats
+  a visible tab edge. Two earlier rounds rationed the name and both spent the one thing the strip is
+  for: #789 gave every tab one flex basis (at 8 tabs / 1340px the ACTIVE name measured 24px, zero
+  characters, carrying the most furniture); #790 added a 60px floor + a `tabDensity` level that shed
+  furniture, whose middle level hid the SSH chip exactly where 8 tabs / 1340px land.
+  `renderer/lib/tabDensity.ts` is DELETED: with full names there is no budget for a density level
+  to buy; do not reintroduce one without first saying what it buys. The fade mask went with it (a
+  mask gradient is unconditional and would fade a name that fits; `text-overflow` is
+  self-conditioning). **The bar's height is ONE number in two places that cannot read each other**:
+  `--tabbar-h` in styles.css (every top-anchored panel, the kanban overlay and the usage popover
+  position against it) and `TABBAR_HEIGHT_PX` in `@shared/window-chrome-metrics` (from which main
+  derives the traffic-light `y`). It is **40px by default, and a SETTING** (`settings.tabBarHeight`,
+  28-64): `App.tsx` writes the resolved value to `--tabbar-h` on `<html>` and main re-centres the
+  macOS traffic lights on the same settings change (change-gated), so the two cannot disagree. Every
+  reader goes through `resolveTabBarHeight` (default for a non-number, clamped; the floor keeps the
+  12px lights inside the bar); the stylesheet token keeps the default LITERAL so an un-hydrated
+  renderer draws the default bar. `styles.tabbar.test.ts` pins the token to the constant and every
+  dependant to the token. The New-project `+` is a **sibling** of `.tabbar__tabs`, not its last
+  child (inside the scroller it vanished once the strip overflowed); `.tabbar__projects` is `flex:
+  1` and stays a drag region, and the pill must not be `flex: 1` or it inflates into an empty
+  capsule. Cmd+M is intercepted in `main/keydown-intercept.ts` (`before-input-event`, installed from
   `main/index.ts` — else macOS minimizes) and forwarded to the renderer via `app:toggle-markdown`;
   Cmd+W (`app:close-node`) and Cmd+0 (`app:zoom-actual-size`) are taken back the same way. **The
   application menu is OURS**: `buildAppMenu` (`main/index.ts`) calls `Menu.setApplicationMenu` and

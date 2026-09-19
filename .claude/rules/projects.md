@@ -52,8 +52,20 @@ project's nodes only.** The contract:
   every write **prunes** keys that no longer address a live project/frame (`pruneCollapsedItems` /
   `liveCollapseKeys`), because settings.json is forever and a canvas churns through group ids.
 - The bottom-left **canvas lock** freezes the CAMERA only (pan/zoom): nodes stay draggable,
-  resizable and connectable while locked — the point is "stop the map sliding", not "freeze
-  the work".
+  resizable and connectable while locked — "stop the map sliding", not "freeze the work". It is
+  **transient by default, opt-in to remember**: a lock that survives a restart reads as "the app is
+  frozen" to the next opener, so `settings.rememberCanvasLock` (Behavior, default OFF) is what turns
+  it into a preference. The bit lives in localStorage (`nodeterm.canvasLocked`,
+  `renderer/lib/canvasLock.ts`) beside the view mode and explorer pin, never in settings.json or the
+  git-shared `project.json`: the SETTING says whether to remember, the lock is one person's view
+  state. The two tiers differ per surface — on Desktop both are machine-local; in the **Server
+  Edition** the setting rides that server's settings.json (shared by every browser) while the bit is
+  per browser PROFILE, so two profiles can legitimately disagree. It is ONE GLOBAL bit, not
+  per-project, because `<Canvas />` is mounted once and not keyed by project, so the lock always
+  carried across project switches anyway. Restore is gated on settings HYDRATION (Canvas mounts
+  first, so a `useState` initializer would read the default and the opt-in would silently never work)
+  and latched to the first run, so flipping the setting mid-session never reaches into storage and
+  locks a canvas someone is using. Desktop + Server Edition; **Mobile: N/A** (no canvas).
 - Before any project switch / add / delete, `commitActiveToStore()` serializes the live
   React Flow nodes back into the store, so nothing is lost. Then disk is written.
 - Switching away unmounts the old project's `TerminalNode`s → their tmux clients detach but
@@ -108,34 +120,3 @@ project's nodes only.** The contract:
 - A project's `cwd` (folder picker, `dialog:select-folder`) is passed to terminal/Claude
   node factories so new terminals open there. **Folder ↔ project is deduped:** "Open folder…"
   reuses the existing project with that `cwd` (and its nodes) instead of creating a duplicate.
-
-
----
-
-## Upstream v0.3.7 merge additions (9e76faf84a5f..upstream/main (v0.3.7))
-
-> Appended verbatim during the v0.3.7 upstream merge (2026-09-20). Upstream keeps ONE CLAUDE.md;
-> the fork keeps this subsystem's deep reference in this rule file, so its new material lands
-> here rather than re-inlining the root. New/changed text only; `[~ replaced N base line(s)
-> here]` marks where upstream reworded text this file already carries above — reconcile at leisure.
-
-### From CLAUDE.md § Projects (tabs)
-
-    [~ replaced 1 base line(s) here]
-  the work". It is **transient by default and opt-in to remember**: a lock that survives a
-  restart reads as "the app is frozen" to whoever opens the app next, and the lit button is a
-  small thing to spot, so `settings.rememberCanvasLock` (Behavior, default OFF) is what turns it
-  into a preference. The bit itself lives in localStorage (`nodeterm.canvasLocked`,
-  `renderer/lib/canvasLock.ts`) beside the view mode and the explorer pin, never in settings.json
-  and never in the git-shared `project.json`: the SETTING says whether to remember, the lock is
-  one person's view state. Note the two tiers differ per surface: on Desktop both are
-  machine-local, but in the **Server Edition** the setting rides that server's settings.json
-  (shared by every browser hitting it) while the bit is per browser PROFILE, so two profiles can
-  legitimately disagree about the lock. Desktop + Server Edition; **Mobile: N/A** (no canvas).
-  It is one GLOBAL bit rather than per-project
-  because `<Canvas />` is mounted once and is not keyed by project, so the lock always carried
-  across project switches within a session. Restore is gated on settings HYDRATION (Canvas mounts
-  first, so a `useState` initializer would read the default and the opt-in would silently never
-  work) and latched to the first run, so switching the setting on mid-session never reaches into
-  storage and locks a canvas somebody is working on.
-

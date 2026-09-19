@@ -41,11 +41,19 @@ file has been opened yet. A rule you did not load is an invariant you will viola
 | `.claude/rules/agents.md` | Agent support: registry + capabilities, hooks, permission mode, transcripts, subagent/workflow viz, adding a new agent |
 | `.claude/rules/agents-canvas-control.md` | Canvas control (nodeterm.sh shim, verbs, fan-in, --after, verify panel) and Context Link |
 | `.claude/rules/agents-accounts-usage.md` | Managed Claude/Codex accounts, account switch, usage indicator scope, remote usage |
+| `.claude/rules/agents-grok.md` | Grok agent per-CLI deep reference: capabilities, hook-directory dialect, subagent-card keying |
+| `.claude/rules/agents-codex.md` | Codex shared-thread node identity: tool-shell recovery, the exported HMAC record |
 | `.claude/rules/session-memory.md` | Session memory: the RAM pill, the per-session panel, socket fan-out kills |
 | `.claude/rules/keybindings.md` | Keybindings (registry, overrides, dispatch) and window chrome / menu stand-down |
 | `.claude/rules/canvas.md` | Canvas interaction & panels: menus, undo, zoom, goToNode, breadcrumbs, palette, sidebar, explorer, settings, theme |
 | `.claude/rules/source-control-worktrees.md` | Source Control panel, AI commit messages, git worktrees bound to group frames |
 | `.claude/rules/kanban.md` | Kanban view: dual-source board, card modal, board log, labels, metadata |
+| `.claude/rules/terminal-ssh.md` | SSH remote terminals: ControlMaster early-publish + boot pre-warm, per-host freshness read, late cold-start self-heal, remote pty spawn pacing, remote node teardown / owed kills |
+| `.claude/rules/canvas-layouts.md` | Canvas layouts: named node-geometry snapshots per project (save/restore/update/delete) |
+| `.claude/rules/canvas-idle-energy.md` | Idle-energy animation frame-loop gate (styles.css `--nt-anim-state`, window/board attributes) |
+| `.claude/rules/window-behavior.md` | Main-process window behavior: geometry restore + window-raise policy |
+| `.claude/rules/node-colors.md` | Node colors: one palette (system + agent sections), swatches, `color --color` boundary |
+| `.claude/rules/files-node.md` | The `files` node (file-manager node) |
 | `.claude/rules/relay.md` | Remote access (phone relay): free, not Pro |
 | `.claude/rules/speech.md` | Speech / dictation (desktop + server) |
 | `.claude/rules/packaging.md` | Packaging, Windows beta, auto-update, check feed, telemetry |

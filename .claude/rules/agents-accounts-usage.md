@@ -158,12 +158,12 @@ paths:
     `cwd`, so a LOCAL account added from one still opens in `$HOME` — the honest answer, since that
     project owns no local directory.
   - **The lifecycle is CORE, and both shells register it** (issue #313) —
-    `core/claude-accounts-service.ts` owns the four `claude-accounts:*` channels (add / wait-login
-    / cancel-wait / remove) behind `platform().handle`; `main/claude-accounts.ts` is a thin desktop
-    wrapper and `registerCoreHandlers` calls the same `registerClaudeAccountsIpc()`. Two optional
-    deps carry everything core cannot reach: `installSkill` (desktop passes `installCanvasSkillInto`
-    — the server passes none, because **canvas control is not wired on that shell at all**, so a
-    per-account SKILL.md would point at nothing) and `remote`, a **thunk** resolving the SSH legs
+    `core/claude-accounts-service.ts` owns the five `claude-accounts:*` channels (add / wait-login
+    / cancel-wait / remove / link) behind `platform().handle`; `main/claude-accounts.ts` is a thin
+    desktop wrapper and `registerCoreHandlers` calls the same `registerClaudeAccountsIpc()`. Two
+    optional deps carry everything core cannot reach: `installSkill` (desktop passes
+    `installCanvasSkillInto`; an enabled Server canvas-control runtime installs its Server-specific
+    skill separately) and `remote`, a **thunk** resolving the SSH legs
     (desktop's manager is created after the registration, and the server has none — in both cases
     an `AccountCtx` carrying a `projectId` degrades to the LOCAL path, which is the pre-existing
     behavior this preserves). **Three surfaces:** Desktop unchanged (same channels, same shapes,
@@ -395,3 +395,58 @@ paths:
   label; consort HIGH). Deferred, same review: a phone registration under a peer account gets the
   agent brand color, not the account's configured color (`appendProjectNode` resolves colors from
   the server's own settings only).
+- **Shared system skills** (`shareSystemSkills`, issue #643, OFF by default) — Claude Code resolves
+  user skills as `join(CLAUDE_CONFIG_DIR ?? ~/.claude, 'skills')` (measured 2.1.266), so an account
+  dir **replaces** `~/.claude/skills` and a fresh managed account shows only nodeterm's installed
+  skills (#438). This per-account switch (Settings → Accounts) is the way back in. **Each system skill
+  is linked INDIVIDUALLY** (`<accountDir>/skills/<name>` → `~/.claude/skills/<name>`), never the whole
+  directory: `installCanvasSkillInto` writes INTO `<configDir>/skills/`, so a directory-level link
+  would put nodeterm's canvas skill in the user's system folder. Per-skill links keep the account's
+  `skills/` a real dir and make the off-switch a link removal (strace-confirmed equivalent for
+  discovery). Load-bearing:
+  - **Ownership is name-anchored** — an entry is ours iff it is a symlink whose target normalizes to
+    exactly `join(systemSkillsDir, <its own name>)` (`core/claude-skill-share-core.ts`, pure +
+    mutation-tested); a real directory is never ours. Removal is `unlink` then `rmdir` (both fail on a
+    real non-empty dir; a Windows junction refuses `unlink`).
+  - **`NODETERM_OWNED_SKILLS` (`manage-nodeterm-canvas`, `get-linked-context`) is never linked or
+    pruned** — nodeterm's own installers own those; sharing them would make two owners fight over the
+    name at every launch.
+  - **The realpath refusal is load-bearing** — the issue's manual workaround (`ln -s ~/.claude/skills
+    skills`) makes the account's `skills/` RESOLVE to the system one; the planner compares REAL paths
+    and refuses (`same-directory`).
+  - **Windows uses a directory JUNCTION** (no Developer Mode / elevation), so the feature is on every
+    desktop platform. **The launch sweep re-links but NEVER removes** (removal only through
+    `claude-accounts:set-skill-sharing`, where intent is explicit — a link's SHAPE cannot tell ours
+    from an identical hand-made one). **The switch flips the filesystem FIRST, persists the flag only
+    if that returned.** The copy says edits flow both ways (a link is not a copy). Surfaces: Desktop
+    full; **Server Edition full** (whole impl is core); **SSH accounts out of scope for v1** (config
+    dir is on the host — disabled with that reason, core refuses `remote-account`); Mobile N/A.
+- **Linked accounts** (`ClaudeAccount.configDir`) — a PRE-EXISTING local config dir the user already
+  drives (`export CLAUDE_CONFIG_DIR=~/.claude-2`) adopted as a first-class account without a login
+  node. Settings → Accounts → **Link existing config dir…** calls `claude-accounts:link` (core): `~`
+  expansion → `normalizeLinkedConfigDir` → string-only refusals (system `~/.claude`, anything under
+  `{userData}/claude-accounts`, an already-linked path) → `stat` → email from `<dir>/.claude.json`
+  (missing = `email: null`) → managed hook install. `claudeConfigDirFor(id)` consults a **registered
+  accounts source** (`registerClaudeAccountsSource`, both shells right after `settingsStore.init()`,
+  BEFORE the mirror provider can flush) so env injection, transcript roots, usage rows and pickers all
+  resolve a linked id with no per-caller branch. Transcript jails accept `<linkedDir>/projects/**`
+  **from settings only**, never a POST-named dir. **Removing a linked account only forgets the
+  record** — the `rm -rf` names `accountConfigDir(userData, id)` directly, so it cannot reach outside
+  the managed root. The hook installer writes `settings.json` THROUGH a symlink (`writeFileSync`, not
+  `renameAtomic`, which would replace the link; pinned by `claude-accounts-link-symlink.test.ts`).
+- **Observed account** (`ObservedClaudeAccount`, `NormalizedAgentEvent.account`) — which account a
+  session is ACTUALLY on, derived by the hook server from the payload's `transcript_path`
+  (`configDirFromTranscriptPath` walks up to the LAST `projects` segment).
+  `classifyClaudeConfigDir` is pure host-agnostic string matching: managed local root → managed remote
+  pattern (`…/.nodeterm/claude-accounts/<id>`) → linked (settings) → any `…/.claude` ⇒ system
+  (`accountId: null`) → else `known: false`. It is a **LABEL** like `verified`: attached once in the
+  hook server (both shells inherit it, neither raw listener changes), claude events only, never
+  throws, **never reads the filesystem** (a forged POST naming `~/.ssh/projects/x` gets
+  `known: false`). Recorded by the mirror and the renderer store (`agentStatus.account`, persisted
+  like `agentId`). **Effective account for READERS** = `data.accountId ?? observed.accountId`
+  (`effectiveAccountId`): `readSessionName`, `context.ensure`, transcript search and ⌘M use it;
+  **spawn/env never does** (launch identity stays creation-time). The **account chip**
+  (`AccountChip.tsx`, one component on node header, kanban card, card modal and sidebar row) shows for
+  any non-system account, and for system panes only when ≥ 2 distinct account keys are live
+  (`hasMultipleAccountKeys`). An unlinked dir is named by its last segment with a tooltip to
+  Settings → Accounts → **Detected config dirs**. Mobile N/A.

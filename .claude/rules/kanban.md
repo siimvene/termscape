@@ -145,4 +145,30 @@ paths:
   half-pill itself: (`components/kanban/ColumnPill.tsx`, `columnForNode` in lib/kanban; rendered
   as a SIBLING of the node root — the roots are overflow:hidden — hidden for Ungrouped/dangling,
   click opens the board). Server Edition works as-is (pure renderer + workspace.save). Scope: no
-  agent-driven card movement yet, no board undo, mobile N/A.
+  agent-driven card movement yet, no board undo.
+
+- **Mobile (`nodeterm-ios`) reaches the board through two relay verbs** in
+  `WorkspaceStore.ensureRemoteBoard` / `setRemoteCardColumn` (host-service `handleKanban`, pure
+  transforms in `core/project-kanban-write.ts`): `projects.ensureBoard` seeds the default columns,
+  `projects.setCardColumn` moves one card. Why: (1) the desktop board is a LAZY default (`kanban` is
+  unwritten until the first edit), so most files carry NO board and the phone, which knows a project
+  only by its file, could not offer one (1 of 13 files here had a `kanban` block) — defaults live in
+  `@shared/kanban-default-board`, copied verbatim (pinned both sides) by iOS `KanbanDefaults`; (2) an
+  SSH project's file is on a THIRD machine the phone has no credentials for, so the verb writes the
+  entry's `cache` (persisted to `workspace.json`, the local record for an ssh entry) and the ordinary
+  mirror pushes it, like a desktop drag; (3) the phone's older direct-SSH write inlined the whole
+  `project.json` into one argv and died at `MAX_ARG_STRLEN` (this repo's measured 114,695 bytes, ~15 KB
+  under the 128 KB ceiling). **Both verbs announce on `workspaceExternalChange`, not optional:** the
+  renderer serializes its OWN board on the next save, so a change it never heard about is reverted.
+
+- **Omni Kanban (global swimlanes)** (`components/kanban/GlobalKanbanView.tsx`, one lane per open
+  project) is gated by `settings.omniKanbanEnabled` (default OFF) and toggled via `state/viewMode.ts`
+  `globalKanban` (localStorage, machine-local) + `omniKanbanAsDefault` (Cmd+Shift+B opens Omni vs
+  per-project). `TabBar` and IPC `onToggleKanban` share one `performKanbanToggle`; `isGlobalKanbanOpen()`
+  is the single gate (fail-closed, STATIC `useSettings` import — an earlier `require` failed OPEN in the
+  packaged renderer). The active lane is derived from serialized `p.nodes` via `toKanbanSessionState`
+  and committed (`commitActiveToStore`) before the overlay mounts; `pendingLaunch` never becomes
+  `initialCommand` (a DAG launch fires only when deps are done, and `TerminalNode` delivers it via
+  `writeWhenShellReady` after the switch). Active-project edits route through Canvas live nodes, others
+  through the store + `writeDisk`; delete uses `ConfirmDialog` + SSH-aware teardown. Project pills and
+  Cmd/Ctrl+1..9 (`nodeterm:swimlane-jump`) jump to a lane. Server as-is, Mobile N/A.
