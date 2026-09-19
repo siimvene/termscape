@@ -405,7 +405,7 @@ one stray keystroke.
 | In-place restart + cold-restore resume | yes | yes | N/A |
 | ⌘M transcript view (`ChatPanel`) | **not implemented for gemini** — `CHAT_CAPABLE` is claude-only; the panel parses claude's JSONL | idem | idem |
 | Find bar's transcript index | **claude only** (`readsClaudeTranscript`); the terminal-buffer search works normally | idem | N/A |
-| Context links | yes (`CONTEXT_LINK_CAPABLE`), marker block in `~/.gemini/GEMINI.md` | **not wired at all** — `initContextLink` is never called from `src/server` | N/A |
+| Context links | yes (`CONTEXT_LINK_CAPABLE`), marker block in `~/.gemini/GEMINI.md` | wired, **local-only** — `src/server/context-link.ts` calls `initContextLink(pty, {})` with no remote deps | N/A |
 | Canvas control | yes, marker block + the sh+curl shim | **not wired** — `agent:control` has no server handler; pre-existing | N/A — no canvas |
 | Managed accounts | **N/A** — accounts are a claude config-dir mechanism; `createAgentNode` never stamps an `accountId` on a non-claude node, and `CLAUDE_CONFIG_DIR` is irrelevant to `~/.gemini/settings.json` | idem | idem |
 | Working indicator | the **brand mark, breathing** — `brandPulsePlan('gemini', …)` returns the `gemini-color.svg` asset and it pulses with a bloom, on the canvas badge and in the notch strip. Before this branch gemini fell through to the plain dot, which says "something is happening" but not *who* | **N/A** for the notch (there is none); the canvas badge works | the phone has its own SwiftUI renderer |

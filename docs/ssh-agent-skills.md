@@ -137,10 +137,12 @@ never linked to, and cannot read *through* an edge it does not itself hold (the 
 directional). The token remains the outer boundary, exactly as for status hooks. The one value
 that reaches a remote command line — an opencode session id — is shell-quoted at that site.
 
-`docs/`-worthy consequence: `src/server` never calls `initContextLink`, so context link is absent
-on the Server Edition (it was before this change too). The route and the renderer are both in
-`src/core`, so wiring it there is now just a call plus a decision about what "remote" means when
-the server *is* the host.
+`docs/`-worthy consequence: at the time of this change `src/server` did not call
+`initContextLink`, so context link was absent on the Server Edition. **It is wired now** —
+`src/server/context-link.ts` calls `initContextLink(ptyManager, {})` and keeps the link map in step
+with the canvases on disk. It passes **no remote deps**, deliberately: that shell runs ON the host
+whose transcripts and tmux it reads, so local-only is the complete answer there and SSH projects are
+a desktop-only concept.
 
 ## Testing
 

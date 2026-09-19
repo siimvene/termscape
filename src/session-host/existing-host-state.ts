@@ -124,3 +124,49 @@ export function readExistingSessionHostIdentity(
 
   return { kind: 'ready', state, token }
 }
+
+/**
+ * How long a host that lost `listen` to EADDRINUSE keeps retrying while holding its startup lock,
+ * and how long an EMPTY lock may go untouched before another launch may reclaim it.
+ *
+ * The two are one mechanism. The retrying host owns the lock for minutes (issue #783 measured the
+ * Windows pipe staying busy for ~1.5 min after its host was killed), so the lock cannot simply be
+ * "young = live" any more. Instead the retrying host TOUCHES the lock on every attempt, and an
+ * empty lock whose mtime has stopped moving belongs to a process that is gone. The stale window is
+ * comfortably longer than one retry interval and far shorter than the retry budget, so a live
+ * retrier is never robbed and a dead one is never waited on for minutes.
+ */
+export const LISTEN_RETRY_BUDGET_MS = 120_000
+export const LISTEN_RETRY_MAX_DELAY_MS = 2_000
+export const EMPTY_LOCK_STALE_MS = 15_000
+
+export type StartupLockState =
+  /** An empty lock a live starter is heartbeating — wait for it, never reclaim it. */
+  | 'starting'
+  /** An empty lock nothing has touched for EMPTY_LOCK_STALE_MS — its owner died mid-startup. */
+  | 'abandoned'
+  /** No lock at all, or a lock with content (published state, or something unreadable — the
+   *  fail-closed readers above own that case). */
+  | 'other'
+
+/**
+ * Classify the startup lock WITHOUT interpreting its bytes: only its existence, its emptiness and
+ * how recently it was touched. Pure but for the injected stat, so both ends can be tested.
+ */
+export function startupLockState(
+  statePath: string,
+  now: number = Date.now(),
+  statSync: (p: string) => { size: number; mtimeMs: number } = (p) => fs.statSync(p)
+): StartupLockState {
+  let stat: { size: number; mtimeMs: number }
+  try {
+    stat = statSync(statePath)
+  } catch {
+    // Absent, or unreadable — neither is our call to make here.
+    return 'other'
+  }
+  if (stat.size !== 0) return 'other'
+  // A clock that jumped backwards must not make a live starter look abandoned, so a future mtime
+  // reads as fresh rather than as a huge age.
+  return now - stat.mtimeMs > EMPTY_LOCK_STALE_MS ? 'abandoned' : 'starting'
+}

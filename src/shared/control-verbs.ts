@@ -2,7 +2,7 @@
 // set. Read the second half of that sentence literally — see WHAT THIS SET DOES NOT DO below.
 //
 // IN `src/shared` BECAUSE IT HAS TWO SIDES, and that is the whole point of this file existing.
-// The set was defined in `src/main/canvas-control-core.ts` and the gate it describes lives in the
+// The set was defined in `src/core/canvas-control-core.ts` and the gate it describes lives in the
 // renderer (`Canvas.tsx`'s `switch (verb)`), which cannot import from `src/main` — `tsconfig.web`
 // includes only `src/renderer`, `src/shared` and the preload types. So the set stayed a
 // security-shaped constant imported by nothing but its own unit test, while
@@ -38,7 +38,17 @@
 // `open-project` (issue #338): create/adopt/first-attach all raise a human confirm (spec B2 +
 // Q1), and its early-handled block in Canvas.tsx reads `isDestructiveVerb(verb)` before its
 // `confirmBusy()` refusal exactly as write/close's cases do — the drift alarm covers all three.
-export const DESTRUCTIVE_VERBS: ReadonlySet<string> = new Set(['write', 'close', 'open-project'])
+//
+// `settings` (@shared/settings-verb): its `--set` raises a human confirm from an early-handled
+// block that reads this set for its `confirmBusy()` refusal. Not destructive in the literal sense —
+// a settings change is reversible — but it can GRANT a capability, and one dialog at a time is the
+// rule for every dialog an agent can raise. Its `--get` reads and never reaches the confirm.
+export const DESTRUCTIVE_VERBS: ReadonlySet<string> = new Set([
+  'write',
+  'close',
+  'open-project',
+  'settings'
+])
 
 /**
  * Does this verb's dispatch case take its `confirmBusy()` refusal from the shared set?

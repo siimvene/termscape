@@ -158,6 +158,22 @@ about which machine they describe. Reading + parsing is `core/session-memory.ts`
   mobile* attaches to tmux sessions over the transport protocol and has no per-session host-memory
   concept; adding one means extending that protocol (follow-up in the iOS repo).
 
+- **The panel's second row action is PAUSE, and it's usually the right one, not `×`.** Measured
+  (2026-09-04, 149 `nt-` sessions, 46 GB tree RSS): the median session with a live `claude` holds
+  **321 MB**, the median whose CLI has already exited holds **5.6 MB** — exiting the CLI returns
+  **98.3%**, and killing the tmux session on top buys the remaining 1.7% at the cost of the pane, its
+  scrollback and the warm reattach (population-wide the split is 95% `claude`+`node` vs 1.8% shell).
+  **Quote these numbers when someone proposes a memory lever that destroys sessions** — it is why
+  issue #616's "end the tmux session too" was not built. PAUSE is not a third depth: it calls
+  `pauseAgentNode(id, false)`, the same `performExitPhase` / PAUSED chip / Resume the node menu
+  offers, so there is no second exit path to keep in step with Eco's. Eligibility is the pure
+  `renderer/lib/sessionPause.ts`, two-directional on purpose: a row that could NEVER pause (orphan,
+  plain terminal, an agent we cannot quit-and-resume) renders **nothing**; one merely refused right
+  now (busy, no session id, or its terminal is not mounted on this canvas — the common case in a
+  machine-wide panel) renders **disabled with the reason**. Canvas answers on the same
+  `st?.sessionId` the node menu uses — the only place that sees the node's agent, its pause closure
+  and its `restartEligibility` at once — so a row cannot promise what the closure would refuse.
+
 **Offscreen release makes the macOS reaper bug far more visible, and the two shipped days apart.**
 A node released while offscreen detaches its PTY client — so it becomes a DETACHED tmux session and
 joins the reaper's candidate pool once past the 6 h grace. On a Mac reading `os.freemem()` the

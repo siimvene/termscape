@@ -11,7 +11,12 @@ import type {
 } from '@shared/types'
 import { DEFAULT_SETTINGS } from '@shared/types'
 import type { AgentId, AgentPermissionMode, BuiltinAgentId } from '@shared/agents/config'
-import { agentConfig, capabilityAgentId, supportsSessionIdFlag } from '@shared/agents/config'
+import {
+  agentConfig,
+  capabilityAgentId,
+  FALLBACK_AGENT_COLOR,
+  supportsSessionIdFlag
+} from '@shared/agents/config'
 import { assembleLaunchCommand } from '@shared/agents/launch'
 import { agentAccountColor } from '@shared/agents/account-color'
 import { boundAccountId } from '@shared/agents/account-binding'
@@ -24,6 +29,7 @@ import { mintFreeGrokSessionId } from '@shared/agents/grok-session-mint'
 import { projectLaunchInfoNow } from './projectLaunchInfo'
 import { isAgentEnabled, launchableDefaultAgent } from './agentAvailability'
 import { codexSharedIdentity } from './codexIdentity'
+import { folderTitle } from '../lib/explorerCreate'
 import { sshHostKey } from '@shared/ssh'
 import { normalizeNodeIcon } from '@shared/node-icon'
 import { useSettings } from './settings'
@@ -34,17 +40,11 @@ import { useSettings } from './settings'
 export { applyCanvasMutation } from '@shared/canvas-mutations'
 export { accountNodeColor, agentAccountColor } from '@shared/agents/account-color'
 import { sanitizeInboundNode } from '@shared/node-exec'
+import { SYSTEM_NODE_COLORS } from '@shared/node-colors'
 
-/** Preset color palette — macOS system colors (dark mode). */
-export const NODE_COLORS = [
-  '#0a84ff', // systemBlue
-  '#32d74b', // systemGreen
-  '#ffd60a', // systemYellow
-  '#ff453a', // systemRed
-  '#bf5af2', // systemPurple
-  '#6ac4dc', // systemTeal
-  '#ff9f0a' // systemOrange
-]
+// Preserve the renderer's long-standing import surface; validation and the palette now live in
+// shared so Server Edition and canvas-control accept exactly what these pickers display.
+export { NODE_COLORS, SYSTEM_NODE_COLORS } from '@shared/node-colors'
 
 const TERMINAL_SIZE = { width: 640, height: 440 }
 const STICKY_SIZE = { width: 240, height: 200 }
@@ -60,6 +60,9 @@ const TRIGGER_SIZE = { width: 300, height: 170 }
 const VIDEO_SIZE = { width: 640, height: 420 }
 const WEB_SIZE = { width: 720, height: 520 }
 const BROWSER_SIZE = { width: 800, height: 560 }
+// Tall and narrow: a file manager is a LIST, and the thing that runs out first is vertical room
+// for entries, not horizontal room for names (which ellipsize).
+const FILES_SIZE = { width: 340, height: 460 }
 
 /** Height of a node when collapsed (header only). */
 export const COLLAPSED_HEIGHT = 40
@@ -313,7 +316,7 @@ export function createTerminalNode(
     ...placeNode('terminal', center, index, size.width, size.height),
     data: {
       title: `Terminal ${index + 1}`,
-      color: NODE_COLORS[index % NODE_COLORS.length],
+      color: SYSTEM_NODE_COLORS[index % SYSTEM_NODE_COLORS.length],
       group: null,
       tags: [],
       cwd: ssh ? ssh.remoteCwd : cwd,
@@ -339,7 +342,7 @@ export function createSshTerminalNode(
     ...placeNode('terminal', center, index, size.width, size.height),
     data: {
       title: server.label,
-      color: NODE_COLORS[index % NODE_COLORS.length],
+      color: SYSTEM_NODE_COLORS[index % SYSTEM_NODE_COLORS.length],
       group: null,
       tags: [],
       ssh: {
@@ -524,9 +527,6 @@ export function resolveNewNodeAgent(
 ): AgentId {
   return explicit ?? projectDefaultAgent(projectId, settings) ?? launchableDefaultAgent(settings)
 }
-
-/** Fallback color for custom / unknown agents that have no config-provided color. */
-const FALLBACK_AGENT_COLOR = '#888888'
 
 /**
  * Resolves an agent's label/color/launch command. Builtins come from the static config;
@@ -1061,6 +1061,39 @@ export function createBrowserNode(
   }
 }
 
+/**
+ * Creates a file-manager node browsing `cwd`.
+ *
+ * `sshFs` is stamped for an SSH project so the node lists the PROJECT'S HOST over the
+ * ControlMaster instead of this machine — the same flag, read the same way, that `createEditorNode`
+ * and `createVideoNode` already use. Without it an SSH project's file manager would quietly browse
+ * the local filesystem at a path that means something else there.
+ */
+export function createFilesNode(
+  index: number,
+  cwd: string,
+  center?: { x: number; y: number },
+  sshFs?: boolean
+): CanvasNode {
+  return {
+    id: nextId('files'),
+    type: 'files',
+    // `placeNode`, not `placeAt`: it snaps POSITION AND SIZE to `settings.gridSize` when
+    // snap-to-grid is on, which is what every other factory does. `placeAt` alone left a new file
+    // manager sitting off-grid beside snapped neighbours, and off-grid in SIZE too — React Flow
+    // resizes by adding a grid multiple to the start size, so an unsnapped box can never be
+    // dragged onto the grid afterwards.
+    ...placeNode('files', center, index, FILES_SIZE.width, FILES_SIZE.height),
+    data: {
+      title: folderTitle(cwd),
+      color: '#ffd60a',
+      group: null,
+      cwd,
+      ...(sshFs ? { sshFs: true } : {})
+    }
+  }
+}
+
 /** Creates a diff editor node for a changed file (relative path + repo cwd). */
 export function createDiffNode(
   index: number,
@@ -1160,7 +1193,7 @@ export function createGroupNode(
     style: { width: size.width, height: size.height },
     data: {
       title: `Group ${index + 1}`,
-      color: NODE_COLORS[index % NODE_COLORS.length],
+      color: SYSTEM_NODE_COLORS[index % SYSTEM_NODE_COLORS.length],
       group: null
     }
   }
@@ -1176,7 +1209,7 @@ export function createProject(
   return {
     id: nextId('project'),
     name: name ?? `Project ${index + 1}`,
-    color: NODE_COLORS[index % NODE_COLORS.length],
+    color: SYSTEM_NODE_COLORS[index % SYSTEM_NODE_COLORS.length],
     cwd,
     ...(ssh ? { ssh } : {}),
     viewport: { x: 0, y: 0, zoom: 1 },
@@ -1184,8 +1217,12 @@ export function createProject(
   }
 }
 
-const GROUP_PAD = 28
-const GROUP_HEADER = 34
+/** Clearance a group frame keeps around its children on every side, and the extra strip above
+ *  them for its label pill. Exported so anything that has to size a frame the way
+ *  `fitGroupToChildren` does (canvas layouts grow a restored frame around nodes the layout
+ *  predates) matches it exactly instead of re-guessing the numbers. */
+export const GROUP_PAD = 28
+export const GROUP_HEADER = 34
 
 const nodeW = (n: CanvasNode) => n.measured?.width ?? (n.width as number) ?? 0
 const nodeH = (n: CanvasNode) => n.measured?.height ?? (n.height as number) ?? 0
@@ -1984,7 +2021,9 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
                     ? DINO_SIZE
                     : kind === 'trigger'
                       ? TRIGGER_SIZE
-                      : TERMINAL_SIZE
+                      : kind === 'files'
+                        ? FILES_SIZE
+                        : TERMINAL_SIZE
   return nodes
     .map((n) => {
       const kind: NodeKind = (n.type as NodeKind) ?? 'terminal'

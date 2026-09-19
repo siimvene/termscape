@@ -13,12 +13,32 @@ import type {
 } from '@shared/types'
 import { CLOSED_SESSIONS_CAP } from '@shared/types'
 import { collisionSeed, derivedProjectId } from '@shared/project-id'
-import type { ProjectCapability } from '@shared/project-capabilities'
+import { capabilityHasMachineDefault, type ProjectCapability } from '@shared/project-capabilities'
 import type { ProjectIcon } from '@shared/project-icon'
 import { recordCapabilityAck, type CapabilityAnswer } from '@shared/project-capability-consent'
+import {
+  CANVAS_LAYOUTS_CAP,
+  CANVAS_LAYOUT_NAME_MAX,
+  pruneLayoutViewports,
+  type CanvasLayout
+} from '@shared/canvas-layout'
 import { applyCanvasMutation, createProject, reorderGroupWithinParent } from './workspace'
 import { markWorkspaceDirty } from './workspaceDirty'
 import { folderName } from '../lib/projectOpen'
+// One order-independent key for an edge's endpoints — the SAME rule `hiddenLinkIds` uses, so a
+// rope and the bridge it covers are recognized as one relationship here too.
+import { pairKey as bridgePairKey } from '../lib/noteLink'
+
+/**
+ * What `saveLayout` did.
+ *
+ * A union rather than a boolean because the refusals need different sentences: the cap is a state
+ * the user has to resolve (delete one first), while an unusable name is a typo. Neither may be
+ * swallowed - this store is not the only writer of `layouts` (a git pull delivers them too), so
+ * the cap can be reached by work the user never did, and a Save button that quietly does nothing
+ * is exactly the failure this return value exists to prevent.
+ */
+export type SaveLayoutResult = 'saved' | 'cap-reached' | 'invalid-name' | 'unknown-project'
 
 interface ProjectsState {
   projects: Project[]
@@ -81,10 +101,19 @@ interface ProjectsState {
    * THE strict per-project capability setter (@shared/project-capabilities). `on` writes the
    * literal `true` the validators accept AND records this machine's 'kept' answer — setting a
    * switch yourself is its own consent, so the clone notice never fires on your own decision.
-   * `off` deletes the field outright (an off capability adds no bytes to the shared file) AND
-   * records 'declined': if a teammate's (or a hostile) `true` re-arrives via git, the capability
-   * is refused and re-noticed rather than silently re-granted (PR #213 C1/M-2). */
+   * `off` deletes the field (an off capability adds no bytes to the shared file) — EXCEPT for a
+   * capability with a machine default (CAPABILITY_MACHINE_DEFAULTS), where absence means "use this
+   * machine's default" and off must therefore be written as a literal `false`. Either way it records
+   * 'declined': if a teammate's (or a hostile) `true` re-arrives via git, the capability is refused
+   * and re-noticed rather than silently re-granted (PR #213 C1/M-2). */
   setProjectCapability(id: string, cap: ProjectCapability, on: boolean): void
+  /**
+   * "Use this machine's default" — only meaningful for a capability with a machine default. Removes
+   * the file's value AND this machine's recorded answer for it: a kept `'declined'` would otherwise
+   * keep an absent field off (the rule that protects a pre-default "turn it off"), so the choice the
+   * user just made would not take effect. If a `true` later re-arrives via git it meets no answer
+   * and raises the clone notice, exactly as for a never-configured project. */
+  resetProjectCapabilityToDefault(id: string, cap: ProjectCapability): void
   /**
    * Records this machine's ANSWER ('kept' | 'declined') to the one-time clone notice.
    * MACHINE-LOCAL by construction: `Project.capabilityAck` rides `IndexEntryV3.capabilityAck`
@@ -106,6 +135,15 @@ interface ProjectsState {
     bridges?: BridgeLink[],
     ropes?: BridgeLink[]
   ): void
+  /**
+   * Appends context bridges / control ropes to a project that is loaded but NOT active — the edge
+   * counterpart of `applyNodeMutation`, and for the same reason: React Flow holds only the active
+   * project's edges, so a cold open (canvas control's `open-*` answered out of the store) has
+   * nowhere else to put the opener's rope and the fan-in bridge it owes. Deduped by edge id AND by
+   * endpoint pair, since `planBridges` mints `bridge-<source>-<target>` while a rope is
+   * `ctrl-<source>-<target>` — two ids, one relationship each. No-op for an unknown project.
+   */
+  appendCanvasLinks(projectId: string, links: { bridges?: BridgeLink[]; ropes?: BridgeLink[] }): void
   /**
    * Applies ONE peer canvas mutation to a project's serialized nodes — the path for a project
    * that is loaded but NOT active (React Flow only holds the active project's nodes). Returns
@@ -156,6 +194,43 @@ interface ProjectsState {
   consumeClosedSession(projectId: string, entryId: string): ClosedSessionEntry | undefined
   /** Removes a closed-session entry without reopening it. */
   discardClosedSession(projectId: string, entryId: string): void
+
+  /**
+   * Saves a layout (replacing by id) together with this machine's camera for it.
+   *
+   * The two halves land in ONE write because they are meaningless apart: the layout is CONTENT in
+   * the git-shared project file, the camera is machine-local index state, and a camera whose
+   * layout never landed is orphan bytes in a file that is forever.
+   *
+   * `now` is the caller's clock rather than a `Date.now()` in here, so the snapshot the caller
+   * built and the timestamps stored beside it cannot disagree, and a test can prove `createdAt`
+   * survived a replace. The store stamps both timestamps itself: they order the list the user
+   * reads, and a caller must not be able to backdate a layout into someone else's slot.
+   */
+  saveLayout(
+    projectId: string,
+    layout: CanvasLayout,
+    viewport: Viewport,
+    now: number
+  ): SaveLayoutResult
+  /**
+   * Renames a layout and bumps its `updatedAt`. No-op for an unknown project or layout id, and
+   * for a name that is empty once trimmed.
+   *
+   * Void where `saveLayout` reports, because every refusal here is one the call site can test for
+   * itself before calling - it knows the name it typed and the id it picked, so a return value
+   * would tell it nothing it did not already have.
+   */
+  renameLayout(projectId: string, layoutId: string, name: string, now: number): void
+  /** Deletes a layout AND this machine's camera for it. Both halves move together: a camera keyed
+   *  to a layout nobody can restore is litter in a file that is forever, the rule
+   *  `pruneCollapsedItems` states for `settings.sidebarCollapsedItems`. */
+  deleteLayout(projectId: string, layoutId: string): void
+  /** Records this machine's camera for a layout without touching the shared half - where I was
+   *  looking after a restore is a fact about this screen, and writing it into
+   *  `.nodeterm/project.json` would move everyone else's canvas. An unknown layout id is refused
+   *  rather than answered with a stub, for the same reason `deleteLayout` prunes. */
+  recordLayoutViewport(projectId: string, layoutId: string, viewport: Viewport): void
 
   /**
    * Registers (or finds) the project for a local directory WITHOUT activating it — the store half
@@ -406,7 +481,8 @@ export const useProjects = create<ProjectsState>((set, get) => ({
         if (p.id !== id) return p
         if (on) return recordCapabilityAck({ ...p, [cap]: true }, cap, 'kept')
         const next = { ...p }
-        delete next[cap]
+        if (capabilityHasMachineDefault(cap)) next[cap] = false
+        else delete next[cap]
         // 'declined', not silence: the deletion lives only in this working copy, so a re-arriving
         // `true` (teammate commit, git checkout) must re-notice instead of meeting a bare ack.
         return recordCapabilityAck(next, cap, 'declined')
@@ -415,6 +491,25 @@ export const useProjects = create<ProjectsState>((set, get) => ({
     // The setter owns the persist (issue #318): its call sites — the AgentsSection toggle, the
     // clone notice's decline — schedule no save of their own, so without this the choice was lost
     // on restart unless an unrelated canvas edit happened to dirty the workspace afterwards.
+    markWorkspaceDirty()
+  },
+
+  resetProjectCapabilityToDefault(id, cap) {
+    if (!capabilityHasMachineDefault(cap)) return
+    set((s) => ({
+      projects: s.projects.map((p) => {
+        if (p.id !== id) return p
+        const next = { ...p }
+        delete next[cap]
+        if (next.capabilityAck && Object.prototype.hasOwnProperty.call(next.capabilityAck, cap)) {
+          const ack = { ...next.capabilityAck }
+          delete ack[cap]
+          if (Object.keys(ack).length) next.capabilityAck = ack
+          else delete next.capabilityAck
+        }
+        return next
+      })
+    }))
     markWorkspaceDirty()
   },
 
@@ -453,6 +548,30 @@ export const useProjects = create<ProjectsState>((set, get) => ({
       projects: s.projects.map((p) =>
         p.id === id
           ? { ...p, nodes, viewport, ...(bridges ? { bridges } : {}), ...(ropes ? { ropes } : {}) }
+          : p
+      )
+    }))
+  },
+
+  appendCanvasLinks(projectId, links) {
+    const add = (existing: BridgeLink[] | undefined, incoming: BridgeLink[] | undefined) => {
+      if (!incoming?.length) return existing
+      const kept = existing ?? []
+      const seenId = new Set(kept.map((e) => e.id))
+      const seenPair = new Set(kept.map((e) => bridgePairKey(e.source, e.target)))
+      const fresh = incoming.filter((e) => {
+        const pair = bridgePairKey(e.source, e.target)
+        if (seenId.has(e.id) || seenPair.has(pair)) return false
+        seenId.add(e.id)
+        seenPair.add(pair)
+        return true
+      })
+      return fresh.length ? [...kept, ...fresh] : existing
+    }
+    set((s) => ({
+      projects: s.projects.map((p) =>
+        p.id === projectId
+          ? { ...p, bridges: add(p.bridges, links.bridges), ropes: add(p.ropes, links.ropes) }
           : p
       )
     }))
@@ -640,6 +759,95 @@ export const useProjects = create<ProjectsState>((set, get) => ({
           : { ...p, closedSessions: p.closedSessions.filter((e) => e.id !== entryId) }
       )
     }))
+  },
+
+  saveLayout(projectId, layout, viewport, now) {
+    // The dialog validates too, but the command palette reaches this action directly, so the
+    // store is the last gate before a name lands in a git-shared file.
+    const name = layout.name.trim().slice(0, CANVAS_LAYOUT_NAME_MAX)
+    if (!name) return 'invalid-name'
+    const project = get().projects.find((p) => p.id === projectId)
+    if (!project) return 'unknown-project'
+    const layouts = project.layouts ?? []
+    const idx = layouts.findIndex((l) => l.id === layout.id)
+    // Replace-by-id never counts against the cap. A genuinely new layout past it is refused rather
+    // than evicting the oldest: the list is shared, so the entry dropped to make room could be a
+    // teammate's, and losing their work to make one Save succeed is worse than a Save that says no.
+    if (idx === -1 && layouts.length >= CANVAS_LAYOUTS_CAP) return 'cap-reached'
+    const stored: CanvasLayout = {
+      ...layout,
+      name,
+      // A replace keeps the original creation moment: it is still the layout the user made that
+      // day, whatever the caller stamped on the snapshot it has just rebuilt.
+      createdAt: idx === -1 ? now : layouts[idx].createdAt,
+      updatedAt: now
+    }
+    const next = idx === -1 ? [...layouts, stored] : layouts.map((l, i) => (i === idx ? stored : l))
+    set((s) => ({
+      projects: s.projects.map((p) =>
+        p.id !== projectId
+          ? p
+          : {
+              ...p,
+              layouts: next,
+              layoutViewports: { ...(p.layoutViewports ?? {}), [stored.id]: viewport }
+            }
+      )
+    }))
+    // Saving a layout touches no node, so no canvas edit will schedule the write for us - the same
+    // persistence gap the capability setters close.
+    markWorkspaceDirty()
+    return 'saved'
+  },
+
+  renameLayout(projectId, layoutId, name, now) {
+    const clean = name.trim().slice(0, CANVAS_LAYOUT_NAME_MAX)
+    if (!clean) return
+    let changed = false
+    set((s) => ({
+      projects: s.projects.map((p) => {
+        if (p.id !== projectId || !p.layouts?.some((l) => l.id === layoutId)) return p
+        changed = true
+        return {
+          ...p,
+          layouts: p.layouts.map((l) =>
+            l.id === layoutId ? { ...l, name: clean, updatedAt: now } : l
+          )
+        }
+      })
+    }))
+    if (changed) markWorkspaceDirty()
+  },
+
+  deleteLayout(projectId, layoutId) {
+    let changed = false
+    set((s) => ({
+      projects: s.projects.map((p) => {
+        if (p.id !== projectId || !p.layouts?.some((l) => l.id === layoutId)) return p
+        changed = true
+        const layouts = p.layouts.filter((l) => l.id !== layoutId)
+        // Both halves move together, and the shared pruner is what decides which cameras survive
+        // so the store cannot grow a second opinion about it.
+        return {
+          ...p,
+          layouts: layouts.length ? layouts : undefined,
+          layoutViewports: pruneLayoutViewports(p.layoutViewports, layouts)
+        }
+      })
+    }))
+    if (changed) markWorkspaceDirty()
+  },
+
+  recordLayoutViewport(projectId, layoutId, viewport) {
+    let changed = false
+    set((s) => ({
+      projects: s.projects.map((p) => {
+        if (p.id !== projectId || !p.layouts?.some((l) => l.id === layoutId)) return p
+        changed = true
+        return { ...p, layoutViewports: { ...(p.layoutViewports ?? {}), [layoutId]: viewport } }
+      })
+    }))
+    if (changed) markWorkspaceDirty()
   },
 
   reopenProject(id) {

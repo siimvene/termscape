@@ -48,6 +48,7 @@ import {
   migrateLegacyCodexAccountHomes
 } from './codex-accounts-core'
 import { readCodexAccountAt } from './codex-session-name'
+import { directExecutableInvocation } from './exec-path'
 import { platform } from './platform'
 import { findInLoginPath } from './pty-manager'
 import { NEW_CODEX_ACCOUNT_LABEL, type CodexAccount } from '../shared/codex-account'
@@ -130,7 +131,10 @@ export async function ensureCodexAccountDaemon(accountId?: string): Promise<void
     async () => {
       const codex = await findInLoginPath('codex')
       if (!codex) throw new Error('Codex CLI unavailable')
-      await execFileP(codex, ['app-server', 'daemon', 'start'], {
+      const invocation = directExecutableInvocation(codex, ['app-server', 'daemon', 'start'])
+      if (!invocation) throw new Error('Codex CLI has no safe Windows entry point')
+      await execFileP(invocation.executable, invocation.args, {
+        ...invocation.options,
         cwd: os.homedir(),
         env: { ...process.env, ...codexSessionEnv(platform().userDataDir, accountId) },
         timeout: 15_000,
@@ -319,7 +323,10 @@ export function codexAccountsHandlers(
           try {
             const codex = await findInLoginPath('codex')
             if (codex) {
-              await execFileP(codex, ['app-server', 'daemon', 'stop'], {
+              const invocation = directExecutableInvocation(codex, ['app-server', 'daemon', 'stop'])
+              if (!invocation) throw new Error('Codex CLI has no safe Windows entry point')
+              await execFileP(invocation.executable, invocation.args, {
+                ...invocation.options,
                 cwd: os.homedir(),
                 env: { ...process.env, CODEX_HOME: localCodexAccountHome(id) },
                 timeout: 10_000,

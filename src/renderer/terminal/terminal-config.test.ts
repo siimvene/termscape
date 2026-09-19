@@ -43,6 +43,7 @@ import {
 } from './terminal-config'
 import { resolveTerminalTheme } from './themes'
 import type { ClientId } from '@shared/presence'
+import { isWindowsPlatform } from '@shared/platform-utils'
 
 const ev = (p: Partial<CopyShortcutEvent>): CopyShortcutEvent => ({
   type: 'keydown',
@@ -613,9 +614,14 @@ describe('terminalKeyAction', () => {
   it('leaves Ctrl+V as a pty control byte off Windows', () => {
     const ctrlV = ev({ key: 'v', code: 'KeyV', ctrlKey: true })
     expect(terminalKeyAction(ctrlV, false, false, false, false)).toBe('pass')
-    // The default reads the live platform; under vitest's node env that is not Windows, so every
-    // existing call site keeps its byte-identical behavior.
-    expect(terminalKeyAction(ctrlV, false)).toBe('pass')
+  })
+
+  // The default reads the live platform. Node 21+ exposes a global `navigator` whose `platform`
+  // names the host OS, so on a Windows machine `isWindowsPlatform()` is true even under vitest's
+  // node environment — asserting 'pass' unconditionally failed the suite on every Windows checkout.
+  it('defaults to the live platform, including Node runtimes exposing navigator', () => {
+    const ctrlV = ev({ key: 'v', code: 'KeyV', ctrlKey: true })
+    expect(terminalKeyAction(ctrlV, false)).toBe(isWindowsPlatform() ? 'native' : 'pass')
   })
 
   it('never lets the paste claim shadow a copy chord or Shift+Enter', () => {

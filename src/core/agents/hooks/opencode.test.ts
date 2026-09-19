@@ -99,6 +99,9 @@ describe('generated plugin behavior (executed)', () => {
     vi.stubEnv('NODETERM_HOOK_PORT', '43210')
     vi.stubEnv('NODETERM_HOOK_TOKEN', 'tok')
     vi.stubEnv('NODETERM_HOOK_ENDPOINT', '')
+    // A developer may be running this test from a live nodeterm PTY. Never let the
+    // generated plugin inherit that session's socket and post test events to it.
+    vi.stubEnv('NODETERM_HOOK_SOCK', '')
     const file = path.join(tmp, `plugin-under-test-${Math.random().toString(36).slice(2)}.mjs`)
     fs.writeFileSync(file, buildOpencodePlugin())
     const mod = await import(/* @vite-ignore */ `file://${file}`)

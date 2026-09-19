@@ -11,10 +11,11 @@
 // come up on — reported as "source node is not a control-capable agent", which is what a node
 // carrying a non-control agent gets, so the failure read as a lost capability rather than as the
 // wrong canvas answering. Resolve the OWNING project instead and answer out of ITS serialized
-// nodes — never by switching the user's view to it (see LIVE_ONLY_VERBS below for the contract).
+// nodes — never by switching the user's view to it (see @shared/control-off-screen for the contract).
 
 import { canControlCanvas, type AgentId } from '@shared/agents/config'
 import { projectTravel } from './presenceTravel'
+import { liveOnlyVerbs } from '@shared/control-off-screen'
 import {
   projectCapabilityGrantedFor,
   type CapabilityAckMap
@@ -26,6 +27,13 @@ export interface ControlProject {
   closed?: boolean
   unavailable?: boolean
   nodes: readonly { id: string }[]
+}
+
+/** A serialized node, as the projects store keeps them for non-active projects. */
+export interface StoredNode {
+  id: string
+  kind?: string
+  title?: string
 }
 
 /**
@@ -78,7 +86,18 @@ export function routeControlSource(
  * whole-file save writes and the project load reads, and a session opened this way is armed for
  * cold open — it starts when that project is next viewed, exactly the `--project` contract.
  *
- * What stays here is what has no store representation at all:
+ * `needsLiveCanvas` here is the NARROW predicate `Canvas.tsx`'s dispatch gates on: TRUE only for a
+ * verb that cannot be answered off the live canvas AT ALL. It is deliberately NOT the shared
+ * module's `needsLiveCanvas` ("needs SOME canvas, live or serialized"), which is true for the cold-
+ * openable/off-canvas/stored-node verbs too — those the store surface answers off screen, so gating
+ * on the shared predicate would refuse everything the fork's whole no-travel feature store-answers.
+ * The richer shared four-set table (`offScreenDisposition`/`offScreenRefusal`/`canColdOpen`/…) is
+ * re-exported below for callers that classify a verb; the live-only gate uses this pair.
+ *
+ * What stays here is what has no store representation at all — and it is NOT re-typed here: the set
+ * is DERIVED from the shared table's refusal keys (`liveOnlyVerbs()` over `OFF_SCREEN_REFUSALS`), so
+ * the four verbs the dispatch gates on and the four the agent-facing help calls "refused off screen"
+ * are one list. They are:
  * - `open-worktree` / `close-worktree` — the worktree registry (`useWorktrees`) and the
  *   project-setup runs are bound to the ACTIVE project's checkout; a binding minted for a project
  *   that is not loaded would be reconciled against the wrong repo.
@@ -89,12 +108,7 @@ export function routeControlSource(
  * it), so they are not listed; the membership below is what `Canvas.tsx` consults AFTER the
  * source has been routed to a non-active project.
  */
-export const LIVE_ONLY_VERBS: ReadonlySet<string> = new Set([
-  'open-worktree',
-  'close-worktree',
-  'branch',
-  'browser'
-])
+export const LIVE_ONLY_VERBS: ReadonlySet<string> = new Set(liveOnlyVerbs())
 
 /**
  * Does this verb have to run against the LIVE canvas? True only for `LIVE_ONLY_VERBS`; everything
@@ -114,15 +128,32 @@ export function liveOnlyRefusal(verb: string, projectName: string): string {
 }
 
 /**
+ * The richer shared verb table lives in `@shared/control-off-screen` because CORE renders the
+ * agent-facing help from it and core cannot import the renderer. Re-exported here (minus the
+ * shared `needsLiveCanvas`, which has broader semantics — see the note above) so every renderer
+ * caller keeps one import for "how does canvas control route".
+ */
+export {
+  canColdOpen,
+  answersOffCanvas,
+  answersFromStoredNodes,
+  offScreenDisposition,
+  offScreenRefusal,
+  offScreenGuidanceLines,
+  controlVerbSetsForTests,
+  liveOnlyVerbs,
+  type OffScreenDisposition
+} from '@shared/control-off-screen'
+
+/**
  * The capability half of the guard: may a session in this node drive the canvas?
  *
- * The empty/absent default MIRRORS pty-manager's spawn-time default (`options.agentId ?? 'claude'`):
- * a plain terminal node received the claude hook env at spawn, so a manual `claude` there holds
- * NODETERM_CANVAS_CONTROL — rejecting it here would contradict the env it was handed.
+ * Plain terminals are not agent nodes. Treating missing identity as Claude made a bare shell look
+ * control-capable and let recovery code relabel it as an agent. A hand-launched CLI is still
+ * observable through its runtime hooks, but the serialized node does not gain agent authority.
  */
 export function sourceIsControlCapable(agentId: unknown): boolean {
-  const id = typeof agentId === 'string' && agentId ? agentId : 'claude'
-  return canControlCanvas(id as AgentId)
+  return typeof agentId === 'string' && agentId.length > 0 && canControlCanvas(agentId as AgentId)
 }
 
 /**
@@ -184,8 +215,18 @@ export function answerBrowserResolve(
     // LIVE read — the drive-time capability check the whole feature's safety rests on. A project.json
     // hand-edit that flipped the switch off is reflected here the next time an agent drives, which is
     // exactly drive time.
-    capabilityOn: projectCapabilityGrantedFor(project, 'agentBrowserControl'),
+    // `{}`: browser control has no machine default (CAPABILITY_MACHINE_DEFAULTS) — an absent switch is
+    // off, and no setting on this machine can change that.
+    capabilityOn: projectCapabilityGrantedFor(project, 'agentBrowserControl', {}),
     sourceTitle: typeof node.title === 'string' ? node.title : '',
     browserTitle: typeof browserNode?.title === 'string' ? browserNode.title : ''
   }
+}
+
+/** `list`'s rows, built from serialized nodes — the same shape the live canvas answers with
+ *  (`n.type` is the persisted `kind`, `n.data.title` the persisted `title`). */
+export function storedNodeListing(
+  nodes: readonly StoredNode[]
+): { id: string; kind: string; title: string }[] {
+  return nodes.map((n) => ({ id: n.id, kind: n.kind ?? 'terminal', title: n.title ?? '' }))
 }

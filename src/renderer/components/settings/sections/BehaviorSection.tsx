@@ -16,6 +16,14 @@ const ROWS = {
     title: 'Default view',
     keywords: ['default', 'view', 'kanban', 'board', 'canvas', 'project']
   },
+  omniKanban: {
+    title: 'Omni Kanban (global swimlanes)',
+    keywords: ['omni', 'kanban', 'swimlane', 'global', 'overview', 'board', 'project']
+  },
+  omniKanbanDefault: {
+    title: 'Omni as default for Cmd+Shift+B',
+    keywords: ['omni', 'kanban', 'global', 'default', 'shortcut', 'cmd', 'shift', 'b']
+  },
   gridSize: { title: 'Grid size', keywords: ['grid', 'size', 'snap'] },
   nodeSize: {
     title: 'Default node size',
@@ -28,6 +36,14 @@ const ROWS = {
   },
   panHover: { title: 'Pan-hover delay (ms)', keywords: ['pan', 'hover', 'delay', 'focus', 'guard'] },
   doubleClick: { title: 'Double-click to focus', keywords: ['double', 'click', 'focus'] },
+  focusZoom: {
+    title: 'Zoom when going to a node',
+    keywords: ['zoom', 'focus', 'go to', 'node', 'jump', 'camera', 'session', 'sidebar']
+  },
+  rememberLock: {
+    title: 'Remember the canvas lock',
+    keywords: ['lock', 'canvas', 'view', 'pan', 'zoom', 'freeze', 'remember', 'restart', 'persist']
+  },
   mdPreview: {
     title: 'Open Markdown in preview',
     keywords: ['markdown', 'md', 'preview', 'render', 'editor', 'docs', 'readme', 'file']
@@ -90,6 +106,32 @@ export function BehaviorSection({ isActive }: { isActive: boolean }): React.JSX.
               <option value="canvas">Canvas</option>
               <option value="kanban">Kanban board</option>
             </Select>
+          }
+        />
+      </SearchableRow>
+      <SearchableRow {...ROWS.omniKanban}>
+        <FieldRow
+          label="Omni Kanban (global swimlanes)"
+          description="When enabled, the global Kanban overview is available via its dedicated shortcut (Settings → Keyboard Shortcuts → Toggle global kanban). Default OFF — existing users see no change."
+          control={
+            <Switch
+              checked={settings.omniKanbanEnabled === true}
+              onChange={(v) => update({ omniKanbanEnabled: v })}
+              ariaLabel="Omni Kanban"
+            />
+          }
+        />
+      </SearchableRow>
+      <SearchableRow {...ROWS.omniKanbanDefault}>
+        <FieldRow
+          label="Make Omni the default for Cmd+Shift+B"
+          description="When enabled, Cmd+Shift+B opens the global overview instead of the per-project board. The dedicated global shortcut always opens Omni regardless. Opt-in, per user."
+          control={
+            <Switch
+              checked={settings.omniKanbanAsDefault === true}
+              onChange={(v) => update({ omniKanbanAsDefault: v })}
+              ariaLabel="Omni as default"
+            />
           }
         />
       </SearchableRow>
@@ -178,6 +220,32 @@ export function BehaviorSection({ isActive }: { isActive: boolean }): React.JSX.
               checked={settings.doubleClickFocus}
               onChange={(v) => update({ doubleClickFocus: v })}
               ariaLabel="Double-click to focus"
+            />
+          }
+        />
+      </SearchableRow>
+      <SearchableRow {...ROWS.focusZoom}>
+        <FieldRow
+          label="Zoom when going to a node"
+          description="Off: going to a node keeps your current zoom and only pans to it."
+          control={
+            <Switch
+              checked={settings.focusZoomToNode}
+              onChange={(v) => update({ focusZoomToNode: v })}
+              ariaLabel="Zoom when going to a node"
+            />
+          }
+        />
+      </SearchableRow>
+      <SearchableRow {...ROWS.rememberLock}>
+        <FieldRow
+          label="Remember the canvas lock"
+          description="The bottom-left lock stays on across restarts until you turn it off. Off: every launch starts unlocked."
+          control={
+            <Switch
+              checked={settings.rememberCanvasLock}
+              onChange={(v) => update({ rememberCanvasLock: v })}
+              ariaLabel="Remember the canvas lock"
             />
           }
         />

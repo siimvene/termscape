@@ -28,6 +28,31 @@ describe('newEntryPath', () => {
     expect(newEntryPath('/repo', 'a/../../evil')).toBeNull()
     expect(newEntryPath('/repo', 'a/')).toBeNull()
   })
+
+  // The hole eneskirca spotted on #294: `..` was only ever looked for between `/` separators, so
+  // a backslash-delimited traversal was one segment that is neither empty nor `..`. It passed on
+  // every platform and escaped `baseDir` as soon as Windows resolved it.
+  it('rejects a backslash traversal, which used to pass as a single segment', () => {
+    expect(newEntryPath('/repo', '..\\evil')).toBeNull()
+    expect(newEntryPath('/repo', 'a\\..\\..\\evil')).toBeNull()
+    expect(newEntryPath('/repo', 'a/..\\evil')).toBeNull()
+    expect(newEntryPath('/repo', 'a\\../evil')).toBeNull()
+  })
+
+  it('rejects a name that is absolute in the Windows dialect', () => {
+    expect(newEntryPath('/repo', '\\Windows\\system32')).toBeNull()
+    expect(newEntryPath('/repo', 'C:\\Windows')).toBeNull()
+    expect(newEntryPath('/repo', 'C:/Windows')).toBeNull()
+    expect(newEntryPath('/repo', 'a\\')).toBeNull()
+  })
+
+  // CONTRIBUTING is explicit that the two separators are NOT interchangeable: on POSIX a
+  // backslash is ordinary filename text. The guard reads both dialects, the construction stays
+  // `/`, and a legal POSIX name survives.
+  it('still accepts a backslash as ordinary filename text', () => {
+    expect(newEntryPath('/repo', 'weird\\name.txt')).toBe('/repo/weird\\name.txt')
+    expect(newEntryPath('/repo', 'a\\\\b')).toBe('/repo/a\\\\b')
+  })
 })
 
 describe('ancestorDirs', () => {

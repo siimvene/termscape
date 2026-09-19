@@ -54,13 +54,44 @@ winget hints (it never installs machine-wide tools itself, and the full bootstra
 elevated) and runs `npm ci`. Its `--check-vs-build-tools` mode is the narrow exception used by
 `quality-windows`: it branches before the elevation refusal, runs only the VS C++ probe, and exits
 before the Node / Python / `npm ci` steps. Fixture injection additionally requires the explicit
-`NODETERM_BOOTSTRAP_TESTING=1` sentinel. `.github/workflows/win-package-smoke.yml` is a
+`NODETERM_BOOTSTRAP_TESTING=1` sentinel. The C++ probe also verifies the x64 Spectre runtime that
+`node-pty`'s `/Qspectre` build needs — the workload can be present while that optional component is
+absent, which otherwise fails only after the full install with `MSB8040`. Before `npm ci` the
+bootstrap sets `npm_config_enable_thin_lto=false` / `npm_config_enable_lto=false`: official Node 26
+Windows builds carry clang/lld ThinLTO in `process.config` and node-gyp 12 copies it into an MSVC
+addon where `link.exe` rejects `/opt:lldltojobs` with `LNK1117` — gyp overrides, not a reason to
+reject a Node version `package.json` allows. `.github/workflows/win-package-smoke.yml` is a
 **workflow_dispatch-only** packaging smoke on windows-latest — build only, never publishes.
 **Follow-ups, in order:** code signing, then Windows auto-update wiring (electron-updater NSIS leg
 + `latest.yml` on the nodeterm.dev feed — blocked on signing: an unsigned auto-update is a
 downgrade in trust), and the fork's PE-identity polish (electron-builder leaves `OriginalFilename`
 empty; the fork's
 `resedit`-based afterSign hook fixes it — cosmetic for NSIS, load-bearing only for Squirrel).
+
+**Linux ships AppImage + deb + rpm**, all unsigned, built by `release-linux` on `ubuntu-latest`
+(`npm run dist:linux` locally). Traps: (1) **packages are named `node-terminal`, the AppImage is
+named `nodeterm`** — electron-builder's `linuxPackageName` is package.json `name`, not `productName`
+(prefix `/opt/nodeterm` IS the productName); anything matching the package name (`scripts/uninstall.sh`'s
+`dpkg -s`/`rpm -q`, README install lines) must say `node-terminal`, and renaming would strand existing
+`.deb` installs, so it is documented not fixed. (2) **rpm shells out to the system `rpmbuild`**
+(electron-builder bundles fpm, not rpmbuild), so `release-linux` runs `apt-get install -y rpm`; the
+emitted `Requires` set resolves on Fedora 44 with nothing extra. (3) **Auto-update is already
+correct**: `isManualUpdatePlatform` (`src/shared/update-platform.ts`) keys off the absence of
+`APPIMAGE`, so deb/rpm land on the manual-download card instead of downloading an AppImage they
+cannot install. (4) **`build.linux.target` ORDER is load-bearing — AppImage stays FIRST**:
+electron-builder writes `latest-linux.yml` from the first publishable target and the AppImage is the
+only Linux artifact electron-updater installs in place; do not alphabetize or re-sort the array (JSON
+cannot carry the comment).
+
+**Building on a GCC 14+ distro (Fedora/Arch/recent openSUSE) needs `CFLAGS=-D_GNU_SOURCE`**:
+smart-whisper's vendored `whisper.cpp` ggml calls GNU-only affinity APIs (`CPU_ZERO`,
+`pthread_getaffinity_np`, `getcpu`) without defining `_GNU_SOURCE`, and GCC 14 made implicit
+declarations an error, so a bare `npm install` fails in smart-whisper's own install script before our
+`postinstall` runs (clean on Fedora 44 / GCC 16.2.1). Two Fedora runtime deps: **`libxcrypt-compat`**
+(fpm's Ruby links `libcrypt.so.1`, dropped by Fedora glibc — both deb and rpm fail without it) and
+**`fuse-libs`** for the AppImage's FUSE2 runtime. Switching `build.toolsets.appimage` to `"1.0.3"`
+drops FUSE2 but is upstream-flagged beta and stops passing the `--no-sandbox` launcher arg, so it is
+a deliberate not-yet.
 
 **macOS permission prompts are declared in `build.mac.extendInfo`, and a missing one denies
 SILENTLY.** On macOS 15+ a connection to the user's own subnet is gated by Local Network privacy,

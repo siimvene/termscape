@@ -23,6 +23,18 @@
  *     change nothing (Property 3 / Constraint 8, the same fail-closed posture as the TypeScript
  *     `resolveCodexThreadNodeIdentity`).
  *
+ * WHAT IT EXPORTS IS WHAT THE RECORD SAYS — it does not decide. `NODETERM_AGENT_ID` and
+ * `NODETERM_CANVAS_CONTROL` used to be constants here (`codex`, granted), and both are facts only
+ * `hookServer.buildPtyEnv` knows: it labels the node with its OWN agent id, which for a custom
+ * agent inheriting the codex harness is `custom:<uuid>`, and it gates the grant on
+ * `canControlCanvas`. Asserting them here mislabelled every such node, and asserted a grant that
+ * agrees with the pane today only because `SHARED_IDENTITY_CAPABLE ⊆ CANVAS_CONTROL_CAPABLE` — a
+ * coincidence that list's own comment invites the next shared-identity agent to break. So the pair
+ * is recorded at bind time and read back here. A PRE-AGENT record (written before those fields
+ * existed) carries neither and means `codex` with the grant, which is precisely what it meant when
+ * it was written; a record that names an agent is exported as it stands, grant included, and never
+ * falls back to the guess.
+ *
  * Inert for every other agent: without `CODEX_THREAD_ID` the whole block is skipped. A machine with
  * no managed accounts has no subdirs, so the scan reduces to the one bare-root read S4 did — the
  * legacy layout keeps resolving byte-for-byte (Constraint 12).
@@ -56,8 +68,11 @@ if [ -z "\${NODETERM_NODE_ID-}" ] && [ -n "\${CODEX_THREAD_ID-}" ]; then
       nt_codex_matches=0
       nt_codex_node=''
       nt_codex_endpoint=''
+      nt_codex_agent=''
+      nt_codex_grant=''
       # Validate one candidate record file for an expected scope, parsed as DATA. On success it
-      # records the node/endpoint and counts the match. $1=file, $2=expected scope ('' = system).
+      # records the node/endpoint/agent/grant and counts the match. $1=file, $2=expected scope
+      # ('' = system).
       nt_codex_try() {
         [ -r "$1" ] || return 0
         nt_a=$(sed -n 's/^accountId=//p' "$1" | head -n 1)
@@ -69,11 +84,36 @@ if [ -z "\${NODETERM_NODE_ID-}" ] && [ -n "\${CODEX_THREAD_ID-}" ]; then
         esac
         nt_n=$(sed -n 's/^nodeId=//p' "$1" | head -n 1)
         nt_e=$(sed -n 's/^endpoint=//p' "$1" | head -n 1)
+        nt_g=$(sed -n 's/^agentId=//p' "$1" | head -n 1)
+        nt_c=$(sed -n 's/^canvasControl=//p' "$1" | head -n 1)
         case "$nt_n" in ''|*[!A-Za-z0-9._-]*) return 0 ;; esac
         case "$nt_e" in /*) ;; *) return 0 ;; esac
+        # SPACES ARE ADMITTED DELIBERATELY, and this line is the reason to say so. The endpoint is
+        # this app's own data-dir path, which on macOS is "~/Library/Application Support/…" — a
+        # filter without the space would reject every macOS record and silently disable the whole
+        # recovery there. What the value is used FOR is what makes that safe: both shims DOT-SOURCE
+        # it with the dot command (canvas-control-core.ts / context-link-core.ts) and the
+        # socket it names then reaches curl --unix-socket "$NODETERM_HOOK_SOCK" — every expansion
+        # inside double quotes, so a space cannot split into extra arguments. The charset is what
+        # keeps quoting and command substitution out; the leading slash above keeps it absolute.
         [ "$(printf %s "$nt_e" | tr -cd 'A-Za-z0-9._/ -')" = "$nt_e" ] || return 0
+        # A PRE-AGENT record (no agentId line, or an empty one) means codex with canvas control:
+        # every record written before the agent fields existed was written by this same Codex
+        # spine, and codex is unconditionally canvas-control-capable, so the implied pair
+        # reproduces what this prelude hardcoded. A record that DOES name an agent is exported as
+        # it stands and never falls back to the guess — including its grant, which is then the
+        # canControlCanvas answer the pane itself got, not an assumption made here.
+        case "$nt_g" in
+          '')
+            nt_g=codex
+            nt_c=1
+            ;;
+          *[!A-Za-z0-9._:-]*) return 0 ;;
+        esac
         nt_codex_node=$nt_n
         nt_codex_endpoint=$nt_e
+        nt_codex_agent=$nt_g
+        nt_codex_grant=$nt_c
         nt_codex_matches=$((nt_codex_matches + 1))
       }
       case "\${NODETERM_CODEX_ACCOUNT_ID-}" in
@@ -102,9 +142,17 @@ if [ -z "\${NODETERM_NODE_ID-}" ] && [ -n "\${CODEX_THREAD_ID-}" ]; then
       then
         NODETERM_NODE_ID="$nt_codex_node"
         NODETERM_HOOK_ENDPOINT="$nt_codex_endpoint"
-        NODETERM_AGENT_ID=codex
-        NODETERM_CANVAS_CONTROL=1
-        export NODETERM_NODE_ID NODETERM_HOOK_ENDPOINT NODETERM_AGENT_ID NODETERM_CANVAS_CONTROL
+        NODETERM_AGENT_ID="$nt_codex_agent"
+        export NODETERM_NODE_ID NODETERM_HOOK_ENDPOINT NODETERM_AGENT_ID
+        # The grant is EXPORTED ONLY WHEN THE RECORD CARRIES IT, and is left UNSET otherwise —
+        # absent, never '0', the same shape buildPtyEnv produces, because both shims gate on
+        # \`[ -z "$NODETERM_CANVAS_CONTROL" ]\`. Withholding is the honest degrade: the tool shell
+        # loses a verb its pane still has, whereas asserting a grant the pane was denied is the
+        # widening this file must never do.
+        if [ "$nt_codex_grant" = 1 ]; then
+          NODETERM_CANVAS_CONTROL=1
+          export NODETERM_CANVAS_CONTROL
+        fi
       fi
       ;;
   esac

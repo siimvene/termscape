@@ -26,7 +26,10 @@
  * callers, and its test pins that the two paths are the same function objects.
  */
 import {
-  projectCapabilityFlagInFile,
+  capabilityHasMachineDefault,
+  capabilityMachineDefault,
+  projectCapabilityFileState,
+  type CapabilityMachineDefaults,
   type ProjectCapability
 } from './project-capabilities'
 
@@ -67,24 +70,67 @@ export function projectCapabilityGranted(s: CapabilityConsentState): boolean {
   return s.enabledInFile === true && s.answer === 'kept'
 }
 
+/** Where an effective capability value came from — for display, never for a grant decision. */
+export type CapabilitySource = 'project' | 'default'
+
+export interface CapabilityEffective {
+  /** THE grant. */
+  on: boolean
+  /** `project` = the file carries an explicit value (or this machine declined it); `default` = the
+   *  file says nothing and this machine's setting answered. */
+  source: CapabilitySource
+  /** The file says `true` but this machine has not KEPT it: off, and the clone notice is owed. */
+  pendingNotice: boolean
+}
+
 /**
- * THE consumer-facing grant check: derives both halves (strict file flag, own-property answer)
- * from a Project-shaped object, so a consumer cannot pick the raw file flag by mistake (PR #213
- * review, I2). PR 6 wires `messagingEnabled(projectId)` as
- * `projectCapabilityGrantedFor(getProject(projectId), 'agentMessaging')` — one call, nothing else.
+ * The whole grant rule, ONCE — every consumer reads it through here or `projectCapabilityGrantedFor`
+ * so no consumer invents its own default:
+ *   - file `true`  → granted only with this machine's `'kept'` (unchanged: a clone's `true` notices)
+ *   - file `false` → off, whatever the default (the explicit value always wins)
+ *   - absent       → a recorded `'declined'` keeps it off (the pre-default builds wrote "off" as a
+ *                    deleted field + decline); otherwise the MACHINE-LOCAL default answers, and only
+ *                    for a capability that has one (`CAPABILITY_MACHINE_DEFAULTS`).
+ * `needsCapabilityNotice` is deliberately untouched: it stays keyed on an EXPLICIT `true`, so a
+ * project that is on only by this machine's default never raises a notice (nothing arrived from a
+ * stranger) while a cloned `true` always does. Pinned by project-capability-consent.test.ts.
+ */
+export function projectCapabilityEffective(
+  p:
+    | (Partial<Record<ProjectCapability, unknown>> & { capabilityAck?: CapabilityAckMap })
+    | undefined
+    | null,
+  cap: ProjectCapability,
+  defaults: CapabilityMachineDefaults
+): CapabilityEffective {
+  const file = projectCapabilityFileState(p, cap)
+  const answer = capabilityAnswerOf(p, cap)
+  if (file === 'on') {
+    const on = projectCapabilityGranted({ capability: cap, enabledInFile: true, answer })
+    return { on, source: 'project', pendingNotice: !on }
+  }
+  if (file === 'off' || !capabilityHasMachineDefault(cap) || answer === 'declined') {
+    return { on: false, source: 'project', pendingNotice: false }
+  }
+  return { on: capabilityMachineDefault(defaults, cap), source: 'default', pendingNotice: false }
+}
+
+/**
+ * THE consumer-facing grant check: derives every half (the file's value, this machine's
+ * own-property answer, this machine's default) from a Project-shaped object and the settings, so a
+ * consumer cannot pick the raw file flag by mistake (PR #213 review, I2). `defaults` is REQUIRED —
+ * a consumer that forgot the machine default must fail to compile, not silently read it as off
+ * while every other surface reads it as on.
  */
 export function projectCapabilityGrantedFor(
   p:
     | (Partial<Record<ProjectCapability, unknown>> & { capabilityAck?: CapabilityAckMap })
     | undefined
     | null,
-  cap: ProjectCapability
+  cap: ProjectCapability,
+  defaults: CapabilityMachineDefaults
 ): boolean {
-  return projectCapabilityGranted({
-    capability: cap,
-    enabledInFile: projectCapabilityFlagInFile(p, cap),
-    answer: capabilityAnswerOf(p, cap)
-  })
+  return projectCapabilityEffective(p, cap, defaults).on
 }
 
 /** This machine's recorded answer, own properties only (M-1: an in-process object must not inherit

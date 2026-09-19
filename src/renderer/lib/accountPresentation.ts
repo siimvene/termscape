@@ -44,7 +44,9 @@ export function presentAccount({
   label,
   email,
   host,
-  machineLabel
+  machineLabel,
+  linked,
+  configDir
 }: {
   label?: string | null
   email?: string | null
@@ -52,12 +54,30 @@ export function presentAccount({
   host?: string | null
   /** Friendly saved SSH-machine name. */
   machineLabel?: string | null
+  /**
+   * A LINKED account: a config dir the user already owned, adopted by `claudeAccounts.link`
+   * (`ClaudeAccount.configDir`). Still local — but worth its own provenance, because it is the one
+   * kind whose removal keeps the folder and whose dir the user drives from their own shell.
+   * Ignored when `host` is set: a linked account is local by definition.
+   */
+  linked?: boolean
+  /** The linked dir, for the tooltip. The path IS the useful fact about a linked account — it is
+   *  what tells `~/.claude-2` from `~/.claude-work`, which no label reliably does. */
+  configDir?: string | null
 }): AccountPresentation {
   const displayLabel = chosenLabel(label)
   const cleanEmail = email?.trim() || undefined
   const identity = displayLabel || cleanEmail || 'Default account'
-  const provenance = host ? `SSH · ${machineLabel?.trim() || host}` : 'Local'
-  const originDetail = host ? `SSH ${host}` : thisMachineCap()
+  const isLinked = !host && !!linked
+  const provenance = host ? `SSH · ${machineLabel?.trim() || host}` : isLinked ? 'Linked' : 'Local'
+  // `thisMachineCap()` and not a hardcoded "This Mac": the local machine is not necessarily a Mac,
+  // and a browser tab gets the neutral word because the account lives on the SERVER. The LINKED
+  // branch names the dir instead — the path is the useful fact there, and it names no machine.
+  const originDetail = host
+    ? `SSH ${host}`
+    : isLinked
+      ? `Linked ${configDir?.trim() || 'config dir'}`
+      : thisMachineCap()
   const identityDetail =
     cleanEmail && cleanEmail !== identity ? `${identity} (${cleanEmail})` : identity
   return {

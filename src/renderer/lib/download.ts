@@ -42,14 +42,26 @@ export function downloadRoute({ browser, ssh, source }: DownloadContext): Downlo
 }
 
 /**
- * True when "Reveal in Finder" can actually do something: an Electron shell, showing paths that
- * are on THIS machine. It was previously offered unconditionally — on an SSH project it handed a
- * remote path to the local file manager, and in a browser tab it is an inert stub. Both were
- * silent no-ops, which reads as a broken app rather than as an unavailable feature.
+ * True when this machine's Electron `shell.*` can actually act on a path the UI is showing:
+ * an Electron shell (both members are `noop` stubs in a browser tab — see `bridge/stubs.ts`),
+ * and a path that is on THIS machine (an SSH host's or a relay peer's is not).
+ *
+ * ONE predicate for every `shell.*` path action, because they share one precondition for one
+ * reason. `reveal` was gated first; `openPath` was not, and a `.zip` in the Server Edition's file
+ * manager was therefore a silent dead click. Writing that rule a second time beside this one is
+ * how the two would drift apart again.
  */
-export function canRevealLocally({ browser, ssh, source }: DownloadContext): boolean {
+export function canUseLocalShell({ browser, ssh, source }: DownloadContext): boolean {
   return !browser && !ssh && source !== 'relay'
 }
+
+/**
+ * True when "Reveal in Finder" can actually do something. It was previously offered
+ * unconditionally — on an SSH project it handed a remote path to the local file manager, and in a
+ * browser tab it is an inert stub. Both were silent no-ops, which reads as a broken app rather
+ * than as an unavailable feature.
+ */
+export const canRevealLocally = canUseLocalShell
 
 /**
  * Start a browser download for `url` without navigating the page. An anchor with `download` is

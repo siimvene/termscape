@@ -3,13 +3,14 @@ import { getViewportForBounds } from '@xyflow/system'
 import {
   FIT_NODE_OPTIONS,
   absolutePosition,
+  isMaximized,
   isMeasured,
-  measuredFitRect,
   nodeFitRect,
   viewportForRect,
   viewportForRectPadded
 } from './nodeFocus'
 import type { FocusableNode } from './nodeFocus'
+import { NODE_MAXIMIZE_MARGIN_PX } from './nodeMaximize'
 
 const term = (over: Partial<FocusableNode> = {}): FocusableNode => ({
   id: 'n1',
@@ -148,28 +149,39 @@ describe('viewportForRect', () => {
   it('refuses to compute against a container it cannot size', () => {
     expect(viewportForRect({ x: 0, y: 0, width: 600, height: 400 }, 0, 0)).toBeNull()
   })
+})
 
-  it('frames the node clear of the sidebar when given a chrome-free region', () => {
-    // The regression this guards: on a cross-project focus the node was centred in the FULL pane
-    // and landed partly under the (pinned) sessions sidebar. Reserving the sidebar's 400px on the
-    // left as a region must push the node's centre into the free half, not the pane's centre.
-    const rect = { x: 4000, y: 3000, width: 600, height: 400 }
-    const region = { offsetX: 400, offsetY: 0, width: 880, height: 900 } // pane 1280×900, sidebar 400
-    const vp = viewportForRect(rect, 1280, 900, region)!
-    // Node centre in screen px = vp.x + centreX * zoom. It must sit inside [400, 1280], i.e. clear
-    // of the sidebar, and near the free region's own centre (400 + 880/2 = 840).
-    const centreX = vp.x + 4300 * vp.zoom
-    expect(centreX).toBeGreaterThan(400)
-    expect(centreX).toBeCloseTo(840, 0)
-    // The plain (no-region) framing put the centre at the pane middle (640) — under the sidebar.
-    const plain = viewportForRect(rect, 1280, 900)!
-    expect(plain.x + 4300 * plain.zoom).toBeCloseTo(640, 0)
+describe('viewportForRect — the framing "go to node" applies', () => {
+  const rect = { x: 5000, y: 4000, width: 600, height: 400 }
+
+  it('centres the node in the pane, whatever chrome floats over it', () => {
+    // Twice-reported regression: framing against the chrome-free rectangle — centred in it, or
+    // centred in the pane and then nudged clear of it — pushes the node right by most of its width,
+    // because the sessions sidebar is a 300px OVERLAY and it is open exactly when this is used.
+    // "Go to node" puts the node where the eye is; the free-rect solve belongs to fitAll.
+    const wide = viewportForRect(rect, 3440, 1400)!
+    expect(wide.x + 5300 * wide.zoom).toBeCloseTo(1720, 0)
+    expect(wide.y + 4200 * wide.zoom).toBeCloseTo(700, 0)
+    const laptop = viewportForRect(rect, 1440, 900)!
+    expect(laptop.x + 5300 * laptop.zoom).toBeCloseTo(720, 0)
+    expect(laptop.y + 4200 * laptop.zoom).toBeCloseTo(450, 0)
   })
 
-  it('is identical to the plain framing when the region is the whole pane', () => {
-    const rect = { x: 4000, y: 3000, width: 600, height: 400 }
-    const full = { offsetX: 0, offsetY: 0, width: 1280, height: 900 }
-    expect(viewportForRect(rect, 1280, 900, full)).toEqual(viewportForRect(rect, 1280, 900))
+  it('keeps a given zoom and only pans (settings.focusZoomToNode off)', () => {
+    // The point of the option: a user who settled on a zoom level loses their sense of place when
+    // a jump also rescales the canvas. The node is still centred.
+    const vp = viewportForRect(rect, 1440, 900, 0.5)!
+    expect(vp.zoom).toBe(0.5)
+    expect(vp.x + 5300 * 0.5).toBeCloseTo(720, 0)
+    expect(vp.y + 4200 * 0.5).toBeCloseTo(450, 0)
+  })
+
+  it('passes an out-of-framing-range zoom through — it is one the canvas already shows', () => {
+    // Re-clamping to FIT_NODE_OPTIONS would rescale the very view this option exists to leave
+    // alone; the canvas's own limits already bound what getZoom() can return.
+    expect(viewportForRect(rect, 1440, 900, 1.9)!.zoom).toBe(1.9)
+    expect(viewportForRect(rect, 1440, 900, 0.1)!.zoom).toBe(0.1)
+    expect(viewportForRect(rect, 1440, 900, 0)).toBeNull()
   })
 })
 
@@ -184,79 +196,88 @@ describe('isMeasured', () => {
   })
 })
 
-describe('measuredFitRect (the measured focus path, which no longer goes through fitView)', () => {
-  // Canvas.frameNode drops React Flow's DEFERRED fitView entirely and frames BOTH cases itself:
-  // measured ⇒ this rect, unmeasured ⇒ nodeFitRect. These pin that the swap cannot drift.
-  const internal = (over: Record<string, unknown> = {}) => ({
-    measured: { width: 600, height: 400 },
-    internals: { positionAbsolute: { x: 4000, y: 3000 } },
-    ...over
-  })
+describe('viewportForRect — the maximized exception (issue #743)', () => {
+  /**
+   * The reporter's controlled measurement, reproduced as arithmetic. macOS, signed v0.3.5,
+   * `focusZoomToNode` OFF (so the zoom is held and cannot confound it), sessions sidebar pinned,
+   * one node, maximized. Only the CAMERA moved across "go to another node and back": the node's
+   * position, size and the zoom were byte-identical before and after.
+   */
+  const PANE_W = 1710
+  const ZOOM = 0.7345
+  const INSETS = { left: 322, right: 0 }
+  const rect = { x: -68.9, y: 0, width: 1824, height: 1261 }
+  /** Where the node's left edge lands on screen for a given viewport. */
+  const leftEdge = (vp: { x: number }) => vp.x + rect.x * ZOOM
 
-  it('frames a measured node identically to the persisted-rect path for the same geometry', () => {
-    const fromStore = measuredFitRect(internal())
-    const fromPersisted = nodeFitRect(term(), [term()])
-    expect(fromStore).toEqual(fromPersisted)
-    // …and therefore lands the exact same camera, with and without a chrome-free region.
-    const region = { offsetX: 400, offsetY: 0, width: 880, height: 900 }
-    expect(viewportForRect(fromStore!, 1280, 900)).toEqual(viewportForRect(fromPersisted!, 1280, 900))
-    expect(viewportForRect(fromStore!, 1280, 900, region)).toEqual(
-      viewportForRect(fromPersisted!, 1280, 900, region)
+  it('reproduces the reported drift when the framing ignores the pinned inset', () => {
+    // 1824 × 0.7345 = 1339.8 rendered px; (1710 - 1339.8) / 2 = 185.1 — centred in the WHOLE pane,
+    // exactly as measured. Maximize had put it at 346.0, so the camera moved 160.9 px, which is
+    // 322 / 2: half the left inset, what centring a free-area-wide object in the full pane gives.
+    const vp = viewportForRect(rect, PANE_W, 900, ZOOM)!
+    expect(leftEdge(vp)).toBeCloseTo(185.1, 0)
+    expect(leftEdge(viewportForRect(rect, PANE_W, 900, ZOOM, INSETS)!) - leftEdge(vp)).toBeCloseTo(
+      160.9,
+      0
     )
   })
 
-  it('uses the absolute position React Flow already resolved (no parent walk needed)', () => {
-    // The store hands out positionAbsolute with the group chain applied, which is why the measured
-    // branch needs neither the node list nor absolutePosition().
-    expect(measuredFitRect(internal({ internals: { positionAbsolute: { x: 5050, y: 260 } } }))).toEqual(
-      { x: 5050, y: 260, width: 600, height: 400 }
+  it('frames a maximized node exactly where maximizeTargetRect placed it', () => {
+    // maximize's own origin is `marginPx + insets.left` = 24 + 322 = 346. The node is the free
+    // area minus two margins, so centring it in the free area reproduces that origin — which is
+    // the property that makes this a fix rather than a different opinion about where to put it.
+    const vp = viewportForRect(rect, PANE_W, 900, ZOOM, INSETS)!
+    expect(leftEdge(vp)).toBeCloseTo(NODE_MAXIMIZE_MARGIN_PX + INSETS.left, 0)
+    // 136.9 px of the node sat behind the sidebar before; none does now.
+    expect(leftEdge(vp)).toBeGreaterThanOrEqual(INSETS.left)
+  })
+
+  it('is a mathematical no-op when no panel is pinned', () => {
+    const bare = viewportForRect(rect, PANE_W, 900, ZOOM)!
+    const zero = viewportForRect(rect, PANE_W, 900, ZOOM, { left: 0, right: 0 })!
+    expect(zero).toEqual(bare)
+    expect(viewportForRect(rect, PANE_W, 900, undefined, { left: 0, right: 0 })).toEqual(
+      viewportForRect(rect, PANE_W, 900)
     )
   })
 
-  it('gives up rather than framing a half-known rect — the caller then stands still', () => {
-    expect(measuredFitRect(internal({ measured: { width: 0, height: 0 } }))).toBeNull()
-    expect(measuredFitRect(internal({ measured: { width: 600 } }))).toBeNull()
-    expect(measuredFitRect({ measured: { width: 600, height: 400 } })).toBeNull()
-    expect(measuredFitRect(internal({ internals: { positionAbsolute: { x: 10 } } }))).toBeNull()
-    expect(measuredFitRect(null)).toBeNull()
-    expect(measuredFitRect(undefined)).toBeNull()
-    // frameNode's rule, end to end: no rect from either source ⇒ no viewport ⇒ setViewport is
-    // never called and the camera stays put. Teleporting to the origin is the bug being fixed.
-    const sizeless: FocusableNode = { id: 'ghost', position: { x: 0, y: 0 } }
-    const rect = measuredFitRect({ measured: {} }) ?? nodeFitRect(sizeless, [sizeless])
-    expect(rect).toBeNull()
+  it('insets the zoom-to-fit path too, without changing the unpinned answer', () => {
+    // `focusZoomToNode` ON rescales as well. The rectangle question is the same one, so the
+    // maximized node is fitted INSIDE the free area rather than the pane — its whole width is
+    // clear of the panel, where centring in the pane left part of it underneath.
+    const fitted = viewportForRect(rect, PANE_W, 900, undefined, INSETS)!
+    expect(fitted.x + rect.x * fitted.zoom).toBeGreaterThanOrEqual(INSETS.left)
+    expect(fitted.x + (rect.x + rect.width) * fitted.zoom).toBeLessThanOrEqual(PANE_W)
   })
 
-  it('documents the failure mode it replaces: an empty fit set centres the ORIGIN at maxZoom', () => {
-    // What a DEFERRED fitView resolved after a project switch computes: the target has left
-    // nodeLookup, the filtered fit set is empty, getInternalNodesBounds collapses to zeroes and
-    // the zoom divides by 0 ⇒ maxZoom. This is the number to compare a bug report against (138%,
-    // empty canvas, node in the far minimap corner).
-    expect(
-      getViewportForBounds(
-        { x: 0, y: 0, width: 0, height: 0 },
-        1600,
-        900,
-        FIT_NODE_OPTIONS.minZoom,
-        FIT_NODE_OPTIONS.maxZoom,
-        FIT_NODE_OPTIONS.padding
-      )
-    ).toEqual({ x: 800, y: 450, zoom: FIT_NODE_OPTIONS.maxZoom })
+  it('falls back to the whole pane when the panels are wider than it', () => {
+    // Not a rectangle anything can be centred in — solving against a negative width would put the
+    // camera somewhere arbitrary. Standing on the old answer is the honest degrade.
+    const narrow = viewportForRect(rect, 300, 900, ZOOM, { left: 322, right: 0 })!
+    expect(narrow).toEqual(viewportForRect(rect, 300, 900, ZOOM))
+  })
+
+  it('refuses a container it cannot size, insets or not', () => {
+    expect(viewportForRect(rect, 0, 0, ZOOM, INSETS)).toBeNull()
+    expect(viewportForRect(rect, PANE_W, 900, 0, INSETS)).toBeNull()
   })
 })
 
-describe('viewportForRectPadded — the measured focus path and fitAll, both imperative now', () => {
+describe('isMaximized', () => {
+  it('keys on premaxRect — the flag maximize itself writes and restore clears', () => {
+    expect(isMaximized({ data: { premaxRect: { x: 0, y: 0, width: 10, height: 10 } } })).toBe(true)
+    expect(isMaximized({ data: {} })).toBe(false)
+    expect(isMaximized({})).toBe(false)
+    expect(isMaximized(null)).toBe(false)
+    expect(isMaximized(undefined)).toBe(false)
+  })
+})
+
+describe('viewportForRectPadded — the imperative fit path (fitAll and directional insets)', () => {
   /*
    * The asymmetric-chrome fixture: 1280×900 pane, a 400px pinned sidebar on the left, 12px
-   * FIT_VIEW_GAP elsewhere, i.e. exactly what solveFitPadding/rectToPadding hand over. Derivation
-   * of the expected viewport, straight out of xyflow's getViewportForBounds:
-   *   parsePaddings ⇒ left 400, right 12, top 12, bottom 12 ⇒ p.x = 412, p.y = 24
-   *   xZoom = (1280 − 412)/600 = 1.4467, yZoom = (900 − 24)/400 = 2.19 ⇒ 1.4467, clamped to
-   *     maxZoom 1.38
-   *   x = 1280/2 − (5050 + 300)·1.38 = 640 − 7383 = −6743, y = 900/2 − (260 + 200)·1.38 = −184.8
-   *   the applied left padding at that x is 226 < the required 400, so xyflow's asymmetric
-   *     correction shifts by 226 − 400 = −174 ⇒ x = −6743 + 174 = −6569 (the node ends up FLUSH
-   *     against the sidebar's inset, not centred in what is left); top/bottom already exceed 12.
+   * FIT_VIEW_GAP elsewhere, i.e. exactly what solveFitPadding/rectToPadding hand over. This is the
+   * measured focus path fitAll shares — a MEASURED node framed with DIRECTIONAL pixel insets.
    */
   const asymmetric = { top: '12px', left: '400px', right: '12px', bottom: '12px' } as const
   const grouped = { x: 5050, y: 260, width: 600, height: 400 }
@@ -278,16 +299,9 @@ describe('viewportForRectPadded — the measured focus path and fitAll, both imp
         asymmetric
       )
     )
-    // The regression this guards: reducing the pane to the free region AND paying the 0.2 ratio
-    // inside it applies both, framing the node ~12% smaller and 20px off centre.
-    const region = { offsetX: 400, offsetY: 12, width: 868, height: 876 }
-    const viaRegion = viewportForRect(grouped, 1280, 900, region)!
-    expect(viaRegion.zoom).toBeCloseTo(1.2067, 4)
-    expect(viaRegion.x).toBeCloseTo(-5621.67, 2)
-    expect(vp).not.toEqual(viaRegion)
   })
 
-  it('honours the caller\'s zoom limits — a fit-ALL must out-zoom the single-node clamp', () => {
+  it("honours the caller's zoom limits — a fit-ALL must out-zoom the single-node clamp", () => {
     const tiny = { x: 0, y: 0, width: 100, height: 100 }
     // fitAll passes the canvas's own <ReactFlow minZoom/maxZoom> (0.01 / 2).
     expect(viewportForRectPadded(tiny, 1280, 900, 0.1, { minZoom: 0.01, maxZoom: 2 })).toEqual({
@@ -300,7 +314,7 @@ describe('viewportForRectPadded — the measured focus path and fitAll, both imp
   })
 
   it('frames a whole-canvas bounds rect the way fitAll asks for it', () => {
-    // What fitAll now computes instead of queueing a fitView: the non-ghost bounds, the same
+    // What fitAll computes instead of queueing a fitView: the non-ghost bounds, the same
     // solveFitPadding insets, the canvas zoom limits.
     const all = { x: -500, y: -200, width: 4000, height: 2000 }
     const limits = { minZoom: 0.01, maxZoom: 2 }
@@ -322,15 +336,17 @@ describe('absurd geometry can never install a viewport (project.json and peers a
   // setViewport({x: NaN, …}) is accepted without complaint: the canvas goes blank and unpannable,
   // and onMove persists that camera into the project. Node positions arrive from a git-shared
   // .nodeterm/project.json and from canvas peers, neither of which validates them, so the refusal
-  // lives here — at the one boundary every framing path crosses.
+  // lives here — at the one boundary every framing path crosses (both viewportForRect and
+  // viewportForRectPadded).
   const rect = { x: 4000, y: 3000, width: 600, height: 400 }
-  const region = { offsetX: 400, offsetY: 0, width: 880, height: 900 }
 
-  it('refuses a NaN / Infinity rect, with and without a region', () => {
+  it('refuses a NaN / Infinity rect on both framing paths', () => {
     for (const bad of [NaN, Infinity, -Infinity]) {
       expect(viewportForRect({ ...rect, x: bad }, 1280, 900)).toBeNull()
       expect(viewportForRect({ ...rect, y: bad }, 1280, 900)).toBeNull()
-      expect(viewportForRect({ ...rect, x: bad }, 1280, 900, region)).toBeNull()
+      // …with a held zoom (the pan path) and with a pinned inset (the maximized path) too.
+      expect(viewportForRect({ ...rect, x: bad }, 1280, 900, 0.5)).toBeNull()
+      expect(viewportForRect({ ...rect, x: bad }, 1280, 900, undefined, { left: 322, right: 0 })).toBeNull()
       expect(viewportForRectPadded({ ...rect, x: bad, y: bad }, 1280, 900, 0.2)).toBeNull()
       expect(viewportForRect({ ...rect, width: bad }, 1280, 900)).toBeNull()
       expect(viewportForRect({ ...rect, height: bad }, 1280, 900)).toBeNull()
@@ -343,7 +359,6 @@ describe('absurd geometry can never install a viewport (project.json and peers a
     // catches this one, which is why both ends are guarded.
     expect(viewportForRect({ ...rect, x: Number.MAX_VALUE }, 1280, 900)).toBeNull()
     expect(viewportForRect({ ...rect, y: -Number.MAX_VALUE }, 1280, 900)).toBeNull()
-    expect(viewportForRect({ ...rect, x: Number.MAX_VALUE }, 1280, 900, region)).toBeNull()
     expect(viewportForRectPadded({ ...rect, x: Number.MAX_VALUE }, 1280, 900, 0.2)).toBeNull()
   })
 
@@ -358,7 +373,6 @@ describe('absurd geometry can never install a viewport (project.json and peers a
         FIT_NODE_OPTIONS.padding
       )
     )
-    expect(viewportForRect(rect, 1280, 900, region)).not.toBeNull()
     expect(viewportForRect({ x: -9e6, y: -7e6, width: 600, height: 400 }, 1280, 900)).not.toBeNull()
   })
 
@@ -378,13 +392,5 @@ describe('absurd geometry can never install a viewport (project.json and peers a
     }
     expect(absolutePosition(child, [g, child]).x).toBe(Infinity)
     expect(nodeFitRect(child, [g, child])).toBeNull()
-  })
-
-  it('measuredFitRect refuses a non-finite absolute position', () => {
-    const m = { width: 600, height: 400 }
-    expect(measuredFitRect({ measured: m, internals: { positionAbsolute: { x: NaN, y: 0 } } })).toBeNull()
-    expect(
-      measuredFitRect({ measured: m, internals: { positionAbsolute: { x: 0, y: Infinity } } })
-    ).toBeNull()
   })
 })

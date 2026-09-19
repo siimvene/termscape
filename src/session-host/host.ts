@@ -30,10 +30,17 @@ import {
   type ListSessionsResult
 } from './protocol'
 import { HostSession } from './session'
+import { sendKeysWrites } from './send-keys-delivery'
 import { paneCommand as readPaneCommand } from './process-tree'
 import { terminateWindowsProcessTree } from './windows-process-tree'
 import { publishSessionHostState } from './state-file'
-import { readExistingSessionHostIdentity } from './existing-host-state'
+import {
+  EMPTY_LOCK_STALE_MS,
+  LISTEN_RETRY_BUDGET_MS,
+  LISTEN_RETRY_MAX_DELAY_MS,
+  readExistingSessionHostIdentity,
+  startupLockState
+} from './existing-host-state'
 import {
   RETRY_SESSION_GENERATION,
   SessionGenerationCoordinator,
@@ -157,9 +164,18 @@ async function main(): Promise<void> {
     try {
       alive = await probeExisting(paths.statePath, paths.endpoint, paths.tokenPath)
     } catch (error) {
-      log(`fatal: existing host ownership state is unreadable: ${String(error)}`)
-      process.exit(1)
-      return
+      // An EMPTY lock is the one unreadable state with a second, independent witness: a live
+      // starter heartbeats it (see startupLockState). One that has stopped moving belonged to a
+      // process that died between the exclusive create and publication — before issue #783 that
+      // deadlocked every later launch, since the fail-closed reader can only ever say "unreadable"
+      // about it. Anything else unreadable still refuses, as it must.
+      if (startupLockState(paths.statePath) !== 'abandoned') {
+        log(`fatal: existing host ownership state is unreadable: ${String(error)}`)
+        process.exit(1)
+        return
+      }
+      log(`abandoned empty startup lock (untouched for >${EMPTY_LOCK_STALE_MS}ms) — reclaiming`)
+      alive = false
     }
     if (alive) {
       log('another host is already running and answered hello — exiting quietly')
@@ -804,7 +820,13 @@ async function main(): Promise<void> {
       case 'sendKeys': {
         const s = sessions.get(req.name)
         if (!s || s.exited) return { ok: false, error: 'no such session' }
-        s.proc.write(req.text + (req.enter ? '\r' : ''))
+        // Framed from the pane's REAL bracketed-paste state, with the Enter as its own write —
+        // the session host's equivalent of tmux's `paste-buffer -p` + `send-keys Enter`. See
+        // send-keys-delivery.ts; the mode read crosses the emulator tail, so re-check liveness
+        // after it rather than writing into a session that exited meanwhile.
+        const bracketed = await s.bracketedPasteRequested()
+        if (s.exited || sessions.get(req.name) !== s) return { ok: false, error: 'no such session' }
+        for (const chunk of sendKeysWrites(req.text, req.enter, bracketed)) s.proc.write(chunk)
         return { ok: true }
       }
       case 'paneCommand': {
@@ -1026,32 +1048,64 @@ async function main(): Promise<void> {
     }
   }
 
+  // EADDRINUSE retry state. The endpoint can stay busy for a while after its owner dies — issue
+  // #783 measured ~1.5 minutes on a Windows named pipe — so we WAIT for it instead of giving up.
+  const listenDeadline = Date.now() + LISTEN_RETRY_BUDGET_MS
+  let listenDelay = 250
+  let lastRetryLogAt = 0
+
+  /** Keep the empty startup lock's mtime moving, so other launches can tell this retry apart from
+   *  a host that died mid-startup (startupLockState). Best effort: a lock a scanner holds open for
+   *  a moment is not a reason to abandon the retry. */
+  function touchStartupLock(): void {
+    try {
+      const now = new Date()
+      fs.utimesSync(paths.statePath, now, now)
+    } catch {
+      /* best effort */
+    }
+  }
+
   server.on('error', (err: NodeJS.ErrnoException) => {
-    log(`listen error: ${err.code ?? err.message}`)
     // We hold the state-file lock, so a genuine EADDRINUSE here means a PRIOR host (from before
     // this file existed, or one that crashed after binding but before this run started) is still
-    // bound. Give the probe one more honest look before giving up.
-    if (err.code === 'EADDRINUSE') {
-      void probeExisting(paths.statePath, paths.endpoint, paths.tokenPath).then(
-        (alive) => {
-          if (alive) process.exit(0)
-          cleanupFiles()
-          process.exit(1)
-        },
-        (error) => {
-          log(`fatal: ownership probe after EADDRINUSE failed: ${String(error)}`)
-          cleanupFiles()
-          process.exit(1)
-        }
-      )
+    // bound to the endpoint.
+    //
+    // Do NOT probe our own state file here: it is the EMPTY lock this process just created, so
+    // every read of it says "file is empty" and the probe can never answer alive or absent. That
+    // was issue #783 — the "one more honest look" was structurally a no-op, and the exit deleted
+    // the lock, so the next launch repeated it from scratch. Nothing here can identify whoever
+    // holds the endpoint, so the honest move is to keep the lock and wait for it to free up.
+    if (err.code === 'EADDRINUSE' && Date.now() < listenDeadline) {
+      const now = Date.now()
+      if (now - lastRetryLogAt > 10_000) {
+        lastRetryLogAt = now
+        log(
+          `listen error: EADDRINUSE — endpoint still held; retrying for ` +
+            `${Math.round((listenDeadline - now) / 1000)}s more`
+        )
+      }
+      touchStartupLock()
+      // Deliberately NOT unref'd: while `listen` has failed the server holds no handle, so an
+      // unref'd timer leaves an empty event loop and the process exits 0 — a host that silently
+      // stops retrying while its log says it is waiting. (Caught by the Windows job below; the
+      // Linux one cannot reach this path at all.)
+      setTimeout(() => {
+        touchStartupLock()
+        server.listen(paths.endpoint)
+      }, listenDelay)
+      listenDelay = Math.min(listenDelay * 2, LISTEN_RETRY_MAX_DELAY_MS)
       return
     }
+    log(`listen error: ${err.code ?? err.message}`)
     cleanupFiles()
     process.exit(1)
   })
 
   const token = crypto.randomBytes(32).toString('hex')
-  server.listen(paths.endpoint, () => {
+  // `once`, and the listen calls below carry no callback: a retry would otherwise register this
+  // again and run the whole publication block once per attempt when the endpoint finally frees.
+  server.once('listening', () => {
     // Defence in depth: the 0600 token already gates every command, but a process running under a
     // permissive umask would otherwise publish the AF_UNIX socket world-writable, letting a co-user
     // at least connect() (and reach the pre-auth framer). Pin it to owner-only. Windows named pipes
@@ -1089,6 +1143,7 @@ async function main(): Promise<void> {
     log(`listening pid=${process.pid} endpoint=${paths.endpoint}`)
     scheduleGraceExitIfEmpty() // a host with zero sessions ever attached still exits eventually
   })
+  server.listen(paths.endpoint)
 
   // Detaching every client (app quit) is not a lifecycle event here at all — there is no
   // "client" concept at the process level, only sockets, and their 'close' handler above already

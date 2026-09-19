@@ -1,16 +1,19 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'http'
 import { randomUUID, timingSafeEqual } from 'crypto'
 import { writeFileSync, mkdirSync, chmodSync, unlinkSync } from 'fs'
+import { homedir } from 'os'
 import path from 'path'
 import { platform } from '../platform'
 import { hookSockPath } from './hook-sock-path'
 import { canControlCanvas, type AgentId } from '../../shared/agents/config'
 import { normalizeFor, type NormalizedAgentEvent } from '../../shared/agents/normalize'
-import type { CodexIdentityEvent } from '../../shared/types'
+import { classifyClaudeConfigDir, configDirFromTranscriptPath } from '../claude-accounts-core'
+import { claudeAccountsSnapshot } from '../claude-config-dir'
+import type { CodexIdentityEvent, ObservedClaudeAccount } from '../../shared/types'
 import type { NodeTokenVerdict } from './node-auth-token'
 import { nodeTokenDir } from './node-token-files'
 import { isForeignKidToken, isSafeNodeId, verifyNodeToken } from './node-auth-token'
-import { isSafeThreadId } from '../codex-identity-proxy'
+import { isSafeCodexAgentId, isSafeThreadId, type CodexThreadAgent } from '../codex-identity-proxy'
 import { isSafeAccountId } from '../../shared/codex-account'
 import {
   controlPolicy,
@@ -147,6 +150,38 @@ function parseClientRevision(raw: string | string[] | undefined): number | undef
 }
 
 /**
+ * The `account` LABEL for a claude hook payload: `transcript_path` →
+ * `<configDir>/projects/…` → which account that dir is. Undefined for every other agent and for a
+ * payload with no usable `transcript_path` — "we did not observe an account" and "the system
+ * account" are different facts and must stay distinguishable (CONTRIBUTING: a failed read is never
+ * evidence of absence), so an absent field is the honest answer, not a synthesized system row.
+ *
+ * NEVER throws: this sits on the 204 path, and a classification failure — a settings store mid-
+ * write, a platform seam not yet initialized in an odd boot order — must cost the label, not the
+ * event. NO filesystem access happens here: the dir is classified as a string, so a forged
+ * POST naming `~/.ssh/projects/x.jsonl` gets a `known: false` label and nothing is opened.
+ */
+function observedClaudeAccount(
+  agentId: string,
+  payload: Record<string, unknown>
+): ObservedClaudeAccount | undefined {
+  if (agentId !== 'claude') return undefined
+  const tp = payload.transcript_path
+  if (typeof tp !== 'string' || !tp) return undefined
+  try {
+    const dir = configDirFromTranscriptPath(tp)
+    if (!dir) return undefined
+    return classifyClaudeConfigDir(dir, {
+      homeDir: homedir(),
+      userDataDir: platform().userDataDir,
+      accounts: claudeAccountsSnapshot()
+    })
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * What the hook server knows about the POST an event arrived on, beyond the event itself.
  *
  * `verified` = the caller presented a per-node token THIS instance minted for THAT node id. It is
@@ -177,9 +212,13 @@ export interface HookEventMeta {
  * fail-closed from day one costs nobody anything.
  *
  * `open-project` (issue #338) is here for the same class of reason as `sticky`: the main-side
- * grant ledger (src/main/project-grants.ts) mints per-caller targeting rights off a successful
+ * grant ledger (src/core/project-grants.ts) mints per-caller targeting rights off a successful
  * `open-project`, and a grant recorded for an unverifiable caller would authorize whoever can
  * name that caller's node id. NEW verb, so fail-closed from day one strands nobody.
+ *
+ * `settings` (@shared/settings-verb) joins for the same reason again: its `--set` raises a dialog
+ * that names the requesting node, and the user's click grants what the requester asked for — a
+ * requester nobody can verify is a requester the dialog would be lying about. NEW verb.
  *
  * Consulted in the `/control/` route BEFORE `identityGate`'s decision is, so no future change to
  * the policy table can widen it; `messaging-verified-only.test.ts` drives the route on both sides
@@ -190,7 +229,8 @@ export const requiresVerified: ReadonlySet<string> = new Set([
   'reply',
   'notify',
   'sticky',
-  'open-project'
+  'open-project',
+  'settings'
 ])
 
 /**
@@ -208,8 +248,13 @@ export const STICKY_CONTROL_REFUSAL = 'Sticky write refused.'
  *  diagnosis, no token or restart advice — a designed refusal, not a rollout accident. */
 export const OPEN_PROJECT_CONTROL_REFUSAL = 'Project open refused.'
 
+/** Same posture for `settings`: a caller that cannot prove which node it is must not read this
+ *  machine's settings, and must never be the one a settings dialog names as the requester. */
+export const SETTINGS_CONTROL_REFUSAL = 'Settings access refused.'
+
 /** The verified-only refusal, worded for the verb that was refused. */
 export function verifiedRefusalFor(verb: string): string {
+  if (verb === 'settings') return SETTINGS_CONTROL_REFUSAL
   if (verb === 'sticky') return STICKY_CONTROL_REFUSAL
   if (verb === 'open-project') return OPEN_PROJECT_CONTROL_REFUSAL
   return MESSAGING_CONTROL_REFUSAL
@@ -295,6 +340,7 @@ class HookServer {
         cwd: string
         hookEndpoint: string
         accountId?: string
+        agent?: CodexThreadAgent
       }) => Promise<string>)
     | null = null
   private codexThreadBindHandler:
@@ -303,6 +349,7 @@ class HookServer {
         threadId: string
         hookEndpoint: string
         accountId?: string
+        agent?: CodexThreadAgent
       }) => Promise<void>)
     | null = null
   private codexIdentityListener: ((e: CodexIdentityEvent) => void) | null = null
@@ -729,8 +776,16 @@ class HookServer {
           // Raw listener first: it drives the transcript-tailing features (which need
           // transcript_path). Inside the try so a throwing raw listener still ends 204.
           this.rawListener?.(agentId, nodeId, payload, { verified })
+          // WHICH CLAUDE ACCOUNT this session is on. A third LABEL alongside
+          // `verified`/`clientRevision`, computed HERE so ONE implementation serves both shells —
+          // the "both raw listeners change together" rule is sidestepped rather than violated,
+          // because neither raw listener changes. Claude only: `transcript_path` means a config
+          // dir for claude alone (codex rollouts and gemini chats live in unrelated trees, and
+          // those agents have their own identity spine).
+          const account = observedClaudeAccount(agentId, payload)
           const normalized = normalizeFor(agentId, { nodeId, agentId, payload })
-          if (normalized && this.listener) this.listener({ ...normalized, verified, clientRevision })
+          if (normalized && this.listener)
+            this.listener({ ...normalized, verified, clientRevision, ...(account ? { account } : {}) })
         }
         res.writeHead(204)
         res.end()
@@ -966,6 +1021,30 @@ class HookServer {
       return
     }
     const accountId = rawAccountId || undefined
+    // THE PANE'S OWN AGENT LABEL, echoed back so the ownership record can carry it.
+    //
+    // Why the client is asked at all, when `hookEndpoint` below is deliberately the server's own
+    // answer: the agent id is a fact about a tmux session that OUTLIVES this process, and the
+    // launcher POSTing here runs inside that pane with the `NODETERM_AGENT_ID` `buildPtyEnv` put
+    // there. Nothing on the server side is as durable — an in-memory map from `buildPtyEnv` is
+    // empty for every node whose pane predates this app run, which is the norm after a restart and
+    // permanent for a node in a project the user has not opened.
+    //
+    // It is not a capability claim. A caller only reaches this line by presenting a token this
+    // instance minted FOR THIS NODE (`nodeTokenVerified` above, strict), so it is the node; the
+    // record it shapes is re-exported into that same node's own tool shells and nowhere else; and
+    // the env var it sets is not what authorizes anything (see `identityGate` — the per-node token
+    // is). Lying about it buys the liar the label they already had.
+    //
+    // THE GRANT IS NOT ECHOED. It is derived here by `canControlCanvas` — the same predicate, in
+    // the same process, that `buildPtyEnv` used to gate the pane — so there is exactly ONE decider
+    // and a forged agent id cannot manufacture a grant the table would refuse. An unparseable or
+    // absent id writes a PRE-AGENT record, which reads back with the documented implied values:
+    // the behaviour that shipped before this field existed.
+    const rawAgentId = form.agentId ?? ''
+    const agent: CodexThreadAgent | undefined = isSafeCodexAgentId(rawAgentId)
+      ? { agentId: rawAgentId, canvasControl: canControlCanvas(rawAgentId) }
+      : undefined
     if (verb === 'start') {
       const cwd = form.cwd ?? ''
       if (!path.isAbsolute(cwd)) {
@@ -979,7 +1058,8 @@ class HookServer {
           nodeId,
           cwd,
           hookEndpoint: this.endpointFilePath(),
-          accountId
+          accountId,
+          agent
         })
         // Same predicate the record store gates on, so a thread id the store would refuse can
         // never be handed back to a launcher that will then `resume` it.
@@ -1008,7 +1088,8 @@ class HookServer {
         nodeId,
         threadId,
         hookEndpoint: this.endpointFilePath(),
-        accountId
+        accountId,
+        agent
       })
       this.codexIdentityListener?.({ nodeId, mode: 'shared' })
       res.writeHead(204)
@@ -1074,7 +1155,7 @@ class HookServer {
   // managed permission hook holds for that many seconds for a phone/canvas answer file before
   // falling through to Claude's interactive prompt. 0/undefined ⇒ NODETERM_PERM_WAIT_SECS absent ⇒
   // the hook's wait-branch is inert (exact legacy behavior). See docs/hook-reply-approvals.md.
-  buildPtyEnv(nodeId: string, agentId: AgentId, permWaitSecs = 0): Record<string, string> {
+  buildPtyEnv(nodeId: string, agentId?: AgentId, permWaitSecs = 0): Record<string, string> {
     if (this.port <= 0 || !this.token) return {}
     return {
       // NO NODETERM_HOOK_TOKEN, NO NODETERM_HOOK_PORT — measured 2026-08-13: these ride the tmux
@@ -1096,9 +1177,9 @@ class HookServer {
       // what a sandboxed sh could not read.
       ...(this.sockPath ? { NODETERM_HOOK_SOCK: this.sockPath } : {}),
       NODETERM_NODE_ID: nodeId,
-      NODETERM_AGENT_ID: agentId,
-      ...(permWaitSecs > 0 ? { NODETERM_PERM_WAIT_SECS: String(permWaitSecs) } : {}),
-      ...(canControlCanvas(agentId) ? { NODETERM_CANVAS_CONTROL: '1' } : {})
+      ...(agentId ? { NODETERM_AGENT_ID: agentId } : {}),
+      ...(agentId && permWaitSecs > 0 ? { NODETERM_PERM_WAIT_SECS: String(permWaitSecs) } : {}),
+      ...(agentId && canControlCanvas(agentId) ? { NODETERM_CANVAS_CONTROL: '1' } : {})
       // NO NODETERM_CODEX_NODE_TOKEN either. The per-node capability is the same class of leak as
       // the app-wide bearer above, and a worse one to reason about: it is the credential that
       // proves WHICH node is calling, so a sibling uid reading it off /proc/<pid>/cmdline could

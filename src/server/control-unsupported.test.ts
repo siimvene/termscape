@@ -6,7 +6,7 @@
  * assertions here are about what the caller can conclude — a stable machine name, and prose that
  * contains the literal "do not retry" — not merely about a status code.
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
@@ -20,6 +20,7 @@ import {
   CONTROL_UNSUPPORTED_ERROR,
   CONTROL_UNSUPPORTED_SENTENCE,
   controlUnsupportedMessage,
+  createServerEditionControlHandler,
   serverEditionControlHandler
 } from './control-unsupported'
 
@@ -99,10 +100,10 @@ describe('the Server Edition refuses canvas control by name', () => {
     expect(text).toContain('do not retry')
   })
 
-  it('`open-project` is unreachable on this edition — the P8 pin for issue #338', async () => {
-    // No server code changed for #338 and none may need to: the SE registers this handler for
-    // ALL verbs, so open-project (and any --project-carrying open) answers the same permanent
-    // named refusal. Pinned by name so the contract cannot drift silently.
+  it('`open-project` stays unreachable when Server canvas control is disabled', async () => {
+    // The feature-off rollback handler refuses every verb. The enabled handler below exposes the
+    // narrow existing-local-project recovery form, but a disabled deployment must still answer a
+    // permanent named refusal rather than pretending the operation succeeded.
     expect(await serverEditionControlHandler({ verb: 'open-project' })).toEqual({
       ok: false,
       error: CONTROL_UNSUPPORTED_ERROR,
@@ -167,6 +168,212 @@ describe('the Server Edition wires it at boot', () => {
     // the null branch is invisible until an agent hits it in production.
     const src = fs.readFileSync(path.resolve(__dirname, 'index.ts'), 'utf8')
     expect(src).toContain('setControlHandler(serverEditionControlHandler)')
+  })
+})
+
+describe('the enabled Server Edition handler parses and dispatches the v1 surface', () => {
+  const actions = () => ({
+    openProject: vi.fn(async () => ({ ok: true as const, result: { projectId: 'project-loop' } })),
+    openTerminal: vi.fn(async () => ({ ok: true as const, result: { id: 'term-new' } })),
+    openAgent: vi.fn(async () => ({ ok: true as const, result: { id: 'agent-new' } })),
+    close: vi.fn(async () => ({ ok: true as const, result: { id: 'closed' } })),
+    link: vi.fn(async () => ({ ok: true as const, result: { linked: ['term-target'] } })),
+    group: vi.fn(async () => ({ ok: true as const, result: { groupId: 'group-new' } })),
+    rename: vi.fn(async () => ({ ok: true as const, result: { id: 'renamed' } })),
+    color: vi.fn(async () => ({ ok: true as const, result: { colored: ['term-target'] } })),
+    sticky: vi.fn(async () => ({ ok: true as const, result: { id: 'sticky-new' } })),
+    settings: vi.fn(async () => ({ ok: true as const, message: 'settings' })),
+    deliver: vi.fn(async () => ({ ok: true as const, message: 'queued' }))
+  })
+
+  it('routes settings to its action, after the shared allowlist parse', async () => {
+    const a = actions()
+    const handler = createServerEditionControlHandler(a)
+    await expect(
+      handler({ verb: 'settings', nodeId: 'term-source', args: { get: 'gridSize' }, verified: true })
+    ).resolves.toMatchObject({ ok: true })
+    expect(a.settings).toHaveBeenCalledWith('term-source', { get: 'gridSize' })
+    // A key off the allowlist never reaches the action.
+    await expect(
+      handler({
+        verb: 'settings',
+        nodeId: 'term-source',
+        args: { set: 'claudePermissionMode', value: 'bypassPermissions' },
+        verified: true
+      })
+    ).resolves.toMatchObject({ ok: false, error: expect.stringContaining('settings-key-forbidden') })
+    expect(a.settings).toHaveBeenCalledTimes(1)
+  })
+
+  it('shares parser validation and forwards source identity to an open', async () => {
+    const a = actions()
+    const handler = createServerEditionControlHandler(a)
+    await expect(
+      handler({
+        verb: 'open-terminal',
+        nodeId: 'term-source',
+        args: { count: '2', after: 'term-upstream' },
+        verified: true
+      })
+    ).resolves.toMatchObject({ ok: true })
+    expect(a.openTerminal).toHaveBeenCalledWith(
+      'term-source',
+      { count: '2', after: 'term-upstream' },
+      true
+    )
+
+    await expect(
+      handler({ verb: 'open-agent', nodeId: 'term-source', args: {}, verified: true })
+    ).resolves.toEqual({ ok: false, error: 'open-agent requires --agent <id>' })
+    expect(a.openAgent).not.toHaveBeenCalled()
+
+    await expect(
+      handler({
+        verb: 'open-project',
+        nodeId: 'term-source',
+        args: { cwd: '/srv/loop' },
+        verified: true
+      })
+    ).resolves.toMatchObject({ ok: true })
+    expect(a.openProject).toHaveBeenCalledWith(
+      'term-source',
+      { cwd: '/srv/loop' },
+      true
+    )
+
+    await expect(
+      handler({
+        verb: 'close',
+        nodeId: 'term-source',
+        args: { node: 'term-new,term-other' },
+        verified: true
+      })
+    ).resolves.toMatchObject({ ok: true })
+    expect(a.close).toHaveBeenCalledWith(
+      'term-source',
+      { node: 'term-new,term-other' },
+      true
+    )
+  })
+
+  it('refuses every enabled verb at the handler boundary when creator identity is unverified', async () => {
+    const a = actions()
+    const handler = createServerEditionControlHandler(a)
+
+    await expect(handler({
+      verb: 'group',
+      nodeId: 'term-source',
+      args: { nodes: 'term-source,term-target' },
+      verified: false
+    })).resolves.toEqual({
+      ok: false,
+      error: 'group-identity-refused: Server Edition canvas control requires verified node identity'
+    })
+    await expect(handler({
+      verb: 'open-terminal',
+      nodeId: 'term-source',
+      args: {},
+      verified: false
+    })).resolves.toEqual({
+      ok: false,
+      error: 'open-terminal-identity-refused: Server Edition canvas control requires verified node identity'
+    })
+    expect(a.group).not.toHaveBeenCalled()
+    expect(a.openTerminal).not.toHaveBeenCalled()
+  })
+
+  it('routes messaging without trusting a notify body', async () => {
+    const a = actions()
+    const handler = createServerEditionControlHandler(a)
+    await handler({
+      verb: 'send',
+      nodeId: 'term-source',
+      args: { node: 'term-target', text: 'hello' },
+      verified: true
+    })
+    await handler({
+      verb: 'notify',
+      nodeId: 'term-source',
+      args: { node: 'term-target' },
+      verified: true
+    })
+    await handler({
+      verb: 'reply',
+      nodeId: 'term-source',
+      args: { node: 'term-target', text: 'ack' },
+      verified: true
+    })
+    expect(a.deliver).toHaveBeenNthCalledWith(1, {
+      verb: 'send',
+      sourceNodeId: 'term-source',
+      targetNodeId: 'term-target',
+      body: 'hello'
+    })
+    expect(a.deliver).toHaveBeenNthCalledWith(2, {
+      verb: 'notify',
+      sourceNodeId: 'term-source',
+      targetNodeId: 'term-target',
+      body: ''
+    })
+    expect(a.deliver).toHaveBeenNthCalledWith(3, {
+      verb: 'reply',
+      sourceNodeId: 'term-source',
+      targetNodeId: 'term-target',
+      body: 'ack'
+    })
+  })
+
+  it('dispatches headless link, group, rename, and color while preserving link identity', async () => {
+    const a = actions()
+    const handler = createServerEditionControlHandler(a)
+    await handler({
+      verb: 'link',
+      nodeId: 'term-source',
+      args: { from: 'term-a', to: 'term-b' },
+      verified: true
+    })
+    await handler({
+      verb: 'group',
+      nodeId: 'term-source',
+      args: { nodes: 'term-a,term-b', label: 'Pair', color: '#bf5af2' },
+      verified: true
+    })
+    await handler({
+      verb: 'color',
+      nodeId: 'term-source',
+      args: { node: 'term-a,term-b', color: '#32d74b' },
+      verified: true
+    })
+    await handler({
+      verb: 'rename',
+      nodeId: 'term-source',
+      args: { node: 'term-a', title: 'A' },
+      verified: true
+    })
+    expect(a.link).toHaveBeenCalledWith(
+      'term-source',
+      { from: 'term-a', to: 'term-b' },
+      true
+    )
+    expect(a.group).toHaveBeenCalledWith('term-source', {
+      nodes: 'term-a,term-b',
+      label: 'Pair',
+      color: '#bf5af2'
+    })
+    expect(a.rename).toHaveBeenCalledWith('term-source', { node: 'term-a', title: 'A' })
+    expect(a.color).toHaveBeenCalledWith('term-source', {
+      node: 'term-a,term-b',
+      color: '#32d74b'
+    })
+  })
+
+  it('keeps every deferred or unknown verb a clean permanent edition refusal', async () => {
+    const handler = createServerEditionControlHandler(actions())
+    for (const verb of ['list', 'browser', 'write', 'not-a-verb']) {
+      const reply = await handler({ verb, nodeId: 'term-source', args: {}, verified: true })
+      expect(reply, verb).toMatchObject({ ok: false, error: CONTROL_UNSUPPORTED_ERROR })
+      expect(reply.message, verb).toContain('do not retry')
+    }
   })
 })
 

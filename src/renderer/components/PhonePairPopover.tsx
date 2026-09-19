@@ -5,6 +5,12 @@ import { useSettings } from '@renderer/state/settings'
 import { usePhonePairing } from './settings/usePhonePairing'
 import { IOS_APP_STORE_URL } from '@renderer/lib/links'
 import { hostOsFromNavigator, sshServerCopy } from '@shared/ssh-server'
+import {
+  pairingEndedMessage,
+  pairingGate,
+  relayGateMessage,
+  relayOnlyExplanation
+} from '@shared/pairing-gate'
 import { thisMachine } from '@renderer/lib/machineName'
 
 /** Same table the Phone settings section prints from — see @shared/ssh-server. */
@@ -26,7 +32,21 @@ export function PhonePairPopover({
   onClose: () => void
   onOpenSettings: () => void
 }): React.JSX.Element {
-  const { phase, qr, sshOpen, sshHealed, relayResult, relayPlan, error, busy, start } = usePhonePairing()
+  const {
+    phase,
+    qr,
+    sshOpen,
+    sshHealed,
+    sshKey,
+    windowsKeyFile,
+    ended,
+    relayResult,
+    relayPlan,
+    error,
+    busy,
+    start
+  } = usePhonePairing()
+  const gate = pairingGate({ sshKey, sshOpen, relayPlan })
 
   const phoneAccessEnabled = useSettings((s) => s.settings.phoneAccessEnabled)
   const updateSettings = useSettings((s) => s.update)
@@ -68,7 +88,11 @@ export function PhonePairPopover({
         <div className="phone-pair__title">Pair your phone</div>
 
         {phase === 'waiting' && qr ? (
-          !sshOpen ? (
+          gate === 'relay-off' || gate === 'relay-dev' ? (
+            <div className="phone-pair__warn">
+              {relayGateMessage(gate, `Reach ${thisMachine()} from anywhere`)}
+            </div>
+          ) : gate === 'ssh-off' ? (
             // No QR while Remote Login is off — pairing against an unreachable sshd installs a
             // key the phone can never use. The live probe flips sshOpen and the QR appears.
             <div className="phone-pair__warn">
@@ -94,7 +118,9 @@ export function PhonePairPopover({
             <>
               <img src={qr} width={208} height={208} alt="Pairing QR code" className="phone-pair__qr" />
               <div className="phone-pair__hint">Scan with the Termscape iOS app · waiting (10 min)</div>
-              {relayPlan === 'dev' ? (
+              {!sshKey ? (
+                <div className="phone-pair__hint">{relayOnlyExplanation(windowsKeyFile)}</div>
+              ) : relayPlan === 'dev' ? (
                 <div className="phone-pair__warn">
                   Dev build: the relay is off regardless of the toggle, so this code pairs
                   LAN-only. Run a packaged build — or set NODETERM_RELAY_URL — for remote access.
@@ -112,7 +138,11 @@ export function PhonePairPopover({
           )
         ) : phase === 'paired' ? (
           <>
-            <div className="phone-pair__ok">✓ Paired — your phone can now connect.</div>
+            <div className="phone-pair__ok">
+              {sshKey
+                ? '✓ Paired — your phone can now connect.'
+                : `✓ Paired — your phone connects to ${thisMachine()} through remote access.`}
+            </div>
             {relayResult === 'ok' ? (
               <div className="phone-pair__ok">Remote access is set up — reachable from anywhere.</div>
             ) : relayResult === 'failed' ? (
@@ -130,7 +160,11 @@ export function PhonePairPopover({
           </>
         ) : phase === 'timeout' ? (
           <>
-            <div className="phone-pair__hint">Pairing timed out.</div>
+            <div className={ended?.reason === 'relay-failed' ? 'phone-pair__warn' : 'phone-pair__hint'}>
+              {ended?.reason === 'relay-failed' || (!sshKey && ended?.reached === false)
+                ? pairingEndedMessage({ ...ended, windows: !sshKey })
+                : 'Pairing timed out.'}
+            </div>
             <button className="phone-pair__btn" disabled={busy} onClick={() => void start()}>
               Show a new code
             </button>

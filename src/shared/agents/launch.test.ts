@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest'
+import { execFileSync } from 'node:child_process'
 import { assembleLaunchCommand, assembleResumeCommand, promptFilePathError } from './launch'
 import { setCustomAgentBaseResolver } from './config'
+import { modelGatewayEnv } from './model-gateway'
 import type { CustomAgent } from '../types'
 
 const ENV = { MY_MODEL: 'sonnet', MY_TOKEN: 'sk-abc' }
@@ -77,6 +79,47 @@ describe('assembleLaunchCommand — builtins (byte-identical to the historical p
     ).toBe('grok')
   })
 
+  it('composes session id AND model together, in one line, before the -- separator', () => {
+    // launch.ts:226 is the ONLY line where minting and the model flag meet, and until this test it
+    // was uncovered: the session-id tests pass no model, the model tests pass no session id and take
+    // the OTHER branch, copilot combines them but gets its model through env instead of a flag, and
+    // codex goes through assembleResumeCommand. Replacing `inputs.model` with `undefined` on that
+    // line left 42 tests green while the model silently vanished from the command.
+    //
+    // Asserted as ONE whole string rather than as separate position checks: those already exist and
+    // are not what was missing. What was missing is that the two flags coexist AND that the pair
+    // still lands before grok's end-of-options separator — after it, grok swallows both into the
+    // prompt and the node launches on the default model with a session id nodeterm never learns,
+    // reading "--session-id … --model …" as the first words of its instructions.
+    expect(
+      assembleLaunchCommand(
+        {
+          agentId: 'grok',
+          initialPrompt: 'do the thing',
+          sessionId: '01a06126-b981-73f1-8b68-4547e4d7da84',
+          sessionIdFlagSupported: true,
+          model: 'grok-4.5',
+          permissionMode: 'plan'
+        },
+        ENV
+      ).command
+    ).toBe(
+      "grok --permission-mode plan --session-id 01a06126-b981-73f1-8b68-4547e4d7da84 --model 'grok-4.5' -- 'do the thing'"
+    )
+  })
+
+  it('grok puts the MODEL flag before the -- separator, alongside the others', () => {
+    // Same failure shape as the session id: a flag after grok's `--` is not rejected, it is
+    // swallowed into the PROMPT. The node would launch on the DEFAULT model while the agent read
+    // "--model grok-4.5" as the first words of its instructions — and no exit code would say so.
+    const cmd = assembleLaunchCommand(
+      { agentId: 'grok', initialPrompt: 'do the thing', model: 'grok-4.5' },
+      ENV
+    ).command
+    expect(cmd).toBe("grok --model 'grok-4.5' -- 'do the thing'")
+    expect(cmd.indexOf('--model')).toBeLessThan(cmd.indexOf(' -- '))
+  })
+
   it('grok puts the permission flag BEFORE the -- separator', () => {
     expect(
       assembleLaunchCommand({ agentId: 'grok', initialPrompt: 'version', permissionMode: 'plan' }, ENV).command
@@ -116,13 +159,44 @@ describe('assembleLaunchCommand — builtins (byte-identical to the historical p
 })
 
 describe('assembleResumeCommand — Copilot', () => {
-  it('uses Copilot resume grammar while leaving a gateway model to the environment', () => {
+  it('resumes the same conversation with an explicit internal model selection', () => {
     expect(
       assembleResumeCommand(
         { agentId: 'copilot', sessionId: 'abc-123', model: 'openai/gpt-5.5' },
         ENV
       ).command
-    ).toBe('copilot --resume=abc-123')
+    ).toBe("copilot --resume=abc-123 --model 'gpt-5.5'")
+  })
+
+  it.skipIf(process.platform === 'win32').each([
+    ['openai/gpt-5.5', 'gpt-5.5'],
+    ['anthropic/claude-sonnet-4.6', 'claude-sonnet-4.6'],
+    ['custom/org/model', 'org/model'],
+    ["custom/o'model; $(exit 42)", "o'model; $(exit 42)"]
+  ])('delivers %s on fresh launch and restart, preserving its separate wire id', (wireModel, modelId) => {
+    const env = modelGatewayEnv(
+      { baseUrl: 'https://gateway.example.test', apiKey: 'test-key' },
+      'copilot',
+      wireModel
+    )
+    // Run the generated commands in a real shell with a harmless CLI stand-in. There is no
+    // COPILOT_MODEL in this old shell: --model must select the model on an in-place restart too.
+    const probe = 'copilot() { printf "%s\\n" "$COPILOT_PROVIDER_WIRE_MODEL" "$@"; }; '
+    for (const resume of [false, true]) {
+      const { command } = resume
+        ? assembleResumeCommand({ agentId: 'copilot', sessionId: 'abc-123', model: wireModel }, {})
+        : assembleLaunchCommand({ agentId: 'copilot', model: wireModel }, {})
+      const output = execFileSync('/bin/sh', ['-c', probe + command], {
+        env,
+        encoding: 'utf8'
+      })
+      expect(output.trimEnd().split('\n')).toEqual([
+        wireModel,
+        ...(resume ? ['--resume=abc-123'] : []),
+        '--model',
+        modelId
+      ])
+    }
   })
 })
 

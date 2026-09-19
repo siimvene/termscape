@@ -45,10 +45,12 @@ describe('buildFilesApi', () => {
   it('context.ensure is a cast; context.onUpdate/git.onCloneProgress subscribe', () => {
     const c = fakeClient()
     const api = buildFilesApi(c as never)
-    api.context.ensure('sid', '/cwd', undefined)
+    // nodeId + agentId ride the same cast: the Server Edition resolves per agent, and the desktop
+    // additionally needs the node id to tell an SSH-project session from a local one (issue #813).
+    api.context.ensure('sid', '/cwd', undefined, 'n1', 'codex')
     const un = api.context.onUpdate(() => {})
     const un2 = api.git.onCloneProgress(() => {})
-    expect(c.calls[0]).toEqual({ kind: 'cast', method: IPC.contextEnsure, args: ['sid', '/cwd', undefined] })
+    expect(c.calls[0]).toEqual({ kind: 'cast', method: IPC.contextEnsure, args: ['sid', '/cwd', undefined, 'n1', 'codex'] })
     expect(c.calls[1]).toEqual({ kind: 'subscribe', method: IPC.contextUpdate, args: [] })
     expect(c.calls[2]).toEqual({ kind: 'subscribe', method: IPC.gitCloneProgress, args: [] })
     expect(typeof un).toBe('function')

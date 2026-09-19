@@ -1,7 +1,7 @@
 import { beforeEach, describe, it, expect } from 'vitest'
 import {
-  dependencyEdges,
   launchesToFire,
+  dependencyEdges,
   forgetArmed,
   launchRetryDelay,
   launchTooltip,
@@ -30,6 +30,14 @@ const armed = (id: string, after: string[], command = `echo ${id}`): ArmedNode =
 const plain = (id: string): ArmedNode => ({ id, data: {} })
 
 describe('launchesToFire', () => {
+  it('leaves server-owned launches to the headless scheduler', () => {
+    const node: ArmedNode = {
+      id: 'c',
+      data: { pendingLaunch: { after: [], command: 'echo c', executor: 'server' } }
+    }
+    expect(launchesToFire([node], {}, new Set(['c']))).toEqual([])
+  })
+
   const live = new Set(['a', 'b', 'c'])
 
   it('fires when every dep has reported done', () => {

@@ -13,8 +13,9 @@
 //     early (remove); a write error is caught + warned, never thrown.
 import path from 'path'
 import { homedir } from 'os'
-import { readFileSync, writeFileSync, mkdirSync, chmodSync } from 'fs'
+import { readFileSync, writeFileSync, mkdirSync, chmodSync, rmSync } from 'fs'
 import type { ManagedHookEvent } from '@shared/agents/hook-events'
+import { renameAtomicSync, tempNameFor } from '../../fs-atomic'
 import { buildManagedScript } from './managed-script'
 
 type HookDef = { matcher?: string; hooks?: { type: string; command: string }[] }
@@ -22,6 +23,33 @@ type Settings = { hooks?: Record<string, HookDef[]>; [k: string]: unknown }
 
 /** Public alias for the hook settings shape, shared by local + remote merge callers. */
 export type HookSettings = Settings
+
+/** Publish a managed hook file without exposing a truncated destination to a running CLI. */
+export function writeManagedHookFileAtomic(
+  target: string,
+  data: string,
+  publish: (tmp: string, target: string) => void = renameAtomicSync,
+  mode?: number
+): void {
+  const tmp = tempNameFor(target)
+  try {
+    writeFileSync(tmp, data, { encoding: 'utf8', flag: 'wx', ...(mode === undefined ? {} : { mode }) })
+    publish(tmp, target)
+  } catch (e) {
+    rmSync(tmp, { force: true })
+    throw e
+  }
+}
+
+/**
+ * Shared Claude/Gemini settings keep their existing write-through semantics so a user-owned
+ * symlink and its target mode survive. Grok opts into atomic replacement for its nodeterm-owned
+ * file under `$GROK_HOME/hooks/`.
+ */
+export function writeManagedHookConfig(target: string, data: string, atomic = false): void {
+  if (atomic) writeManagedHookFileAtomic(target, data)
+  else writeFileSync(target, data, 'utf8')
+}
 
 /**
  * ONE script location per MACHINE — `~/.nodeterm/agent-hooks/<agent>.sh` — not one per instance.
@@ -44,7 +72,7 @@ export function installManagedHookScript(agentId: string, scriptFileName: string
   const scriptPath = managedHookScriptPath(scriptFileName)
   try {
     mkdirSync(path.dirname(scriptPath), { recursive: true })
-    writeFileSync(scriptPath, buildManagedScript(agentId), 'utf8')
+    writeManagedHookFileAtomic(scriptPath, buildManagedScript(agentId), renameAtomicSync, 0o755)
   } catch (e) {
     console.warn(`[agent-hooks] ${agentId} script write failed`, e)
     return null
@@ -208,10 +236,12 @@ export interface InstallHooksOptions {
   scriptFileName: string
   configPath: string
   events: readonly ManagedHookEvent[]
+  /** Atomic replacement is safe only when nodeterm owns the config file outright (Grok). */
+  atomicConfig?: boolean
 }
 
 export function installHooksInto(opts: InstallHooksOptions): void {
-  const { agentId, scriptFileName, configPath, events } = opts
+  const { agentId, scriptFileName, configPath, events, atomicConfig = false } = opts
 
   const sp = installManagedHookScript(agentId, scriptFileName)
   if (!sp) return
@@ -226,7 +256,7 @@ export function installHooksInto(opts: InstallHooksOptions): void {
   config = mergeManagedHook(config, command, events)
   try {
     mkdirSync(path.dirname(configPath), { recursive: true })
-    writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf8')
+    writeManagedHookConfig(configPath, JSON.stringify(config, null, 2), atomicConfig)
   } catch (e) {
     console.warn(`[agent-hooks] ${agentId} install failed`, e)
   }
@@ -237,10 +267,12 @@ export interface RemoveHooksOptions {
   events: readonly ManagedHookEvent[]
   /** Our script's file name — narrows the match so foreign agent-hooks entries survive. */
   scriptFileName: string
+  /** Atomic replacement is safe only when nodeterm owns the config file outright (Grok). */
+  atomicConfig?: boolean
 }
 
 export function removeHooksFrom(opts: RemoveHooksOptions): void {
-  const { configPath, events, scriptFileName } = opts
+  const { configPath, events, scriptFileName, atomicConfig = false } = opts
   // Same normalized comparison as the installer — a raw `includes` left every entry behind on
   // Windows (issue #558), so uninstall silently did nothing there.
   const isOurs = managedCommandMatcher(`agent-hooks/${scriptFileName}`, false)
@@ -258,7 +290,7 @@ export function removeHooksFrom(opts: RemoveHooksOptions): void {
     if (config.hooks[ev].length === 0) delete config.hooks[ev]
   }
   try {
-    writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf8')
+    writeManagedHookConfig(configPath, JSON.stringify(config, null, 2), atomicConfig)
   } catch {
     /* fail open */
   }

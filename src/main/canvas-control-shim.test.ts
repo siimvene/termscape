@@ -9,7 +9,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
-import { CONTROL_SHIM_SCRIPT } from './canvas-control-core'
+import { CONTROL_SHIM_SCRIPT } from '../core/canvas-control-core'
 import { hookServer, parseControlBody } from '../core/agents/hook-server'
 import { nodeAuthToken } from '../core/agents/node-auth-token'
 import { initPlatform, resetPlatformForTests } from '../core/platform'
@@ -99,6 +99,8 @@ describe('canvas-control shim', () => {
     expect(received.at(-1)?.args).toEqual({ path: '/tmp/a b.png' })
     await callShim(['close', 'node-9'])
     expect(received.at(-1)?.args).toEqual({ node: 'node-9' })
+    await callShim(['color', 'node-9,node-10', '--color', '#bf5af2'])
+    expect(received.at(-1)?.args).toEqual({ node: 'node-9,node-10', color: '#bf5af2' })
   })
 
   it('accepts a trailing flag with no value', async () => {

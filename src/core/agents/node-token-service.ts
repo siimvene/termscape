@@ -231,18 +231,93 @@ export function remoteNodeTokenMinter(): ((nodeId: string) => string) | null {
  * must keep building without electron. Unregistered — the Server Edition, every test — it is a
  * no-op, which is the correct behavior there too.
  */
-type RemoteNodeTokenWriter = (controlPath: string, nodeId: string) => void
+type RemoteNodeTokenWriter = (controlPath: string, nodeIds: readonly string[]) => void
 let remoteWriter: RemoteNodeTokenWriter | null = null
 
 export function setRemoteNodeTokenWriter(writer: RemoteNodeTokenWriter | null): void {
   remoteWriter = writer
 }
 
-/** Fire-and-forget, fail-open: a token that cannot be written costs the node `legacy`, never its
- *  terminal. Nothing here may throw into a pty spawn. */
+/**
+ * Which node ids this app run has already materialised on which host, keyed by ControlPath.
+ *
+ * WHY (measured, 2026-09-15). This is one ssh exec child PER SPAWN, and a project switch mounts
+ * every node in the same tick: a 108-node canvas fired 107 of these at the exact moment 107 pty
+ * channels were opening, and a stock host allows `MaxSessions` channels on the ONE connection they
+ * all multiplex over. They are gated (`SshChildGate`, so they queue rather than fall back to full
+ * logins — the brief that prompted this said otherwise and was wrong), but a queue of 107 round
+ * trips behind a budget of 6 still competes with the terminals for that budget for the whole burst.
+ *
+ * And nearly all of them have nothing to do: the CONNECT path already wrote a token for every node
+ * the canvas held (`materialiseNodeTokens`), so a node that existed at connect is asking the host to
+ * rewrite a file it already has. The memo turns that into zero round trips, and `seedRemoteNodeTokens`
+ * is what the connect path calls to record what it just wrote.
+ */
+const remoteWritten = new Map<string, Set<string>>()
+/** Ids waiting to be written for a control path, and the timer that will flush them. */
+const remotePending = new Map<string, { ids: Set<string>; timer: ReturnType<typeof setTimeout> }>()
+
+/** How long a burst is collected before one write goes out. A project switch mounts every node in
+ *  the SAME tick, so this only has to outlive a task queue — not a network round trip. */
+export const REMOTE_TOKEN_COALESCE_MS = 50
+
+/**
+ * Record ids the CONNECT path has just written on this host, so the spawn path does not rewrite
+ * them. Called with the same list `materialiseNodeTokens` handed the host — and it RESETS the
+ * memo first, because a connect may be to a different host on the same (project-keyed) control
+ * path, and the connect writes every id anyway.
+ */
+export function seedRemoteNodeTokens(controlPath: string, nodeIds: readonly string[]): void {
+  remoteWritten.set(controlPath, new Set(nodeIds))
+}
+
+/** Forget a host's memo (its master went away, or the node's token was swept). */
+export function forgetRemoteNodeTokens(controlPath: string): void {
+  remoteWritten.delete(controlPath)
+  const pending = remotePending.get(controlPath)
+  if (pending) {
+    clearTimeout(pending.timer)
+    remotePending.delete(controlPath)
+  }
+}
+
+/**
+ * Fire-and-forget, fail-open: a token that cannot be written costs the node `legacy`, never its
+ * terminal. Nothing here may throw into a pty spawn.
+ *
+ * Skipped outright for an id this run already materialised on that host, and otherwise COALESCED
+ * (see `remoteWritten`) so a mount burst is one remote write rather than one per node. The memo is
+ * marked at flush time, not at request time, so a flush that throws leaves the ids owed.
+ */
 export function ensureRemoteNodeToken(controlPath: string, nodeId: string): void {
   try {
-    remoteWriter?.(controlPath, nodeId)
+    if (!remoteWriter) return
+    if (remoteWritten.get(controlPath)?.has(nodeId)) return
+    const pending = remotePending.get(controlPath)
+    if (pending) {
+      pending.ids.add(nodeId)
+      return
+    }
+    const ids = new Set([nodeId])
+    const timer = setTimeout(() => {
+      remotePending.delete(controlPath)
+      const list = [...ids]
+      // Mark BEFORE the call, not after: the writer is fire-and-forget (it returns void and
+      // reports nothing), so there is no "after" to key on. A write that silently fails costs the
+      // node its `verified` label until the next connect — which is exactly what it cost before
+      // this memo existed, for a node created after connect on a host that refuses the write.
+      const seen = remoteWritten.get(controlPath) ?? new Set<string>()
+      for (const id of list) seen.add(id)
+      remoteWritten.set(controlPath, seen)
+      try {
+        remoteWriter?.(controlPath, list)
+      } catch {
+        /* fail-open */
+      }
+    }, REMOTE_TOKEN_COALESCE_MS)
+    // Never hold the process open for a best-effort token write.
+    ;(timer as { unref?: () => void }).unref?.()
+    remotePending.set(controlPath, { ids, timer })
   } catch {
     /* fail-open */
   }

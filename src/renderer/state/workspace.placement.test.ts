@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { DEFAULT_SETTINGS } from '@shared/types'
 import { useSettings } from './settings'
-import { createStickyNode, createTerminalNode } from './workspace'
+import { createFilesNode, createStickyNode, createTerminalNode } from './workspace'
 
 const GRID = 20
 
@@ -60,5 +60,18 @@ describe('new node placement with snap-to-grid', () => {
 
     expect(node.width as number).toBeGreaterThanOrEqual(160)
     expect(node.height as number).toBeGreaterThanOrEqual(120)
+  })
+
+  // A factory that reaches for `placeAt` instead of `placeNode` silently opts out of snapping,
+  // and this file only covered terminal + sticky — which is exactly why the file-manager node
+  // shipped off-grid past a green suite. Position AND size, because React Flow resizes by adding
+  // a grid multiple to the START size: an unsnapped box can never be dragged onto the grid later.
+  it('snaps a file-manager node like every other kind', () => {
+    settings({ snapToGrid: true, gridSize: GRID })
+    const node = createFilesNode(0, '/repo/src', cursor)
+
+    expect([node.position.x % GRID, node.position.y % GRID]).toEqual([0, 0])
+    expect([(node.width as number) % GRID, (node.height as number) % GRID]).toEqual([0, 0])
+    expect(node.style).toEqual({ width: node.width, height: node.height })
   })
 })

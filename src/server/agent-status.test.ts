@@ -6,6 +6,10 @@ import { ServerPlatform } from './platform-server'
 import { wireAgentStatus } from './agent-status'
 import { _resetForTest } from '../core/agent-status-mirror'
 import { forgetGrokSession, grokSessionDirFor, readGrokSessionName } from '../core/grok-session'
+import {
+  registerClaudeAccountsSource,
+  resetClaudeAccountsSourceForTests
+} from '../core/claude-config-dir'
 import { IPC } from '../shared/ipc'
 import { decodePtyData } from '../shared/rpc'
 
@@ -73,6 +77,7 @@ beforeEach(() => {
 })
 afterEach(() => {
   fs.rmSync(dir, { recursive: true, force: true })
+  resetClaudeAccountsSourceForTests()
   _resetForTest()
 })
 
@@ -264,6 +269,56 @@ describe('wireAgentStatus', () => {
   })
 })
 
+// The transcript jail on THIS shell, and the LINKED half of it. Both raw
+// listeners have to learn the same widening or the Server Edition silently keeps the pre-fix
+// behavior for a pane running the user's own `CLAUDE_CONFIG_DIR` — the "both raw listeners change
+// together" rule, which this repo has broken three times.
+describe('wireAgentStatus — the transcript jail admits LINKED config dirs', () => {
+  it('tracks a transcript under <linkedDir>/projects, and refuses everything else in that dir', () => {
+    const linked = fs.mkdtempSync(path.join(os.tmpdir(), 'nt-linked-jail-'))
+    try {
+      registerClaudeAccountsSource(() => [
+        { id: 'linked-1', label: 'second', configDir: linked, createdAt: 0 }
+      ])
+      const fh = fakeHooks()
+      const ctx = recTail()
+      wireAgentStatus(platform, { hooks: fh.hooks as never, contextTail: ctx.tail as never })
+      const ok = path.join(linked, 'projects', '-repo', 's1.jsonl')
+      fh.fireRaw('claude', 'n1', {
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Read',
+        session_id: 's1',
+        transcript_path: ok
+      })
+      expect(ctx.calls.some((c) => c.m === 'track' && c.args[1] === ok)).toBe(true)
+      // The linked dir is not opened up wholesale: the segment after it must be `projects`.
+      const before = ctx.calls.length
+      fh.fireRaw('claude', 'n2', {
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Read',
+        session_id: 's2',
+        transcript_path: path.join(linked, '.ssh', 'id_rsa')
+      })
+      expect(ctx.calls.length).toBe(before)
+    } finally {
+      fs.rmSync(linked, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses that same path when the dir is NOT in settings (the jail reads settings, not the POST)', () => {
+    const fh = fakeHooks()
+    const ctx = recTail()
+    wireAgentStatus(platform, { hooks: fh.hooks as never, contextTail: ctx.tail as never })
+    fh.fireRaw('claude', 'n1', {
+      hook_event_name: 'PreToolUse',
+      tool_name: 'Read',
+      session_id: 's1',
+      transcript_path: path.join(os.tmpdir(), 'not-linked', 'projects', 's1.jsonl')
+    })
+    expect(ctx.calls.filter((c) => c.m === 'track' && c.args[1] !== undefined)).toEqual([])
+  })
+})
+
 /**
  * The grok branch of the raw listener (`src/server/agent-status.ts`) had no coverage at all: a
  * mutation to `if (false && agentId === 'grok')` left the whole suite green. It is the only place
@@ -298,7 +353,9 @@ describe('wireAgentStatus — the grok raw-listener branch', () => {
     const fh = fakeHooks()
     const ctx = recTail()
     wireAgentStatus(platform, { hooks: fh.hooks as never, contextTail: ctx.tail as never })
-    // grok's own dialect: camelCase keys, snake_case event VALUE, and no transcript_path at all.
+    // grok's own dialect: camelCase keys, snake_case event VALUE. It DOES send `transcriptPath`,
+    // omitted here because nothing on this path reads it: the transcript is derived from
+    // (cwd, sessionId), and the advertised path names `updates.jsonl`, the wrong file.
     fh.fireRaw('grok', 'g1', {
       hookEventName: 'user_prompt_submit',
       sessionId: 'gs-1',
@@ -345,6 +402,37 @@ describe('wireAgentStatus — the grok raw-listener branch', () => {
     expect(grokSessionDirFor('gs-4')).toBe(sessionDir('/w/project', 'gs-4'))
     fh.fireRaw('grok', 'g4', { hookEventName: 'session_end', sessionId: 'gs-4', cwd: '/w/project' })
     expect(grokSessionDirFor('gs-4')).toBeUndefined()
+  })
+
+  it('KEEPS the old session association across compaction — grok does not mint a new id', () => {
+    const fh = fakeHooks()
+    const ctx = recTail()
+    wireAgentStatus(platform, { hooks: fh.hooks as never, contextTail: ctx.tail as never })
+    fh.fireRaw('grok', 'g-compact', {
+      hookEventName: 'pre_compact',
+      sessionId: 'gs-before',
+      cwd: '/w/project'
+    })
+    expect(grokSessionDirFor('gs-before')).toBe(sessionDir('/w/project', 'gs-before'))
+
+    fh.fireRaw('grok', 'g-compact', {
+      hookEventName: 'post_compact',
+      sessionId: 'gs-after',
+      cwd: '/w/project'
+    })
+    // This used to assert the OPPOSITE, on the belief that grok mints a new session id when it
+    // compacts. Measured on 1.0.13: it does not — `pre_compact` and `post_compact` carry the same
+    // `sessionId`. So the retirement branch could not fire and was removed, and this asserts the
+    // case it existed for: even with a DIFFERENT id, the earlier association survives. Nothing else
+    // retires an id but SessionEnd.
+    expect(grokSessionDirFor('gs-before')).toBe(sessionDir('/w/project', 'gs-before'))
+    expect(grokSessionDirFor('gs-after')).toBe(sessionDir('/w/project', 'gs-after'))
+
+    platform.cast(platform.attach({ sendText: () => {}, sendBinary: () => {} }), IPC.ptyDestroy, [
+      'g-compact'
+    ])
+    expect(ctx.calls.some((c) => c.m === 'untrack' && c.args[0] === 'gs-after')).toBe(true)
+    forgetGrokSession('gs-after')
   })
 
   it('learns nothing rather than half a path when the cwd is not reconstructible', () => {

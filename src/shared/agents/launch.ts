@@ -1,12 +1,12 @@
 // Pure command assembly — the ONE place an agent's launch / resume command line is built.
 //
-// Used by the renderer only: fresh node creation (`workspace.ts createAgentNode`), cold-restore /
-// wake / variant resume (`TerminalNode.tsx`), and the Settings command preview
-// (`CustomAgentsSection.tsx`). Pure: the environment is an explicit parameter, and every caller
-// passes the SAME boot-time snapshot (src/renderer/lib/agentEnv.ts) — one assembler, one env, so
-// the preview cannot drift from the real launch by construction. There is deliberately no
-// main/server preview IPC: an endpoint that expands ${env:…} for a caller-supplied agent record
-// is an environment-variable oracle for relay peers (the #171/#190 review).
+// Used by the renderer for fresh node creation, cold restore, wake, variant resume and Settings
+// preview, and by Server Edition's headless node factory for fresh launches. Pure: the environment
+// is an explicit parameter. Renderer callers pass the SAME boot-time snapshot
+// (`src/renderer/lib/agentEnv.ts`), so its preview cannot drift from its launch by construction;
+// the server passes its own process environment directly and exposes no preview endpoint. There is
+// deliberately no main/server preview IPC: expanding ${env:…} for a caller-supplied agent record
+// would be an environment-variable oracle for relay peers (the #171/#190 review).
 //
 // Inheritance: a custom agent with a `baseAgent` resolves its prompt convention, separator, and
 // capability flags through that base harness (`capabilityAgentId`), so a claude-compatible proxy

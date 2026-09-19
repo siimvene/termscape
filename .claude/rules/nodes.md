@@ -134,13 +134,18 @@ paths:
 - **browser** (`BrowserNode.tsx`) — a navigable Chromium browser wrapping the shared
   `BrowserSurface` (webview + toolbar); the last top-level URL persists to `data.url`, and the same
   surface backs the kanban card modal's browser popup.
+- **files** (`FilesNode.tsx`) — a file-manager node: one directory listing (`data.cwd`, persisted)
+  pinned beside the terminals working in it. Adds no new IPC (runs on `FsApi`). Deep reference:
+  `.claude/rules/files-node.md`.
 - **dino** (`DinoNode.tsx`) — a small self-contained T-Rex-style runner on a canvas (no PTY);
   high score persists via `data.highScore`.
 - **trigger** (`TriggerNode.tsx`) — a canvas-owned schedule (cron / interval / once) that
   delivers a payload into a connected terminal/agent node when due (issue #493 — the inverse of
   the ephemeral loop/cron cards, which visualize AGENT-initiated recurrence). The card shows the
-  schedule + next-run countdown, the target (a derived, never-persisted edge — same rule as the
-  pending-launch dep edges), the payload, an honest ARMED/DISARMED/CHANGED/SET-UP chip with the
+  schedule + next-run countdown, the target (a derived, never-persisted edge — but the pending-launch
+  dep edge is NO longer one: since the 2026-09-02 edge model it is a persisted rope,
+  `ctrl-<dep>-<node>`, whose dashed ⏳ LOOK is what is derived), the payload, an honest
+  ARMED/DISARMED/CHANGED/SET-UP chip with the
   "definitions travel with the repo, consent never does" narrative, Run-now, and the last runs
   (fired / delivered-late / queued / missed / failed / expired). Arming passes a ConfirmDialog
   showing the exact schedule+payload+target being consented to; all decisions are the pure,
@@ -364,3 +369,4 @@ or browser nodes means adding the draw and the set together, in one change.
   picker), so no new IPC was added and nothing is stubbed. **Mobile**: N/A for v1 — *nodeterm mobile*
   attaches to tmux sessions over the transport protocol and carries no per-node icon concept;
   surfacing one means extending that protocol (follow-up in the iOS repo).
+

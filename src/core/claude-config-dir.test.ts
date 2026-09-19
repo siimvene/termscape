@@ -1,13 +1,31 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { initPlatform, resetPlatformForTests } from './platform'
 import { fakePlatform } from './platform-fake'
-import { claudeConfigDirFor, claudeConfigDirForSpawn } from './claude-config-dir'
+import {
+  claudeConfigDirFor,
+  claudeConfigDirForSpawn,
+  claudeAccountsSnapshot,
+  linkedClaudeConfigDirFor,
+  linkedClaudeConfigDirs,
+  registerClaudeAccountsSource,
+  resetClaudeAccountsSourceForTests
+} from './claude-config-dir'
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
+import type { ClaudeAccount } from '../shared/types'
+
+const acct = (over: Partial<ClaudeAccount> & { id: string }): ClaudeAccount => ({
+  label: over.id,
+  createdAt: 0,
+  ...over
+})
 
 beforeEach(() => initPlatform(fakePlatform({ userDataDir: '/tmp/ud' })))
-afterEach(() => resetPlatformForTests())
+afterEach(() => {
+  resetPlatformForTests()
+  resetClaudeAccountsSourceForTests()
+})
 
 describe('claudeConfigDirFor', () => {
   // NOTE: the actual current signature in claude-accounts.ts is
@@ -80,5 +98,84 @@ describe('claudeConfigDirForSpawn — a co-located peer\'s account dir is a spaw
     resetPlatformForTests()
     initPlatform(fakePlatform({ userDataDir: own, peerUserDataDir: peer }))
     expect(() => claudeConfigDirForSpawn('../escape')).toThrow(/invalid account id/)
+  })
+})
+
+// ---- Linked accounts (a config dir the user already owns) ------------------------------------
+//
+// `claudeConfigDirFor` is THE resolver: env injection at spawn, the usage reader, the transcript
+// roots and the mirror's account list all call it and nothing else. So the linked branch is added
+// here rather than at seven call sites — and these cases are what keep the managed branch, and its
+// id validation, exactly as it was.
+
+describe('registerClaudeAccountsSource + claudeConfigDirFor', () => {
+  it('with no source registered, every id resolves managed (bit-for-bit legacy)', () => {
+    expect(claudeAccountsSnapshot()).toEqual([])
+    expect(claudeConfigDirFor('abc')).toBe('/tmp/ud/claude-accounts/abc')
+    expect(linkedClaudeConfigDirs()).toEqual([])
+  })
+
+  it('resolves a linked account to its own dir, and its neighbours to the managed root', () => {
+    registerClaudeAccountsSource(() => [
+      acct({ id: 'linked', configDir: '/home/u/.claude-2' }),
+      acct({ id: 'managed' })
+    ])
+    expect(claudeConfigDirFor('linked')).toBe('/home/u/.claude-2')
+    expect(claudeConfigDirFor('managed')).toBe('/tmp/ud/claude-accounts/managed')
+    expect(linkedClaudeConfigDirFor('linked')).toBe('/home/u/.claude-2')
+    expect(linkedClaudeConfigDirFor('managed')).toBeNull()
+  })
+
+  it('normalizes the stored value (trailing slash, `.`, an absorbable `..`)', () => {
+    registerClaudeAccountsSource(() => [acct({ id: 'l', configDir: '/home/u/x/.././.claude-2/' })])
+    expect(claudeConfigDirFor('l')).toBe('/home/u/.claude-2')
+  })
+
+  it('IGNORES a relative or `..`-bearing configDir → managed fallback, never something wider', () => {
+    // settings.json is hand-edited; a relative value must not resolve against the process cwd,
+    // and the safe default is the managed dir (which then hits the existing missing-dir warn +
+    // system fallback at spawn).
+    for (const bad of ['.claude-2', '../.claude-2', '', '   ', 42 as unknown as string]) {
+      resetClaudeAccountsSourceForTests()
+      registerClaudeAccountsSource(() => [acct({ id: 'l', configDir: bad })])
+      expect(claudeConfigDirFor('l')).toBe('/tmp/ud/claude-accounts/l')
+      expect(linkedClaudeConfigDirFor('l')).toBeNull()
+      expect(linkedClaudeConfigDirs()).toEqual([])
+    }
+  })
+
+  it('ignores a host-scoped or pending row (a linked dir is LOCAL and settled by definition)', () => {
+    registerClaudeAccountsSource(() => [
+      acct({ id: 'r', configDir: '/home/u/.claude-2', host: 'u@example' }),
+      acct({ id: 'p', configDir: '/home/u/.claude-3', pending: true })
+    ])
+    expect(claudeConfigDirFor('r')).toBe('/tmp/ud/claude-accounts/r')
+    expect(claudeConfigDirFor('p')).toBe('/tmp/ud/claude-accounts/p')
+    expect(linkedClaudeConfigDirs()).toEqual([])
+  })
+
+  it('keeps the id validation even for a linked row (the one gate, not seven)', () => {
+    registerClaudeAccountsSource(() => [acct({ id: '../escape', configDir: '/home/u/.claude-2' })])
+    expect(() => claudeConfigDirFor('../escape')).toThrow(/invalid account id/)
+  })
+
+  it('a throwing settings source costs the linked answer, never the call', () => {
+    // This runs on the hook-event hot path and from both jails: a settings store mid-write must
+    // not take a 204 down with it, and "no linked accounts" is the safe direction.
+    registerClaudeAccountsSource(() => {
+      throw new Error('settings unreadable')
+    })
+    expect(claudeAccountsSnapshot()).toEqual([])
+    expect(claudeConfigDirFor('abc')).toBe('/tmp/ud/claude-accounts/abc')
+    expect(linkedClaudeConfigDirs()).toEqual([])
+  })
+
+  it('linkedClaudeConfigDirs dedupes two rows naming one dir', () => {
+    registerClaudeAccountsSource(() => [
+      acct({ id: 'a', configDir: '/home/u/.claude-2' }),
+      acct({ id: 'b', configDir: '/home/u/.claude-2/' }),
+      acct({ id: 'c', configDir: '/home/u/.claude-3' })
+    ])
+    expect(linkedClaudeConfigDirs()).toEqual(['/home/u/.claude-2', '/home/u/.claude-3'])
   })
 })

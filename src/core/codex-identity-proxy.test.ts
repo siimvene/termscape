@@ -367,3 +367,189 @@ describe('account-scoped ownership', () => {
     expect(resolveCodexThreadNodeIdentity('thread-1', recordsRoot, 'acct-B')).toBe('node-2')
   })
 })
+
+// ── The agent dimension: the record names the agent, and the prelude stops guessing ───────────
+//
+// `NODETERM_AGENT_ID` and `NODETERM_CANVAS_CONTROL` used to be constants in the sh prelude
+// (`codex`, granted). Both are `buildPtyEnv`'s answers about the PANE, so the constants mislabelled
+// every custom agent inheriting the codex harness and asserted a grant the pane might not hold.
+// Now they ride the record, inside the signature.
+//
+// The invariant these tests exist for is that the three preimage generations are SELECTED by the
+// record's shape and never tried in turn: a record that names an agent must not be verifiable under
+// a preimage that ignores the agent, or the field could be stripped or rewritten at will.
+const sign6 = (
+  threadId: string,
+  scope: string,
+  nodeId: string,
+  endpoint: string,
+  agentId: string,
+  grant: boolean
+): string =>
+  b64url(
+    createHmac('sha256', FIXED_SECRET)
+      .update(`${threadId}\0${scope}\0${nodeId}\0${endpoint}\0${agentId}\0${grant ? '1' : '0'}`)
+      .digest()
+  )
+
+const recordFile = (threadId: string): string => path.join(recordsRoot, threadId)
+
+describe('agent identity in the ownership record', () => {
+  beforeEach(() => setCodexThreadIdentityAuthSecret(FIXED_SECRET))
+
+  it('round-trips the agent id and the grant', () => {
+    writeCodexThreadIdentity('thread-1', 'node-1', '/data/e', recordsRoot, undefined, {
+      agentId: 'custom:abc',
+      canvasControl: false
+    })
+    const got = readCodexThreadIdentity('thread-1', recordsRoot)
+    expect(got?.agentId).toBe('custom:abc')
+    expect(got?.canvasControl).toBe(false)
+    expect(got?.agentDeclared).toBe(true)
+  })
+
+  it('reads a PRE-AGENT record as codex with the grant, and says the id was not declared', () => {
+    // The back-compat contract, and the reason it is safe: every record written before these fields
+    // existed came from this same Codex spine, and codex is unconditionally canvas-control-capable,
+    // so the implied pair reproduces exactly what the prelude used to hardcode.
+    fs.mkdirSync(recordsRoot, { recursive: true })
+    fs.writeFileSync(
+      recordFile('legacy-1'),
+      `accountId=\nnodeId=node-1\nendpoint=/data/e\nsignature=${sign4('legacy-1', 'system', 'node-1', '/data/e')}\n`
+    )
+    const got = readCodexThreadIdentity('legacy-1', recordsRoot)
+    expect(got?.nodeId).toBe('node-1')
+    expect(got?.agentId).toBe('codex')
+    expect(got?.canvasControl).toBe(true)
+    // The distinguishing bit: `codex` here is an IMPLICATION, not a claim, and callers that rewrite
+    // the record need to know the difference (see the no-downgrade test below).
+    expect(got?.agentDeclared).toBe(false)
+  })
+
+  it('refuses a record whose agent id was edited after signing', () => {
+    writeCodexThreadIdentity('thread-1', 'node-1', '/data/e', recordsRoot, undefined, {
+      agentId: 'codex',
+      canvasControl: true
+    })
+    const raw = fs.readFileSync(recordFile('thread-1'), 'utf8')
+    fs.writeFileSync(recordFile('thread-1'), raw.replace('agentId=codex', 'agentId=custom:evil'))
+    expect(readCodexThreadIdentity('thread-1', recordsRoot)).toBeUndefined()
+  })
+
+  it('refuses a record whose GRANT was edited after signing', () => {
+    // The whole reason the grant is inside the signature: it is a capability the prelude exports
+    // into an agent's shell, so an unsigned copy would be a grant anyone who can write the file
+    // could add.
+    writeCodexThreadIdentity('thread-1', 'node-1', '/data/e', recordsRoot, undefined, {
+      agentId: 'custom:abc',
+      canvasControl: false
+    })
+    const raw = fs.readFileSync(recordFile('thread-1'), 'utf8')
+    fs.writeFileSync(recordFile('thread-1'), raw.replace('canvasControl=0', 'canvasControl=1'))
+    expect(readCodexThreadIdentity('thread-1', recordsRoot)).toBeUndefined()
+  })
+
+  it('never verifies an agent-carrying record under the pre-agent preimage', () => {
+    // THE SELECTION RULE. This record is signed with the valid 4-tuple for its node+endpoint, so a
+    // verifier that fell through generations would accept it and then read `custom:evil` — the door
+    // through which the agent id becomes forgeable. Selecting by shape closes it.
+    fs.mkdirSync(recordsRoot, { recursive: true })
+    fs.writeFileSync(
+      recordFile('thread-1'),
+      `accountId=\nnodeId=node-1\nendpoint=/data/e\nagentId=custom:evil\ncanvasControl=1\n` +
+        `signature=${sign4('thread-1', 'system', 'node-1', '/data/e')}\n`
+    )
+    expect(readCodexThreadIdentity('thread-1', recordsRoot)).toBeUndefined()
+  })
+
+  it('accepts a hand-signed 6-tuple record, so the preimage is the documented one', () => {
+    fs.mkdirSync(recordsRoot, { recursive: true })
+    fs.writeFileSync(
+      recordFile('thread-1'),
+      `accountId=\nnodeId=node-1\nendpoint=/data/e\nagentId=custom:abc\ncanvasControl=0\n` +
+        `signature=${sign6('thread-1', 'system', 'node-1', '/data/e', 'custom:abc', false)}\n`
+    )
+    expect(readCodexThreadIdentity('thread-1', recordsRoot)?.agentId).toBe('custom:abc')
+  })
+
+  it('binds the agent id under a managed account scope too', () => {
+    bindCodexThreadIdentity('thread-1', 'node-1', '/data/e', live([]), recordsRoot, 'acct-A', {
+      agentId: 'custom:abc',
+      canvasControl: true
+    })
+    expect(readCodexThreadIdentity('thread-1', recordsRoot, 'acct-A')?.agentId).toBe('custom:abc')
+    // Scope binding is unchanged: the managed record is still invisible at the system scope.
+    expect(readCodexThreadIdentity('thread-1', recordsRoot)).toBeUndefined()
+  })
+
+  it('a rebind WITHOUT an agent id keeps the one already recorded', () => {
+    // A pane whose NODETERM_AGENT_ID did not survive, or an older launcher, must not strip the line
+    // and send the prelude back to guessing `codex` — for a custom codex-based node that guess is
+    // the exact mislabel this slice removes.
+    bindCodexThreadIdentity('thread-1', 'node-1', '/data/e', live([]), recordsRoot, undefined, {
+      agentId: 'custom:abc',
+      canvasControl: false
+    })
+    bindCodexThreadIdentity('thread-1', 'node-1', '/data/e2', live([]), recordsRoot)
+    const got = readCodexThreadIdentity('thread-1', recordsRoot)
+    expect(got?.hookEndpoint).toBe('/data/e2')
+    expect(got?.agentId).toBe('custom:abc')
+    expect(got?.canvasControl).toBe(false)
+  })
+
+  it('a rebind of a PRE-AGENT record does not write the implied codex as a claim', () => {
+    // The other half of the rule. `codex` was an implication of an old record's shape; promoting it
+    // to a signed claim would make a wrong guess permanent for a custom node.
+    fs.mkdirSync(recordsRoot, { recursive: true })
+    fs.writeFileSync(
+      recordFile('legacy-1'),
+      `accountId=\nnodeId=node-1\nendpoint=/data/e\nsignature=${sign4('legacy-1', 'system', 'node-1', '/data/e')}\n`
+    )
+    bindCodexThreadIdentity('legacy-1', 'node-1', '/data/e2', live([]), recordsRoot)
+    expect(fs.readFileSync(recordFile('legacy-1'), 'utf8')).not.toContain('agentId=')
+    expect(readCodexThreadIdentity('legacy-1', recordsRoot)?.agentDeclared).toBe(false)
+  })
+
+  it('a later bind that DOES know the agent id upgrades a pre-agent record in place', () => {
+    fs.mkdirSync(recordsRoot, { recursive: true })
+    fs.writeFileSync(
+      recordFile('legacy-1'),
+      `accountId=\nnodeId=node-1\nendpoint=/data/e\nsignature=${sign4('legacy-1', 'system', 'node-1', '/data/e')}\n`
+    )
+    bindCodexThreadIdentity('legacy-1', 'node-1', '/data/e', live([]), recordsRoot, undefined, {
+      agentId: 'custom:abc',
+      canvasControl: true
+    })
+    expect(readCodexThreadIdentity('legacy-1', recordsRoot)?.agentId).toBe('custom:abc')
+  })
+
+  it('refuses an EMPTY agentId line rather than reading it as codex', () => {
+    // The fallback is keyed on the LINE BEING ABSENT, never on the value being empty. Keying it on
+    // the value would mean a record that carries an `agentId=` line can still land on the `codex`
+    // guess — the exact mislabel this slice removes, reinstated by a shape we do accept as input.
+    // This record is even signed for `codex`, so a value-keyed reader would verify it happily.
+    fs.mkdirSync(recordsRoot, { recursive: true })
+    fs.writeFileSync(
+      recordFile('thread-1'),
+      `accountId=\nnodeId=node-1\nendpoint=/data/e\nagentId=\ncanvasControl=1\n` +
+        `signature=${sign6('thread-1', 'system', 'node-1', '/data/e', 'codex', true)}\n`
+    )
+    expect(readCodexThreadIdentity('thread-1', recordsRoot)).toBeUndefined()
+  })
+
+  it('refuses to write an agent id outside the accepted alphabet', () => {
+    // Re-validated at the write as well as the read: the value ends up as an environment variable in
+    // an agent's shell, and a signature only proves we wrote the bytes, not that they are a shape we
+    // still accept.
+    for (const bad of ['', 'a b', 'a\nb', 'a/b', 'x'.repeat(129)]) {
+      expect(
+        () =>
+          writeCodexThreadIdentity('thread-1', 'node-1', '/data/e', recordsRoot, undefined, {
+            agentId: bad,
+            canvasControl: true
+          }),
+        JSON.stringify(bad)
+      ).toThrow()
+    }
+  })
+})

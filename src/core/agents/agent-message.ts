@@ -115,11 +115,12 @@ export interface DeliveryDeps {
    */
   bracketPasteRequested(nodeId: string): Promise<boolean>
   /**
-   * ONE tmux invocation: the envelope pasted (tmux frames it from the pane's real bracketed-paste
-   * state — `paste-buffer -p`) and the submit as a `send-keys Enter` in the same command list.
-   * Takes the PLAIN envelope text: the payload must carry no ESC byte of ours, because tmux ≥ 3.7
-   * passes paste-buffer content through vis(3), which renders an embedded frame as literal `^[`
-   * text (issue #453). Resolves false when the pane is gone.
+   * Deliver and submit the PLAIN envelope. Desktop uses one tmux command list; Server Edition
+   * separates paste from Enter until pane capture proves the fresh composer settled. The payload
+   * must carry no ESC byte of ours, because tmux ≥ 3.7 passes paste-buffer content through vis(3),
+   * which renders an embedded frame as literal `^[` text (issue #453). Resolves false only when
+   * the envelope did not reach the pane; a post-paste submit failure remains eligible for the
+   * receipt watch's honest `stalled` outcome.
    */
   sendEnvelope(nodeId: string, envelope: string): Promise<boolean>
   /** The target's status mirror entry — gate 2's whole input. */
@@ -413,17 +414,17 @@ export async function deliverAgentMessage(
     if (!(await deps.bracketPasteRequested(req.targetNodeId)))
       return refuse({ kind: 'targetNotPasteAware' })
 
-    // The envelope goes out PLAIN — tmux applies the bracketed-paste frame itself and the Enter
-    // rides the same tmux command list as a separate key event (`PtyManager.sendEnvelope` →
-    // `localPasteDelivery`/`remotePasteDelivery`, enter=true). This replaced a JS-composed frame
+    // The envelope goes out PLAIN — tmux applies the bracketed-paste frame itself. Desktop's Enter
+    // rides the same tmux command list (`PtyManager.sendEnvelope`); Server Edition waits for pane
+    // settlement and submits separately. Both replaced a JS-composed frame
     // (`bracketedInjection`, deleted): tmux ≥ 3.7 passes paste-buffer content through vis(3), so a
     // payload-carried `ESC[200~` arrived as the literal text `^[[200~` and the `\r` riding inside
     // the frameless burst never submitted (issue #453, measured on the bundled tmux 3.7b).
     //
-    // herdr :48 — the race that note feared (an Enter milliseconds behind an UNMARKED burst being
-    // absorbed as pasted content) cannot occur here: the Enter arrives after tmux's own `ESC[201~`
-    // close marker, a boundary a paste-aware composer cannot re-chunk across. Probe B in #453
-    // measured exactly this delivery submitting cleanly against a live Claude Code pane.
+    // herdr :48 — the desktop Enter arrives after tmux's own `ESC[201~` close marker. Server's
+    // fresh-composer path additionally observes that the TUI rendered the paste before sending it;
+    // this closes the asynchronous boot-window case where the boundary was written but not yet
+    // consumed by Claude's composer.
     //
     // herdr :116 — framing an unaware app made OpenCode read `A != B` as shell mode; `-p` frames
     // only when the pane's app really requested bracketed paste, so that failure mode is tmux's

@@ -8,11 +8,11 @@
  * consent via the #213 mechanism, which would be a third disjunct in `gateProjectTarget`, not a
  * redesign).
  *
- * IN MEMORY, IN MAIN, NEVER PERSISTED — the browser-ownership-ledger posture
+ * IN MEMORY, IN THE CORE PROCESS, NEVER PERSISTED — the browser-ownership-ledger posture
  * (browser-control-ledger.ts), for the same reason: a grant is a record of consent given to a
  * RUNNING session, not a durable claim. An app restart clears every grant; a caller's node
  * teardown (pty destroy/recycle, wired in index.ts) clears that caller's. Recording happens ONLY
- * in main's control-handler wrapper on `result.ok && verified` — main's own identity verdict for
+ * in the desktop control-handler wrapper on `result.ok && verified` — the core's identity verdict for
  * that request, never anything off the wire or out of project.json.
  *
  * PURE on purpose: no electron, no fs, no child_process (project-grants.test.ts asserts this
@@ -60,12 +60,15 @@ export function clearAll(): void {
   grants.clear()
 }
 
-/** The open verbs that accept `--project` (spec §2.2). Only these three — `--project` on any
- *  other verb is dead weight the gate deliberately ignores (spec §7.5). */
+/** The verbs that accept `--project` (spec §2.2): the three open verbs, plus `settings`, whose
+ *  per-project keys (@shared/settings-verb) may name a project other than the caller's — own or
+ *  granted only, the same rule, decided here before anything is forwarded. `--project` on any other
+ *  verb is dead weight the gate deliberately ignores (spec §7.5). */
 export const PROJECT_TARGETABLE_VERBS: ReadonlySet<string> = new Set([
   'open-terminal',
   'open-claude',
-  'open-agent'
+  'open-agent',
+  'settings'
 ])
 
 /** The flat refusal an UNVERIFIED caller's `--project` gets — one sentence, no diagnosis, no
@@ -73,7 +76,7 @@ export const PROJECT_TARGETABLE_VERBS: ReadonlySet<string> = new Set([
 export const PROJECT_TARGETING_REFUSAL = 'Project targeting refused.'
 
 /** The named refusal for an id that is neither the caller's own project nor granted. Also the
- *  answer for an id main's store does not know, AND for an ungranted id that happens to name an
+ *  answer for an id the core store does not know, AND for an ungranted id that happens to name an
  *  SSH project: every id the caller has no relationship to refuses with these SAME BYTES, so the
  *  gate is neither a project-existence oracle nor a project-KIND oracle (PR #362 review, I3 —
  *  the earlier distinct SSH wording let a verified caller learn "this id is a real SSH project"
@@ -100,7 +103,7 @@ export const OPEN_PROJECT_LOCAL_ONLY =
 export const OPEN_PROJECT_GRANT_CAP =
   'open-project-grant-cap: this session already holds the maximum number of project grants'
 
-/** The wrapper could not resolve the caller's own project from main's persisted store (a node
+/** The wrapper could not resolve the caller's own project from the persisted store (a node
  *  saved seconds ago may still be inside the save debounce). Fail closed, but say it is
  *  transient — this is the one refusal here that a short wait can clear. */
 export const OPEN_PROJECT_CALLER_UNRESOLVED =
@@ -113,9 +116,9 @@ export const OPEN_PROJECT_CWD_INVALID =
 export type ProjectTargetGate = 'allow' | { refuse: string }
 
 /**
- * The `--project` targeting gate (spec §3 "consumed" + §5 P1/P2/P8), run in main's control-handler
+ * The `--project` targeting gate (spec §3 "consumed" + §5 P1/P2/P8), run in the shell's control-handler
  * wrapper BEFORE anything is forwarded to the renderer — the renderer never sees an unauthorized
- * `--project`. Every input is main's own data: `verified` is the hook server's identity verdict
+ * `--project`. Every input is core-owned data: `verified` is the hook server's identity verdict
  * for THIS request, `callerProjectId` comes from node membership in `persistedCanvases()`,
  * `targetIsSsh` from `projectMetaFor` (undefined = the store does not know the target), and
  * `granted` from this module's ledger. Nothing is read off the request except the target id
@@ -127,7 +130,7 @@ export type ProjectTargetGate = 'allow' | { refuse: string }
  *    mid-debounce ever let `persistedCanvases` resolve the caller one tick before
  *    `projectMetaFor` finds the entry, the caller's legitimate `--project <own-id>` must not be
  *    spuriously refused as unknown. Allowing OWN on the caller-resolution alone is still
- *    fail-closed — the id equals the caller's own project in main's own store;
+ *    fail-closed — the id equals the caller's own project in the core store;
  *  - every id the caller has NO relationship to (unknown, local-ungranted, SSH-ungranted)
  *    refuses with the byte-identical PROJECT_TARGET_REFUSED (review I3 — no kind oracle);
  *  - the SSH refusal sits INSIDE the granted allow as pure belt: a granted SSH id cannot exist
@@ -181,7 +184,7 @@ export function recordOpenProjectGrant(
  * The whole main-side pre-forward gate for an `open-project` request (issue #338 Task 1.4, made
  * pure in the PR #362 fix round — review I1/I2 proved the SSH-caller and unresolved-caller
  * branches had no red-capable coverage while they lived inline in index.ts's wrapper). The
- * wrapper resolves the inputs from main's own stores (caller project by node membership in
+ * wrapper resolves the inputs from core-owned stores (caller project by node membership in
  * `persistedCanvases`, SSH-ness via `projectMetaFor`, the cap from this module's ledger) and
  * routes EVERY open-project through here; a `refuse` answer is returned to the caller without
  * anything being forwarded to the renderer, so no dialog can be shown (PR 2) and no grant can be

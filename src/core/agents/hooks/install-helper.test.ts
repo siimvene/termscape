@@ -1,9 +1,56 @@
 import path from 'path'
 import { describe, expect, it } from 'vitest'
-import { buildManagedHookCommand, mergeManagedHook, type HookSettings } from './install-helper'
+import { chmodSync, lstatSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import {
+  buildManagedHookCommand,
+  mergeManagedHook,
+  writeManagedHookConfig,
+  writeManagedHookFileAtomic,
+  type HookSettings
+} from './install-helper'
 import { CLAUDE_HOOK_EVENTS } from '@shared/agents/hook-events'
 
 const cmd = buildManagedHookCommand('/remote/.nodeterm/agent-hooks/claude.sh')
+
+describe('writeManagedHookFileAtomic', () => {
+  it('leaves the previous hook file intact and cleans its temp when publication fails', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'nt-hook-atomic-'))
+    const target = join(dir, 'hooks.json')
+    writeFileSync(target, 'old')
+    try {
+      expect(() =>
+        writeManagedHookFileAtomic(target, 'new', () => {
+          throw new Error('publish failed')
+        })
+      ).toThrow('publish failed')
+      expect(readFileSync(target, 'utf8')).toBe('old')
+      expect(readdirSync(dir)).toEqual(['hooks.json'])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('writeManagedHookConfig', () => {
+  it('follows a shared settings symlink and preserves its private mode by default', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'nt-hook-shared-'))
+    const target = join(dir, 'real-settings.json')
+    const link = join(dir, 'settings.json')
+    writeFileSync(target, 'old')
+    chmodSync(target, 0o600)
+    symlinkSync(target, link)
+    try {
+      writeManagedHookConfig(link, 'new')
+      expect(lstatSync(link).isSymbolicLink()).toBe(true)
+      expect(readFileSync(target, 'utf8')).toBe('new')
+      expect(lstatSync(target).mode & 0o777).toBe(0o600)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
 
 describe('buildManagedHookCommand', () => {
   it('runs the script only when it is still readable, and exits 0 otherwise', () => {

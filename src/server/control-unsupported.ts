@@ -1,3 +1,6 @@
+import { parseControlRequest } from '../core/canvas-control-core'
+import type { ServerControlReply } from './headless-node-factory'
+
 /**
  * The Server Edition's answer to `/control/*`: a NAMED, permanent refusal.
  *
@@ -48,8 +51,9 @@ export function controlUnsupportedMessage(verb: string): string {
 }
 
 /**
- * What `src/server/index.ts` hands to `hookServer.setControlHandler`. Never resolves `ok: true`:
- * there is nothing on this host for a control verb to act on.
+ * What `src/server/index.ts` hands to `hookServer.setControlHandler` while the feature flag is
+ * OFF. This preserves the pre-Phase-1 response byte-for-byte, which is both the safe upgrade
+ * default and the explicit rollback path.
  */
 export async function serverEditionControlHandler({ verb }: { verb: string }): Promise<{
   ok: false
@@ -57,4 +61,143 @@ export async function serverEditionControlHandler({ verb }: { verb: string }): P
   message: string
 }> {
   return { ok: false, error: CONTROL_UNSUPPORTED_ERROR, message: controlUnsupportedMessage(verb) }
+}
+
+export interface ServerEditionControlActions {
+  openProject(
+    sourceNodeId: string,
+    args: Record<string, string>,
+    verified: boolean
+  ): Promise<ServerControlReply>
+  openTerminal(
+    sourceNodeId: string,
+    args: Record<string, string>,
+    verified: boolean
+  ): Promise<ServerControlReply>
+  openAgent(
+    sourceNodeId: string,
+    args: Record<string, string>,
+    verified: boolean
+  ): Promise<ServerControlReply>
+  close(
+    sourceNodeId: string,
+    args: Record<string, string>,
+    verified: boolean
+  ): Promise<ServerControlReply>
+  link(
+    sourceNodeId: string,
+    args: Record<string, string>,
+    verified: boolean
+  ): Promise<ServerControlReply>
+  group(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply>
+  rename(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply>
+  color(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply>
+  sticky(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply>
+  /** Reads only; `--set` is refused by name (src/server/settings-control.ts). */
+  settings(sourceNodeId: string, args: Record<string, string>): Promise<ServerControlReply>
+  deliver(input: {
+    verb: 'send' | 'reply' | 'notify'
+    sourceNodeId: string
+    targetNodeId: string
+    body: string
+  }): Promise<ServerControlReply>
+}
+
+const SERVER_V1_VERBS: ReadonlySet<string> = new Set([
+  'open-project',
+  'open-terminal',
+  'open-agent',
+  'close',
+  'link',
+  'group',
+  'rename',
+  'color',
+  'send',
+  'reply',
+  'notify',
+  'sticky',
+  'settings'
+])
+
+/** A permanent, verb-specific refusal used only while canvas control itself is enabled. */
+export function unsupportedServerVerbMessage(verb: string): string {
+  const why = verb === 'browser' ? ` ${BROWSER_UNSUPPORTED_CLAUSE}` : ''
+  return (
+    `${CONTROL_UNSUPPORTED_ERROR}: The "${verb}" canvas-control verb is not supported by ` +
+    `nodeterm Server Edition v1. This is not a temporary failure — do not retry.${why}`
+  )
+}
+
+/**
+ * Build the real Server Edition handler. Authentication remains entirely in HookServer: this
+ * callback receives only requests that passed the app bearer, per-node verdict and the
+ * verified-only gate for messaging/sticky. Parsing is shared with desktop; dispatch is deliberately
+ * small and exhaustive so every deferred verb receives a named permanent edition refusal.
+ */
+export function createServerEditionControlHandler(actions: ServerEditionControlActions): (req: {
+  verb: string
+  nodeId: string
+  args: Record<string, string>
+  verified: boolean
+}) => Promise<ServerControlReply> {
+  return async ({ verb, nodeId, args, verified }) => {
+    if (!SERVER_V1_VERBS.has(verb)) {
+      return {
+        ok: false,
+        error: CONTROL_UNSUPPORTED_ERROR,
+        message: unsupportedServerVerbMessage(verb)
+      }
+    }
+    const command = parseControlRequest(verb, args)
+    if ('error' in command) return { ok: false, error: command.error }
+    // Creator ownership is meaningful only for an authenticated node identity. Keep this at the
+    // Server boundary so every mutating/executing verb — including ones whose factory method has no
+    // `verified` parameter — fails before it can inspect or change shared state.
+    if (!verified) {
+      return {
+        ok: false,
+        error: `${command.verb}-identity-refused: Server Edition canvas control requires verified node identity`
+      }
+    }
+
+    switch (command.verb) {
+      case 'open-project':
+        return actions.openProject(nodeId, command.args, verified)
+      case 'open-terminal':
+        return actions.openTerminal(nodeId, command.args, verified)
+      case 'open-agent':
+        return actions.openAgent(nodeId, command.args, verified)
+      case 'close':
+        return actions.close(nodeId, command.args, verified)
+      case 'link':
+        return actions.link(nodeId, command.args, verified)
+      case 'group':
+        return actions.group(nodeId, command.args)
+      case 'rename':
+        return actions.rename(nodeId, command.args)
+      case 'color':
+        return actions.color(nodeId, command.args)
+      case 'sticky':
+        return actions.sticky(nodeId, command.args)
+      case 'settings':
+        return actions.settings(nodeId, command.args)
+      case 'send':
+      case 'reply':
+      case 'notify':
+        return actions.deliver({
+          verb: command.verb,
+          sourceNodeId: nodeId,
+          targetNodeId: command.args.node,
+          body: command.verb === 'notify' ? '' : command.args.text
+        })
+      default:
+        // `SERVER_V1_VERBS` and this switch are kept separate on purpose: the parser's wider
+        // ControlVerb union can grow without silently making a new server action reachable.
+        return {
+          ok: false,
+          error: CONTROL_UNSUPPORTED_ERROR,
+          message: unsupportedServerVerbMessage(verb)
+        }
+    }
+  }
 }

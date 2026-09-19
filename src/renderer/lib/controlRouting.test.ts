@@ -4,6 +4,13 @@ import {
   needsLiveCanvas,
   liveOnlyRefusal,
   LIVE_ONLY_VERBS,
+  canColdOpen,
+  answersOffCanvas,
+  answersFromStoredNodes,
+  offScreenDisposition,
+  offScreenRefusal,
+  controlVerbSetsForTests,
+  storedNodeListing,
   sourceIsControlCapable,
   answerBrowserResolve,
   type ControlProject,
@@ -72,6 +79,11 @@ describe("needsLiveCanvas — a control call never switches the user's view", ()
   // closing its stations — yanked the human's view away from whatever they were working on. The
   // contract is now inverted: everything is answered from the owning project's serialized store,
   // and only the verbs with NO store representation are refused (never travelled to).
+  //
+  // NOTE the semantics kept in the merge: this `needsLiveCanvas` is the NARROW predicate the
+  // dispatch gates on (TRUE only for LIVE_ONLY_VERBS), NOT the shared module's broader
+  // "needs some canvas" one. The shared four-set classification (canColdOpen/answersOffCanvas/
+  // answersFromStoredNodes/offScreenDisposition) is exercised in the describes below.
   it('is false for every node-creating, node-editing and node-reading verb', () => {
     for (const verb of [
       'list',
@@ -128,10 +140,131 @@ describe("needsLiveCanvas — a control call never switches the user's view", ()
   })
 })
 
+describe('canColdOpen — an OPEN is answered out of the store, not by moving the user', () => {
+  it('is true for the node-opening verbs AND for verify/spawn-team, which also cold-arm nodes', () => {
+    expect(canColdOpen('open-terminal')).toBe(true)
+    expect(canColdOpen('open-claude')).toBe(true)
+    expect(canColdOpen('open-agent')).toBe(true)
+    // `verify`/`spawn-team` CREATE session nodes too, and this fork arms them for cold open through
+    // the store surface (Canvas.tsx's `ControlSurface` arms every un-armed node it commits). So the
+    // help calls them "answered off screen (queued)", not "refused".
+    expect(canColdOpen('verify')).toBe(true)
+    expect(canColdOpen('spawn-team')).toBe(true)
+  })
+
+  it('is false for every verb that acts on nodes which already exist', () => {
+    // These reach a pane, a store writer, the board, or the serialized nodes' geometry — none
+    // CREATES a session, so none cold-opens. (The layout verbs are answered off screen all the
+    // same; they are `stored-node`, not `cold-open` — see the disposition table below.)
+    for (const verb of [
+      'write',
+      'close',
+      'group',
+      'ungroup',
+      'move',
+      'arrange',
+      'align',
+      'link',
+      'rename',
+      'color',
+      'open-worktree',
+      'open-browser',
+      'browser',
+      'show-image',
+      'show-video',
+      'show-web',
+      'board',
+      'assign'
+    ]) {
+      expect(canColdOpen(verb), verb).toBe(false)
+    }
+  })
+
+  it('answers the four DISPLAY verbs off canvas, and nothing else', () => {
+    for (const verb of ['show-image', 'show-video', 'show-web', 'open-browser']) {
+      expect(answersOffCanvas(verb), verb).toBe(true)
+    }
+    for (const verb of [
+      'open-terminal',
+      'open-claude',
+      'open-agent',
+      'list',
+      'send',
+      'reply',
+      'sticky',
+      'open-project',
+      'write',
+      'close',
+      'group',
+      'ungroup',
+      'move',
+      'arrange',
+      'align',
+      'link',
+      'rename',
+      'color',
+      'verify',
+      'spawn-team',
+      'open-worktree',
+      'board',
+      'assign'
+    ]) {
+      expect(answersOffCanvas(verb), verb).toBe(false)
+    }
+  })
+
+  it('keeps `browser` on the travelling path — it NAVIGATES a mounted guest', () => {
+    // The one pair worth stating side by side. `open-browser` places a node, which a serialized
+    // canvas can hold; `browser` drives an Electron <webview> guest that exists only while its
+    // project is on screen. Adding it here would answer "navigated" about a guest that is not
+    // there. `browser` is the one display-family verb that is ALSO live-only.
+    expect(answersOffCanvas('open-browser')).toBe(true)
+    expect(answersOffCanvas('browser')).toBe(false)
+    expect(needsLiveCanvas('browser')).toBe(true)
+    expect(needsLiveCanvas('open-browser')).toBe(false)
+  })
+
+  // (The shared module's broader "these still NEED some canvas" needsLiveCanvas assertions for the
+  // display and cold-open verbs were dropped in the merge: the fork's NARROW `needsLiveCanvas` is
+  // the one the dispatch gates on — FALSE for a store-answerable open/display verb — so those
+  // assertions inverted against it. The off-screen answerability they meant to pin lives in
+  // `canColdOpen` (true for the three opens) and `answersOffCanvas` (true for the four display
+  // verbs) above, and the dropped shared expectation is recorded in the CONTROL merge notes.)
+  it('the three cold-open verbs are also NOT live-only — the store answers them off screen', () => {
+    for (const verb of ['open-terminal', 'open-claude', 'open-agent']) {
+      expect(canColdOpen(verb), verb).toBe(true)
+      expect(needsLiveCanvas(verb), verb).toBe(false)
+    }
+  })
+
+  it('the three sets are DISJOINT', () => {
+    const { storeAnswered, coldOpenable, offCanvas } = controlVerbSetsForTests()
+    expect(storeAnswered.filter((v) => coldOpenable.includes(v))).toEqual([])
+    expect(storeAnswered.filter((v) => offCanvas.includes(v))).toEqual([])
+    expect(coldOpenable.filter((v) => offCanvas.includes(v))).toEqual([])
+    // …and none is empty, so the assertions above cannot pass vacuously.
+    expect(storeAnswered.length).toBeGreaterThan(0)
+    expect(coldOpenable.length).toBeGreaterThan(0)
+    expect(offCanvas.length).toBeGreaterThan(0)
+  })
+
+  it('does NOT change which project answers — routing is still by source (cecb4dfe stands)', () => {
+    // The regression this fix must not cause: cecb4dfe made an agent OUTSIDE the active project
+    // answerable at all (before it, the active canvas had never heard of the node and reported
+    // "not a control-capable agent"). Cold-opening changes only HOW the owning project is
+    // written to, never WHETHER it is found.
+    const projects = [P('p-active', [{ id: 'a1' }]), P('p-other', [{ id: 'b1' }])]
+    expect(routeControlSource(projects, 'p-active', 'b1')).toEqual({
+      kind: 'switch',
+      projectId: 'p-other'
+    })
+  })
+})
+
 describe('sourceIsControlCapable', () => {
-  it('defaults a plain terminal node (no agentId) to claude, mirroring the spawn-time env', () => {
-    expect(sourceIsControlCapable(undefined)).toBe(true)
-    expect(sourceIsControlCapable('')).toBe(true)
+  it('does not relabel a plain terminal node as Claude', () => {
+    expect(sourceIsControlCapable(undefined)).toBe(false)
+    expect(sourceIsControlCapable('')).toBe(false)
   })
 
   it('accepts every canvas-control-capable agent', () => {
@@ -142,15 +275,6 @@ describe('sourceIsControlCapable', () => {
 
   it('rejects an agent that never gets NODETERM_CANVAS_CONTROL', () => {
     expect(sourceIsControlCapable('cursor')).toBe(false)
-  })
-})
-
-describe('the `browser` verb needs the LIVE canvas', () => {
-  it('needsLiveCanvas(browser) is true, and open-browser (which only CREATES a node) is store-answerable', () => {
-    // `browser` drives a real <webview> that only exists on the live canvas; it is NOT
-    // store-answerable. `open-browser` merely places a node, which the store can hold.
-    expect(needsLiveCanvas('browser')).toBe(true)
-    expect(needsLiveCanvas('open-browser')).toBe(false)
   })
 })
 
@@ -218,5 +342,115 @@ describe('answerBrowserResolve — the renderer answers ONLY what it alone knows
   it('a non-control-capable source is reported as such (main turns it into the refusal)', () => {
     const p = proj({ nodes: [{ id: 'x-1', agentId: 'cursor' }], agentBrowserControl: true, capabilityAck: { agentBrowserControl: 'kept' } })
     expect(answerBrowserResolve(p, 'x-1')).toMatchObject({ ok: true, sourceControlCapable: false })
+  })
+})
+
+describe('storedNodeListing', () => {
+  it('renders serialized nodes in the same shape the live canvas answers `list` with', () => {
+    expect(
+      storedNodeListing([
+        { id: 'term-b-1', kind: 'terminal', title: 'Claude Code' },
+        { id: 'sticky-b-2', kind: 'sticky' },
+        { id: 'term-b-3' }
+      ])
+    ).toEqual([
+      { id: 'term-b-1', kind: 'terminal', title: 'Claude Code' },
+      { id: 'sticky-b-2', kind: 'sticky', title: '' },
+      { id: 'term-b-3', kind: 'terminal', title: '' }
+    ])
+  })
+})
+
+describe('the off-screen disposition table (the verbs that used to travel)', () => {
+  it('the verbs that act on existing nodes are answered from the store, not by travelling', () => {
+    // The field report: the user was typing in another project, a background agent issued a
+    // `close`, and the app switched their tab. These reach a pane, a store writer, the board file,
+    // or the serialized nodes' geometry (the layout verbs) — none of them needs React Flow — so
+    // none of them has any business moving a camera to get there.
+    for (const v of [
+      'write',
+      'close',
+      'rename',
+      'color',
+      'link',
+      'board',
+      'assign',
+      'group',
+      'ungroup',
+      'move',
+      'arrange',
+      'align'
+    ]) {
+      expect(answersFromStoredNodes(v), v).toBe(true)
+      expect(offScreenDisposition(v), v).toEqual({ kind: 'stored-node' })
+    }
+  })
+
+  it('only the four live-only verbs refuse, and each says WHY in its own words', () => {
+    // A refusal an agent can act on beats hijacking the human's screen. The reasons are per verb
+    // because the caller's next move differs: an `open-worktree` can wait for the human, a `branch`
+    // cannot happen at all until that terminal is mounted. This fork refuses exactly the four verbs
+    // with NO serialized counterpart; everything else is answered off screen (above).
+    const why = (v: string) => {
+      const d = offScreenDisposition(v)
+      expect(d.kind, v).toBe('refuse')
+      return d.kind === 'refuse' ? d.why : ''
+    }
+    expect(why('branch')).toMatch(/parks the original/)
+    expect(why('open-worktree')).toMatch(/worktree store/)
+    expect(why('close-worktree')).toMatch(/worktree store/)
+    expect(why('browser')).toMatch(/webview/)
+    // The layout and panel verbs upstream refused are ANSWERED here, not refused.
+    expect(offScreenDisposition('arrange').kind).toBe('stored-node')
+    expect(offScreenDisposition('group').kind).toBe('stored-node')
+    expect(offScreenDisposition('move').kind).toBe('stored-node')
+    expect(offScreenDisposition('verify').kind).toBe('cold-open')
+    expect(offScreenDisposition('spawn-team').kind).toBe('cold-open')
+  })
+
+  it('an unknown verb refuses — the fail-closed direction', () => {
+    // Someone adds a verb to main's table and forgets this file. It must not fall through to
+    // anything that could act, and it certainly must not travel.
+    expect(offScreenDisposition('teleport-everything')).toEqual({
+      kind: 'refuse',
+      why: 'it needs the live canvas'
+    })
+  })
+
+  it('the three answering paths keep their own kinds', () => {
+    expect(offScreenDisposition('list')).toEqual({ kind: 'store-answered' })
+    expect(offScreenDisposition('send')).toEqual({ kind: 'store-answered' })
+    expect(offScreenDisposition('notify')).toEqual({ kind: 'store-answered' })
+    expect(offScreenDisposition('open-claude')).toEqual({ kind: 'cold-open' })
+    expect(offScreenDisposition('show-web')).toEqual({ kind: 'off-canvas' })
+    // `open-browser` PLACES a node (off canvas); `browser` DRIVES one (refuses). The pair is the
+    // easiest thing in the table to collapse by accident.
+    expect(offScreenDisposition('open-browser')).toEqual({ kind: 'off-canvas' })
+    expect(offScreenDisposition('browser').kind).toBe('refuse')
+  })
+
+  it('the refusal sentence names the project, the reason and the fact that nothing happened', () => {
+    const msg = offScreenRefusal('open-worktree', 'web-app')
+    expect(msg.startsWith('open-worktree: project "web-app" is not on screen')).toBe(true)
+    expect(msg).toContain('worktree store')
+    expect(msg).toContain('Open that project and run this again')
+    expect(msg).toContain('nothing was changed')
+  })
+
+  it('a verb that is ANSWERED off screen still gets a sane sentence if someone asks for one', () => {
+    // `offScreenRefusal` is only called on the refusing branch, but it must not produce nonsense
+    // (or throw) if a future caller reaches for it on another verb.
+    expect(offScreenRefusal('write', 'web-app')).toContain('write:')
+  })
+
+  it('the four sets are disjoint, so the dispatch order cannot silently decide', () => {
+    const { storeAnswered, coldOpenable, offCanvas, storedNode } = controlVerbSetsForTests()
+    const all = [...storeAnswered, ...coldOpenable, ...offCanvas, ...storedNode]
+    expect(new Set(all).size).toBe(all.length)
+    // …and NONE of the four store-/cold-/off-canvas-answerable sets is live-only: the fork's NARROW
+    // `needsLiveCanvas` is FALSE for every verb the store surface can answer off screen, TRUE only
+    // for LIVE_ONLY_VERBS. (The shared module's broader needsLiveCanvas — TRUE for these too — is
+    // NOT re-exported here; see the needsLiveCanvas describe above and the CONTROL merge notes.)
+    for (const v of all) expect(needsLiveCanvas(v), v).toBe(false)
   })
 })

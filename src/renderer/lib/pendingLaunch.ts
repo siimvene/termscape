@@ -255,7 +255,7 @@ export function launchesToFire(
   const out: LaunchToFire[] = []
   for (const n of nodes) {
     const p = n.data.pendingLaunch
-    if (!p || !p.command) continue
+    if (!p || !p.command || p.executor === 'server') continue
     if (p.awaitSetupGroup && !(setupDone?.(p.awaitSetupGroup) ?? true)) continue
     if (p.after.every((d) => depSatisfied(d, status, live))) out.push({ id: n.id, command: p.command })
   }

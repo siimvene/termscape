@@ -18,6 +18,11 @@ npm run typecheck  # tsc for both the node and web projects — the fastest corr
 npm test           # vitest, unit + integration
 ```
 
+On Windows, run `bootstrap-windows.bat` instead of `npm install`. It verifies the Visual Studio
+C++ workload and its separately installed Spectre-mitigated libraries before compiling `node-pty`.
+It also shields MSVC addon builds from the clang/lld ThinLTO settings inherited from Node 26; a
+plain `npm install` under a stock Node 26 with node-gyp 12 otherwise fails with `LNK1117`.
+
 `npm run server:dev` boots the Server Edition (browser UI) if you are working on that surface.
 
 **If `src/main/node-pty-patch.test.ts` is red, your `node_modules` is unpatched — not your code.**
@@ -45,7 +50,12 @@ The repo is split by Electron process boundary and the split is enforced, not ad
 
 **Put new service logic in `src/core` behind `CorePlatform`, not inline in `src/main`.** That is the
 seam the Server Edition boots from; logic left in `src/main` silently does not exist there, and the
-boundary tests cannot tell you a feature is *missing*.
+boundary tests cannot tell you a feature is *missing*. This keeps happening to the same subsystem:
+the ⌘M transcript read and then the context meter's `context:ensure` both shipped desktop-only, and
+in both cases the browser cast the message into the void and the feature just looked empty. If your
+handler needs something only Electron has (an SSH ControlMaster, a native dialog), make that an
+**injected dep** whose absence is a documented degrade — see `registerTranscriptIpc` /
+`registerContextEnsureIpc` — rather than a reason to keep the whole handler in `src/main`.
 
 ## Three surfaces
 
@@ -65,7 +75,10 @@ forces you to *declare* every member, but a no-op stub compiles fine while doing
 
 The **canvas and the kanban board are two views of the same nodes.** When you add something to a
 canvas node — a header action, a badge, a menu item — ask whether the board's card and card modal
-need it too, and wire it in the same change.
+need it too, and wire it in the same change. The global (Omni) board shows all open projects as
+stacked swimlanes; it is off by default (`settings.omniKanbanEnabled`), has a dedicated remappable
+shortcut (`view.globalKanbanToggle`), and can be made the default for Cmd+Shift+B via
+`settings.omniKanbanAsDefault` — see CLAUDE.md for the full invariants.
 
 A board card's **source** is a registry entry, not a branch you add at a call site
 (`renderer/lib/kanbanSources.ts`). Declare the source once — filter label, `placement`
@@ -109,6 +122,110 @@ lane unaffected.
   PR; copy that really is macOS-specific (the ptmx-limit banner, the notch step) is exempt by name
   with its reason. Comments are not scanned.
 
+- **An overlay you lay over a live terminal steals its wheel — give it `pointer-events: none`.**
+  Wheel routing is a per-packet hit test on `closest('.nowheel')` (ours in `Canvas.tsx`, and React
+  Flow's own `panOnScroll` independently), so the element under the pointer decides, not the node.
+  `.term-node__xterm` carries the class and covers the whole body, so a banner drawn ON a running
+  terminal takes those pixels out of the terminal's wheel area and hands them to the canvas — the
+  user scrolls and the canvas slides instead. `.term-node__upload` and `.term-copy-pill` were
+  already `pointer-events: none` for this; `.term-node__stalecwd` was not (issue #767), and
+  `canvas/terminal-wheel-boundary.test.ts` now fails on the next one. An overlay that REPLACES a
+  dead view keeps the canvas wheel on purpose — there is nothing underneath to scroll. Same rule
+  one layer up: do not "fix" a routing question by moving `nowheel` outward, because a second
+  consumer reads the class and no per-element opt-out can reach it. Deep version: CLAUDE.md §
+  Terminal node lifecycle.
+
+- **The node colour palette is ONE list, and it is also the control boundary.**
+  `src/shared/node-colors.ts` is what every picker draws and what `nodeterm color --color C`
+  validates against — so a colour the UI offers and a colour the CLI accepts cannot drift apart.
+  Its agent section is DERIVED from `AGENT_CONFIG`, never re-typed: add a builtin agent and the
+  palette grows by itself. If you are adding a surface that lets someone choose a node colour,
+  render `<NodeColorSwatches>` rather than mapping the array yourself (a guard test fails on a
+  hand-rolled swatch row) — and if the value will be drawn as TEXT or as an opaque fill under
+  white, take `SYSTEM_NODE_COLOR_SWATCHES` instead, with the contrast reason in a comment. Deep
+  version, including the measured numbers: CLAUDE.md § Node colors.
+
+- **Every loosening of a security gate must be a SETTING the user can see and revoke.** A "don't
+  ask again" that lives only in a dialog is a permission granted once and never findable again. The
+  canvas-control destructive confirm is the pattern to copy (`@shared/control-confirm`): a CANCEL
+  never grants anything, a waived action still announces itself on screen and NAMES the waiver that
+  let it through, and which gates may be waived at all is a TABLE, not an `if` at each call site —
+  so "this one can never be waived" is a tested fact rather than a line somebody forgot to write.
+  **What a dialog may grant is bounded by SCOPE, not by permanence.** It offers "while nodeterm is
+  running" (in-memory — not `settings.json`, not `localStorage`, so quitting restores the gate) or
+  "always in this project" (machine-local, keyed by project id, pruned like
+  `settings.sidebarCollapsedItems`). The machine-WIDE waiver stays Settings-only, because that is
+  the one a stray click in a dialog that appeared under the user's hands must not be able to grant.
+  Offering only the app-run one was its own failure: it is not what a user who ticks "don't ask
+  again" means, so the real choices were "be asked forever" or "turn it off everywhere". Two rules
+  come with the project scope: it is keyed on the project the call ACTS ON (canvas control routes
+  by source, so that is often not the project on screen), and it is machine-local — never
+  `.nodeterm/project.json`, which is git-shared, or a cloned repo could switch someone's confirms
+  off.
+
+- **An agent may only reach settings through an ALLOWLIST, and every change asks.** The
+  canvas-control `settings` verb (`src/shared/settings-verb.ts`) reads and asks to change a short
+  table of keys; anything off the table is refused by name, and a forbidden set (permission modes,
+  accounts/credentials, node identity, browser control, telemetry, keybindings, confirm waivers)
+  outranks the table — its test walks the table against the set AND a name pattern, so an entry that
+  would let an agent grant itself a power goes red even when added on purpose. `settings` is outside
+  `CONFIRM_WAIVABLE_VERBS`: a CLI that could waive its own confirm would make the confirm decorative.
+  A capability change must land through the UI's own setter (`setProjectCapability`: file flag AND
+  this machine's `'kept'` answer), never a hand-rolled flag write. Adding a key is one line in the
+  table plus a `why`. The Server Edition has no dialog, so it refuses every `--set` by name.
+
+- **A permission mode (or anything else) that rides `project.json` is GIT-SHARED — never key a
+  local gate on it alone.** `project.defaultPermissionMode` travels to everyone who clones the
+  repo, so binding a confirmation-skip to "the mode is bypassPermissions" would let a cloned
+  repository silently switch off a user's destructive-action gate. The rule that came out of it:
+  ask `resolvePermissionModeWithSource` WHO chose the value (`project` / `global` / `default`) and
+  act only on the user's own machine-local choice — and keep `default` distinct from `global`,
+  because reading an unset setting as a deliberate choice is reading consent into silence. Anything
+  machine-local goes in `settings.json`; nothing that grants a capability goes in `project.json`.
+  A machine-local DEFAULT for a project capability (`agentMessagingDefault`) is allowed only because
+  it answers ABSENCE: an explicit `true` in `project.json` still needs this machine's recorded
+  answer, an explicit `false` still wins, and "off" must therefore be written as a literal `false`.
+  Read grants through `projectCapabilityGrantedFor(project, cap, settings)` — never the file bit.
+
+- **Nothing an agent asks for may take the user's screen.** Canvas control routes by SOURCE: the
+  request names the agent's own node, and the dispatch has to find the canvas that owns it. For
+  years "that canvas is not on screen" was answered by switching the project tab — so a background
+  agent's `close` moved a user who was typing in another project, applied that project's saved
+  viewport, and took their camera and typing focus for a call they did not make. Every verb now has
+  a decided off-screen behaviour (`src/shared/control-off-screen.ts`) and none of them is "travel":
+  it is answered against the owning project's serialized nodes, or REFUSED with a reason the agent
+  can act on. If you add a verb, give it an entry — a refusal beats a hijack, and a verb with no
+  entry falls into the generic refusal, which is fail-closed but is nobody's decision. Two traps
+  the old shape hid: a verb body that resolves `--node` against the live `nodesRef.current` while
+  answering for another project silently acts on whatever the human is looking at (use
+  `ctlNodes()`), and reading `activeProjectId` inside a verb has the same bug (use `ctlProject`).
+  The guard is `test/acceptance/control-verb-disposition.test.ts`, which walks main's verb table
+  against the renderer's dispositions — deliberately cross-layer, because that is the only way
+  "every verb" is checked rather than remembered.
+
+- **A dialog raised on someone else's behalf must know that request's lifetime.** Main abandons a
+  canvas-control request after 120 s and tells the renderer nothing, so an unanswered dialog sat
+  there forever AND held the one-confirm-at-a-time guard, which refused every later destructive
+  verb with "a confirmation is already pending" for the rest of the app run — the agent, told the
+  refusal was retryable, retried into it in a loop. If you raise a dialog for a bounded request,
+  give it the deadline (`ConfirmState.expiresAt`), import the bound rather than re-typing it, have
+  it expire slightly AFTER the requester gives up, and answer with "expired" — never "denied by
+  user", which claims a decision the human never made. Reach for the existing
+  `useExpiringDialog` hook rather than a second effect: the worktree-removal dialog needed the
+  identical rule a day later, and two copies is how one of them quietly misses the next fix. Give
+  the deadline only to a dialog an AGENT raised — one the user opened themselves must never vanish
+  under them — and remember that clearing a dialog is not always just nulling its state (that one
+  also has to release the ref its own busy-guard reads).
+
+- **An error must not name a remedy nobody measured — and the remedy needs its own test.** The
+  `unproven-target-owner` refusal told its caller *"Re-open the target node so its owner is
+  recorded, then try again"*, and re-opening is precisely the attach that records nothing
+  (ownership is recorded only on a genuine fresh spawn), so a caller that obeyed got the identical
+  refusal forever. It shipped because no test read the sentence. When you write a refusal, pin its
+  claim against the MECHANISM it describes — assert the remedy's precondition by calling the
+  function that decides it, so the copy goes red when the behaviour moves — and remember who reads
+  it: telling a language model to do something only a human can do is not advice.
+
 - **Anything path-shaped: Windows is a delivery target.** Most of this was written on
   macOS/Linux, so the recurring defect is code that is genuinely correct on POSIX —
   `split('/')`, `startsWith('/')` as an is-absolute test, a bare `fs.rename`. Use
@@ -118,6 +235,33 @@ lane unaffected.
   core that owns the files, and keep an unobserved host unknown rather than guessing. Conversely,
   on POSIX a backslash is legal filename text — do not treat both separators as interchangeable
   unless the owning filesystem is known to be Windows.
+
+- **Anything tmux does for us on POSIX, the session host owes on Windows.** The two delivery paths
+  are not symmetric and the missing half fails in the direction that LOOKS like success: `sendText`
+  rides `tmux paste-buffer -p` on POSIX, which frames the payload from the pane's real
+  bracketed-paste state and submits with a separate `send-keys Enter`; the session host answered the
+  same call with one raw `text + '\r'`, so a paste-aware composer swallowed the Enter as pasted
+  content and an injected prompt sat there unsubmitted (issue #686). Before adding a delivery, a
+  probe or a pane query, check what the tmux leg does with it and write the host's equivalent in the
+  same change. The host can usually answer more precisely than tmux, because its headless emulator
+  sees the pane app's own bytes — see CLAUDE.md's "We have our own VT emulator" for the one place
+  that reasoning is inverted.
+
+- **Finding a Windows executable is not the same as being able to spawn it.** A PATH lookup may
+  correctly resolve an npm CLI to `<name>.cmd`, but Node's `execFile`/`spawn` cannot execute that
+  shim directly. For short-lived app-owned subprocesses, pass the resolved path and argv through
+  `directExecutableInvocation` (`src/core/exec-path.ts`): it uses hidden `cmd.exe` with explicit
+  escaping, verbatim arguments and delayed expansion off. Do not fix this with `shell: true`;
+  prompts and other user-controlled arguments would become shell syntax. `.bat`/`.ps1`, CR/LF/NUL
+  arguments and lines above cmd's limit fail explicitly. Keep stdin direct: PowerShell's text
+  pipeline changes Unicode and line endings under Windows PowerShell 5.1.
+
+- **The phone reaches a Windows desktop through the relay only.** Everything the iOS app sends over
+  SSH is POSIX sh plus tmux, and Windows OpenSSH hands out `cmd.exe`, so Windows pairing installs no
+  SSH key and requires remote access instead of an SSH server (`src/shared/pairing-gate.ts`). Do not
+  "fix" this by installing the key into `administrators_authorized_keys`. The phone tries SSH before
+  the relay, so a key that works locks it onto a path that cannot work. CLAUDE.md, "Remote access",
+  has the details.
 
 - **Normalize BOTH sides of a path comparison, through one function.** A marker normalized where
   it is built and matched raw where it is used is a no-op on the machine you wrote it on and a
@@ -136,6 +280,18 @@ lane unaffected.
   including paths embedded in generated SSH commands or handed to scp, which the `fs` scan cannot
   see. Keep a remote temp's own leaf bounded: extending an already-valid maximum-length target leaf
   with a UUID suffix turns an atomic write into a guaranteed `ENAMETOOLONG` failure.
+
+- **A write ack is a claim about a WRITE, never about what the remote now holds.** Do not retire
+  state that records "the server still needs to be told X" just because the write returned true.
+  The SSH mirror's writer acks the 5 s throttle's trailing write **optimistically** — it returns
+  true and schedules the run — so a connection that dies inside that window leaves an ack behind
+  with nothing on the wire. Deleting the deletion tombstones on that ack is how 16 terminals
+  deleted on a slow link came back, announced as sessions from a phone the reporter does not own
+  (`clearedNodes` / `confirmClearedDeletions`, `src/core/workspace-store.ts`). Retire such state on
+  a READ that shows the remote no longer has it — which is the same rule this codebase already
+  applies in the other direction, "a failed read is never evidence of absence". And when you cannot
+  observe where incoming data came from, **do not name a source in the UI copy**: a wrong
+  attribution sends the reader hunting for a device instead of at the file.
 
 - **Never write to a child's stdin without an `'error'` listener on that stream.** A pipe write's
   failure is not a throw at the call site: when the child exits before draining stdin (a CLI handed
@@ -177,11 +333,45 @@ bug.
 
 **A failed read is never evidence of absence.** "Could not measure" and "there is nothing" are
 different facts and must stay distinguishable at every layer. Collapsing them is how a panel ends up
-reporting "no sessions" on a host running thirty.
+reporting "no sessions" on a host running thirty. When something ACTS on the negative, give it three
+answers rather than two — `present | absent | unknown` (`TranscriptPresence` is the shape) — and let
+only the positive finding trigger the action. Ask which of the two mistakes is recoverable: cold
+restore wrongly resuming a dead session id costs an error line, while wrongly dropping a live one
+opens a blank conversation over work the user believed was continuing.
 
 **Degrade to nothing, never to something wrong.** A probe that fails means the bare, safe command —
 never a substituted nearest match. A hand-editable value that is unrecognised must yield the safe
 default, never something more destructive than the default.
+
+**A node's OWNERSHIP is persisted state, never a live object.** "Is this node remote / whose host is
+it on?" must be answerable with nothing attached, because the questions that ask it — a delete, a
+kill, a cleanup — arrive precisely when nothing is: after an app restart, after the offscreen
+release, after the park timer, for a project that is not open. `PtyManager.runEndSession` read it
+off the dying in-memory `Session` instead, so an SSH node deleted with no live client had its remote
+`kill-session` skipped **in silence** and its one kill sent to the LOCAL tmux socket, where a
+`requireRemote` node has nothing; the node left the canvas looking deleted and its `nt-<id>` kept
+running on the host. Ask the machine-local index (`workspaceStore.sshProjectIdForNode`), and treat a
+live handle as the *complement* of that answer, not its source.
+
+**A side effect you could not deliver is not a side effect you performed.** The `ok:false` rule is
+not only for reads. `catch {}` around a remote kill folded "tmux says there is no such session" (an
+ANSWER) into "the ControlMaster is down" (a NON-answer, session still running). Classify the failure
+— and when the work genuinely cannot be done now, either refuse the action with a reason or write
+the debt down and settle it later (`core/pending-remote-kills.ts`). Silently dropping it is the one
+option that is never available.
+
+**A Server Edition agent owns only nodes it freshly opened in this server run.** The
+creator ledger is process-local and must never be rebuilt from `.nodeterm/project.json`, titles,
+hook history, or a surviving tmux name: all are writable or stale. A restart therefore clears
+ownership, performs no node/session adoption, and leaves durable queued launches dormant. Metadata
+mutations and message delivery validate every target before writing anything; missing proof is a
+named refusal. Validate Server upgrades against a disposable data directory and port. Restarting a
+shared live service is
+an explicit operator action, never a test or an automatic repair step.
+
+**A plain terminal is not a Claude node.** It may carry the generic node/endpoint wiring needed for
+a hand-launched agent to report hooks, but it gets no `NODETERM_AGENT_ID` and no
+`NODETERM_CANVAS_CONTROL` until the serialized node explicitly names an agent.
 
 **Re-validate hand-editable values at the point of use**, not by their TypeScript type. Settings
 come from git-shared JSON and can end up interpolated into a shell command line.
@@ -189,6 +379,14 @@ come from git-shared JSON and can end up interpolated into a shell command line.
 **Test generated shell for real.** If you generate a shell command, run it under an actual
 `/bin/sh` against a fixture tree. A composed fixture will not tell you that `echo ##MEM` prints an
 empty line because `#` starts a comment.
+
+**A shared agent daemon is live-session infrastructure.** Codex's app-server control socket is
+shared by every `--remote` TUI in an account scope, so stopping or replacing one daemon disconnects
+every attached canvas node. A managed launcher must keep the already-bound thread under a bounded
+supervisor: resume only when protocol health failed or the known socket generation changed, never
+loop an unrelated client error, and never replay the original prompt after reconnect. Probe a
+responsive daemon before invoking lifecycle repair; stale PID bookkeeping is not permission to kill
+working sessions. See `docs/shared-codex-node-identity.md`.
 
 **Credentials never ride argv — local or SSH.** Not a tmux `-e` pair, not `curl -H`, not a remote
 command string. `/proc/<pid>/cmdline` is mode 444 on a stock Linux, and a remote command line is argv
@@ -210,6 +408,20 @@ wire sent.
 Put the rule in one predicate under `src/shared` and have every mint site ask it, and derive the
 things that follow from it (a node's color, say) from that same call rather than re-deriving the
 condition per caller.
+
+**A feature that creates links owes an ownership rule, and it must be a property of the plan.**
+"Share `~/.claude/skills` with this account" (issue #643) links each system skill into a managed
+account's own `skills/` and removes those links again when switched off — one wrong removal deletes
+somebody's real skills folder. Three habits made it safe and they generalize: link the LEAVES, not
+the containing directory (nodeterm writes its own canvas skill into `<configDir>/skills/`, so a
+directory-level link would have written it into the user's system folder); decide ownership by an
+anchored SHAPE (a symlink at `<name>` pointing at `<system>/<name>`) so what the on-switch creates
+is exactly what the off-switch removes, and a real directory can never qualify; and compare
+REALPATHS before acting, because the hand-made version of the same feature makes the two directories
+one and linking into it would plant links in the folder you are about to clean up. Verify the
+removal against a real filesystem with real symlinks and real content — a mocked `fs` agrees with
+whatever the code believed. And a launch-time sweep may re-create, never delete: ownership inferred
+from shape cannot tell your link from an identical one the user made by hand.
 
 **Do not take scrolling away from tmux.** It owns the mouse, the scrollback and the alternate
 screen. A previous design moved that into the emulator and failed structurally; `.claude/rules/terminal.md`
@@ -256,6 +468,29 @@ that file advertises presents nothing forever when the file is old or unreadable
 hook script alone could heal itself, the same node proved itself through one client and was refused
 through another for the life of the session.
 
+**Local generated sh clients recover shared-Codex identity before their env gate.** A Codex tool
+shell is forked by the account-scoped app-server, so it has `CODEX_THREAD_ID` but not the pane's
+`NODETERM_*`. Managed hooks, local `nodeterm.sh`, and local `context.sh` must prepend
+`codexThreadIdentityResolverSh(codexThreadIdentityRoot())` before checking `NODETERM_NODE_ID` or
+`NODETERM_CANVAS_CONTROL`. Keep the SSH shim constants machine-neutral: baking the desktop/server
+record path into a remote host is both wrong and a local-layout leak. A guard test enforces that
+(`remote-shim-neutrality.guard.test.ts`), because the leak is silent — the remote shim keeps
+working, and nothing goes red.
+
+**That prelude may not decide anything a pane already decided.** It exports the agent id and the
+canvas-control grant the ownership RECORD carries, never constants. They used to be hardcoded
+(`codex`, granted) and both are `buildPtyEnv`'s answers: a custom agent inheriting the codex harness
+is `custom:<uuid>`, and the grant comes from `canControlCanvas`. If you add a field the prelude
+exports, put it inside the record's HMAC and have the desktop re-derive anything that grants a
+capability — never accept the client's word for that. Withhold rather than assume: a tool shell
+missing a verb its pane has is a bug report, a tool shell holding one its pane was denied is a
+security question.
+
+**A shell that forwards data into these records cannot be type-checked into correctness.** A
+handler that destructures the request without the new field, and a call that omits an optional
+trailing argument, are both well-typed — so the feature ships inert with a green suite. Pin the
+wiring at source level (`codex-identity-record-wiring.test.ts`, `hook-verified-parity.test.ts`).
+
 **A stream error is not a throw you can catch.** When a write to `process.stdout`/`stderr` fails —
 `EPIPE` down a closed pipe, `EIO` after macOS revokes a closed terminal's tty — node reports it by
 emitting `'error'` on the stream a tick later, and the default for an unhandled `'error'` event is
@@ -275,6 +510,32 @@ node shows it (`state/launchDelivery.ts` → the QUEUED badge's ⚠ + tooltip) a
 reply carries it (`queued` / `queuedIds`), because a user who cannot see the failure and an
 orchestrator that is told "opened" both act on a session that is not there. If you add a bounded
 retry anywhere, ask what the clock actually starts on and where its exhaustion becomes visible.
+
+**Never move the user's view on a background agent's say-so.** Canvas-control requests route by
+SOURCE, and React Flow holds only the ACTIVE project's nodes — so the dispatch used to travel to the
+caller's project before answering. For an OPEN that was a screen hijack: the user is looking at
+project B, an agent in project A runs `open-claude`, the tab switches and A's saved viewport is
+applied, so the camera appears to jump and zoom. The rule now has three tiers, all membership lists
+in `renderer/lib/controlRouting.ts`: `STORE_ANSWERED_VERBS` ("no canvas is needed at either end" —
+`list`, `send`, `reply`, `sticky`, `open-project`, `settings`), `canColdOpen` ("a canvas IS needed, but the
+serialized one will do" — `open-terminal`, `open-claude`, `open-agent`, which write into the owning
+project's stored nodes with their launch armed and report `queued: true`) and `answersOffCanvas`
+("…and there is nothing to defer" — `show-image`, `show-video`, `show-web`, `open-browser`, whose
+node has no session behind it and is finished the moment it is written, so it reports `offCanvas:
+true` and never `queued`). Everything that acts on nodes which already exist still travels, because
+it reads live state the serialized copy does not carry — `browser` included, which navigates a
+mounted `<webview>` guest, unlike `open-browser`, which only places the node.
+
+Three things to carry over when you put a verb in one of the two off-screen tiers. **The acting
+project is the SOURCE's**: `ctlProject` decides the ssh flag, the browser session key and the media
+allowlist route, and reading `activeProjectId` there answers a background agent with whatever the
+human is looking at. **Nothing may reach the live canvas**: `setNodes` / `setControlEdges` /
+`markDirty` address the ACTIVE project, so the write goes through `applyNodeMutation` +
+`appendCanvasLinks` + `writeDisk`. And **tell the human** — the reply goes to the agent, so without
+a strip nothing anywhere reports that a node landed in another project; it is sticky, because it
+describes work the user was not watching. When you add a verb, decide which tier it is in — and if
+you change what a verb DOES, update `buildCanvasSkillBody` / `buildCanvasControlInstructions` in the
+same PR, with a test that goes red on the stale claim (`src/main/canvas-control-core.test.ts`).
 
 **Pointing a project at a folder is a WRITE — probe before you bind.** A project's canvas is
 written to `<cwd>/.nodeterm/project.json`, so the moment a project gains a `cwd` the next autosave
@@ -322,6 +583,63 @@ file text. `src/shared/source-hygiene.test.ts` enforces this across every tracke
 has already produced a real hole: a traversal check that split on `/` alone saw `./a\..\..\x.png`
 as a single harmless segment on *every* platform. Split on `[\\/]`, and prefer accepting both
 dialects while storing only one (see **Node icons** in CLAUDE.md for the worked example).
+
+**Canvas edges are all `type: 'floating'`, and one relation gets one edge.** Never set
+`sourceHandle`/`targetHandle` on an edge object — the rendered path is computed from the two nodes'
+rectangles (`renderer/lib/floatingEdge.ts`), and a fixed side is what sent an edge to a node placed
+left of its source looping across the whole canvas. And do not add a second edge family for a
+relation a rope already carries: `--after` is a **rope** whose dashed "⏳ waits for" look is DERIVED
+from the target's `pendingLaunch` (`renderer/lib/edgeModel.ts`), and the context bridge it also
+writes stays hidden underneath it. One `open-claude --after` used to land three edges on one node.
+`src/renderer/canvas/edge-model.source.test.ts` pins both halves.
+
+**A canvas layout is GEOMETRY, and its two halves live in different files.** A saved layout moves
+nodes and nothing else: it never creates, deletes, renames, reparents or respawns one, and never
+touches a tmux session. The snapshot itself (`Project.layouts`) is CONTENT and rides the git-shared
+`.nodeterm/project.json`, while this machine's camera per layout (`Project.layoutViewports`) is
+machine-local and rides `workspace.json` beside `viewport` and `breadcrumbs`. Restoring applies its
+camera with `setViewport`, per the `fitView` rule below. Deleting a layout and updating one to the
+arrangement on screen both confirm first, because layout edits are not in the undo stack; restoring
+does not, because it is. Whether a dialog claims the edit reaches other people comes from
+`layoutIsShared`, which is true for an SSH project as well as a folder one.
+
+**React Flow's `fitView` is queued, not immediate — never use it to frame something automatically.**
+Calling it sets `fitViewQueued` and the fit runs from a later `setNodes` (only once every node is
+measured) or the next `updateNodeInternals`, against whatever the node lookup holds by then; a fit
+set that comes out empty parks the canvas origin in the middle of the screen. Compute the viewport
+yourself and apply it with `setViewport` (`renderer/lib/nodeFocus.ts`, `canvas/fit-view.ts`), which
+lands now and against the canvas you meant. `fitAll` is the one deliberate exception: an explicit
+user gesture on a settled canvas.
+
+**A context menu is two levels deep, and the third level is discarded in silence.**
+`ContextMenu` renders a submenu's children with
+`if (child.type === 'colors' || child.type === 'submenu') return null` — no error, no warning,
+nothing on screen. That matters most where you cannot see it: Claude's and Codex's **account
+pickers are themselves submenus**, so moving one of those rows into another submenu deletes the
+account picker for exactly the users who have managed accounts, and looks perfect to everyone
+else. If you group rows in an add menu, get the decision from `isPinnedAgentEntry`
+(`renderer/lib/addMenuSpec`) rather than judging by eye — and never spell an agent id there: which
+rows stay at the top is derived from the row's own shape plus `ACCOUNT_CAPABLE_AGENT_IDS`, so a new
+agent is handled the day it is added. The cap is measured in
+`components/ContextMenu.submenu-depth.test.tsx`; if you teach the component a third level, that
+test tells you which pin to revisit.
+
+**Adding a node kind means touching the add menus once, not four times.**
+`renderer/lib/addMenuSpec` owns which kinds are addable and how they are grouped, for the canvas
+pane right-click, the sessions-sidebar "+" and the Dock. `ADD_ITEM_GROUP` is a total `Record` over
+the kind union, so a new kind is a **compile error** until you route it. The kanban column's
+"+ New session" is deliberately not a consumer — it can only offer kinds that become a card — and
+`addMenuSpec.surfaces.test.ts` pins that split so "make them all consistent" stays a decision
+rather than a reflex.
+
+**A setting read at mount reads the DEFAULT, not the user's.** `useSettings` starts on
+`DEFAULT_SETTINGS` and hydrates from disk asynchronously, while `<Canvas />` is mounted before that
+lands. A `useState(() => settings.foo ? ...)` initializer therefore reads the shipped default and
+never looks again, so an opt-in feature ships inert with a green suite and no error anywhere. Gate
+on `hydrated` (the first-launch consent dialog and `settings.rememberCanvasLock` are the worked
+examples). If the same effect also WRITES, latch its first run: otherwise switching the setting on
+mid-session applies stored state to whatever the user is doing right then, which is a different
+feature from the one they asked for.
 
 ## Testing
 
@@ -377,6 +695,17 @@ tmux without carrying `TMUX_TMPDIR` into it, which is the one way left to escape
 `src/core/tmux-socket-isolation.guard.test.ts` holds the short allowlist of suites that name a
 production socket on purpose; adding a third is a review conversation, not a checkbox.
 
+**An `infinite` CSS animation is a frame loop, and it runs whether or not anyone is looking.** A
+running animation makes the compositor produce a frame every vsync — 120/s on a ProMotion display —
+and re-raster the window each time; measured on a 40-terminal canvas, ONE visible pulsing node took
+idle CPU from 1.5 % to 33 %, and twenty took it to 101 %. The cost is paid once for the window, so
+the step is at the FIRST animation, not the twentieth. Two consequences when you add one: give it
+`animation-play-state: var(--nt-anim-state);` right after the shorthand so it joins the idle-window
+gate (`src/renderer/styles.animation-gate.test.ts` fails if you forget, because one ungated
+animation takes the whole win back), and prefer a static state to a pulse wherever the pulse is not
+carrying information the user needs at a glance. The full measurement table and the reasoning are
+in CLAUDE.md § Idle energy.
+
 ## Pull requests
 
 - Branch from `main`. CI runs `quality` and `quality-windows`; keep both green (this private plan has no
@@ -386,6 +715,10 @@ production socket on purpose; adding a third is a review conversation, not a che
 - Explain **why**, not just what. If a decision has a trade-off, name it and say what you rejected.
 - If you measured something, put the numbers in — they save the next person the same afternoon.
 - Say what you did **not** verify. That is more useful than a confident summary.
+- **Lead with what changed and why it matters.** A reviewer who reads only your first two
+  sentences should be able to decide whether to keep reading; implementation detail comes after.
+- **Match the length to the change.** A one line fix gets a paragraph, a change that moves a
+  boundary gets as much room as it needs, and neither is improved by headings it does not need.
 
 ## Documentation
 

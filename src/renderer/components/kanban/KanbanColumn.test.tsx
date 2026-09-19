@@ -43,4 +43,18 @@ describe('KanbanColumn lanes', () => {
   it('counts every lane, including totals larger than the cards fetched', () => {
     expect(render().querySelector('.kanban-col__count')?.textContent).toBe('9')
   })
+
+  it('renders the new-session menu outside the column overflow container', async () => {
+    const host = render({
+      createOptions: [{ key: 'terminal', label: 'Terminal', choice: { kind: 'terminal' }, icon: <span /> }]
+    })
+    await act(async () => {
+      host.querySelector<HTMLButtonElement>('.kanban-col__new')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+
+    const menu = document.body.querySelector('.kanban-col__newmenu--portal')
+    expect(menu).not.toBeNull()
+    expect(menu?.parentElement).toBe(document.body)
+    menu?.remove()
+  })
 })

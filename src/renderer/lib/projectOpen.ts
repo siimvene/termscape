@@ -48,7 +48,7 @@ export function findProjectByCwd<T extends { cwd?: string }>(
  * pairs have already passed a human decision — creating, adopting, or the lighter first-attach
  * "Allow?" — so an idempotent re-open by the SAME caller does not re-raise the dialog, while a
  * DIFFERENT caller naming the same cwd still asks. DIALOG DEDUPE ONLY: authorization is main's
- * grant ledger (src/main/project-grants.ts), keyed to main's own verified identity verdict; this
+ * grant ledger (src/core/project-grants.ts), keyed to the core's own verified identity verdict; this
  * map decides nothing but whether a dialog is shown. In-memory, per app run — the same lifetime
  * as the grants it mirrors.
  */
@@ -239,6 +239,19 @@ function rootPosition(n: PlacedNode, byId: Map<string, PlacedNode>): { x: number
     parentId = parent.parentId
   }
   return { x, y }
+}
+
+/**
+ * A stored node's ROOT-space position — the public face of `rootPosition`, so the cold-open
+ * planner does not need a third copy of a parent walk this repo already carries two of.
+ */
+export function rootPositionIn(
+  nodes: readonly PlacedNode[],
+  node: PlacedNode
+): { x: number; y: number } {
+  const byId = new Map<string, PlacedNode>()
+  for (const n of nodes) if (n.id) byId.set(n.id, n)
+  return rootPosition(node, byId)
 }
 
 /**

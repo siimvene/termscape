@@ -481,24 +481,22 @@ Consequences worth knowing:
   announces a new link cannot quote the shim path. The boot-installed instructions cover
   discovery independently.
 
-**Deliberate scope skips (Phase 3b):**
+**Deliberate scope and feature-gate differences:**
 
 - The SDK **chat node** is still **deferred** — it is not wired into the server bridge.
-- **Canvas-control** (`agent:control`, the Claude-only `nodeterm` CLI verbs) is **not
-  wired** over the server, and since the strict-verb work it says so **by name**:
-  `/control/<verb>` answers HTTP 400 with `error: control-unsupported-on-this-edition`
-  and a sentence containing the literal *"do not retry"*. The old generic
-  `control unavailable` read to an agent like a transient outage, and an agent retries an
-  outage. `browser` additionally names why it is **structural** rather than unimplemented —
+- **Canvas-control** (`agent:control`) is opt-in on the Server Edition. With the feature disabled,
+  `/control/<verb>` answers HTTP 400 with `error: control-unsupported-on-this-edition` and a
+  sentence containing the literal *"do not retry"*. With it enabled, only the bounded v1 verbs
+  described below are wired; every other verb receives the same named permanent refusal.
+  `browser` additionally names why it is **structural** rather than unimplemented —
   a browser node on this edition renders in the **viewer's own** browser tab, which this
   server has no debugger for, and never can. The whole `browser` drive set shipped over
   S8 (nav/read/click/type/press/scroll/wait/screenshot/cookies) is therefore **desktop-only**:
   it needs Electron's `<webview>` + CDP, which this edition has none of, so there is no
   browser driving here at all. See `src/server/control-unsupported.ts`.
-  The agent-messaging verbs (`send`/`reply`/`notify`) are additionally **verified-only at
-  the route** on every edition, so on this one an unverified caller gets the flat 403
-  messaging refusal and a verified caller gets the same
-  `control-unsupported-on-this-edition` — both terminal, neither an invitation to retry.
+  The agent-messaging verbs (`send`/`reply`/`notify`) are verified-only. When Server control is
+  enabled they additionally require process-local proof that the caller spawned the target in this
+  run; with control disabled they receive `control-unsupported-on-this-edition`.
 - The **`ptyDestroy` tail-teardown** — *resolved in Phase 3c.* Phase 3b left this skipped
   (agent tails self-cleared only on `SessionEnd`, so a node closed *without* one left an
   idle file-tail); the server now untracks agent tails on node close, at desktop parity.
@@ -523,12 +521,52 @@ desktop parity on agent-tail cleanup and first-connect behavior:
   boots the app into a broken/blank state — the bridge shows the standard reconnect overlay
   and the app reloads on reopen, so first-load failure now behaves like a mid-session drop.
 
-**Still deferred** (unchanged from Phase 3b): the SDK **chat node**, **canvas-control**
-(`agent:control` / the `nodeterm` CLI verbs — now a *named, non-retryable* refusal rather
-than a generic failure, see above), full **two-master flow-control coordination**
+**Still deferred:** the SDK **chat node**, full
+**two-master flow-control coordination**
 (the server still re-asserts its WS backpressure pause on each send rather than co-managing
 a single actuator with the renderer), and the web folder picker's **hardcoded start
 directory**.
+
+### Opt-in canvas control and creator ownership
+
+Server canvas control is disabled by default. Set `NODETERM_SERVER_CANVAS_CONTROL=1` (or pass
+`--canvas-control`) to install the Server-local shim and enable its `/control/*` implementation.
+Every enabled request requires verified node identity. **Enabling it lets an agent session run
+arbitrary commands on this host as the user the server runs as** — `open-terminal --cmd <command>`
+is executed in a PTY this process spawns, with that user's environment, files and credentials. The
+gates below decide *which* agent may ask, not *what* may be asked for, so the surface this flag
+opens is the host, not the canvas. Enable it on a host where you would be content to hand those
+agents a shell.
+
+Ownership is intentionally narrower than the desktop confirmation UI: an agent may mutate, message,
+or close only a node it opened during the current Server process run. Link, group, rename, color,
+sticky updates, dependency targets, message delivery, and close validate their complete target set
+before any write or PTY kill; an unowned member refuses the whole operation. Queued messages repeat
+the creator check at flush time in addition to the existing verified and per-project switch gates.
+
+The creator ledger is memory-only and is never reconstructed from a project file, title, hook
+record, or tmux session name. After a service restart it is empty, and boot performs no canvas-node
+or terminal-session adoption: it does not attach-or-create missing backends and does not send a
+persisted queued command even when a tmux backend survived. A later explicit owner open or browser
+view is the only cold-spawn path. Plain terminals carry no agent identity or canvas-control grant;
+missing `agentId` never means Claude.
+
+A canvas-control write is not an outside edit. The factory mutates the project, saves it, and
+broadcasts the whole thing on **`workspace:server-change`** — a channel of its own, separate from
+the `workspace:external-change` the workspace watcher uses for a git pull or a hand edit. It shared
+that channel until it was measured: the renderer classifies an outside edit by comparing the
+project shell, `ropes` included, so the single `ctrl-…` rope every `open-agent` appends read as a
+conflict whenever the canvas was dirty — which it is right through a spawn burst, because the
+paired `canvas:mut` marks it dirty, spawns arrive inside the autosave debounce, and the conflict
+bar suspends autosave, so the first one latched the bar on and every later write re-raised it.
+"Keep my version" then serialized the browser's own edges over the file and dropped the ropes this
+factory had just persisted. On the new channel the browser three-way merges instead
+(`renderer/lib/serverChange.ts`): nodes the server opened are adopted silently, ropes and bridges
+are merged against the last-known disk copy, and unsaved local edits survive. Nothing is asked of
+the user, because both sides of this merge are the same application.
+
+Validate upgrades with a disposable `NODETERM_DATA_DIR` and port. Restarting a shared live Server
+service is an explicit operator action; it is not part of a test, repair, or boot-rescue flow.
 
 ### Managed Claude accounts
 
@@ -538,8 +576,8 @@ transcript readers, the usage rows and the account pickers are all `src/core` �
 *lifecycle* was welded to `ipcMain`, so a browser-only deployment could pick an account it had no
 way to create (issue #313).
 
-- **The lifecycle is core.** `src/core/claude-accounts-service.ts` owns the four
-  `claude-accounts:*` channels (add / wait-login / cancel-wait / remove) and registers them
+- **The lifecycle is core.** `src/core/claude-accounts-service.ts` owns the five
+  `claude-accounts:*` channels (add / wait-login / cancel-wait / remove / link) and registers them
   through the platform seam, so **both shells serve them**: `src/main/claude-accounts.ts` is now a
   thin desktop wrapper, and `registerCoreHandlers` calls the same `registerClaudeAccountsIpc()`.
   The browser reaches them through a real `buildClaudeAccountsApi` in the ws-bridge instead of the
@@ -558,6 +596,12 @@ way to create (issue #313).
 - **No remote (SSH) accounts.** The Server Edition has no SSH-project manager, so an account
   context carrying a `projectId` takes the **local** path — the same degrade the desktop takes
   before its manager exists.
+- **"Link existing config dir…" is a path on the SERVER.** The handler `stat`s the directory and
+  writes into it (the account's `settings.json`, the managed status hook) as the **server user**,
+  wherever that user can reach — and a `~` typed in the browser expands to the **server's** home,
+  not the browser user's. That is the same rule every other path field on this edition follows
+  (the folder picker browses the server's disk), but it is worth saying out loud here, because the
+  dir a person is linking is usually one they created by hand and think of as "mine".
 
 ### Managed Codex accounts (S6)
 
@@ -569,8 +613,9 @@ account-management IPC — that surface is desktop-driven over SSH.
   `setCodexThreadIdentityAuthSecret(...)` with it, so a managed Codex account's thread→node→account
   ownership records can **sign and verify on a headless host**. Headless Linux has no OS keychain, so
   the secret is 32 **raw bytes** at `node-auth-key.bin`, mode `0600` — the same both-shells channel the
-  desktop seals via `safeStorage`. This only makes the record layer *able to sign*; it is orthogonal to
-  the shared-app-server degrade (Codex nodes still launch bare here, exactly as before).
+  desktop seals via `safeStorage`. When the managed runtime and launcher are available, headless
+  canvas-control launches route through `nodeterm-codex` and claim that signed node identity; an
+  unavailable capability still degrades to the bare `codex` command.
 - **Does NOT host the account-management verbs.** `initCodexAccounts` registers its IPC over Electron's
   `ipcMain` with WebContents-owner authorization, which the headless bridge does not provide, so
   `startServer` never calls it. This is **not** a silent gap: managed Codex logins **on an SSH host**

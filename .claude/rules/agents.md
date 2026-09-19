@@ -32,8 +32,6 @@ paths:
   - "src/renderer/lib/transcriptGates.ts"
   - "src/renderer/lib/claudeBranch.ts"
   - "docs/*-agent.md"
-  - "src/core/grok-*.ts"
-  - "src/renderer/state/grokSessionIds.ts"
 ---
 # Agent support: registry + capabilities, hooks, permission mode, transcripts, subagent/workflow viz, adding a new agent
 
@@ -111,32 +109,11 @@ else, and its context links must keep classifying across restarts).
   the shared mapping. Desktop and Server Edition use the same core handler; relay tabs deliberately
   do not apply this machine's gateway to another core. Mobile needs a settings/model-picker surface
   before it can expose the feature.
-- **Grok** (`@xai-official/grok` 1.0.0, builtin since 2026-08) — in `AGENT_HOOK_TARGETS`,
-  `RESUMABLE_AGENTS`, `RENAME_CAPABLE`, `PERMISSION_MODE_CAPABLE`, `CANVAS_CONTROL_CAPABLE`,
-  `CONTEXT_LINK_CAPABLE`, `CHAT_CAPABLE`, `TRANSFER_SOURCE_CAPABLE`, `USAGE_CAPABLE` and
-  `SESSION_ID_CAPABLE`; NOT in `SUBAGENT_CAPABLE` — subagent cards still need the `spawn_subagent`
-  PreToolUse/PostToolUse payload, which nobody has captured. The other four came off the blocked list
-  in 2026-09, once a machine with a logged-in grok session produced real fixtures: context links and
-  the ⌘M panel read `chat_history.jsonl` (NOT `updates.jsonl` — see below), and the meter reads
-  `signals.json`. Its hook config is a **directory** (`$GROK_HOME/hooks/*.json`, all merged), so nodeterm
-  **owns one file outright** (`nodeterm-status.json`) instead of merging into a shared settings file —
-  which is also why a malformed copy of it is *healed* rather than preserved, locally and on an SSH
-  host (`RemoteHooks.installGrokRemote`, under the host's own `$GROK_HOME`). Its dialect is
-  **camelCase keys with snake_case event VALUES** (`{"hookEventName":"pre_tool_use"}`) — the SDK path
-  flips the keys to snake_case, so `normalizeGrok` canonicalizes the event name and reads every field
-  twice, and the shells share one decoder (`grokRawFields`). It carries **no `transcript_path`**, so a
-  session directory is DERIVED from `cwd` + `sessionId` (`core/agents/grok-paths.ts`, the one
-  `$GROK_HOME` rule — `core/usage/grok-usage.ts` delegates to it) and remembered in the shells' raw
-  listener; the name read is `core/grok-session.ts` over `summary.json`, routed per agent by
-  `core/agent-session-name.ts`. **The tool-event `matcher` is a regex: `.*`, never `*`** — a bare `*`
-  is invalid and silently stops tool events firing (hence `ManagedHookEvent`). Grok also reads
-  **`~/.claude/skills`** (Claude compat), which is why canvas control needed no new installer, and
-  **`~/.claude/settings.json`**, so every grok event ALSO fires nodeterm's claude hook — an **inert**
-  cross-fire (`normalizeClaude` finds neither grok's camelCase keys nor, in the SDK dialect, its
-  lowercase event values), pinned by tests; canonicalizing claude's event-name compare would make it
-  harmful. The `auto` permission-mode **version gate is claude's alone** (it is fed by a `claude
-  --version` probe), and grok's mode flag must go **BEFORE** its `--` separator, which is
-  end-of-options. Full picture, dialect traps and the device checklist: **`docs/grok-agent.md`**.
+- **Grok** (`@xai-official/grok` 1.0.0, builtin since 2026-08) — full per-CLI reference (capability
+  memberships incl. `SUBAGENT_CAPABLE` since 2026-09, the hook-DIRECTORY dialect, `cwd`+`sessionId`
+  session-path derivation, the inert claude-hook cross-fire, and native `SubagentStart`/`SubagentStop`
+  card keying) lives in **`.claude/rules/agents-grok.md`** and **`docs/grok-agent.md`**. It loads when
+  grok code is touched, so it is not duplicated here.
 - **Gemini + codex parity** (2026-08-09) — brought both up to grok's level in the lists above. Unlike
   grok, **both CLIs are installed** and gemini **ships its own hook reference**
   (`/usr/lib/node_modules/@google/gemini-cli/bundle/docs/hooks/reference.md`), so almost every fact is
@@ -164,11 +141,15 @@ else, and its context links must keep classifying across restarts).
     The transcript jail is widened **per root** (`~/.gemini/tmp`, `<codexHome>/sessions`), never to
     `$HOME` — that predicate exists so a forged hook POST cannot aim a read at `~/.ssh/id_rsa`.
   - **`hasUsage` gated THREE features, not one.** Joining `USAGE_CAPABLE` also switched on
-    `context.ensure` and the find bar's transcript index, both of which go through claude's
+    `context.ensure` and the find bar's transcript index, both of which went through claude's
     `resolveTranscript` — whose **cwd fallback** then handed a codex node *the newest claude transcript
-    for that cwd*: a stranger's session as its meter and its search hits. Now gated by the pure
-    `readsClaudeTranscript` (`renderer/lib/transcriptGates.ts`), which reuses `CHAT_CAPABLE` rather than
-    adding a fourth list. Non-claude agents lose only the mount-time head start.
+    for that cwd*: a stranger's session as its meter and its search hits. The find bar's index is
+    gated by the pure `readsClaudeTranscript` (`renderer/lib/transcriptGates.ts`), which reuses
+    `CHAT_CAPABLE` rather than adding a fourth list; **`context.ensure` LEFT that gate in 2026-09
+    (issue #813)** once its handler stopped *being* claude's resolver and started routing per agent
+    (see **Context-meter rehydration** below). The lasting rule: grep every consumer of a helper
+    before adding an id to its list, and when two consumers need different answers, route the one that
+    can be routed instead of widening the gate for both.
   - **`TITLE_READ_CAPABLE` was created here**: gemini names its own sessions through its `update_topic`
     tool (the title is in that call's `args.title`, NOT a top-level field) but has no rename command, so
     the read and write legs split. Its read path is the transcript the context tail already tracks
@@ -610,6 +591,71 @@ else, and its context links must keep classifying across restarts).
   resumes the parked original with `claude --settings … -r <ORIGINAL_ID>`. The original id is
   the session id already known from hooks; `lib/claudeBranch.ts` is the fallback that parses
   `pty.capture` output when the id isn't known. The source node stays on the new branch.
+- **Context-meter rehydration (`context:ensure`)** — the meter is fed by hook events and a tmux
+  session outlives the app, so a continuing session idle after a restart shows a blank meter until the
+  next prompt. The mount-time read that closes that is `core/context-ensure.ts`
+  (`registerContextEnsureIpc`), **in core so BOTH shells serve it** — it used to be inline in
+  `src/main/index.ts` with no Server Edition handler (issue #813, the same hole `core/transcript-ipc.ts`
+  closed). Three rules: (1) **it routes per agent, never widens a gate** — `agentId` picks that agent's
+  OWN locator/tail (claude → `resolveTranscript`, codex → `locateCodex`, gemini → `locateGemini`, the
+  last two keyed STRICTLY by session id); an agent not in the switch gets NO meter, never claude's
+  resolver. grok is deliberately absent — its `signals.json` dir is learned from a hook event, so a
+  restart has nothing to rehydrate from. (2) **A remote node is resolved on its HOST or not at all**
+  (`ensureRemote` → `remoteTranscriptRefFor`, reusing the ⌘M locator/jail/cache); "could not resolve"
+  is terminal, claude-only. (3) **Nothing negative is ever cached** — a clean miss and a failed ssh
+  call are indistinguishable, so both cache nothing and the next mount retries in full; only concurrent
+  in-flight calls are de-duplicated. **No timer** — one read at mount. Desktop + Server Edition full
+  (local-only on the server); kanban card + modal inherit the same `ContextMeter`; Mobile N/A. Tests:
+  `core/context-ensure.test.ts` + `main/context-ensure-wiring.test.ts`.
+- **A killed CLI is DETECTED (`agentStatus.dropped`, `renderer/terminal/agent-liveness.ts`, issue
+  #616).** Every orderly exit announces itself (`/exit` fires SessionEnd, hibernate/pause set their
+  chips); a KILL announces nothing (the process is gone before a hook can run) and tmux's shell still
+  owns the pane, so the node keeps rendering its last badge over a dead conversation. Measured on the
+  reporting host (2026-09-04): 62 GB RAM + swap consumed, `oom_kill` at 187, 147 live `claude` processes
+  holding 44 GB. The signal is `#{pane_current_command}` reading as a shell while the status table still
+  believes an agent is parked. Four refusals ARE the feature: a `null` pane read is NEVER evidence (a
+  downed ControlMaster must not make healthy remote nodes claim death); `hibernated`/`paused` already
+  have chips; **only `done`**, never `working` (a tool subprocess owns the pane's foreground mid-turn);
+  and the agent must be in **`SESSION_END_CAPABLE`** — DERIVED from `normalize.ts` (the four normalizers
+  that map `sessionPhase:'end'`: claude, gemini, copilot, grok; codex and opencode map none, so there a
+  deliberate `/quit` and an OOM kill leave byte-identical evidence). The verdict is TRANSIENT (a claim
+  about a pane, re-measurable in ms; persisting it would strand a stale chip on a resumed node) and ANY
+  hook event withdraws it. It also catches a bare shell from a cold-restore `--resume` that hit "No
+  conversation found" (a persisted `sessionId` outliving its transcript; 20 of 108 re-measured) —
+  cold restore now probes `transcript:exists` first and launches bare on `absent`. Chip on node
+  header, kanban card, modal; Desktop + Server identical; relay tabs answer `null`, never judged.
+- **A reused ControlMaster is not evidence of a live hook tunnel** (issue #735 — remote sessions stuck
+  on Unknown, no notifications). `connect()`'s reuse branch returned the cached `hookEndpointPath`
+  whenever `ssh -O check` answered, but our own `ControlMaster=auto`+`ControlPersist` self-heal rebuilds
+  a dead master on the next child command — and the rebuilt master carries no `-R` (only
+  `RemoteHooks.setup()` calls `hookForwardArgs`), so hook POSTs die into a socket file that still exists
+  with nobody listening while terminals, mirror and git all work. MEASURED on the prompting host: 10
+  per-project hook sockets, exactly ONE with a listener; 107 of 128 live `nodeterm-rmt` sessions pinned
+  to the dead endpoint (tmux ignores `-e` on an existing session, so they stayed dark until restart).
+  The reuse branch now probes the tunnel (`RemoteHooks.tunnelAlive`, one `curl` over the master) and
+  re-runs idempotent `setup()` on no answer, firing `onTunnelVerified`. The retry is backed off
+  (`src/main/remote-ssh/tunnel-repair.ts`, pure + tested): first failure repairs immediately, a host
+  that can never forward settles at one attempt per 15 min. A missing spec answers "not alive" (nothing
+  bound = a tunnel that cannot deliver).
+- **The per-agent remote hook installs run CONCURRENTLY** (`RemoteHooks.setup()`, the chain
+  `connectOnce` awaits before a project reports connected). MEASURED against a real sshd through 50 ms
+  RTT, 5 runs: **3281 ms serial → 1471 ms concurrent** over the same 22–24 ssh children. The installers
+  are independent by construction (each writes its own script + merges its own agent's config; the only
+  shared statement is an idempotent `mkdir -p`), and `SshChildGate` (cap 6 per ControlMaster) keeps the
+  fan-out safe against a stock host's `MaxSessions`. Two rules: **the tunnel + endpoint file stay
+  strictly BEFORE the fan-out** (that file is what every installed hook POSTs through, written only
+  after the tunnel verifies end to end; `remote-hooks.test.ts` pins ordering AND overlap), and
+  **`allSettled`, not `all`** — one installer failing costs that agent its hooks and nothing else, not a
+  `return null` that discards every other agent's setup and (post-#735) retries forever.
+- **A third subagent-card removal path is opt-in** (`settings.autoHideFinishedSubagentCards`, default
+  OFF; mirrors to the store as `autoHideFinished`). With it on, a card is dropped the moment its
+  subagent REPORTS done, with no turn boundary; OFF reproduces the two existing paths exactly. Only a
+  DONE card is ever dropped, so #547's rule (a new turn keeps still-running subagents' cards) and Eco's
+  `liveSubagents` are untouched. **The decay is deliberately NOT one of the paths it gates**:
+  `sweepStaleWorking` fires precisely because the end never ARRIVED — the opposite of what the setting
+  promises, and the one case where a visible card carries the most information (a fan-out whose
+  subagents died silently would otherwise leave nothing on the canvas). Renderer only; Desktop + Server
+  identical; Mobile N/A.
 
 ### Adding a new agent (or a new model) — what to watch out for
 

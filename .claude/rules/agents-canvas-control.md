@@ -55,10 +55,12 @@ paths:
   `targetBusy` refusal into a deliver-on-idle queue), update those two functions in the same change,
   or the docs describe a product that no longer exists and an orchestrating agent acts on the stale
   contract. Derive from the code, never re-type: the retry guidance renders from `RETRYABLE`
-  (`messagingGuidanceLines`) so a new outcome kind lands in the text the day it is added — prefer
-  that shape over prose you have to remember to edit. `canvas-control-core.test.ts` walks both
-  generated bodies and must red on the stale claim (it pins the queue wording and the RETRYABLE
-  split); a doc line with no such test is a plan, not a fact — see the drift that shipped as #269.
+  (`messagingGuidanceLines`) and the off-screen paragraph from the verb table itself
+  (`offScreenGuidanceLines` — which is why that table lives in `src/shared`: core cannot import the
+  renderer), so a new outcome kind or verb lands in the text the day it is added.
+  `canvas-control-core.test.ts` walks both generated bodies and must red on the stale claim (it pins
+  the queue wording and the RETRYABLE split); a doc line with no such test is a plan, not a fact —
+  see the drift that shipped as #269.
   **Flag syntax**: `--flag value`, `--flag=value`, or a valueless flag anywhere on the line. The
   shim used to consume the next token after any `--flag` *unconditionally*, so `--read --node b1`
   became `arg.read=--node` with `b1` silently dropped and the server answering about the wrong
@@ -120,9 +122,19 @@ paths:
   threw the command away in exactly the state the button exists to rescue). (6) Canvas subscribes
   to `armedDepSig`, NOT `useAgentStatus(s => s.byId)` —
   the same discipline as `loopSig`; the full map re-renders the canvas on every hook event.
-  Pure logic + refusal matrix in `renderer/lib/pendingLaunch.ts` (unit-tested); the dashed dep→node
-  edges are **derived, never persisted** (a pending dependency is a state that ends when the launch
-  fires — the durable relation is the context bridge `--after` also draws).
+  Pure logic + refusal matrix in `renderer/lib/pendingLaunch.ts` (unit-tested). The dep→node edge is
+  a **persisted rope** (`ctrl-<dep>-<node>` in `project.ropes`, like the opener's) whose LOOK is
+  derived — dashed + ⏳ while `pendingLaunch.after` still lists the dep, solid once it launched
+  (`edgeModel.ts` `ropeVisual` over the ONE `ropeInfoOf` lookup the render and BOTH delete paths ask;
+  two builders would be two answers and the label the user reads would stop describing what the
+  delete does). The fan-in bridge `--after` also writes hides under that rope (`hiddenLinkIds`), so
+  ONE edge per pair holds. Deleting a WAITING rope drops that dep from `after` (`dropAfterDep`) and
+  takes nothing else — the covered bridge survives, because "stop waiting for it" is not "stop being
+  able to read its work"; an emptied list fires. Only `open-*`/`verify` write the rope, so
+  `missingDepRopes` heals an armed node that has none at PROJECT LOAD (`pendingLaunch` is persisted,
+  the rope is not, so a node armed by an older build would otherwise hold a launch with no arrow). All
+  edges route through the single `floating` edge type (`canvas/FloatingEdge.tsx`, a bezier between
+  the two nodes' facing-side midpoints; a node whose eye is closed hides every edge touching it).
   **(7) Delivery waits for the node's PTY, and never fails silently** (issue #569 item 1, 2026-09).
   A satisfied dependency says nothing about whether there is a terminal to type into, and the
   original loop conflated the two: a flat 5 × 400 ms budget started when the CANVAS held the node
@@ -353,8 +365,10 @@ paths:
   injects `isRemoteNode`/`readRemoteFile`/`runRemoteCommand`, bounded tail reads), its hook-fed
   path is jailed at ingest (`isSafeRemoteTranscriptPath`), and `resolveLinkTranscript` REFUSES
   the local locators for remote nodes (they'd resolve a stranger's local transcript). Server
-  Edition passes no deps → local-only (context link is NOT wired there at all — `initContextLink`
-  is never called from `src/server`). Discovery is per-agent: claude installs a
+  Edition IS wired (`src/server/context-link.ts` calls `initContextLink(ptyManager, {})`) but passes
+  no remote deps → **local-only**, the complete answer there: that shell runs ON the host whose
+  transcripts and tmux it reads, and SSH projects are a desktop-only concept. Discovery is
+  per-agent: claude installs a
   `get-linked-context` skill; codex/gemini get an idempotent marker block
   (`<!-- nodeterm:get-linked-context:start/end -->`) merged into `~/.codex/AGENTS.md` /
   `~/.gemini/GEMINI.md`. On connect an idle-gated one-line note is injected into each endpoint
@@ -503,3 +517,101 @@ paths:
   station as live. The sweep's confirm also RE-DERIVES its set from fresh facts, restricted to
   the ids the dialog showed: a dialog can sit open for minutes, and a station that started a new
   turn, was armed, or picked up work meanwhile simply stays.
+- **Every canvas-control verb has a DECIDED off-screen disposition, and none is "travel"**
+  (`src/shared/control-off-screen.ts`; complements "NEVER switches the user's view" above).
+  `routeControlSource` resolves the OWNING project (`active | switch | reopen | blocked | unknown`) —
+  before it, an agent outside the app's startup project was rejected as *"source node is not a
+  control-capable agent"*, a capability sentence for a routing failure. Five sets, and their
+  differences are the design: `STORE_ANSWERED_VERBS` (no canvas at either end —
+  `list`/`send`/`reply`/`sticky`/`open-project`); `COLD_OPENABLE_VERBS`
+  (`open-terminal`/`open-claude`/`open-agent` — a session node armed and inert via `armForColdOpen`
+  into the owning project's serialized nodes, reply `queued:true`); `OFF_CANVAS_VERBS`
+  (`show-image`/`show-video`/`show-web`/`open-browser` — a display node with no session, complete when
+  `writeDisk` returns, so it replies `offCanvas:true` NOT `queued:true`; the half the cold-open fix
+  left open, and an HTML-report skill reaches for `show-web` every finish, each of which used to yank
+  the user's tab); `STORED_NODE_VERBS` (`write`/`close`/`rename`/`color`/`link`/`board`/`assign` —
+  each reaches a pane, a store writer or the board file); and `OFF_SCREEN_REFUSALS` (the eleven that
+  genuinely need live React Flow, each with its reason in the refusal). Load-bearing: `ctlNodes()` is
+  the one name for "the node array this call acts on" (on screen `nodesRef.current`, off canvas the
+  owning project's serialized nodes via `nodeStatesToFlow`); `board`/`assign` read `ctlProject`, not
+  `activeProjectId` (a bug that hid behind the old travel); `closeStoredNodes` is the ONE cross-project
+  teardown, shared with the sidebar's `closeSession`; route **`reopen` (a CLOSED project) cold-writes
+  and does NOT reopen the tab** (closing is the user's "park this, keep it running"). The human learns
+  of off-screen work through ONE sticky info strip (`offCanvasNoticeText`, button `travelToNode`).
+  Guard: `test/acceptance/control-verb-disposition.test.ts` walks MAIN's `VERBS_FOR_TEST` against the
+  RENDERER's disposition — the only way "every verb" is checked rather than a hand-kept list.
+- **Server (headless) canvas control accepts only VERIFIED node identity, with process-local creator
+  ownership** (2026-08 incident hardening). `HeadlessNodeFactory` records which source node opened
+  each new node in a process-local ledger; link/group/rename/color/sticky-update, message delivery and
+  close validate the whole target set as current-run creations before writing or killing anything, and
+  queued messages revalidate before flush. The ledger is intentionally EMPTY after restart (project
+  JSON, titles, hook history and tmux names are not creator proof), so boot neither attaches/creates
+  backends nor sends persisted queued commands; a live backend with a durable arm is untouched until
+  an explicit owner action or browser view. `open-terminal`/`open-agent` are verified-only at the
+  Server handler boundary; a plain terminal gets neither `NODETERM_AGENT_ID` nor
+  `NODETERM_CANVAS_CONTROL`, and missing identity never defaults to Claude.
+- **The destructive confirm (`write`/`close`/`open-project`) is the only human gate between a control
+  agent and the workspace** — per-node identity is not enforced until `NODE_IDENTITY_STRICT_AFTER`, so
+  a `legacy` caller still reaches dispatch (`@shared/control-confirm`, 2026-09):
+  - **`close --node a,b,c` is ONE dialog** (`lib/closeTargets.ts`). Single-id form is bit-identical
+    (deliberately including no existence check); the bulk form refuses the WHOLE list on an unknown id
+    and names it, capped at `CLOSE_BULK_MAX` (50), spelling out ≤12 names (a name the user cannot see
+    is not consent). Before this the desktop read the comma list as one id, so `close a,b,c` called
+    `deleteNodes(['a,b,c'])` (a no-op) and answered `closed a,b,c` — success reported for work not done.
+  - **"Don't ask again" is bounded by SCOPE, not permanence.** Session (`state/controlConfirm.ts`,
+    memory only, per verb, restored on quit) | "always in <project>"
+    (`settings.controlConfirmWaivers.projects`, machine-local, NEVER `.nodeterm/project.json`) |
+    machine-wide (only from Settings → Agents). Keyed on the project the call ACTS ON (`ctlProject`),
+    not the active one; pruned on every write (`pruneControlConfirmWaivers`) against every project
+    incl. CLOSED ones; precedence narrowest-first (session → project → always → bypass); a waiver
+    granted by a CANCEL must not exist (`control-confirm-scope.source.test.ts`); every waived
+    application still raises the info strip (`waivedNotice`).
+  - **`bypassPermissions` needs TWO locks.** The mode is persisted to git-shared
+    `.nodeterm/project.json`, so keying the waiver on the mode alone would let a CLONED repo disable
+    the gate. It requires a machine-local opt-in (`controlConfirmWaivers.bypassMode`, default off) AND
+    a mode from the user's own GLOBAL setting (`resolvePermissionModeWithSource` → `project | global |
+    default`; only `global` waives, `default` is its own answer because nobody chose it). The claude
+    version gate is deliberately NOT applied (a security decision must not hang on `claude --version`).
+    **`open-project` can NEVER be waived** (`CONFIRM_WAIVABLE_VERBS` table) — it widens the app's blast
+    radius rather than acting inside it.
+  - **An agent-requested dialog knows its own lifetime** (`ConfirmState.expiresAt`/`onExpire`,
+    `CONTROL_REQUEST_TIMEOUT_MS` shared with main). Main abandons a request after 120 s telling the
+    renderer nothing, leaving the dialog up AND `confirmBusy()` true, which then refused every later
+    `write`/`close` with `a confirmation is already pending` — the "same dialog keeps coming back"
+    report. The deadline is measured from the RENDERER's receipt (so it fires just AFTER main gives
+    up), replies `expired` (nobody denied anything), and shows a fading strip, not an alert (an alert
+    keeps `confirmBusy()` true, reproducing the bug). `close-worktree --mode remove`'s dialog expires
+    through the SAME `useExpiringDialog.ts` (extracted, not copied): no `onExpire`, its clear also
+    releases `removePendingRef`, and the deadline is set only when `requestedBy` is present (a removal
+    the USER opened must not vanish under them).
+  - **MEASURED: two canvases cannot raise two dialogs for one request.** Desktop main forwards to one
+    `getMainWindow()`; the Server Edition raises none (headless); the shim's endpoint failover cannot
+    duplicate one because the control POST carries **no `--max-time`** (a POST waiting on a human
+    eventually gets an HTTP answer, and failover fires only on a dead transport). A future `--max-time`
+    on that curl would break this.
+- **`settings` verb** (`@shared/settings-verb`, 2026-09) — `settings [--project <id>]` lists,
+  `--get <key>` reads, `--set <key> --value <v>` ASKS to change (flags only: the shim drops a
+  positional sub-action for an unlisted verb). One pure rule set shared by the desktop dispatch, the
+  Server Edition and main's `parseControlRequest`: an **allowlist** (`agentMessaging` per project;
+  `snapToGrid`/`gridSize`/`defaultNodeWidth`/`defaultNodeHeight` machine-wide) with a required `why`,
+  and a **forbidden set + name pattern that outranks it** (permission modes incl. `bypassPermissions`,
+  `hookIdentityStrict`, `agentBrowserControl`, accounts/credentials/gateway/launch commands, telemetry,
+  keybindings, confirm waivers, `capabilityAck`). Four rules: (1) **every `--set` confirms**, and
+  `settings` is in `DESTRUCTIVE_VERBS` but NOT `CONFIRM_WAIVABLE_VERBS` — no waiver of any scope
+  answers for the user; (2) a capability read is the **grant** (`projectCapabilityGrantedFor`), never
+  the file bit, and a write goes through the UI's own `setProjectCapability`; (3) verified-only,
+  `--project` own-or-granted; (4) **Server Edition refuses every `--set` by name** (its headless
+  opt-in is not consent to grant capabilities). Mobile N/A.
+- **Agent messaging's MACHINE DEFAULT** (`settings.agentMessagingDefault`, ships OFF). A project whose
+  `.nodeterm/project.json` carries no `agentMessaging` is answered by this machine's settings.json
+  through ONE function, `projectCapabilityEffective` (`@shared/project-capability-consent`);
+  `projectCapabilityGrantedFor` now REQUIRES the defaults argument so a consumer that forgot it fails
+  to compile instead of reading every unconfigured project as off. Four rules: an explicit `true`
+  still needs this machine's `'kept'` (a cloned file notices, a project on only by default never
+  does); OFF is now WRITTEN (a literal `false`, because absence means "use the default"); an ABSENT
+  field with a recorded `'declined'` stays off (a user's explicit no is not undone by a default
+  switched on later); and the default is forbidden to the `settings` verb. **Ships OFF because**
+  `core/agents/pane-ownership.ts` records a pane's owner only on a FRESH spawn, so after a restart
+  every surviving pane is `unproven-target-owner` and refused — "on by default" would be false after
+  every restart (the flip waits on a cross-restart ownership proof, #659). Server Edition reads the
+  same grant; Mobile N/A.

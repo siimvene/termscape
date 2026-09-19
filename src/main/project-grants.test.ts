@@ -31,7 +31,7 @@ import {
   OPEN_PROJECT_LOCAL_ONLY,
   OPEN_PROJECT_CALLER_UNRESOLVED,
   OPEN_PROJECT_GRANT_CAP
-} from './project-grants'
+} from '../core/project-grants'
 
 beforeEach(() => clearAll())
 
@@ -72,7 +72,7 @@ describe('the grant ledger is session-scoped (P3)', () => {
   it('the module is pure: no fs, no electron, no persistence path to write through', () => {
     // Structural, in the no-electron.test.ts style: the P3 claim "never persisted" is a property
     // of the SOURCE — an in-memory Map with no import that could reach a disk or the shell.
-    const src = fs.readFileSync(path.join(__dirname, 'project-grants.ts'), 'utf8')
+    const src = fs.readFileSync(path.join(__dirname, '../core/project-grants.ts'), 'utf8')
     expect(src).not.toMatch(/from ['"]electron(\/[^'"]*)?['"]|require\(['"]electron/)
     expect(src).not.toMatch(/from ['"](node:)?fs['"]|require\(['"](node:)?fs['"]\)/)
     expect(src).not.toMatch(/from ['"](node:)?child_process['"]/)

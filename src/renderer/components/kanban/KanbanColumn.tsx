@@ -1,6 +1,8 @@
 import { Fragment, memo, useLayoutEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
+import { IconClose } from '../icons'
 import type { KanbanColumn as KanbanColumnT } from '@shared/types'
-import { NODE_COLORS } from '../../state/workspace'
+import { SYSTEM_NODE_COLOR_SWATCHES } from '@shared/node-colors'
 import type { KanbanCreateChoice, KanbanCreateOption } from './KanbanView'
 import { byLane, type KanbanSourceId } from '../../lib/kanbanSources'
 
@@ -47,27 +49,50 @@ export const KanbanColumn = memo(function KanbanColumn({
   const [title, setTitle] = useState(column?.title ?? '')
   const [swatchesOpen, setSwatchesOpen] = useState(false)
   const [newMenuOpen, setNewMenuOpen] = useState(false)
-  // The "+ New session" menu normally drops DOWN (top:100%); a column near the window's bottom edge
-  // would push it off-screen, so we flip it UP when it doesn't fit below. Measured on open.
-  const [menuUp, setMenuUp] = useState(false)
+  const newTriggerRef = useRef<HTMLButtonElement>(null)
   const newMenuRef = useRef<HTMLDivElement>(null)
   // Trello-style drop highlight: counted enter/leave (dragleave fires when crossing children).
   const [dragOverCount, setDragOverCount] = useState(0)
 
   useLayoutEffect(() => {
-    if (!newMenuOpen) {
-      setMenuUp(false)
-      return
+    if (!newMenuOpen) return
+
+    const positionMenu = () => {
+      const trigger = newTriggerRef.current
+      const menu = newMenuRef.current
+      if (!trigger || !menu) return
+
+      const triggerRect = trigger.getBoundingClientRect()
+      const width = Math.min(triggerRect.width, Math.max(0, window.innerWidth - 16))
+      const left = Math.max(8, Math.min(triggerRect.left, window.innerWidth - width - 8))
+      const below = triggerRect.bottom + 4
+
+      // The menu is initially hidden but measurable. Position it below first, then flip above
+      // the trigger when the viewport has more room there. Fixed positioning plus the portal
+      // keeps it out of the lane's horizontal overflow clip and above following swimlanes.
+      menu.style.width = `${width}px`
+      menu.style.left = `${left}px`
+      menu.style.top = `${below}px`
+      const menuHeight = menu.getBoundingClientRect().height
+      const fitsBelow = below + menuHeight <= window.innerHeight - 8
+      const above = triggerRect.top - menuHeight - 4
+      const top = fitsBelow
+        ? below
+        : above >= 8
+          ? above
+          : Math.max(8, window.innerHeight - menuHeight - 8)
+      menu.style.top = `${top}px`
+      menu.style.visibility = 'visible'
     }
-    const el = newMenuRef.current
-    if (!el) return
-    // Measured while rendered DOWN. If its bottom clears the viewport AND there's more room above
-    // the trigger than below it, flip up. (getBoundingClientRect includes the current position.)
-    const rect = el.getBoundingClientRect()
-    const overflowsBelow = rect.bottom > window.innerHeight - 8
-    const spaceAbove = rect.top // menu top ≈ just under the button
-    const spaceBelow = window.innerHeight - rect.top
-    if (overflowsBelow && spaceAbove > spaceBelow) setMenuUp(true)
+
+    positionMenu()
+    window.addEventListener('resize', positionMenu)
+    // Capture scroll events from the global board and each horizontally scrollable column.
+    window.addEventListener('scroll', positionMenu, true)
+    return () => {
+      window.removeEventListener('resize', positionMenu)
+      window.removeEventListener('scroll', positionMenu, true)
+    }
   }, [newMenuOpen])
 
   const colId = column?.id ?? null
@@ -143,16 +168,21 @@ export const KanbanColumn = memo(function KanbanColumn({
             title="Delete column (cards return to Ungrouped)"
             onClick={() => onDelete?.(column.id)}
           >
-            ✕
+            <IconClose />
           </button>
         )}
       </div>
       {column && swatchesOpen && (
         <div className="kanban-col__swatches">
-          {NODE_COLORS.map((c) => (
+          {/* System subset, not the agent colors: ColumnPill draws a column's color as 10px
+              TEXT on an 18% wash of itself, where grok grey and copilot purple fall under the
+              contrast floor. Node pickers offer the full palette. */}
+          {SYSTEM_NODE_COLOR_SWATCHES.map(({ value: c, label }) => (
             <button
               key={c}
               className="kanban-col__swatch"
+              title={label}
+              aria-label={label}
               style={{ background: c }}
               onClick={() => {
                 if (column) onRecolor?.(column.id, c)
@@ -171,8 +201,8 @@ export const KanbanColumn = memo(function KanbanColumn({
         ))}
       </div>
       <div className="kanban-col__footer">
-        {newMenuOpen && (
-          <div ref={newMenuRef} className={menuUp ? 'kanban-col__newmenu kanban-col__newmenu--up' : 'kanban-col__newmenu'}>
+        {newMenuOpen && typeof document !== 'undefined' && createPortal(
+          <div ref={newMenuRef} className="kanban-col__newmenu kanban-col__newmenu--portal">
             {createOptions.map((o) => (
               <button
                 key={o.key}
@@ -185,9 +215,10 @@ export const KanbanColumn = memo(function KanbanColumn({
                 {o.label}
               </button>
             ))}
-          </div>
+          </div>,
+          document.body
         )}
-        <button className="kanban-col__new" onClick={() => setNewMenuOpen((v) => !v)}>
+        <button ref={newTriggerRef} className="kanban-col__new" onClick={() => setNewMenuOpen((v) => !v)}>
           + New session
         </button>
       </div>

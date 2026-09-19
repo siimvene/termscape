@@ -8,6 +8,28 @@ export interface ModelGatewaySettings {
   baseUrl: string
   /** Literal legacy key, `${env:VAR}` reference, or `MODEL_GATEWAY_SECRET_REF`. */
   apiKey: string
+  /** Path the discovery (Models API) request is sent to, appended to `baseUrl` — e.g.
+   *  `/openai/v1/models` for a gateway that serves its model catalogue under a protocol prefix.
+   *  Deliberately a PATH SUFFIX and never a full URL: discovery sends the resolved API key to the
+   *  target, and a caller-chosen host would turn the pre-save/relay flow into a credential-exfil-
+   *  tration oracle (the same reason `${env:VAR}` references resolve only for the saved baseUrl).
+   *  Empty/absent = the conventional derived `/v1/models` (see `modelGatewayRoutes`). */
+  discoveryPath?: string
+}
+
+/** Characters a discovery path may contain, minus URL structure that could change WHERE the
+ *  request goes: no query (`?`), fragment (`#`), dot-dot traversal, or second scheme. The value is
+ *  hand-editable settings.json AND caller-supplied over IPC, so it is re-validated at the point it
+ *  is appended to the root (the same rule as permission modes / model ids on a command line) — an
+ *  unrecognized value yields the derived default path, never a guessed one. */
+const GATEWAY_DISCOVERY_PATH = /^\/[A-Za-z0-9\-._~!$&'()*+,;=:@/]*$/
+
+/** A validated discovery path, or null when absent/unsafe (null ⇒ use the derived default). */
+export function sanitizedGatewayDiscoveryPath(path: string | undefined): string | null {
+  const value = path?.trim() ?? ''
+  if (!value) return null
+  if (value.length > 500 || value.includes('..') || !GATEWAY_DISCOVERY_PATH.test(value)) return null
+  return value.replace(/\/+$/, '') || null
 }
 
 /** Stored in settings.json when the literal credential lives in the shell's secret store. */
@@ -100,8 +122,18 @@ export function resolveModelGatewayApiKey(
  * the provider-specific paths are the Bifrost layout requested by the launch mapping. Only http(s)
  * URLs are accepted: this value is later handed to `fetch` and agent CLIs, and settings.json is
  * hand-editable. Invalid input degrades to null, never to a guessed endpoint.
+ *
+ * `discoveryPath` (optional, from the same `ModelGatewaySettings`) replaces the conventional
+ * `/v1/models` suffix when it is present and passes `sanitizedGatewayDiscoveryPath`. It changes
+ * only WHICH path on the saved root the catalogue is read from — never the host — so the
+ * credential trust gate upstream (references resolve only for the saved baseUrl) is unaffected.
+ * An unsafe value falls back to the derived default rather than sending a fetch somewhere the
+ * user did not vet.
  */
-export function modelGatewayRoutes(baseUrl: string): ModelGatewayRoutes | null {
+export function modelGatewayRoutes(
+  baseUrl: string,
+  discoveryPath?: string
+): ModelGatewayRoutes | null {
   const raw = baseUrl.trim().replace(/\/+$/, '')
   if (!raw) return null
   try {
@@ -111,8 +143,9 @@ export function modelGatewayRoutes(baseUrl: string): ModelGatewayRoutes | null {
     // The separate API-key field exists precisely so a secret never has to live there.
     if (parsed.username || parsed.password || parsed.search || parsed.hash) return null
     const root = parsed.toString().replace(/\/+$/, '')
+    const discoverySuffix = sanitizedGatewayDiscoveryPath(discoveryPath) ?? '/v1/models'
     return {
-      discovery: `${root}/v1/models`,
+      discovery: `${root}${discoverySuffix}`,
       openai: `${root}/openai/v1`,
       anthropic: `${root}/anthropic`
     }
@@ -154,9 +187,58 @@ export function parseGatewayModels(payload: unknown): GatewayModel[] {
  * provider here would hide supported modes. The capability is the only UI gate; custom agents
  * inherit it from their declared base harness.
  */
-export function modelsForAgent(models: GatewayModel[], agentId: AgentId): GatewayModel[] {
+export function modelsForAgent(
+  models: GatewayModel[],
+  agentId: AgentId,
+  grokModels: readonly GatewayModel[] = []
+): GatewayModel[] {
   if (!canSwitchModel(agentId)) return []
+  // grok is offered ITS OWN models, never the gateway's, and this is a correctness rule rather than
+  // a preference: grok cannot be routed through the gateway at all (see `modelGatewayEnv` below —
+  // its custom models live in `~/.grok/config.toml`, not in environment variables). Handing it the
+  // gateway catalogue would put ids on the menu that its CLI rejects at launch: a picker that looks
+  // like it worked and kills the node.
+  if (capabilityAgentId(agentId) === 'grok') return [...grokModels]
   return models
+}
+
+/**
+ * Parse `grok models` — the CLI's own list, so there is no allowlist to maintain and a model shipped
+ * tomorrow appears without a code change.
+ *
+ * MEASURED output (1.0.13, 2026-09-02):
+ *
+ *   You are logged in with grok.com.
+ *
+ *   Default model: grok-4.6
+ *
+ *   Available models:
+ *     * grok-4.6 (default)
+ *     - grok-4.5
+ *
+ * Only the indented bullets under "Available models:" are read. The `Default model:` line is
+ * deliberately NOT a source: it repeats an entry that the bullet list already carries, and treating
+ * a prose line as data is how a login banner or a future footer becomes a fake model id.
+ *
+ * Anything unparseable yields an EMPTY list, which the UI reads as "no model switching" — the
+ * pre-feature behaviour. Never a partial list built from whatever happened to match.
+ */
+export function grokModelsFrom(stdout: string | null | undefined): GatewayModel[] {
+  const text = stdout ?? ''
+  const start = text.indexOf('Available models:')
+  if (start < 0) return []
+  const byId = new Map<string, GatewayModel>()
+  for (const raw of text.slice(start).split('\n').slice(1)) {
+    // An unindented line ends the block: the list is indented, anything flush left is prose again.
+    if (raw.trim() && !/^\s/.test(raw)) break
+    const m = /^\s+[*-]\s+(\S+)/.exec(raw)
+    if (!m) continue
+    const id = m[1]
+    // Same charset discipline as every other id that reaches a command line.
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:\/-]*$/.test(id)) continue
+    if (!byId.has(id)) byId.set(id, { id })
+  }
+  return [...byId.values()]
 }
 
 /**
@@ -215,6 +297,14 @@ export function tmuxUpdateEnvironmentLine(extraNames: readonly string[] = []): s
   return `set -g update-environment "${names.join(' ')}"`
 }
 
+/** Copilot selects the provider's internal model id; the gateway keeps the full wire id. */
+function copilotModelParts(wireModel: string): { provider: string; modelId: string } {
+  const slash = wireModel.indexOf('/')
+  return slash > 0
+    ? { provider: wireModel.slice(0, slash).toLowerCase(), modelId: wireModel.slice(slash + 1) }
+    : { provider: '', modelId: wireModel }
+}
+
 export function modelGatewayEnv(
   settings: ModelGatewaySettings,
   agentId: AgentId,
@@ -250,9 +340,7 @@ export function modelGatewayEnv(
       // would activate an incomplete provider and make every new Copilot node fail to launch.
       const wireModel = normalizedAgentModel(agentId, model)
       if (!wireModel) return {}
-      const slash = wireModel.indexOf('/')
-      const provider = slash > 0 ? wireModel.slice(0, slash).toLowerCase() : ''
-      const modelId = slash > 0 ? wireModel.slice(slash + 1) : wireModel
+      const { provider, modelId } = copilotModelParts(wireModel)
       const anthropic = provider === 'anthropic'
       return {
         COPILOT_PROVIDER_BASE_URL: anthropic ? routes.anthropic : routes.openai,
@@ -268,6 +356,18 @@ export function modelGatewayEnv(
           : {})
       }
     }
+    case 'grok':
+      // Deliberately EMPTY, and stated rather than omitted. grok's model gateway is not an
+      // environment: custom models are declared in `~/.grok/config.toml` with their own `base_url`
+      // and `api_key` (`~/.grok/docs/user-guide/11-custom-models.md`), and that file also says the
+      // environment-wide knobs it does accept CANNOT carry `model`/`base_url`/`api_key`. So there is
+      // no env for this function to emit, and emitting the OpenAI pair anyway would point grok's
+      // built-in models at a gateway they were never configured for.
+      //
+      // Writing into the user's `config.toml` to route grok through the gateway is a real feature
+      // and a separate decision — it edits a file the user owns, for a value they did not ask us to
+      // change. Not this PR.
+      return {}
     default:
       return {}
   }
@@ -290,9 +390,9 @@ export function normalizedAgentModel(agentId: AgentId, model: string | undefined
 export function withAgentModel(cmd: string, agentId: AgentId, model: string | undefined): string {
   const value = normalizedAgentModel(agentId, model)
   if (!value) return cmd
-  // Copilot receives the model through COPILOT_PROVIDER_MODEL_ID/WIRE_MODEL. Appending --model
-  // would collapse those two distinct values back together and send the unrecognized
-  // provider-prefixed Bifrost id through Copilot's internal catalogue.
-  if (capabilityAgentId(agentId) === 'copilot') return cmd
-  return `${cmd} --model ${shellSingleQuote(value)}`
+  // COPILOT_PROVIDER_MODEL_ID/WIRE_MODEL describe the provider; Copilot still requires a startup
+  // selection via --model or COPILOT_MODEL. Use a flag so an in-place restart also selects it in
+  // an existing shell. Match the internal id above, keeping the gateway prefix in WIRE_MODEL only.
+  const modelId = capabilityAgentId(agentId) === 'copilot' ? copilotModelParts(value).modelId : value
+  return `${cmd} --model ${shellSingleQuote(modelId)}`
 }

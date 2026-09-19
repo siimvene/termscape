@@ -40,9 +40,16 @@ interface HudPush {
   width: number
   notchWidth: number
   notchCenterX: number
-  hasNotch: boolean
   hoverExpand: boolean
   percentMode?: 'used' | 'remaining' | 'tokens'
+  // Placement (main's pure `hudPlacement`, docs/notch-hud.md): the shape, and where the collapsed
+  // capsule / expanded panel sit. The renderer draws EXACTLY these — it decides nothing itself.
+  fused: boolean
+  anchor: 'left' | 'center' | 'right'
+  capsuleX: number
+  capsuleTop: number
+  panelLeft: number
+  panelWidth: number
 }
 interface HudApi {
   onRows(cb: (push: HudPush) => void): () => void
@@ -75,8 +82,10 @@ root.append(capsule)
 
 let expanded = false
 let latestRows: HudRow[] = []
-// Notch width from main's geometry push — drives the symmetric right-hand padding.
+// Notch width from main's geometry push — drives the fused capsule's right-hand padding.
 let notchWidthPx = 168
+// Shape from main's placement push: fused to the notch (grow-left overhang applies) or a pill.
+let fused = true
 // Hover-to-expand (settings.notchHoverExpand). Off = the capsule only expands on click.
 let hoverExpand = true
 // settings.usagePercentMode — the same number/label the other context surfaces render (issue #78).
@@ -423,9 +432,20 @@ function buildSubItem(s: HudSubagentRow): HTMLElement {
 // kadar genişlettiysen sağdan da o kadar"): on a crowded menu bar the symmetric right-hand
 // overhang sat ON TOP of the status items, and because the capsule is the click-through hotspot,
 // hovering there also swallowed their clicks (issue #78 — grow-left approved by the owner there).
+// FUSED ONLY: a floating pill has no notch to cover, so the padding would just be a dead black
+// tail to the right of the mascots (which is what the notchless pill drew before placement
+// landed; on a left/right-aligned pill it would also have hung over the menu-bar items).
 function syncCapsuleOverhang(): void {
-  // Decision is the pure, tested `capsuleOverhangPx` (indicator.ts) — in particular the notchless
-  // pill gets NO notch-width padding, or a misdetected notch turns it into a wide black bar.
+  // Grow-left overhang covers the physical notch, so it applies ONLY to a fused capsule. A floating
+  // pill — notchless, or a left/right/offset pill on a NOTCHED display (upstream placement) — must
+  // never get it, or it draws a dead black tail / hangs over the menu-bar items.
+  if (!fused) {
+    capsule.style.paddingRight = ''
+    return
+  }
+  // The pixel decision is the pure, tested `capsuleOverhangPx` (indicator.ts): none when expanded or
+  // notchless (a misdetected notch must not turn the pill into a wide black bar), else the notch
+  // width when there is content to show.
   const px = capsuleOverhangPx({
     expanded,
     notchless: document.documentElement.classList.contains('notchless'),
@@ -456,8 +476,28 @@ function applyGeometry(push: HudPush): void {
   if (typeof push.notchCenterX === 'number') rs.setProperty('--notch-center-x', `${push.notchCenterX}px`)
   if (typeof push.hoverExpand === 'boolean') hoverExpand = push.hoverExpand
   if (push.percentMode === 'used' || push.percentMode === 'remaining' || push.percentMode === 'tokens') percentMode = push.percentMode
-  // No physical notch → draw a standalone floating pill instead of fusing to y=0.
-  document.documentElement.classList.toggle('notchless', push.hasNotch === false)
+  applyPlacement(push)
+}
+
+/** Placement: the shape class + the anchor class + the four pushed numbers as CSS variables. The
+ *  capsule element is the click-through hotspot, so moving it here moves the interactive region
+ *  with it — nothing else tracks where the capsule is. */
+function applyPlacement(push: HudPush): void {
+  const rs = document.documentElement.style
+  const cls = document.documentElement.classList
+  fused = push.fused !== false
+  // `pill` = not fused: a standalone floating capsule (all corners rounded). It replaced the old
+  // `notchless` class because the shape is no longer only about the display — a notched Mac with
+  // the capsule on the left, or lowered off the notch, is a pill too.
+  cls.toggle('pill', !fused)
+  const anchor = push.anchor === 'left' || push.anchor === 'right' ? push.anchor : 'center'
+  cls.toggle('anchor-left', anchor === 'left')
+  cls.toggle('anchor-center', anchor === 'center')
+  cls.toggle('anchor-right', anchor === 'right')
+  if (typeof push.capsuleX === 'number') rs.setProperty('--capsule-x', `${push.capsuleX}px`)
+  if (typeof push.capsuleTop === 'number') rs.setProperty('--capsule-top', `${push.capsuleTop}px`)
+  if (typeof push.panelLeft === 'number') rs.setProperty('--panel-left', `${push.panelLeft}px`)
+  if (typeof push.panelWidth === 'number') rs.setProperty('--panel-width', `${push.panelWidth}px`)
 }
 
 window.hud.onRows((push: HudPush) => {

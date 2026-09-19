@@ -1,4 +1,15 @@
 /**
+ * The builtin agents that can own a MANAGED ACCOUNT — the one list behind both the binding rule
+ * below and the add menus' decision about which agent rows stay out of the `New agent` submenu
+ * (`renderer/lib/addMenuSpec`). Those two facts really are the same fact: an agent that can grow
+ * an account picker is an agent whose row can become a SUBMENU, and `ContextMenu` renders a
+ * submenu inside a submenu as NOTHING — so nesting such a row silently deletes its account picker
+ * for exactly the users who have accounts. Written once here so a third agent gaining managed
+ * accounts cannot light up one of the two and not the other.
+ */
+export const ACCOUNT_CAPABLE_AGENT_IDS: readonly string[] = ['claude', 'codex']
+
+/**
  * Which managed account a node is actually BOUND to — the one rule behind both `data.accountId`
  * and the account's default node color.
  *
@@ -27,6 +38,6 @@ export function boundAccountId(
   agentId: string | undefined
 ): string | undefined {
   if (!accountId) return undefined
-  if (agentId !== undefined && agentId !== 'claude' && agentId !== 'codex') return undefined
+  if (agentId !== undefined && !ACCOUNT_CAPABLE_AGENT_IDS.includes(agentId)) return undefined
   return accountId
 }

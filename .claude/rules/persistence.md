@@ -29,11 +29,11 @@ separate store mirroring node state — earlier dual-source designs caused sync 
 `src/renderer/state/workspace.ts` holds only pure helpers: the color palette, the node
 factories (`createTerminalNode`, `createSshTerminalNode`, `createAgentNode(agentId, …)`,
 `createAccountLoginNode`, `createStickyNode`, `createGroupNode`, `createEditorNode`,
-`createDiffNode`, `createVideoNode`, `createWebNode`, `createBrowserNode`, `createDinoNode`,
-`createTriggerNode`), the
+`createDiffNode`, `createVideoNode`, `createWebNode`, `createBrowserNode`, `createFilesNode`,
+`createDinoNode`, `createTriggerNode`), the
 group transforms (`groupSelectedNodes`, `ungroupNodes`, `duplicateNode`), and the
 `nodeStatesToFlow` / `flowToNodeStates` serializers. Node kinds (`NodeKind` in
-`src/shared/types.ts`): `terminal | sticky | group | editor | diff | video | web | browser |
+`src/shared/types.ts`): `terminal | sticky | group | editor | diff | video | web | browser | files |
 subagent | loop | dino | trigger` — `subagent` and `loop` are render-only (ephemeral hook-driven
 viz) and never persisted. `trigger` (issue #493, all four
 phases landed) is a first-class PERSISTED kind. The whole host-side
@@ -83,7 +83,17 @@ Persistence has two layers:
   speak an assembled v2-shaped `Workspace`; all fan-out lives in `core/workspace-store.ts` +
   pure `core/workspace-files.ts`. v2 files migrate on first save (backup `workspace.v2.bak`,
   one-time renderer note). Outside edits (git pull/sync) are detected by
-  `core/workspace-watcher.ts` → silent reload, or a Reload/Keep-mine conflict bar when dirty.
+  `core/workspace-watcher.ts` → silent reload, or a Reload/Keep-mine conflict bar when dirty; both
+  ride `workspace:external-change`, as do the phone's `appendRemoteNode` and the SSH reconcile
+  (really another device). **A write this core made ITSELF rides `workspace:server-change`** (today:
+  Server Edition headless canvas control, `server/canvas-control.ts`): the renderer three-way merges
+  it against the store baseline (`renderer/lib/serverChange.ts` — incoming nodes adopted, ropes/
+  bridges merged by id, local unsaved edits kept, dangling edges pruned), never a bar or reload. It
+  shared the outside-edit channel once and that was data loss: `decideExternalChange` compares the
+  shell incl. `ropes`, so the one `ctrl-…` rope an `open-agent` appends read as a conflict on a dirty
+  canvas (spawns land inside the 800 ms autosave debounce and the bar itself suspends autosave), and
+  "Keep my version" overwrote the file, dropping server-persisted ropes and resurrecting removed
+  cards.
   Unreadable refs render as greyed **unavailable** tabs (never dropped); corrupt project files
   are set aside as `project.json.corrupt-<ts>`. "Open folder…" adopts an existing
   `.nodeterm/project.json` — the probe MINTS the project id (node ids — tmux names — kept), and
@@ -176,6 +186,19 @@ Persistence has two layers:
   `refreshSshProject` runs ON `saveChain`: off the chain a poll snapshotting the pre-save entry
   could complete its slow ssh read after the save's mirror landed and "adopt" the store's own
   write on rev alone.
+  **A write ACK is not evidence about the server's CONTENT — only a read is** (2026-09-06: 16
+  terminals deleted on an SSH project came straight back as sessions from a phone the reporter does
+  not own). `clearedNodes` is the tombstone set telling the mirror re-read "we deleted this, do not
+  rescue it back"; dropping it the moment `remoteIO.write` returned true was wrong, because that ack
+  is optimistic for the throttle's trailing write — a connection dying inside the window left
+  `markUnmirrored` re-owing the mirror with the tombstones already gone, and `rescueRemoteNodes`
+  merged every just-deleted node back. A tombstone now retires ONLY via `confirmClearedDeletions` —
+  a read that no longer lists the id (the mirror re-read or `reconcileSsh`, no extra round-trip), or
+  an adopt; BOTH read sites must call it. Cost: GC lags a landed write by one read; benefit: the
+  rule no longer depends on a dropped write being reported. The set is runtime-only, bounded by this
+  run's deleted ids, pruned for projects that leave the index. **Neither surface may name a device
+  for an adopted node** (`adoptedClause`, `renderer/lib/externalChange.ts`): the layer cannot tell a
+  stale own mirror from a phone append, so the copy names the project FILE and asserts no source.
 - **Live terminal sessions** (tmux): terminals continue where they left off across node
   remounts *and* full app restarts, including running processes. See `.claude/rules/terminal.md`.
 

@@ -113,7 +113,8 @@ describe('every CSS variable resolves', () => {
     '--cmascot-w',
     '--cmascot-h',
     '--cmascot-sheet-w',
-    '--cmascot-sheet-h' // notch HUD sprite sheets
+    '--cmascot-sheet-h', // notch HUD sprite sheets
+    '--swimlane-color' // GlobalKanbanView swimlane left border, per project
   ])
 
   it('references no variable that is never defined', () => {

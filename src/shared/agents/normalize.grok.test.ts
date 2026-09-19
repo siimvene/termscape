@@ -5,8 +5,10 @@ import { grokRawFields, normalizeClaude, normalizeGrok, type RawHookEnvelope } f
  * Grok's hook envelope is its own dialect: camelCase keys whose `hookEventName` VALUE is
  * snake_case ("pre_tool_use"), and the grok SDK path converts the top-level keys to snake_case.
  * Both spellings are therefore read, and the event name is canonicalized rather than matched
- * literally — read out of the shipped 1.0.0 docs, not inferred from claude's shape. No payload was
- * ever captured: a hook fires only inside a logged-in grok session, which was never available here.
+ * literally — read out of the shipped 1.0.0 docs, not inferred from claude's shape. Payloads WERE
+ * captured on 1.0.13 (`__fixtures__/grok/hook-payloads.json`); the cases
+ * below that are built from a capture say so. The behavioural pin over the live
+ * subagent payloads is `normalize.grok.capture.test.ts`, not the hand-built cases here.
  */
 function env(payload: Record<string, unknown>): RawHookEnvelope {
   return { nodeId: 'n1', agentId: 'grok', payload }
@@ -75,232 +77,238 @@ describe('normalizeGrok — Stop', () => {
     }
   })
 
-  it('stop_failure ends the turn so the badge cannot stick on working', () => {
+  it.each([
+    'rate_limit',
+    'authentication_failed',
+    'invalid_request',
+    'server_error',
+    'max_output_tokens',
+    'unknown'
+  ])('stop_failure %s ends the turn so the badge cannot stick on working', (error) => {
     expect(
-      normalizeGrok(env({ hookEventName: 'stop_failure', sessionId: 's1', lastAssistantMessage: 'rate limited' }))
-    ).toMatchObject({ state: 'done', lastMessage: 'rate limited' })
+      normalizeGrok(
+        env({ hookEventName: 'stop_failure', sessionId: 's1', error, lastAssistantMessage: error })
+      )
+    ).toMatchObject({ state: 'done', lastMessage: error })
+  })
+
+  it.each([
+    ['a future dialect', 'future_error'],
+    ['an absent class', undefined],
+    ['an empty class', '']
+  ])('stop_failure with %s STILL ends the turn — the node must not stay RUNNING', (_name, error) => {
+    // This used to return null, on the closed-vocabulary discipline the rest of this file follows.
+    // That discipline is for values that DECIDE something; this one decides nothing — every class
+    // ends the turn. Gating on it left the node on RUNNING until the idle_prompt backstop, or
+    // forever if none arrived: the silent half of the failure, the one nobody reports because
+    // nothing looks broken.
+    //
+    // Asserted as `done` and NOT as "not null", because "not null" would also pass if some future
+    // edit returned `working` here — which is the very state this exists to prevent.
+    const out = normalizeGrok(env({ hookEventName: 'stop_failure', sessionId: 's1', error }))
+    expect(out).toMatchObject({ kind: 'state', state: 'done' })
+    expect(out?.state).not.toBe('working')
   })
 })
 
-/**
- * Notification is the one grok event nobody here could measure, and the two sources that describe it
- * disagree — so every expectation below cites the source it encodes, and ALL of it is inference:
- *
- *  - orca (`/root/orca-main`, MIT, a shipping grok integration) — `permission_prompt` plus prose
- *    messages, `src/shared/agent-hook-listener.ts:2370-2402` (readers) and `:3994-4012` (precedence).
- *  - grok's own shipped docs — `turn_complete | approval_required | session_ready | task_complete |
- *    agent_error`, `~/.grok/docs/user-guide/05-configuration.md:414`.
- *
- * The mapping is therefore built to be safe under BOTH vocabularies: the routine per-tool prompt is
- * suppressed, a genuine ask still reaches NEEDS YOU under either spelling, and anything unrecognized
- * changes no state.
- */
+describe('normalizeGrok — published 1.0.13 events', () => {
+  it('keeps working after PermissionDenied because the turn continues after the tool decision', () => {
+    expect(
+      normalizeGrok(env({ hookEventName: 'permission_denied', sessionId: 's1', toolName: 'write_file' }))
+    ).toMatchObject({ kind: 'state', state: 'working' })
+  })
+
+  it.each([
+    'user_interrupt',
+    'permission_rejected',
+    'permission_cancelled',
+    'max_turns',
+    'no_progress',
+    'unknown'
+  ] as const)('carries closed StopCancelled reason %s without deciding the badge transition yet', (reason) => {
+    expect(
+      normalizeGrok(
+        env({
+          hookEventName: 'stop_cancelled',
+          sessionId: 's1',
+          reason,
+          subagentType: 'explore',
+          lastAssistantMessage: 'not allowed'
+        })
+      )
+    ).toEqual({
+      nodeId: 'n1',
+      agentId: 'grok',
+      sessionId: 's1',
+      kind: 'state',
+      cancelReason: reason,
+      subagentType: 'explore',
+      lastMessage: 'not allowed'
+    })
+  })
+
+  it('rejects an unrecognized StopCancelled reason', () => {
+    expect(normalizeGrok(env({ hookEventName: 'stop_cancelled', reason: 'future_reason' }))).toBeNull()
+  })
+
+  // REPLACED after measuring. This case used to build payloads with NO `subagentId` and assert that
+  // the result carried `sessionId` — "without inventing an instance id". Both halves are wrong
+  // against the wire: all four captured subagent payloads (1.0.13) carry `subagentId`, so the
+  // id-less shape does not occur; and passing `sessionId` through is the trap, because on the STOP
+  // that id is the CHILD's own. The measured behaviour is pinned in the `normalizeGrok — subagents`
+  // block at the end of this file. What survives here is the id-less input, which must map to
+  // NOTHING rather than to a card no store can key.
+  it('returns null for a subagent event with no instance id, rather than an unkeyable card', () => {
+    expect(
+      normalizeGrok(env({ hookEventName: 'subagent_start', sessionId: 's1', subagentType: 'explore' }))
+    ).toBeNull()
+    expect(
+      normalizeGrok(env({ hook_event_name: 'subagent_stop', session_id: 's1', subagent_type: 'explore' }))
+    ).toBeNull()
+  })
+
+  it('carries the closed compaction phase while leaving the current badge untouched', () => {
+    expect(
+      normalizeGrok(env({ hookEventName: 'pre_compact', sessionId: 'old', trigger: 'manual' }))
+    ).toEqual({
+      nodeId: 'n1',
+      agentId: 'grok',
+      sessionId: 'old',
+      kind: 'state',
+      compactionPhase: 'pre'
+    })
+    expect(
+      normalizeGrok(env({ hook_event_name: 'post_compact', session_id: 'new', trigger: 'auto' }))
+    ).toEqual({
+      nodeId: 'n1',
+      agentId: 'grok',
+      sessionId: 'new',
+      kind: 'state',
+      compactionPhase: 'post'
+    })
+    expect(normalizeGrok(env({ hookEventName: 'post_compact', trigger: 'future' }))).toBeNull()
+  })
+})
+
+/** Grok 1.0.13 publishes the closed Notification vocabulary in
+ * `~/.grok/docs/user-guide/10-hooks.md:99`; `:162` says permission_prompt fires only while its UI
+ * actually waits. The literal unknown cases keep that contract closed. */
 describe('normalizeGrok — Notification', () => {
-  /**
-   * THE regression this branch's first mapping had backwards. Orca's
-   * `isGrokRoutinePermissionPromptNotification` (`agent-hook-listener.ts:2378-2389`) exists because
-   * "Grok emits this before each tool even under bypassPermissions; PreToolUse already covers
-   * progress" — its own named regression test is
-   * `src/renderer/src/hooks/agent-hook-completion-notifications.test.ts:654`. Mapping it to `blocked`
-   * fires markUnread (no cooldown), the needs-you chime, an OS notification while unfocused and a
-   * phone inbox card on EVERY tool call.
-   */
-  it('the routine per-tool permission prompt is suppressed, not a NEEDS YOU', () => {
+  it.each([
+    {
+      name: 'permission_prompt',
+      payload: {
+        hookEventName: 'notification',
+        notificationType: 'permission_prompt',
+        message: 'Tool permission requested',
+        level: 'info'
+      },
+      want: {
+        nodeId: 'n1',
+        agentId: 'grok',
+        sessionId: undefined,
+        kind: 'state',
+        state: 'blocked',
+        lastMessage: undefined
+      }
+    },
+    {
+      name: 'idle_prompt',
+      payload: { hookEventName: 'notification', notificationType: 'idle_prompt' },
+      want: {
+        nodeId: 'n1',
+        agentId: 'grok',
+        sessionId: undefined,
+        kind: 'state',
+        state: 'done',
+        interrupted: true,
+        idle: true
+      }
+    },
+    {
+      name: 'task_complete',
+      payload: { hookEventName: 'notification', notificationType: 'task_complete' },
+      want: null
+    },
+    {
+      name: 'unknown',
+      payload: { hookEventName: 'notification', notificationType: 'some_future_type' },
+      want: null
+    },
+    {
+      name: 'unknown containing permission',
+      payload: { hookEventName: 'notification', notificationType: 'permission_reminder' },
+      want: null
+    },
+    {
+      name: 'unknown camelCase near-alias',
+      payload: { hookEventName: 'notification', notificationType: 'permissionPrompt' },
+      want: null
+    },
+    {
+      name: 'unknown hyphenated near-alias',
+      payload: { hookEventName: 'notification', notificationType: 'permission-prompt' },
+      want: null
+    }
+  ])('maps published and unknown type: $name', ({ payload, want }) => {
+    expect(normalizeGrok(env(payload))).toEqual(want)
+  })
+
+  it.each([
+    'approval_required',
+    'agent_needs_input',
+    'elicitation_dialog',
+    'session_ready',
+    'permission_request'
+  ])('retires the old inferred Notification type %s', (notificationType) => {
+    expect(normalizeGrok(env({ hookEventName: 'notification', notificationType }))).toBeNull()
+  })
+
+  it('does not infer idle state from prose attached to an unknown type', () => {
     expect(
       normalizeGrok(
         env({
           hookEventName: 'notification',
-          notificationType: 'permission_prompt',
-          message: 'Tool permission requested',
-          level: 'info'
+          notificationType: 'session_ready',
+          message: 'Type your message or @path/to/file'
         })
       )
     ).toBeNull()
-    // Level absent is the same routine case (orca: `!level || level === 'info'`), and the message is
-    // compared trimmed + case-folded.
-    expect(
-      normalizeGrok(
-        env({
-          hookEventName: 'notification',
-          notificationType: 'permission_prompt',
-          message: '  tool permission requested  '
-        })
-      )
-    ).toBeNull()
   })
 
-  /**
-   * The suppression must survive grok's OTHER dialect. grok's envelope is documented camelCase
-   * throughout, so `permissionPrompt` is a plausible spelling of the same type — and comparing the
-   * type raw would make it miss the suppression and fall through to `includes('permission')`, i.e.
-   * bring the per-tool-call strobe straight back. The type therefore goes through the same
-   * `grokCanonical` rule the event name uses (orca canonicalizes too, to snake_case:
-   * `normalizeHookEventName`, `agent-hook-listener.ts:2201-2210`).
-   */
-  it('suppresses the routine prompt in EVERY spelling of its type', () => {
-    for (const notificationType of ['permissionPrompt', 'permission_prompt', 'Permission-Prompt', 'PERMISSION_PROMPT']) {
-      expect(
-        normalizeGrok(
-          env({ hookEventName: 'notification', notificationType, message: 'tool permission requested' })
-        ),
-        notificationType
-      ).toBeNull()
-    }
-  })
-
-  it('reads the other ask + idle types in camelCase too (one canonicalization, not three)', () => {
-    expect(
-      normalizeGrok(env({ hookEventName: 'notification', notificationType: 'agentNeedsInput' }))
-    ).toMatchObject({ state: 'waiting' })
-    expect(
-      normalizeGrok(env({ hookEventName: 'notification', notificationType: 'elicitationDialog' }))
-    ).toMatchObject({ state: 'waiting' })
-    expect(
-      normalizeGrok(env({ hookEventName: 'notification', notificationType: 'approvalRequired' }))
-    ).toMatchObject({ state: 'blocked' })
-    // And the closed set stays closed under canonicalization: an elicitation END is still inert.
-    expect(
-      normalizeGrok(env({ hookEventName: 'notification', notificationType: 'elicitationComplete' }))
-    ).toBeNull()
-  })
-
-  it('a GENUINE ask still reaches NEEDS YOU — the suppression is narrow, not a mute', () => {
-    // Same type, a real message: this is the ask a human must answer.
-    expect(
-      normalizeGrok(
-        env({
-          hookEventName: 'notification',
-          notificationType: 'permission_prompt',
-          message: 'Bash wants to run `rm -rf build`'
-        })
-      )
-    ).toMatchObject({ state: 'blocked' })
-    // Same type and the routine message, but LOUDER than info — orca's level condition fails, so it
-    // is treated as a real ask rather than swallowed.
-    expect(
-      normalizeGrok(
-        env({
-          hookEventName: 'notification',
-          notificationType: 'permission_prompt',
-          message: 'tool permission requested',
-          level: 'warn'
-        })
-      )
-    ).toMatchObject({ state: 'blocked' })
-    expect(
-      normalizeGrok(env({ hookEventName: 'notification', notificationType: 'agent_needs_input' }))
-    ).toMatchObject({ state: 'waiting' })
-  })
-
-  /**
-   * grok's own docs name `approval_required` (05-configuration.md:414) where orca names
-   * `permission_prompt`; the two share no substring, so both are matched. Without this the mapping
-   * fires for NOTHING if the docs' vocabulary turns out to be the real one.
-   */
-  it("maps grok's own documented `approval_required` to NEEDS YOU as well", () => {
-    expect(
-      normalizeGrok(env({ hookEventName: 'notification', notificationType: 'approval_required' }))
-    ).toMatchObject({ state: 'blocked' })
-  })
-
-  /**
-   * The rescue signal, and the reason it must key off the MESSAGE: grok states its idle prompt in
-   * prose (orca's `isGrokIdleNotification`, `agent-hook-listener.ts:2391-2402`) and neither source
-   * names an "idle" TYPE — so the type-only test this replaced could never fire. It is the only thing
-   * that can clear a node stuck on `working` after an Esc, because grok sends no hook for an
-   * interrupted turn at all.
-   */
-  it('detects idle from the MESSAGE — each of orca\'s four phrases clears the badge', () => {
-    for (const message of [
-      'Type your message or @path/to/file',
-      'enter send · shift-tab normal mode',
-      'shift-tab normal mode',
-      'Ask a side question without interrupting'
-    ]) {
-      expect(
-        normalizeGrok(env({ hookEventName: 'notification', notificationType: 'session_ready', message })),
-        message
-      ).toMatchObject({ state: 'done', idle: true, interrupted: true })
-    }
-    // No type at all is still enough — the message carries it.
-    expect(
-      normalizeGrok(env({ hookEventName: 'notification', message: 'TYPE YOUR MESSAGE' }))
-    ).toMatchObject({ state: 'done', idle: true, interrupted: true })
-  })
-
-  it('keeps a type-based idle fallback for a message-less notification', () => {
-    // Belt and braces: unlike a substring test on an ASK word, a false positive here can only CLEAR
-    // a badge — it can never leave one stuck.
-    expect(normalizeGrok(env({ hookEventName: 'notification', notificationType: 'idle_prompt' }))).toMatchObject({
-      state: 'done',
-      idle: true,
-      interrupted: true
-    })
-  })
-
-  /**
-   * Precedence, mirroring orca's own order (`agent-hook-listener.ts:3994-4012`: routine-suppress,
-   * then ask, then idle): a payload claiming BOTH an ask type and idle prose is asking. A wrongly
-   * cleared NEEDS YOU is the failure this branch exists to prevent; a badge that lingers one hook
-   * longer is not.
-   */
-  it('an ask type wins over idle prose in the same payload', () => {
-    expect(
-      normalizeGrok(
-        env({
-          hookEventName: 'notification',
-          notificationType: 'permission_request',
-          message: 'Approve? (type your message to answer)'
-        })
-      )
-    ).toMatchObject({ state: 'blocked' })
-  })
-
-  /**
-   * Orca reads the kind from THREE keys (`notificationType ?? notification_type ?? type`,
-   * `agent-hook-listener.ts:2370-2376`); the third was missing here.
-   */
-  it('reads the notification kind from the bare `type` key too', () => {
-    expect(normalizeGrok(env({ hookEventName: 'notification', type: 'approval_required' }))).toMatchObject({
-      state: 'blocked'
-    })
-    expect(
-      normalizeGrok(env({ hookEventName: 'notification', type: 'agent_needs_input' }))
-    ).toMatchObject({ state: 'waiting' })
-  })
-
-  it('an UNKNOWN notification type is a no-op — a future type must not stick a badge', () => {
-    expect(normalizeGrok(env({ hookEventName: 'notification', notificationType: 'auth_success' }))).toBeNull()
-    expect(normalizeGrok(env({ hookEventName: 'notification' }))).toBeNull()
-  })
-
-  /**
-   * The asking types are matched EXACTLY, not by substring: grok's vocabulary is claude-derived, and
-   * claude's `elicitation_complete` / `elicitation_response` fire when an elicitation ENDS. A
-   * substring test on 'elicit' would read those as a fresh ask and leave NEEDS YOU on a node that
-   * just finished — the exact bug normalizeClaude's closed set exists to avoid
-   * (normalize.test.ts, 'informational / unknown Notification types do not change state').
-   */
-  it('the elicitation END notifications are informational, NOT a new ask', () => {
-    for (const type of ['elicitation_complete', 'elicitation_response', 'agent_completed']) {
-      expect(normalizeGrok(env({ hookEventName: 'notification', notificationType: type })), type).toBeNull()
-    }
-    // The dialog OPENING is the one elicitation type that does ask.
-    expect(
-      normalizeGrok(env({ hookEventName: 'notification', notificationType: 'elicitation_dialog' }))
-    ).toMatchObject({ state: 'waiting' })
-  })
-
-  it('reads the notification type in the SDK snake_case dialect too', () => {
+  it('reads the published types through the SDK key dialect', () => {
     expect(
       normalizeGrok(env({ hook_event_name: 'notification', notification_type: 'permission_prompt' }))
-    ).toMatchObject({ state: 'blocked' })
-    expect(
-      normalizeGrok(env({ hook_event_name: 'notification', notification_type: 'agent_needs_input' }))
-    ).toMatchObject({ state: 'waiting' })
+    ).toEqual({
+      nodeId: 'n1',
+      agentId: 'grok',
+      sessionId: undefined,
+      kind: 'state',
+      state: 'blocked',
+      lastMessage: undefined
+    })
     expect(
       normalizeGrok(env({ hook_event_name: 'notification', notification_type: 'idle_prompt' }))
-    ).toMatchObject({ state: 'done', idle: true, interrupted: true })
+    ).toEqual({
+      nodeId: 'n1',
+      agentId: 'grok',
+      sessionId: undefined,
+      kind: 'state',
+      state: 'done',
+      interrupted: true,
+      idle: true
+    })
+  })
+
+  it('reads a published type through the legacy bare type key', () => {
+    expect(normalizeGrok(env({ hookEventName: 'notification', type: 'permission_prompt' }))).toEqual({
+      nodeId: 'n1',
+      agentId: 'grok',
+      sessionId: undefined,
+      kind: 'state',
+      state: 'blocked',
+      lastMessage: undefined
+    })
   })
 })
 
@@ -315,11 +323,6 @@ describe('normalizeGrok — dialects', () => {
     expect(normalizeGrok(env({ hookEventName: 'PreToolUse' }))).toMatchObject({ state: 'working' })
   })
 
-  it('ignores events we do not subscribe to yet', () => {
-    for (const ev of ['pre_compact', 'post_compact', 'subagent_start', 'subagent_stop', 'permission_denied']) {
-      expect(normalizeGrok(env({ hookEventName: ev, sessionId: 's1' })), ev).toBeNull()
-    }
-  })
 })
 
 /**
@@ -393,5 +396,85 @@ describe('grokRawFields', () => {
       toolUseId: 't2',
       toolInput: { path: '/w2/a.ts' }
     })
+  })
+})
+
+/**
+ * Subagent cards. Every payload below is copied from the 1.0.13 capture
+ * (`__fixtures__/grok/hook-payloads.json`, two parallel `explore` children), field names and all.
+ * The live-payload pin is `normalize.grok.capture.test.ts`; these cases keep the mapping
+ * reachable when someone edits `normalizeGrok` without opening the fixture.
+ *
+ * These assert the mapped EVENT, not list membership: a test that only checks `canSubagent('grok')`
+ * passes while `normalizeGrok` returns null and no card can ever render, which is exactly how the
+ * feature reached review claiming to work.
+ */
+describe('normalizeGrok — subagents', () => {
+  const START = {
+    hookEventName: 'subagent_start',
+    sessionId: 'parent-1',
+    subagentId: 'child-a',
+    subagentType: 'explore',
+    description: 'Read a.txt contents'
+  }
+  const STOP = {
+    hookEventName: 'subagent_stop',
+    // The captured stop carries the CHILD's own id here, not the parent's.
+    sessionId: 'child-a',
+    subagentId: 'child-a',
+    subagentType: 'explore',
+    lastAssistantMessage: 'alfa'
+  }
+
+  it('maps subagent_start to a card keyed on subagentId, carrying type and task', () => {
+    expect(normalizeGrok(env(START))).toEqual({
+      nodeId: 'n1',
+      agentId: 'grok',
+      kind: 'subagent-start',
+      toolUseId: 'child-a',
+      subagentType: 'explore',
+      task: 'Read a.txt contents'
+    })
+  })
+
+  it('maps subagent_stop to the end, carrying the last assistant message as the result', () => {
+    expect(normalizeGrok(env(STOP))).toEqual({
+      nodeId: 'n1',
+      agentId: 'grok',
+      kind: 'subagent-end',
+      toolUseId: 'child-a',
+      subagentType: 'explore',
+      result: 'alfa'
+    })
+  })
+
+  it('gives two children of the SAME type different cards — one per instance, not per type', () => {
+    const a = normalizeGrok(env(START))
+    const b = normalizeGrok(env({ ...START, subagentId: 'child-b' }))
+    expect(a?.subagentType).toBe(b?.subagentType)
+    expect(a?.toolUseId).not.toBe(b?.toolUseId)
+  })
+
+  it('never re-points the node session: neither event carries a sessionId', () => {
+    // The stop's own sessionId is the CHILD's; passing it through as `sessionId` would move the
+    // node's session onto the child and take the context meter with it.
+    expect(normalizeGrok(env(START))).not.toHaveProperty('sessionId')
+    expect(normalizeGrok(env(STOP))).not.toHaveProperty('sessionId')
+  })
+
+  it('reads the snake_case dialect the SDK path presents', () => {
+    expect(
+      normalizeGrok(
+        env({
+          hook_event_name: 'subagent_start',
+          subagent_id: 'child-a',
+          subagent_type: 'explore'
+        })
+      )
+    ).toMatchObject({ kind: 'subagent-start', toolUseId: 'child-a', subagentType: 'explore' })
+  })
+
+  it('returns null for a subagent event with no id, rather than an unkeyable card', () => {
+    expect(normalizeGrok(env({ hookEventName: 'subagent_start', subagentType: 'explore' }))).toBeNull()
   })
 })

@@ -22,7 +22,8 @@ import { hookServer, PERM_WAIT_SECS_DEFAULT } from './agents/hook-server'
 import {
   probeSaysAbsent,
   remoteHookEnvArgs,
-  remoteTmuxHasSessionArgs,
+  remoteListSessionsArgs,
+  parseRemoteSessionNames,
   remoteTmuxKillArgs,
   localKillSockets,
   localTmuxKillArgs,
@@ -31,11 +32,22 @@ import {
   remotePasteDelivery,
   remoteCapturePaneArgs,
   remotePaneCommandArgs,
+  remoteSessionAgeArgs,
+  parseSessionAge,
   remotePaneOwnerCombinedArgs,
   remotePaneProcessArgs,
   remoteTerminateForegroundArgs,
   remotePaneCursorArgs
 } from './remote-ssh/control-master'
+import {
+  planRemoteEnd,
+  type RemoteEndPlan,
+  type RemoteNodeOwnerResolver
+} from './remote-end'
+import { RemoteSessionIndex, type SessionVerdict } from './remote-ssh/remote-session-index'
+import { remotePtySpawnGate, type SpawnSlot } from './remote-ssh/pty-spawn-gate'
+import type { SshConnection } from '../shared/ssh'
+import { recordPendingRemoteKill, type PendingRemoteKill } from './pending-remote-kills'
 import { probeAgentSockToPin } from './remote-ssh/agent-probe'
 import { parsePaneCursor } from './pane-cursor'
 import { classifyPaneCwd, lsofCwdLinked } from './pane-cwd'
@@ -94,7 +106,7 @@ import {
 } from './codex-identity-proxy'
 import { ensureNodeToken, ensureRemoteNodeToken, sweepNodeToken } from './agents/node-token-service'
 import { clearNode as clearNodeAgentStatus } from './agent-status-mirror'
-import { hasSharedIdentity, setCustomAgentBaseResolver, type AgentId } from '../shared/agents/config'
+import { hasSharedIdentity, setCustomAgentBaseResolver, vanillaEnvStripPattern, type AgentId } from '../shared/agents/config'
 import { findCustomAgent } from '../shared/agents/custom-agent'
 import { applyCustomAgentEnv, customAgentEnvArgs } from './custom-agent-env'
 import {
@@ -554,15 +566,8 @@ function resolveLocaleLang(): string | null {
   return /utf-?8/i.test(cur) ? null : 'en_US.UTF-8'
 }
 
-/**
- * Resolve an executable against the user's real login-shell PATH (reusing the cached probe),
- * returning its absolute path or null. GUI apps inherit only a minimal PATH, so a bare
- * `execFile('claude', …)` would fail even when the tool is installed.
- */
-export async function findInLoginPath(bin: string): Promise<string | null> {
-  const shellPath = (await resolveShellPath()) ?? process.env.PATH ?? ''
-  return findInPathString(bin, shellPath)
-}
+// Kept as a compatibility export: executable resolution now lives with the other PATH helpers.
+export { findInLoginPath } from './exec-path'
 
 /** A UI client: an Electron webContents id or a ServerPlatform uiId. */
 type ClientId = number
@@ -633,6 +638,30 @@ function flowTicket(sub: SubKey | null, owner: FlowOwner): string {
  *  record for a client is comparable with the effective size we compute from all of them. */
 function normalizeSize(cols: number, rows: number): PtySize {
   return effectiveSize([{ cols, rows }]) as PtySize // one entry in ⇒ never null out
+}
+
+/**
+ * Hand a remote spawn's gate slot back the moment its pty produces its first byte — the cheapest
+ * signal that the ssh channel is up and the host has answered.
+ *
+ * Releases IMMEDIATELY when there is no session to listen to (a refusal, a discarded spawn), and
+ * the slot's own settle deadline covers a pty that never speaks. `onData` is an extra listener on
+ * the same pty the session already reads; it disposes itself on the first chunk.
+ */
+function releaseSpawnSlotOnOutput(session: Session | undefined, release: SpawnSlot): void {
+  if (!session) {
+    release()
+    return
+  }
+  try {
+    const sub = session.proc.onData(() => {
+      sub.dispose()
+      release()
+    })
+  } catch {
+    // A pty that cannot be listened to is one we cannot pace against; do not hold the queue for it.
+    release()
+  }
 }
 
 interface Session {
@@ -973,6 +1002,8 @@ export class PtyManager {
    * exactly as it did before it existed.
    */
   private readProjectSpawnOverrides: ProjectSpawnOverridesReader | null = null
+  /** "Which SSH host owns this node?", from the persisted index — see `setRemoteNodeOwner`. */
+  private remoteNodeOwner: RemoteNodeOwnerResolver | null = null
   /** ONE shared snapshot interval for all persisted sessions — a per-session interval spawned
    *  one tmux/ssh capture subprocess per session per tick, forever, even for idle terminals. */
   private snapshotTimer: ReturnType<typeof setInterval> | null = null
@@ -1559,6 +1590,19 @@ export class PtyManager {
   }
 
   /**
+   * Wire "which host owns this node?", answered from PERSISTED project data rather than from a
+   * live session — see `remote-end.ts` for the leak this closes.
+   *
+   * A separate setter for the same reason as the one above: the resolver needs the workspace store
+   * AND the SSH-project manager, and neither shell has both by the time `init` runs. Wiring none
+   * (the Server Edition, which has no SSH-project manager) leaves every delete on the local path it
+   * already took.
+   */
+  setRemoteNodeOwner(resolve: RemoteNodeOwnerResolver | null): void {
+    this.remoteNodeOwner = resolve
+  }
+
+  /**
    * The project's contribution to THIS spawn — bounded and fail-open on every path.
    *
    *  - no reader wired, or no `ownerProjectId` (the pane is UNPROVEN — see PtyCreateOptions) ⇒ no
@@ -1968,6 +2012,19 @@ export class PtyManager {
     return tomb
   }
 
+  /**
+   * Create or attach a node session without a renderer initiating the request.
+   *
+   * Client id 0 is reserved by both shells (ServerPlatform starts real websocket clients at 1;
+   * Electron webContents ids are positive). Keeping the synthetic subscriber in the ordinary
+   * ledger means a browser that opens later takes the proven co-attach path, while output sent to
+   * id 0 is simply dropped by a platform with no such UI. All spawn policy, node-auth env,
+   * account scoping, project env and ownership recording still run through `create` unchanged.
+   */
+  createHeadless(options: PtyCreateOptions): Promise<PtyCreateResult> {
+    return this.create(0, options)
+  }
+
   private async create(clientId: ClientId, options: PtyCreateOptions): Promise<PtyCreateResult> {
     const key = options.persistKey
     if (!key) return this.spawnNew(clientId, options)
@@ -2249,11 +2306,17 @@ export class PtyManager {
     // (a cheap name-only `has-session` probe, decided before spawning anything) the session-host
     // backend's attach-or-create IS the probe — see the `spawned?.sessionHost` branch below, which
     // overwrites both `fresh` and `screen` from that same round trip once `spawnSession` returns.
+    // For an SSH node the freshness answer is TRI-STATE, and the third value is the point: a read
+    // that could not complete answers `unknown`, which folds to "exists" (never type a resume into
+    // a live agent pane) — but that fold is a GUESS, and under a mount burst that saturates the
+    // host's `MaxSessions` it is the WRONG guess often enough to strand a conversation. See
+    // `freshUnverified`; the renderer re-asks once, after the attach, when this is set.
+    const remoteVerdict = options.sshRemote
+      ? await this.remoteSessionVerdict(options.sshRemote, sessionName(options.persistKey as string))
+      : undefined
+    const freshUnverified = remoteVerdict === 'unknown'
     let fresh = options.sshRemote
-      ? !(await this.remoteSessionExists(
-          options.sshRemote,
-          sessionName(options.persistKey as string)
-        ))
+      ? remoteVerdict === 'absent'
       : warmWindowsBackend
         ? false
         : tmuxBacked
@@ -2265,7 +2328,7 @@ export class PtyManager {
     // Rewrite the launcher on every create: it is generated, so an app upgrade must not leave an
     // old copy behind. Failure is not fatal — `installCodexLauncher` answers null, the caps probe
     // says "no shared identity", and the launch line the renderer already chose is the bare CLI.
-    if (hasSharedIdentity((options.agentId ?? 'claude') as AgentId) && !options.sshRemote) {
+    if (options.agentId && hasSharedIdentity(options.agentId as AgentId) && !options.sshRemote) {
       installCodexLauncher()
     }
     // Resolved HERE rather than inside `spawnSession` because that function is synchronous and two
@@ -2343,14 +2406,27 @@ export class PtyManager {
       if (tomb && (tomb.by !== clientId || tomb.seq > tombSeqAtStart))
         return { sessionId: '', fresh: false, closed: { by: tomb.by } }
     }
-    const sessionId = this.spawnSession(
-      options,
-      clientId,
-      undefined,
-      warmWindowsBackend,
-      projectOverrides
-    )
+    // PACE THE REMOTE SPAWNS (see remote-ssh/pty-spawn-gate.ts). A project switch mounts every node
+    // in one tick, and a remote terminal is an ssh client on the project's ONE multiplexed
+    // connection — past the host's `MaxSessions` each excess one performs a full login, and the
+    // pressure that creates is what makes the freshness read time out and strand a conversation.
+    // The slot is released on the session's first output, so a warm attach holds it for one round
+    // trip. Local spawns are not gated: there is no connection to overrun.
+    const spawnSlot =
+      options.sshRemote && options.persistKey
+        ? await remotePtySpawnGate.acquire(options.sshRemote.controlPath)
+        : null
+    let sessionId: string
+    try {
+      sessionId = this.spawnSession(options, clientId, undefined, warmWindowsBackend, projectOverrides)
+    } catch (err) {
+      // A spawn that never happened must not hold a slot until the settle deadline — the next node
+      // in the queue is waiting on it.
+      spawnSlot?.()
+      throw err
+    }
     const spawned = this.sessions.get(sessionId)
+    if (spawnSlot) releaseSpawnSlotOnOutput(spawned, spawnSlot)
     // PANE OWNERSHIP (agent messaging, PR #237 fix round 2): record the OWNING project of a pane
     // this process just GENUINELY spawned. Gated on `fresh` — an attach/co-attach to a session
     // someone else spawned (incl. an app-restart re-attach) leaves the pane UNPROVEN, so a second
@@ -2431,6 +2507,9 @@ export class PtyManager {
       sessionId,
       fresh,
       persistent,
+      // Only when the fold actually happened: a verdict we READ needs no second opinion, and
+      // setting this on a confident `fresh:false` would spend a round trip per warm node.
+      ...(freshUnverified && !fresh ? { freshUnverified: true as const } : {}),
       ...(accountFallback ? { accountFallback } : {}),
       ...(staleCwd ? { staleCwd: true as const } : {}),
       ...(screen ? { screen } : {})
@@ -2526,21 +2605,17 @@ export class PtyManager {
   /** Does the node's remote tmux session exist (over the project's ControlMaster)? Async so the
    *  network round-trip never blocks the main event loop. A probe that FAILED for transport
    *  reasons answers "exists": only tmux's own exit 1 is evidence of absence (probeSaysAbsent) —
-   *  a dead/reconnecting master read as "cold" typed a resume command into a live agent session. */
+   *  a dead/reconnecting master read as "cold" typed a resume command into a live agent session.
+   *
+   *  ONE `list-sessions` per host per burst, not one `has-session` per node: a project switch
+   *  mounts every node in the same tick, and N probe channels on top of N pty channels overruns a
+   *  stock host's `MaxSessions`, which costs each excess child a full TCP+auth login. The whole
+   *  measurement is in `remote-session-index.ts`. The verdict contract is identical either way. */
   private async remoteSessionExists(
     sshRemote: NonNullable<PtyCreateOptions['sshRemote']>,
     sessionId: string
   ): Promise<boolean> {
-    const ssh = findSsh()
-    if (!ssh) return true // can't probe → not evidence of absence; warm attach types nothing
-    try {
-      await runAsync(ssh, remoteTmuxHasSessionArgs(sshRemote.conn, sshRemote.controlPath, sessionId), {
-        timeout: PROBE_TIMEOUT_MS
-      })
-      return true
-    } catch (e) {
-      return !probeSaysAbsent(e)
-    }
+    return this.remoteSessions.exists(sshRemote.controlPath, sessionId, sshRemote.conn)
   }
 
   /**
@@ -2622,6 +2697,66 @@ export class PtyManager {
     }
   }
 
+  /** The tri-state behind `remoteSessionExists`, for the one caller that must act on the
+   *  difference between "the host says it is not there" and "we could not read the host". */
+  private async remoteSessionVerdict(
+    sshRemote: NonNullable<PtyCreateOptions['sshRemote']>,
+    sessionId: string
+  ): Promise<SessionVerdict> {
+    return this.remoteSessions.verdict(sshRemote.controlPath, sessionId, sshRemote.conn)
+  }
+
+  /**
+   * Was this node's remote tmux session POSITIVELY listed on the host? The strict half of the
+   * probe above, for the renderer's early-attach gate.
+   *
+   * `exists()` folds an unreadable host into "exists" because its caller is about to decide
+   * whether to type a resume command into a pane. This caller decides the opposite question —
+   * may a terminal attach over a ControlMaster whose connect-time setup (remote tmux.conf, the
+   * hook endpoint, the account env) has NOT finished yet — and there only a session that already
+   * exists is safe: `new-session -A` on a live session merely attaches, so `-f` and the tmux `-e`
+   * pairs (both creation-time only) are genuinely not needed. A session that is absent, or that we
+   * simply could not read, must wait for the full `connected` instead, or the create would make a
+   * session with no config and no hook env — which silently costs the node its agent-status badges.
+   *
+   * So: `true` ONLY for `present`; `absent` and `unknown` both answer false, and the caller waits.
+   * Shares the one coalesced `tmux list-sessions` per host with `create()`, so a warm switch pays
+   * no extra round trip (see remote-session-index.ts).
+   */
+  async remoteSessionConfirmed(
+    persistKey: string,
+    sshRemote: { controlPath: string; conn: SshConnection }
+  ): Promise<boolean> {
+    return (
+      (await this.remoteSessions.verdict(
+        sshRemote.controlPath,
+        sessionName(persistKey),
+        sshRemote.conn
+      )) === 'present'
+    )
+  }
+
+  /** One coalesced remote `tmux list-sessions` per ControlMaster (see remote-session-index.ts).
+   *  `list` carries the SAME classification the per-node probe had: tmux's own exit 1 ("no server
+   *  running") is the only evidence of absence; ssh 255 / 127 / a timeout answer `unknown`, which
+   *  the index renders as "exists" — a warm attach, which types nothing into the pane. */
+  private remoteSessions = new RemoteSessionIndex<SshConnection>({
+    list: async (controlPath, conn) => {
+      const ssh = findSsh()
+      // No ssh binary to probe with: not evidence of absence.
+      if (!ssh) return { kind: 'unknown' }
+      try {
+        const { stdout } = await runAsync(ssh, remoteListSessionsArgs(conn, controlPath), {
+          timeout: PROBE_TIMEOUT_MS
+        })
+        return { kind: 'names', names: parseRemoteSessionNames(stdout) }
+      } catch (e) {
+        // `list-sessions` exits 1 with "no server running" — the host genuinely holds no session.
+        return probeSaysAbsent(e) ? { kind: 'names', names: [] } : { kind: 'unknown' }
+      }
+    }
+  })
+
   /** Find the live session registered under a node id (persistKey), if any. */
   private sessionByPersistKey(persistKey: string): Session | undefined {
     for (const session of this.sessions.values()) {
@@ -2660,11 +2795,35 @@ export class PtyManager {
    * Same fail-safe direction as everywhere else here: an unprobeable tmux answers "exists", so
    * the caller treats it as a warm join and types nothing into it.
    */
+  /**
+   * Would this machine ever SELECT the session-host backend? The same predicate the spawn path uses
+   * (win32, or no local tmux, with the setting on and the bundle present), lifted out so the
+   * read-only queries can ask it too.
+   *
+   * They have to: `hasSession` / `listSessions` go through `request()`, and `request()` is what
+   * establishes the connection on a cold client — so an existence probe SPAWNS a host. Before
+   * #579 that was invisible, because no packaged build had a bundle to spawn. Once it ships, an
+   * unguarded probe would start a session-host process on a tmux-backed Mac that can never choose
+   * it.
+   */
+  private hostBackendEligible(): boolean {
+    return (
+      (this.runtimePlatform === 'win32' || !this.tmuxPath) &&
+      this.getSettings().tmuxEnabled &&
+      sessionHostSupported()
+    )
+  }
+
   async sessionExists(persistKey: string): Promise<boolean> {
     if (this.liveSessionForPersistKey(persistKey)) return true
     const probes: Promise<boolean>[] = []
     if (this.tmuxPath) probes.push(this.tmuxSessionExists(persistKey))
-    if (this.getSettings().tmuxEnabled && sessionHostSupported()) {
+    // Same "would this machine ever choose the host backend" predicate the spawn path uses, and it
+    // has to be here rather than only there: `hasSession` goes through `request()`, which
+    // ESTABLISHES the connection on a cold client — so an existence probe SPAWNS a host. Without
+    // the guard, a tmux-backed Mac would start a session-host process it can never select, purely
+    // by being asked whether a session exists.
+    if (this.hostBackendEligible()) {
       // A failed host read is not evidence of absence. This mirrors tmuxSessionExists' fail-safe
       // direction and prevents a reconnect blip from being mistaken for a cold generation.
       probes.push(sessionHostHasSession(sessionName(persistKey)).catch(() => true))
@@ -2994,7 +3153,7 @@ export class PtyManager {
     // wait-branch for claude sessions when the setting is on. `permWaitSecs > 0` injects
     // NODETERM_PERM_WAIT_SECS; off / non-claude ⇒ 0 ⇒ absent ⇒ legacy behavior.
     const permWaitSecs =
-      this.getSettings().hookReplyApprovals && (options.agentId ?? 'claude') === 'claude'
+      this.getSettings().hookReplyApprovals && options.agentId === 'claude'
         ? PERM_WAIT_SECS_DEFAULT
         : 0
     // Materialise this node's token BEFORE the session exists, so the very first hook event the
@@ -3003,7 +3162,7 @@ export class PtyManager {
     if (options.persistKey && !options.sshRemote) ensureNodeToken(options.persistKey)
     const hookEnv =
       options.persistKey && !options.sshRemote
-        ? hookServer.buildPtyEnv(options.persistKey, options.agentId ?? 'claude', permWaitSecs)
+        ? hookServer.buildPtyEnv(options.persistKey, options.agentId, permWaitSecs)
         : {}
     for (const [k, v] of Object.entries(hookEnv)) env[k] = v
 
@@ -3011,7 +3170,7 @@ export class PtyManager {
     // managed launcher by NAME, so its directory goes first on THIS session's PATH only. A plain
     // terminal, and every other agent, sees the PATH it always saw. The launcher itself falls back
     // to the bare CLI, so a session that gets the PATH but no identity is still a working session.
-    if (hasSharedIdentity((options.agentId ?? 'claude') as AgentId) && !options.sshRemote) {
+    if (options.agentId && hasSharedIdentity(options.agentId as AgentId) && !options.sshRemote) {
       env.PATH = `${codexLauncherDir()}${path.delimiter}${env.PATH ?? ''}`
     }
 
@@ -3081,17 +3240,42 @@ export class PtyManager {
     // A plain terminal has no agentId and must never receive provider credentials. The hook env's
     // historical Claude fallback does not apply here: gateway access is an explicit agent
     // capability, not a terminal default.
-    const gatewayEnv = options.agentId
-      ? modelGatewayEnv(
-          this.getSettings().modelGateway,
-          options.agentId,
-          options.agentModel,
-          process.env as Record<string, string | undefined>,
-          this.getModelGatewaySecret()
-        )
-      : {}
+    //
+    // "Restart on subscription" / launch mode: strip the gateway + inherited provider env
+    // so the agent runs against its OWN default provider (Claude's subscription, Copilot's GitHub
+    // routing). `vanillaEnvStripPattern` resolves through the base harness (`capabilityAgentId` of
+    // the agent id, so a custom agent inheriting a builtin gets the builtin's strip set); null ⇒ the
+    // agent has no strip set ⇒ no-op (gemini/grok/opencode are left alone). `buildPtyEnv` runs only
+    // in `spawnNew` (a fresh session), never on a warm reattach, so toggling the setting never strips
+    // an already-running session — only the next fresh launch.
+    // The launch mode is a tri-state (`agentLaunchMode`); a per-node one-shot `clearEnv` (the
+    // "Restart on subscription" action) forces the subscription/vanilla path for THIS spawn. The
+    // old boolean `vanillaLaunchDefault` is now a migration mirror kept in lockstep with the mode
+    // by the settings read/write paths, so reading the mode here is sufficient.
+    const launchMode = options.clearEnv ? 'subscription' : this.getSettings().agentLaunchMode
+    const stripRe =
+      launchMode === 'subscription'
+        ? options.agentId
+          ? vanillaEnvStripPattern(options.agentId)
+          : null
+        : null
+    const gatewayEnv =
+      options.agentId && !stripRe
+        ? modelGatewayEnv(
+            this.getSettings().modelGateway,
+            options.agentId,
+            options.agentModel,
+            process.env as Record<string, string | undefined>,
+            this.getModelGatewaySecret()
+          )
+        : {}
     if (!options.sshRemote) {
       for (const [k, v] of Object.entries(gatewayEnv)) env[k] = v
+      // Strip inherited provider vars so a vanilla session does not fall back to a LaunchAgent-set
+      // ANTHROPIC_BASE_URL instead of the subscription. Local only — see the note above.
+      if (stripRe) {
+        for (const k of Object.keys(env)) if (stripRe.test(k)) delete env[k]
+      }
     }
 
     // The OWNING project's env (`.nodeterm/settings.json`, local overlay + TRUSTED shared half —
@@ -3208,9 +3392,9 @@ export class PtyManager {
               options.sshRemote.hookEndpointPath,
               options.persistKey,
               hookServer.getVersion(),
-              // Same default the local path applies (`hookServer.buildPtyEnv(persistKey, agentId ??
-              // 'claude', …)`) so a remote node's agent env matches its local twin exactly.
-              options.agentId ?? 'claude'
+              // Plain terminals carry no agent identity or control grant. An explicit agent node
+              // matches the local `buildPtyEnv` path exactly.
+              options.agentId
             ),
             // Arm the remote permission hook's wait-branch too (deterministic approvals over SSH):
             // the request/answer files live on the REMOTE host; the desktop answers over the
@@ -3278,6 +3462,10 @@ export class PtyManager {
           '[pty] remote session env skipped (no remote home or no uploader) — agent will launch without gateway/custom env'
         )
       }
+      // `new-session -A` is about to make this session exist on the host. Record it, so a second
+      // look inside the index's cache window (a respawn, a co-attach) cannot be told it is cold —
+      // which is what makes the renderer replay a snapshot and type a resume line into a live pane.
+      this.remoteSessions.markPresent(options.sshRemote.controlPath, sessionName(options.persistKey))
       args = remoteTmuxPtyArgs(
         options.sshRemote.conn,
         options.sshRemote.controlPath,
@@ -4382,6 +4570,57 @@ export class PtyManager {
   }
 
   /**
+   * How many SECONDS ago was this node's tmux session created — on the machine that holds it?
+   *
+   * The late cold-start check (`PtyCreateResult.freshUnverified`). When the freshness read could
+   * not complete, `fresh:false` was a guess, and `tmux new-session -A` may have CREATED the very
+   * session we then treated as a warm reattach. tmux itself can settle that after the fact:
+   * `#{session_created}` survives an `-A` attach, so a session created within seconds of our own
+   * attach is one WE made, i.e. the node was cold.
+   *
+   * Remote answers are computed ENTIRELY on the host (`remoteSessionAgeArgs`) so the host's clock
+   * skew never enters the number; local ones compare tmux's stamp against this machine's own clock,
+   * which is the same clock.
+   *
+   * `null` is "we could not tell" for every reason there is — no live session, no tmux, the
+   * session-host backend (which has no creation stamp to offer), an unreadable host, a garbled
+   * line. Never an age, and never a throw: the caller ACTS on a small number, so every uncertainty
+   * has to come back as the value that means "do nothing".
+   */
+  async sessionAgeSeconds(persistKey: string): Promise<number | null> {
+    const target = sessionName(persistKey)
+    const live = this.liveSessionForPersistKey(persistKey)
+    const sshRemote = live?.sshRemote
+    if (sshRemote) {
+      const ssh = findSsh()
+      if (!ssh) return null
+      try {
+        const { stdout } = await runAsync(
+          ssh,
+          remoteSessionAgeArgs(sshRemote.conn, sshRemote.controlPath, target),
+          { timeout: PROBE_TIMEOUT_MS }
+        )
+        return parseSessionAge(stdout)
+      } catch {
+        return null
+      }
+    }
+    // The session-host backend keeps no creation stamp, and a plain shell has no session at all.
+    if (live?.sessionHost || !this.tmuxPath) return null
+    try {
+      const { stdout } = await runAsync(
+        this.tmuxPath,
+        ['-L', TMUX_SOCKET, 'display-message', '-p', '-t', `=${target}:`, '#{session_created}'],
+        { timeout: PROBE_TIMEOUT_MS }
+      )
+      // One clock here, so the host half of the remote line is ours to supply.
+      return parseSessionAge(`${stdout.trim()} ${Math.floor(Date.now() / 1000)}`)
+    } catch {
+      return null
+    }
+  }
+
+  /**
    * Terminate the foreground agent process group in a node's tmux pane without writing anything
    * into the terminal. This is intentionally narrower than recycling the session: model switching
    * first stops the harness by PID, then uses the existing recycle path to rebuild the shell with
@@ -4619,10 +4858,11 @@ export class PtyManager {
           )
           .catch(() => [] as string[])
       : Promise.resolve([] as string[])
-    const hostSessions =
-      this.getSettings().tmuxEnabled && sessionHostSupported()
-        ? sessionHostListSessions().catch(() => [] as string[])
-        : Promise.resolve([] as string[])
+    // Guarded for the same reason as `sessionExists`: listing is a request, and a request on a cold
+    // client spawns the host.
+    const hostSessions = this.hostBackendEligible()
+      ? sessionHostListSessions().catch(() => [] as string[])
+      : Promise.resolve([] as string[])
     const [tmux, host] = await Promise.all([tmuxSessions, hostSessions])
     return [...new Set([...tmux, ...host])]
   }
@@ -5009,6 +5249,70 @@ export class PtyManager {
     return promise
   }
 
+  /**
+   * Deliver the remote half of an end — or write down that we could not.
+   *
+   * The `catch {}` this replaces read "remote session may not exist / master down; ignore", and
+   * those two are not the same fact at all. "May not exist" is an ANSWER: tmux says `can't find
+   * session` and exits 1, which is what `probeSaysAbsent` is anchored to and what the local kill
+   * loop has always treated as the ordinary case. "Master down" is a NON-answer — ssh's own 255,
+   * a 127 for a tmux that is not on the remote PATH, a spawn error with no code at all — and the
+   * session is still running on the host. Ignoring both is how ~150 `nt-` sessions accumulate on a
+   * machine whose owner deleted them.
+   *
+   * A non-answer is therefore RECORDED, and paid off the next time that host is reachable
+   * (`drainPendingRemoteKills`, run from the SSH project's connect). The delete itself is never
+   * refused over it: the node is going, and a refusal would strand it on the canvas with the same
+   * session still running plus a dialog. That choice is only defensible BECAUSE the debt is
+   * durable — drop the store and the honest thing to do becomes refusing.
+   *
+   * **Only a DELETE may owe a debt.** A `recycle` keeps the node (worktree move, model switch,
+   * "pause & end session"), so a kill deferred to some later reconnect would land on the session
+   * the node has since RESPAWNED under the same name — it would end live work, hours after the
+   * action that queued it, with nothing on screen connecting the two. A recycle whose remote kill
+   * could not be delivered therefore does exactly what it did before: nothing. Only `delete` makes
+   * "kill this name whenever you next can" an unconditionally correct instruction.
+   */
+  private async endRemoteSession(
+    persistKey: string,
+    intent: EndIntent,
+    plan: Extract<RemoteEndPlan, { kind: 'deliver' | 'defer' }>
+  ): Promise<void> {
+    const session = sessionName(persistKey)
+    const owe = (reason: PendingRemoteKill['reason']): Promise<void> =>
+      intent === 'delete'
+        ? recordPendingRemoteKill({
+            hostKey: plan.hostKey,
+            session,
+            reason,
+            projectId: plan.projectId
+          })
+        : Promise.resolve()
+    if (plan.kind === 'defer') {
+      await owe(plan.reason)
+      return
+    }
+    // The host's session set is about to change under the cached list; drop it rather than let a
+    // recreate inside the window read as warm.
+    this.remoteSessions.invalidate(plan.controlPath)
+    try {
+      await this.confirmedProcessRun(
+        plan.ssh,
+        remoteTmuxKillArgs(plan.conn, plan.controlPath, session)
+      )
+    } catch (error) {
+      // tmux's own "can't find session" (exit 1) settles it — there is nothing left to kill, and
+      // that is the expected answer for a host that rebooted since the session was last seen.
+      if (probeSaysAbsent(error)) return
+      await owe('delivery-failed')
+      console.warn(
+        `[pty] remote kill for ${session} on ${plan.hostKey} was not delivered` +
+          (intent === 'delete' ? '; owed until that host reconnects' : ''),
+        error instanceof Error ? error.message : String(error)
+      )
+    }
+  }
+
   private async runEndSession(
     clientId: ClientId | null,
     persistKey: string,
@@ -5019,9 +5323,16 @@ export class PtyManager {
     /** Trusted replacement identity; present only after confirmed profile preflight. */
     replacementTarget?: PtyRecycleTarget
   ): Promise<void> {
-    // Both callers run while the session is still live, so its sshRemote is known. Capture it
-    // synchronously before any await. The index is the co-attach one (UI sessions); the scan is
-    // the fallback for a session that is live but not indexed.
+    // The index is the co-attach one (UI sessions); the scan is the fallback for a session that is
+    // live but not indexed. Both are captured synchronously, before any await.
+    //
+    // What this used to say — "both callers run while the session is still live, so its sshRemote
+    // is known" — was simply not true, and believing it leaked remote sessions. A delete arrives
+    // precisely when there may be NO live session: after an app restart, after the offscreen
+    // release disposed the client, after the park timer ran out, or for a node whose project is not
+    // open at all. `dying` was then undefined, `sshRemote` with it, and the remote branch below was
+    // skipped in silence while the one kill that did go out went to the LOCAL socket — nothing at
+    // all for a `requireRemote` node. See `planRemoteEnd`.
     const indexedId = this.byPersistKey.get(persistKey)
     const indexed = indexedId ? this.sessions.get(indexedId) : undefined
     const fallback = indexed ?? this.sessionByPersistKey(persistKey)
@@ -5031,7 +5342,16 @@ export class PtyManager {
         ? [...this.sessions.entries()].find(([, candidate]) => candidate === fallback)?.[0]
         : undefined)
     const dying = fallback
-    const sshRemote = dying?.sshRemote
+    // Resolved here, synchronously, for the same reason the live handle always was: a
+    // connect/disconnect landing mid-teardown must not change the branch that already committed to
+    // it. The resolver is the FALLBACK — a live `sshRemote` is the exact handle this session was
+    // spawned over and still wins — and it is what makes a delete with no live client reach the
+    // host at all.
+    const remoteEnd = planRemoteEnd({
+      live: dying?.sshRemote,
+      owner: this.remoteNodeOwner?.(persistKey) ?? null,
+      ssh: findSsh()
+    })
     // SessionHostClient has a real request/response acknowledgement. Await it BEFORE any local
     // deletion claim: on transport failure the node, tombstone, subscribers and transcript tails
     // remain available, because the host outcome is unknown and the user must be able to retry.
@@ -5161,16 +5481,13 @@ export class PtyManager {
     // too, and there are two of them to keep in step.
     if (intent === 'delete') clearNodeAgentStatus(persistKey)
     if (!backendAlreadyEnded) {
-      if (sshRemote) {
+      if (remoteEnd.kind !== 'none') {
         // Remote (ssh-project) node: end the REMOTE session.
-        const ssh = findSsh()
-        if (ssh) {
-          try {
-            await runAsync(ssh, remoteTmuxKillArgs(sshRemote.conn, sshRemote.controlPath, sessionName(persistKey)))
-          } catch {
-            // remote session may not exist / master down; ignore
-          }
-        }
+        //
+        // Routed through `confirmedProcessRun` — which IS `runAsync` in production, so the command
+        // and its bounds are unchanged — because this is confirmed teardown now rather than a
+        // best-effort side call, and because a kill nothing can observe is a kill nothing can test.
+        await this.endRemoteSession(persistKey, intent, remoteEnd)
         // ...and then fall through to the LOCAL kill below rather than returning. A remote node
         // normally has no local session — but it may have one from before `requireRemote`, when a
         // create issued with the master down spawned a local shell under this exact name. That

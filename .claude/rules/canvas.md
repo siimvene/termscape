@@ -60,12 +60,41 @@ paths:
   be hidden, whatever settings.json says. The group-frame menu's colors strip answers to the same
   `colors` id; builders run through `tidySeparators` so a hidden row leaves no dangling rule.
 - **Add menu** = bottom dock (`Dock.tsx`) `+`, mirrored by the pane menu and command palette.
+  `lib/addMenuSpec` is the ONE source for which kinds are addable and (since 2026-09) how the two
+  `ContextMenu` surfaces GROUP them (`New terminal` · `New remote…` · the account-capable agents ·
+  `New agent ▸` · `New view ▸` · `Files ▸` · `Orchestrate ▸`, then the canvas actions). It replaced a
+  flat 18-row list: the menu need not be EXHAUSTIVE (⌘K and the keybinding registry already carry a
+  remappable command per agent and node kind), it has to be FAST. Four rules hold it:
+  - **The submenu depth cap is STRUCTURAL:** `ContextMenu` drops a submenu's `colors`/`submenu`
+    children (returns `null`), so a third level vanishes silently. Claude's and Codex's account
+    pickers are already level-two, so nesting either behind `New agent ▸` would delete the picker for
+    exactly the managed-account users. MEASURED in `ContextMenu.submenu-depth.test.tsx`.
+  - **Which agent rows stay first-level is DERIVED, never a spelled-out id** (`isPinnedAgentEntry`): a
+    row that IS a submenu, or whose agent is in `ACCOUNT_CAPABLE_AGENT_IDS` (the list `boundAccountId`
+    reads). Otherwise the menu would rearrange itself as the user adds/removes accounts.
+  - **`ADD_ITEM_GROUP` is a total `Record` over the kind union** — a new `AddItem` kind is a compile
+    error until routed. `remote` stays top-level (it is not an agent; burying the one SSH entry point
+    under "New agent" hides it).
+  - **Grouping is a rearrangement, not a filter:** a nested row keeps its `disabled`/`hint` (e.g.
+    `New worktree…` greyed with `WORKTREE_SSH_HINT` inside `Orchestrate ▸`). Per surface — pane
+    right-click + sidebar "+" share `buildGroupedAddMenu`; the group-frame menu shares the agent half
+    + its own content rows; the **Dock stays FLAT**; the kanban "+ New session" is NOT a consumer
+    (`KanbanCreateChoice` is a closed union of card-able kinds). `addMenuSpec.surfaces.test.ts` pins
+    all four.
 - **Undo/redo**: debounced snapshot of the nodes array on settle (drag/edit), `pastRef`/
   `futureRef` stacks, ⌘Z / ⌘⇧Z + dock buttons. History resets per project load; skipped
   while typing in inputs/terminals.
 - **Selection/pan**: box-select on left-drag (`SelectionMode.Partial` — touch to select);
   pan = middle-drag or trackpad two-finger (`panOnScroll`, `zoomOnScroll:false`); pinch
   zoom. Right mouse is free for the context menu.
+- **Edges** are all one React Flow type, `floating` (`canvas/FloatingEdge.tsx` over the pure
+  `lib/floatingEdge.ts`): every family (ropes, context bridges, note links, subagent/loop and trigger
+  edges) is drawn between the midpoints of the two nodes' facing sides, so an edge to a node left of
+  or above its source takes the short way and meets the node at ONE point. Context and note links are
+  the exception: they anchor only left/right (`data.anchor: 'horizontal'`), where the
+  `link-out`/`link-in` handles are. A terminal node's **eye** (`hide-fanout`) hides its subagent/loop
+  cards AND every edge touching it — display only: the links still authorise reads and an `--after`
+  still waits. Desktop + Server Edition identical (pure renderer); kanban and mobile N/A.
 - **Delete** (Delete/Backspace) opens `ConfirmDialog` before removing selected nodes.
 - **Zoom chords** (`renderer/lib/zoomShortcut.ts`): **⌘/Ctrl+0 → `zoomTo100`** (actual size — what
   the browser AND Electron's default View menu already mean by that key) and **Shift+1 → `fitAll`**
@@ -81,62 +110,52 @@ paths:
   the page) and stubs the subscription.
 - **"Go to node" (`goToNode` → the single `frameNode`)** — the one camera-travel path (notification
   click, sessions sidebar, ⌘K jump, presence travel, minimap double-click, double-click focus).
-  **`frameNode` NEVER calls `fitView`**; both its cases compute the framing themselves and drive the
-  camera imperatively with `setViewport`, and "simplifying" it back to `fitView({nodes:[{id}]})`
-  reintroduces the origin jump. Why: in `@xyflow/react` 12 `fitView` is **DEFERRED** — it only parks
-  `fitViewQueued` + `fitViewOptions` in the store and resolves on a later `setNodes`, and **only
-  while `nodesInitialized === true`**, which this canvas can never be relied on to be: the **webview
-  keep-alive ghosts** sit in the `<ReactFlow nodes>` prop with `display:none`, no width/height and
-  deliberately not `hidden` (a hidden node unmounts the guest — see `.claude/rules/nodes.md`), so
-  React Flow's ResizeObserver never measures them and `adoptUserNodes` keeps `nodesInitialized`
-  false forever. [MEASURED 2026-09-02, while `frameNode` used `fitView`] the click moved the camera
-  **not at all** ("I have to scroll to the node myself"), and the fit stayed queued until some
-  unrelated `updateNodeInternals` — frequently after a project switch, by which point the target id
-  has left `nodeLookup`, so `getFitViewNodes` returns an **EMPTY** set (it filters by `measured` and
-  by the option ids), `getInternalNodesBounds` collapses to `{0,0,0,0}` and `getViewportForBounds`
-  divides by zero ⇒ **maxZoom (138%) centred on the world ORIGIN**: empty canvas, the node alone in
-  the far minimap corner — which `onMove` then **persists** into the project's machine-local
-  `viewport`, so every later activation of that project re-lands there. So `frameNode` picks the
-  rect (React Flow's own measurement when the store has one — `measuredFitRect`, whose
-  `internals.positionAbsolute` already has the group chain resolved — otherwise the node's PERSISTED
-  size via `nodeFitRect`, which walks the parent chain itself) and runs ONE path from there:
-  `solveFreeRegion` → `viewportForRect` → `setViewport(…, {duration:300})`, which is synchronous and
-  has no call→resolve window the target can vanish from. The measured check still reads React Flow's
-  **store** (`getInternalNode`), not our node object — `measured` reaches our state one render later
-  (via `onNodesChange`), so our copy lies about nodes the store has long sized; the persisted case is
-  the first tick after a project loads, i.e. every **cross-project** focus (load and focus in the
-  same tick). Unknowable size / no pane yet ⇒ the camera **stands still**; never fall back to a bare
-  `fitView` there, that IS the origin jump.
-  - **The two rect sources consume the chrome solve DIFFERENTLY, and that is not a wart.** The
-    measured case passes `solveFitPadding`'s **directional pixel insets** against the **full pane**
-    to `getViewportForBounds` — byte-identical to the fit it replaced, because that is exactly what
-    the old `fitView` call did (`...FIT_NODE_OPTIONS` with `padding` overridden). The persisted case
-    frames inside the **free region** with the flat 0.2 ratio, as it always did. They are NOT
-    interchangeable: xyflow's numeric padding is a proportional inset applied **on top of** the
-    bounds, so reducing the pane to the region AND passing 0.2 pays both, and its asymmetric path
-    pushes the rect flush against the reserved edge rather than centring it in the remainder.
-    [MEASURED: a 600×400 node at abs {5050,260}, 1280×900 pane, 400px pinned sidebar — old/correct
-    `{x:-6569, y:-184.8, zoom:1.38}` vs region+ratio `{x:-5621.67, y:-105.07, zoom:1.2067}`, i.e.
-    12% smaller and 20px off.] Pinned numerically, with the derivation, in `nodeFocus.test.ts`.
-  - **Every rect and every computed viewport is finite-checked in `viewportForRectPadded`** (and the
-    absolute position in `nodeFitRect`), because `setViewport({x: NaN, …})` is accepted without
-    complaint — a blank, unpannable canvas that `onMove` then persists. Node positions arrive from a
-    git-shared `.nodeterm/project.json` and from canvas peers, and neither is validated upstream;
-    `Number.MAX_VALUE` is *finite* going in and only overflows at the zoom multiply, which is why
-    both ends are checked. No rect / no viewport ⇒ stand still.
-- **`fitAll` is imperative for the same reason, so NOTHING in Canvas queues a fit.** xyflow keeps
-  **one global `fitViewQueued` slot** and nothing cancels it, so a fit-all queued while a ghost
-  holds `nodesInitialized` false outlives the gesture: it resolves on some later
-  `updateNodeInternals` and overrides a node focus that had already landed — and across a project
-  switch its explicit old-project ids leave an empty fit set, i.e. the same origin jump, persisted
-  by `onMove`. It now takes the bounds of the non-ghost nodes (`getNodesBounds`, which also counts a
-  real node React Flow has not measured yet — the old explicit-ids fit set dropped those),
-  `solveFitPadding` insets or the 0.1 ratio, and the canvas's own `CANVAS_MIN_ZOOM`/`CANVAS_MAX_ZOOM`
-  (a fit-all must out-zoom the single-node clamp) → `setViewport(…, {duration:300})`. A canvas with
-  no non-ghost node **stands still**: the old bare-`fitView` fall-through was a no-op only when
-  React Flow's WHOLE lookup was empty, and with a ghost parked at the origin it fit an *empty
-  filtered* set instead. `canvas-wiring.test.tsx` scans the WHOLE file for `fitView(` — prose there
-  and here writes it without the paren on purpose.
+  **`frameNode` computes the viewport itself and applies it with `setViewport`; it must NEVER call
+  `fitView`.** In `@xyflow/react` 12 `fitView` is DEFERRED — it parks `fitViewQueued` and resolves on
+  a later `setNodes` (only while `nodesInitialized`) or `updateNodeInternals`, against whatever
+  `nodeLookup` holds by then. The **webview keep-alive ghosts** (`display:none`, no width/height,
+  deliberately not `hidden`) hold `nodesInitialized` false FOREVER (`.claude/rules/nodes.md`), so a
+  queued fit never resolves on time; after a project switch the target id has left the lookup, the fit
+  set comes out EMPTY, bounds collapse to `{0,0,0,0}` and `getViewportForBounds` parks the world
+  ORIGIN at max zoom — which `onMove` then PERSISTS into the project's machine-local viewport.
+  Cross-project focus (load + focus in one tick) hits this every time; the second click works, which
+  is what makes it read as intermittent.
+  - **Geometry (`renderer/lib/nodeFocus.ts`):** the rect is React Flow's own measurement when it has
+    one (`getInternalNode`; `measured` reaches OUR node objects one render later via `onNodesChange`,
+    `internals.positionAbsolute` resolves the group chain + `extent:'parent'`), else `nodeFitRect`
+    from the PERSISTED size walking the parent chain. Then `viewportForRect`: **centred in the pane,
+    nothing else.** Framing against the chrome-free rectangle was tried twice and is wrong both ways
+    (centred IN it: too far right on an ultrawide, half off on a laptop; centred in pane then nudged
+    clear: still not the middle), because `.sessions-sidebar` is a 300px absolute OVERLAY open exactly
+    when this is used. The couple of dozen px behind the sidebar cost less than the centre. The
+    free-rect solve stays in `fitAll` (below), which fits EVERY node and would tuck them under the dock.
+  - **ONE exception, not a walk-back (issue #743): a MAXIMIZED node** (`isMaximized` —
+    `data.premaxRect`) is framed against the rectangle its own placement used, via
+    `measurePinnedInsets(box)` → `viewportForRect`. The trade-off above rests on one number — how much
+    of the node ends up behind the panel — and for a maximized node that number is set by the PANEL by
+    construction: `maximizeTargetRect` sized it to be *exactly* the free area, so centring it in the
+    wider pane buries half the inset. Measured (signed v0.3.5, sidebar pinned): an ordinary node lost
+    33px, the maximized one 137px, the camera drifting `322 / 2 = 161`px per round trip. With no pinned
+    panel `insets` is zero and it is a no-op; a pane narrower than its panels falls back to the whole
+    pane. `measurePinnedInsets` reads the DOM, so it is asked only for a node that can use the answer.
+  - **`settings.focusZoomToNode`** (Behavior, default ON) is the rescale escape hatch: off, the camera
+    keeps the zoom `getZoom()` reports and only pans, and that zoom is passed **unclamped** (it is one
+    the canvas already shows; re-clamping it to the framing range would rescale the view the option
+    exists to leave alone).
+  - **Finite guards:** every rect and computed viewport is finite-checked in `viewportForRect` /
+    `viewportForRectPadded` (and the absolute position in `nodeFitRect`), because `setViewport({x:
+    NaN, …})` is accepted without complaint — a blank, unpannable canvas that `onMove` then persists.
+    Node positions arrive from a git-shared `.nodeterm/project.json` and from peers, neither validated
+    upstream; `Number.MAX_VALUE` is finite going in and only overflows at the zoom multiply. No rect /
+    no pane ⇒ the camera **stands still**; never "helpfully" fall back to a bare `fitView` there —
+    that IS the origin jump.
+- **`fitAll` is imperative for the same reason, so NOTHING in Canvas queues a fit.** It takes the
+  bounds of the non-ghost nodes (`getNodesBounds`, which also counts a real node React Flow has not
+  measured yet — the old explicit-ids fit set dropped those), the `solveFitPadding` insets or a 0.1
+  ratio against the current chrome layout, and the canvas's own `CANVAS_MIN_ZOOM`/`CANVAS_MAX_ZOOM`
+  (a fit-all must out-zoom the single-node clamp) → `setViewport(…, {duration:300})`. A canvas with no
+  non-ghost node **stands still**. `canvas-wiring.test.tsx` scans the WHOLE file for `fitView(` — prose
+  here writes it without the paren on purpose — and pins that both `frameNode` and `fitAll` contain none.
 - **Breadcrumb trail** (`renderer/lib/breadcrumbs.ts` — all the pure logic lives there) — every
   deliberate `goToNode` landing records a `NavStop` ({nodeId, at, note}) for the ACTIVE project, and
   **Cmd+[ / Cmd+]** (`canvas.goBack` / `canvas.goForward`, bound in `shared/keybindings.ts`) plus the
@@ -188,7 +207,10 @@ self-correcting on the next render; guarding it would mean threading ownership t
   **New File… / New Folder…** (empty-area right-click targets the root; SSH projects create on the
   host). Canvas pane right-click and ⌘K also expose **New file…** (creates under the project cwd,
   opens an editor node). These use `mkdir` + `exists` added to `FsApi`/`SshFsApi` across
-  desktop/server/SSH (`core/fs-ops.ts`, `main/ssh-fs.ts`; relay remote-fs degrades to `false`).
+  desktop/server/SSH (`core/fs-ops.ts`, `main/ssh-fs.ts`). **Relay tabs are NOT degraded** — their
+  `fs` routes to the peer's core (`fsOps.makeDir`/`pathExists`), so both verbs are live there; only
+  the legacy PHONE vocabulary (`main/remote/host-service.ts`) lacks `fs.mkdir`/`fs.exists`, which fall
+  through to its dispatcher's `Unknown method` rejection.
   Expanded dirs **persist per project** across drawer close + app restart (`state/explorer.ts`
   zustand store, localStorage `nodeterm.explorerExpanded`). The header pin docks it like the
   sessions sidebar (`lib/explorerPin.ts`, `nodeterm.explorerPinned`, default off): overlay

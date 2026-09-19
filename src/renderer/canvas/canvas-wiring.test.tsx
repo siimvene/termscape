@@ -155,30 +155,6 @@ describe('breadcrumb wiring the CLAUDE.md bullet calls load-bearing', () => {
     expect(CANVAS_SRC.match(/isMeasured\(internal\)/g) ?? []).toHaveLength(1)
   })
 
-  it('frames the camera synchronously — frameNode never uses the DEFERRED fitView', () => {
-    const body = CANVAS_SRC.slice(
-      CANVAS_SRC.indexOf('const frameNode = useCallback'),
-      CANVAS_SRC.indexOf('const goToNode = useCallback')
-    )
-    expect(body.length).toBeGreaterThan(0)
-    // `useReactFlow().fitView` only QUEUES (fitViewQueued + fitViewOptions) and resolves on the
-    // next setNodes with nodesInitialized === true — which never happens while a keep-alive ghost
-    // (display:none, no size, deliberately not `hidden`) sits in the nodes prop. So the click
-    // moved nothing, and the queued fit resolved later against a node list the target had left:
-    // an EMPTY fit set, bounds {0,0,0,0}, the world origin at maxZoom (138%) — which onMove then
-    // persisted into the project's viewport. The camera must be driven imperatively instead.
-    expect(body).not.toContain('fitView(')
-    // Both rect sources animate over the same 300 ms the old fit did — a bare setViewport(viewport)
-    // would teleport instead.
-    expect(body.match(/setViewport\(viewport, \{ duration: 300 \}\)/g) ?? []).toHaveLength(2)
-    // The MEASURED rect must be framed with solveFitPadding's DIRECTIONAL pixel insets against the
-    // full pane (viewportForRectPadded), which is what the fit it replaces did. Framing it inside
-    // the reduced free region instead pays the 0.2 ratio ON TOP of the reduction and comes out
-    // ~12% smaller — see nodeFocus.test.ts for the numbers.
-    expect(body).toContain('const padded = solveFitPadding(wrapEl, measured.width, measured.height)')
-    expect(body).toContain('viewportForRectPadded(')
-  })
-
   it('NOTHING in Canvas queues a deferred fit — fitAll is imperative too', () => {
     // xyflow keeps ONE global fitViewQueued slot, and nothing cancels it. A fit-all queued while a
     // ghost holds nodesInitialized false outlives the click: it resolves on some later
@@ -213,6 +189,46 @@ describe('breadcrumb wiring the CLAUDE.md bullet calls load-bearing', () => {
     expect(arrange).toContain('requestAnimationFrame(() => fitAll())')
   })
 
+  it('frameNode computes the camera itself and never routes through fitView', () => {
+    // React Flow's fitView is QUEUED, not immediate: it runs from a later setNodes (and only once
+    // EVERY node is measured) or the next updateNodeInternals, so it frames whatever nodeLookup
+    // holds by then. Resolved after the node set moved on, its fit set comes out empty, the bounds
+    // collapse to {0,0,0,0} and the camera flies to the canvas ORIGIN — the "right project, empty
+    // canvas, sometimes" report. A cross-project focus lands in that window every time.
+    const frame = CANVAS_SRC.slice(
+      CANVAS_SRC.indexOf('const frameNode = useCallback'),
+      CANVAS_SRC.indexOf('const goToNode = useCallback')
+    )
+    expect(frame.length).toBeGreaterThan(0)
+    expect(frame).not.toContain('fitView(')
+    expect(frame).toContain('setViewport(viewport, { duration: 300 })')
+  })
+
+  it('centres the node in the pane and never solves chrome around it', () => {
+    // Framing a single focused node against the chrome-free rectangle was reported wrong twice
+    // ("too far right", "not in the middle"): the sessions sidebar is a 300px overlay and it is
+    // open exactly when this is used. The free-rect solve stays in fitAll, which fits every node.
+    const frame = CANVAS_SRC.slice(
+      CANVAS_SRC.indexOf('const frameNode = useCallback'),
+      CANVAS_SRC.indexOf('const goToNode = useCallback')
+    )
+    expect(frame).toContain('viewportForRect(rect, box.width, box.height, keepZoom, insets)')
+    expect(frame).not.toContain('solveFitFrame')
+    expect(frame).toContain('settings.focusZoomToNode ? undefined : getZoom()')
+  })
+
+  it('insets that framing ONLY for a maximized node (issue #743)', () => {
+    // The trade-off above is about how much of the node ends up behind the panel, and for a
+    // maximized node that number is set by the PANEL, not the node: it is exactly as wide as the
+    // free area, so centring it in the wider pane buries half the inset less the margin. Keying
+    // on anything looser would walk back the whole-pane rule for ordinary nodes.
+    const frame = CANVAS_SRC.slice(
+      CANVAS_SRC.indexOf('const frameNode = useCallback'),
+      CANVAS_SRC.indexOf('const goToNode = useCallback')
+    )
+    expect(frame).toContain('const insets = isMaximized(node) ? measurePinnedInsets(box) : NO_INSETS')
+  })
+
   it('the resume card slot is spent only on a card that can render, and only when opted in', () => {
     // Gated on settings.showResumeCard (default off) FIRST — a disabled card must not spend the
     // one-shot slot — then once per app run, only with a live stop, and never under the opaque
@@ -223,6 +239,18 @@ describe('breadcrumb wiring the CLAUDE.md bullet calls load-bearing', () => {
     expect(CANVAS_SRC).toContain(
       'const resumeCardEnabled = useSettings.getState().settings.showResumeCard'
     )
+  })
+})
+
+describe('the auto-hide preference reaches the ephemeral-card store', () => {
+  // `autoHideFinishedSubagentCards` lives in settings and is acted on in `state/agentNodes.ts`,
+  // which is deliberately free of the settings store, so this effect is the ONLY thing joining
+  // them. Every test of the behaviour drives `setAutoHideFinished` directly, so deleting the
+  // effect leaves the setting inert with the whole suite and typecheck green: the toggle flips,
+  // persists, and does nothing.
+  it('mirrors the setting into setAutoHideFinished', () => {
+    expect(CANVAS_SRC).toContain('.setAutoHideFinished(settings.autoHideFinishedSubagentCards === true)')
+    expect(CANVAS_SRC).toContain('}, [settings.autoHideFinishedSubagentCards])')
   })
 })
 
@@ -512,5 +540,48 @@ describe('navigating from the sidebar dismisses the start screen', () => {
     expect(indexOfPresent(body, 'setWelcomeOpen(false)')).toBeLessThan(
       indexOfPresent(body, 'requestCard(')
     )
+  })
+})
+
+describe('the canvas lock is remembered only when the user opted in', () => {
+  // The whole feature is three lines inside a 13k-line file, and every one of them can be deleted
+  // without reddening a test: the helper's own suite passes whether or not Canvas ever calls it.
+  // Same reasoning as the frameNode pin above.
+  const effect = CANVAS_SRC.slice(
+    CANVAS_SRC.indexOf('const rememberCanvasLock = useSettings('),
+    CANVAS_SRC.indexOf('// Load saved SSH servers once')
+  )
+
+  it('starts unlocked, so an install that never opts in is unchanged', () => {
+    expect(CANVAS_SRC).toContain('const [canvasLocked, setCanvasLocked] = useState(false)')
+  })
+
+  it('restores and persists behind settings.rememberCanvasLock', () => {
+    expect(effect).toContain('useSettings((s) => s.settings.rememberCanvasLock)')
+    expect(effect).toContain('if (rememberCanvasLock) setCanvasLocked(readCanvasLocked())')
+    expect(effect).toContain('if (rememberCanvasLock) writeCanvasLocked(canvasLocked)')
+    // The deps are the one line here that a deletion leaves green: without `canvasLocked` the
+    // effect stops re-running on a toggle, so only a settings flip would ever write and a lock
+    // engaged with the BUTTON would never survive a restart. There is no ESLint in this repo, so
+    // exhaustive-deps cannot catch it either.
+    expect(effect).toContain('}, [settingsHydrated, rememberCanvasLock, canvasLocked])')
+  })
+
+  it('waits for settings to hydrate before deciding either way', () => {
+    // Canvas mounts before settings load, so an ungated read sees DEFAULT_SETTINGS (off) and the
+    // opt-in silently never takes effect.
+    expect(effect).toContain('if (!settingsHydrated) return')
+    expect(indexOfPresent(effect, 'if (!settingsHydrated) return')).toBeLessThan(
+      indexOfPresent(effect, 'canvasLockRestored.current = true')
+    )
+  })
+
+  it('restores only on the first run after hydration, never on a later opt-in', () => {
+    // Flipping the setting on mid-session must not reach into storage and lock a canvas somebody
+    // is working on: the latch is what keeps a restore a launch-time event.
+    expect(indexOfPresent(effect, 'canvasLockRestored.current = true')).toBeLessThan(
+      indexOfPresent(effect, 'if (rememberCanvasLock) setCanvasLocked(readCanvasLocked())')
+    )
+    expect(effect).toContain('if (!canvasLockRestored.current) {')
   })
 })

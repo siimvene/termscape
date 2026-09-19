@@ -103,6 +103,12 @@ const REAL_SOCKET_ALLOWED = new Map<string, string>([
   [
     'src/main/remote/host-destroy-tmux.test.ts',
     'PtyManager binds TMUX_SOCKET itself, so the verb can only be measured on that name'
+  ],
+  [
+    'test/server/canvas-control-boot-e2e.test.ts',
+    'boots a real Server Edition, whose PtyManager binds TMUX_SOCKET itself: the assertion is that ' +
+      'boot spawns NOTHING, and only that socket can answer it. Reads with has-session and kills ' +
+      'one per-run unique nt-<uuid> target — never a broad target and never the server itself.'
   ]
 ])
 

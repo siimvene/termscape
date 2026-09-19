@@ -448,7 +448,9 @@ interface WorktreeNodeLike {
 /**
  * The nodes a worktree teardown DISPLACES: every descendant of the bound group that carries a
  * working directory (a terminal or a chat) inside the worktree path, PLUS any editor/diff node
- * anywhere on the canvas whose file lives inside it.
+ * anywhere on the canvas whose file lives inside it, PLUS any file-manager node anywhere whose
+ * directory is inside it (see the `files` branch for why its rule is the editor one, not the
+ * terminal one).
  *
  * BOTH teardown paths derive from this — Remove (which also ends their sessions and respawns them)
  * and a stale group's Unbind (which touches no process at all). Unbind is the documented recovery
@@ -482,6 +484,20 @@ export function displacedByWorktree(
   for (const n of nodes) {
     if (n.type === 'terminal') {
       if (!under.has(n.id)) continue
+      const cwd = typeof n.data?.cwd === 'string' ? n.data.cwd : undefined
+      if (isInsideDir(cwd, worktreePath)) out.add(n.id)
+    } else if (n.type === 'files') {
+      // Checked ANYWHERE on the canvas, like editor/diff and unlike terminal — the `under`
+      // restriction on terminals is there because displacing one RESPAWNS it, and a session the
+      // user rooted here by hand should not be restarted from under them. A file manager has no
+      // session: the directory it is showing is simply gone, wherever the node happens to sit, and
+      // resetting its cwd costs the user nothing. Left alone it would show "Could not read this
+      // folder" forever AND keep the dead path in project.json, which is the same persisted-dead-
+      // path failure the terminal branch above exists to prevent.
+      //
+      // It gets `cwd` reset rather than `fileMissing`: a directory CAN be re-pointed at the
+      // fallback, which is exactly why editor/diff get the flag instead — there is nothing
+      // sensible to re-point a dead FILE at.
       const cwd = typeof n.data?.cwd === 'string' ? n.data.cwd : undefined
       if (isInsideDir(cwd, worktreePath)) out.add(n.id)
     } else if (n.type === 'editor' || n.type === 'diff') {

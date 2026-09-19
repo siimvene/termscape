@@ -34,8 +34,8 @@
  * This is scoped to tmux-pane messaging ownership but is intentionally feature-neutral: S8 PR 4's
  * BrowserControlLedger and messaging PR 7's deliver-on-idle queue want the same "who really spawned
  * this node" answer and can consume `paneOwnerProject` directly. It lives in `src/core` (no
- * electron, no main import) so it ships on both shells; the Server Edition never records or reads it
- * because messaging does not exist there (`setControlHandler` is never called).
+ * electron, no main import) so it ships on both shells; the opt-in Server Edition control runtime
+ * now records and reads it through the same PtyManager and messaging service as desktop.
  */
 
 /** nodeId → owning projectId (machine-local entry id), for panes freshly spawned THIS run. */

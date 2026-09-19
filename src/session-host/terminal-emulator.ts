@@ -74,6 +74,24 @@ export class TerminalEmulator {
     return out
   }
 
+  /**
+   * Has the app running in this session REQUESTED bracketed paste (`CSI ?2004h`)?
+   *
+   * This is the session host's answer to the question `paste-buffer -p` asks tmux's pane state,
+   * and it is answerable here for a reason the tmux side cannot claim: the emulator is fed the
+   * session's OWN pty output, so a `?2004h` it saw was written by the app in the pane. (The
+   * tombstone in `pty-manager.ts` for `bracketPasteRequested` and CLAUDE.md's "the emulator is
+   * NOT the answer here" both concern a RENDERER xterm attached as a tmux CLIENT, where the mode
+   * it observes is tmux's own paste-through on the outer terminal and reads true for every pane.
+   * No tmux sits between this emulator and the pane's app.)
+   *
+   * Read through `HostSession.bracketedPasteRequested()`, never directly: emulator writes are
+   * queued, so the answer is only current behind `outputTail`.
+   */
+  bracketedPasteRequested(): boolean {
+    return this.term.modes.bracketedPasteMode
+  }
+
   dispose(): void {
     try {
       this.serializer.dispose()

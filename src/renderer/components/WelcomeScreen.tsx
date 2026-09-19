@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { TermscapeMark } from './TermscapeMark'
+import { IconClose } from './icons'
 import type { ProjectIcon } from '@shared/project-icon'
 import { filterClosedProjects } from '../lib/closedHistory'
 import { ProjectGlyph } from './ProjectGlyph'
@@ -84,15 +85,20 @@ export function WelcomeScreen({
             position: 'absolute',
             top: 16,
             right: 20,
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            width: 26,
+            height: 26,
+            padding: 0,
             background: 'transparent',
             border: 'none',
             color: 'rgba(235,235,245,0.6)',
-            fontSize: 26,
             lineHeight: 1,
             cursor: 'pointer'
           }}
         >
-          ×
+          <IconClose />
         </button>
       )}
       <div className="welcome__brand">
@@ -201,7 +207,7 @@ export function WelcomeScreen({
                       onDeleteClosed(p.id)
                     }}
                   >
-                    ×
+                    <IconClose />
                   </button>
                 )}
               </div>

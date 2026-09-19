@@ -9,7 +9,8 @@
 //      never enters the agent-status map at all.
 //   3. Every row is rendered. A cap would have to announce itself.
 
-import { useCallback, useEffect, useMemo } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { IconClose, IconPower, IconReload } from './icons'
 import type { AgentState } from '@shared/agents/normalize'
 import { formatBytes } from '@shared/fsLimits'
 import { useAgentStatus } from '../state/agentStatus'
@@ -17,6 +18,7 @@ import { useProjects } from '../state/projects'
 import { useSessionMemory } from '../state/sessionMemory'
 import { resolveSessionRows, totalMb } from '../lib/sessionMemoryRows'
 import { usageScopeKey } from '../lib/usageScope'
+import type { SessionPauseOffer } from '../lib/sessionPause'
 
 export interface SessionMemoryPanelProps {
   /** Travel to the node behind a row. Canvas passes `travelToNode`, so a CLOSED project's tab is
@@ -25,6 +27,19 @@ export interface SessionMemoryPanelProps {
   /** Confirm + end the session. `orphan` says whether the panel believes there is a node behind it;
    *  Canvas re-resolves the owner at click time and only uses this for the wording. */
   onKillSession: (nodeId: string, orphan: boolean) => void
+  /**
+   * What this row's pause slot should render, decided by Canvas (which is the only place that can
+   * see the node's agent, its live pause closure and its restart eligibility). The pure rule is
+   * `lib/sessionPause.ts`; the panel only draws the answer.
+   */
+  pauseOfferFor: (nodeId: string) => SessionPauseOffer
+  /**
+   * Pause the session behind a row — the NON-destructive reclaim, beside the destructive `×`.
+   * Canvas routes it to the same `pauseAgentNode(id, false)` the node menu uses, raises its own
+   * notices, and re-resolves eligibility at click time; the panel awaits it only so it can
+   * re-sweep and show the memory that came back.
+   */
+  onPauseSession: (nodeId: string) => Promise<void>
   onClose: () => void
 }
 
@@ -53,8 +68,13 @@ function StatusDot({ state, hollow }: { state: AgentState | null; hollow: boolea
 export function SessionMemoryPanel({
   onGoToNode,
   onKillSession,
+  pauseOfferFor,
+  onPauseSession,
   onClose
 }: SessionMemoryPanelProps): JSX.Element {
+  /** Which row's pause is in flight, if any — an exit can take seconds (it polls the pane until a
+   *  shell owns it), and a control that looks idle through all of it invites a second click. */
+  const [pausing, setPausing] = useState<string | null>(null)
   const ok = useSessionMemory((s) => s.ok)
   const rows = useSessionMemory((s) => s.rows)
   const loading = useSessionMemory((s) => s.loading)
@@ -154,13 +174,46 @@ export function SessionMemoryPanel({
               <span className="sessmem-row__cmd">{v.row.command}</span>
               <span className="sessmem-row__mb">{formatMb(v.row.totalMb)}</span>
             </button>
+            {/* The NON-destructive reclaim, deliberately to the LEFT of the `×`: on the host this
+                was measured against, exiting the CLI returns 98.3% of a session's memory while the
+                `×` destroys the pane and its scrollback for the remaining 1.7%. A row that could
+                never be paused (an orphan, a plain terminal) renders nothing here rather than a
+                permanently dead control — see `sessionPauseOffer`. */}
+            {(() => {
+              const offer = pauseOfferFor(v.row.nodeId)
+              if (!offer.show) return null
+              return (
+                <button
+                  className="sessmem-row__pause"
+                  title={offer.hint}
+                  aria-label={`Pause ${v.title}`}
+                  disabled={offer.disabled || pausing === v.row.nodeId}
+                  onClick={() => {
+                    // `disabled` is the DOM's answer; this is the code's — and it also covers the
+                    // in-flight case, where a second click would queue a second `/exit` behind the
+                    // first (the restart guard refuses it, but silently).
+                    if (offer.disabled || pausing === v.row.nodeId) return
+                    setPausing(v.row.nodeId)
+                    void onPauseSession(v.row.nodeId)
+                      .then(() => sweep())
+                      .finally(() => setPausing(null))
+                  }}
+                >
+                  {pausing === v.row.nodeId ? (
+                    <span className="ui-spinner" aria-hidden />
+                  ) : (
+                    <IconPower />
+                  )}
+                </button>
+              )
+            })()}
             <button
               className="sessmem-row__kill"
               title="End this session"
               aria-label={`End ${v.title}`}
               onClick={() => onKillSession(v.row.nodeId, v.orphan)}
             >
-              ×
+              <IconClose />
             </button>
             {v.row.childCount > 0 && (
               // "child processes", NOT "MCP servers": `pane_pid` is the pane's SHELL, so the count
@@ -214,7 +267,7 @@ export function SessionMemoryPanel({
             disabled={loading}
             onClick={sweep}
           >
-            ⟳
+            <IconReload />
           </button>
         )}
       </div>

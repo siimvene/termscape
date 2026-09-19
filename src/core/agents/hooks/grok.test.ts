@@ -34,7 +34,23 @@ describe('grok hook installer', () => {
     expect(grokHookConfigPath()).toBe(path.join(grokHome, 'hooks', 'nodeterm-status.json'))
     const cfg = read(grokHookConfigPath())
     expect(Object.keys(cfg.hooks).sort()).toEqual(
-      ['Notification', 'PostToolUse', 'PostToolUseFailure', 'PreToolUse', 'SessionEnd', 'SessionStart', 'Stop', 'StopFailure', 'UserPromptSubmit'].sort()
+      [
+        'SessionStart',
+        'UserPromptSubmit',
+        'PreToolUse',
+        'PostToolUse',
+        'PostToolUseFailure',
+        'PermissionDenied',
+        'Stop',
+        'StopFailure',
+        'StopCancelled',
+        'Notification',
+        'SubagentStart',
+        'SubagentStop',
+        'PreCompact',
+        'PostCompact',
+        'SessionEnd'
+      ].sort()
     )
   })
 
@@ -42,18 +58,29 @@ describe('grok hook installer', () => {
     const { installGrokHooks, grokHookConfigPath } = await import('./grok')
     installGrokHooks()
     const cfg = read(grokHookConfigPath())
-    for (const ev of ['PreToolUse', 'PostToolUse', 'PostToolUseFailure']) {
+    for (const ev of ['PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'PermissionDenied']) {
       expect(cfg.hooks[ev][0].matcher, ev).toBe('.*')
     }
     // Non-tool events must carry NO matcher, for two DIFFERENT reasons — both in
     // ~/.grok/docs/user-guide/10-hooks.md:153. On `Stop` and `UserPromptSubmit` a matcher is
     // "ignored with a warning (those events always fire)": harmless noise. On the other four it
     // FILTERS, against something that is not a tool name at all — the start source on
-    // `SessionStart`, the end reason on `SessionEnd`, the notification type on `Notification`, the
-    // classified error type on `StopFailure` — so a stray `.*` there is not noise: anything it fails
-    // to match is an event we silently never receive. Every one of them is checked, so a matcher
-    // accidentally attached to an event in hook-events.ts cannot ship.
-    for (const ev of ['SessionStart', 'UserPromptSubmit', 'Stop', 'StopFailure', 'Notification', 'SessionEnd']) {
+    // `SessionStart`, the end reason on `SessionEnd`, the notification type on `Notification`, or
+    // the documented reason/type/trigger on the other events — so a stray `.*` there is not noise:
+    // anything it fails to match is an event we silently never receive. Every one is checked.
+    for (const ev of [
+      'SessionStart',
+      'UserPromptSubmit',
+      'Stop',
+      'StopFailure',
+      'StopCancelled',
+      'Notification',
+      'SubagentStart',
+      'SubagentStop',
+      'PreCompact',
+      'PostCompact',
+      'SessionEnd'
+    ]) {
       expect(cfg.hooks[ev][0].matcher, ev).toBeUndefined()
     }
   })
@@ -92,12 +119,12 @@ describe('grok hook installer', () => {
       p,
       JSON.stringify({
         hooks: {
-          PreCompact: [{ hooks: [{ type: 'command', command: `sh '${path.join(home, '.nodeterm/agent-hooks/grok.sh')}'` }] }]
+          ObsoleteEvent: [{ hooks: [{ type: 'command', command: `sh '${path.join(home, '.nodeterm/agent-hooks/grok.sh')}'` }] }]
         }
       })
     )
     installGrokHooks()
-    expect(read(grokHookConfigPath()).hooks.PreCompact).toBeUndefined()
+    expect(read(grokHookConfigPath()).hooks.ObsoleteEvent).toBeUndefined()
   })
 
   it('remove takes our entries back out', async () => {

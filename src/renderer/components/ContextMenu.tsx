@@ -1,7 +1,8 @@
 import { useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import { NODE_COLORS } from '../state/workspace'
+import { NodeColorSwatches } from './NodeColorSwatches'
 import { useMenuFlip } from '../ui/useMenuFlip'
+import { useSubmenuFlip } from '../ui/useSubmenuFlip'
 
 export type MenuItem =
   | {
@@ -78,18 +79,14 @@ export function ContextMenu({ x, y, items, onClose, zIndex, scroll }: ContextMen
           if (item.type === 'label') return <div key={i} className="ctx-label">{item.label}</div>
           if (item.type === 'colors') {
             return (
-              <div key={i} className="ctx-colors">
-                {NODE_COLORS.map((c) => (
-                  <button
-                    key={c}
-                    style={{ background: c }}
-                    onClick={() => {
-                      item.onPick(c)
-                      onClose()
-                    }}
-                  />
-                ))}
-              </div>
+              <NodeColorSwatches
+                key={i}
+                className="ctx-colors"
+                onPick={(c) => {
+                  item.onPick(c)
+                  onClose()
+                }}
+              />
             )
           }
           if (item.type === 'submenu') {
@@ -103,7 +100,7 @@ export function ContextMenu({ x, y, items, onClose, zIndex, scroll }: ContextMen
                 <span className="ctx-icon">{item.icon}</span>
                 {item.label}
                 {openSub === i && (
-                  <div className="ctx-menu ctx-submenu" onClick={(e) => e.stopPropagation()}>
+                  <SubmenuFlyout>
                     {item.children.map((child, j) => {
                       if (child.type === 'separator') return <div key={j} className="ctx-sep" />
                       if (child.type === 'label')
@@ -125,7 +122,7 @@ export function ContextMenu({ x, y, items, onClose, zIndex, scroll }: ContextMen
                         </button>
                       )
                     })}
-                  </div>
+                  </SubmenuFlyout>
                 )}
               </div>
             )
@@ -149,5 +146,28 @@ export function ContextMenu({ x, y, items, onClose, zIndex, scroll }: ContextMen
       </div>
     </>,
     document.body
+  )
+}
+
+/**
+ * One submenu flyout, measured so it opens AWAY from the viewport edge.
+ *
+ * Its own component because the measurement is per-flyout state (a ref plus a side) and only the
+ * open one exists at a time: mounting it with the row keeps the hook's lifetime exactly the
+ * flyout's, so a menu re-opened near the other edge measures afresh instead of inheriting the
+ * last decision. `data-side` is what the stylesheet anchors on; the default stays `right`, so a
+ * flyout with room renders exactly as it always did.
+ */
+function SubmenuFlyout({ children }: { children: ReactNode }): JSX.Element {
+  const { ref, side } = useSubmenuFlip()
+  return (
+    <div
+      ref={ref}
+      className="ctx-menu ctx-submenu"
+      data-side={side}
+      onClick={(e) => e.stopPropagation()}
+    >
+      {children}
+    </div>
   )
 }

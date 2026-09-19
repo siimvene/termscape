@@ -182,18 +182,48 @@ describe('mergeIncomingNodes', () => {
 
 describe('conflict copy', () => {
   it('keeps the historical sentence when nothing was added', () => {
-    expect(conflictBarMessage(0)).toBe('Project file changed on disk (git pull or another machine).')
+    expect(conflictBarMessage(0)).toContain(
+      'Project file changed on disk (git pull or another machine).'
+    )
+  })
+  it('always says the autosave is suspended — in every wording', () => {
+    // The bar SUSPENDS the debounced whole-workspace save for as long as it is up (Canvas's
+    // autosaveDelay returns null on a conflict), and it is cleared only by its own two buttons or
+    // a project switch. A user who read this strip as an FYI about someone else's git pull had no
+    // way to know their own canvas had stopped being written — 2026-09-02: two and a half hours,
+    // eight session cards opened and never persisted, no signal anywhere.
+    for (const n of [0, 1, 2])
+      expect(conflictBarMessage(n)).toContain('not being saved until you choose')
   })
   it('names what arrived, and says it is already on the canvas', () => {
     const msg = conflictBarMessage(1)
-    expect(msg).toContain('1 new session')
-    expect(msg).toContain('added to this canvas')
+    expect(msg).toContain('1 session')
+    expect(msg).toContain('not on this canvas')
+    expect(msg).toContain('added')
   })
   it('pluralizes', () => {
-    expect(conflictBarMessage(2)).toContain('2 new sessions')
-    expect(conflictBarMessage(2)).toContain('were added to this canvas')
-    expect(adoptedNodesNotice(1)).toContain('1 new session')
-    expect(adoptedNodesNotice(3)).toContain('3 new sessions')
-    expect(adoptedNodesNotice(3)).toContain('were added to this canvas')
+    expect(conflictBarMessage(2)).toContain('2 sessions')
+    expect(conflictBarMessage(2)).toContain('were not on this canvas')
+    expect(adoptedNodesNotice(1)).toContain('1 session')
+    expect(adoptedNodesNotice(1)).toContain('was not on this canvas')
+    expect(adoptedNodesNotice(3)).toContain('3 sessions')
+    expect(adoptedNodesNotice(3)).toContain('were not on this canvas')
+  })
+  // 2026-09-06 field report: 16 terminals deleted on a slow SSH link came back announced as
+  // sessions "registered from another device (your phone, or another machine)" — the reporter owns
+  // no phone and runs no second machine. The source was our own stale server file (a mirror write
+  // acked by the 5 s throttle and then dropped). Nothing at this layer knows where an adopted node
+  // came from, so neither surface may name a device: it names the FILE, which is what was observed,
+  // and offers the possibilities without asserting one.
+  it('never attributes the sessions to a device it cannot have observed', () => {
+    for (const msg of [conflictBarMessage(16), adoptedNodesNotice(16)]) {
+      expect(msg).not.toMatch(/phone/i)
+      expect(msg).not.toMatch(/registered from/i)
+      expect(msg).toContain('project file')
+      expect(msg).toContain('or from an older copy of the file')
+    }
+  })
+  it('says the same thing on both surfaces — one clause, no drift', () => {
+    expect(conflictBarMessage(4).startsWith(adoptedNodesNotice(4))).toBe(true)
   })
 })

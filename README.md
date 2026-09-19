@@ -292,7 +292,9 @@ Store presence. You build it (or grab the prebuilt binary from Releases) yoursel
   this fork's [Releases](https://github.com/siimvene/nodeterm/releases). Unsigned, so first
   launch is **right-click → Open**. No auto-update — pull + rebuild to upgrade
   (see [Build & install (this fork)](#build--install-this-fork)).
-- **Linux (x64)** — build it: `npm run dist:linux` → AppImage + `.deb` in `dist/`.
+- **Linux (x64)** — build it: `npm run dist:linux` → AppImage + `.deb` + `.rpm` in `dist/`.
+  The AppImage needs FUSE 2, which Fedora does not install by default: `sudo dnf install
+  fuse-libs` if it exits with a `libfuse.so.2` error.
 - **iOS** — **Termscape**, built from
   [nodeterm-mobile](https://github.com/siimvene/nodeterm-mobile) and shipped through the App
   Store (via that repo's CI release workflow; see its README for the current status).
@@ -338,6 +340,18 @@ release job does this automatically), or just install tmux yourself. On **Window
 C++ build tools and Python 3 (needed to compile node-pty) and points you at the exact
 `winget` commands for anything missing, then runs `npm ci`.
 
+On **Fedora** (and any distro shipping GCC 14 or newer), export `CFLAGS=-D_GNU_SOURCE` for the
+install: smart-whisper's bundled whisper.cpp uses GNU-only CPU-affinity calls without asking for
+them, and GCC 14 turned that from a warning into an error, so a plain `npm install` fails while
+building it. Packaging additionally wants `rpm-build` (for the `.rpm` target) and
+`libxcrypt-compat` (electron-builder's bundled `fpm` runs a Ruby that still links
+`libcrypt.so.1`, without which both `.deb` and `.rpm` fail):
+
+```bash
+sudo dnf install -y rpm-build libxcrypt-compat
+CFLAGS=-D_GNU_SOURCE npm install
+```
+
 ```bash
 npm install        # deps + rebuilds node-pty against Electron's ABI (postinstall)
 npm run dev        # dev mode with renderer HMR
@@ -346,7 +360,7 @@ npm start          # preview the production build
 npm run typecheck  # fastest correctness gate
 npm test           # vitest unit + integration suite
 npm run dist       # local UNSIGNED .dmg into dist/ (smoke test)
-npm run dist:linux # AppImage + .deb into dist/ (on a Linux host)
+npm run dist:linux # AppImage + .deb + .rpm into dist/ (on a Linux host; .rpm needs rpmbuild)
 npm run dist:win   # unsigned NSIS installer + zip into dist/ (on a Windows host)
 npm run server:dev # build + run the browser Server Edition (needs Node 22 + tmux)
 ```

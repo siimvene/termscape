@@ -12,46 +12,48 @@
  *
  * ── THREE SURFACES ──────────────────────────────────────────────────────────────────────────────
  * - **Desktop (Electron):** wired in `src/main/index.ts` — the only surface with the verbs.
- * - **Server Edition:** never wired; `/control/send` answers `control-unsupported-on-this-edition`
- *   (`src/server/control-unsupported.ts`) for a verified caller and the messaging refusal for an
- *   unverified one. Everything this file imports from `src/core` still ships on both shells.
+ * - **Server Edition:** wired when its canvas-control config flag is enabled; otherwise
+ *   `/control/send` keeps the named edition refusal. Both shells inject their own stores and PTYs.
  * - **Mobile (phone):** never a sender (it drives canvas control over relay→IPC, not `/control/*`);
  *   a phone-spawned node is a valid TARGET and resolves like any other store node.
  */
-import type { NormalizedAgentEvent } from '../shared/agents/normalize'
-import { binariesFor, type PaneOwner } from '../shared/agents/pane-owner-predicate'
-import type { BoardLogEntry } from '../shared/types'
+import type { NormalizedAgentEvent } from '../../shared/agents/normalize'
+import { binariesFor, type PaneOwner } from '../../shared/agents/pane-owner-predicate'
+import type { BoardLogEntry } from '../../shared/types'
 import type {
   AgentMessageDeliverRequest,
   AgentMessageReply
-} from '../shared/agents/agent-messaging'
-import { AGENT_MESSAGE_VERBS, NOTIFY_BODY } from '../shared/agents/agent-messaging'
+} from '../../shared/agents/agent-messaging'
+import { AGENT_MESSAGE_VERBS, NOTIFY_BODY } from '../../shared/agents/agent-messaging'
 import {
   deliverAgentMessage,
   type DeliveryDeps,
   type ReceiptEvent
-} from '../core/agents/agent-message'
+} from './agent-message'
 import {
   RETRYABLE,
   type AgentMessageOutcome,
   type NotPermittedReason
-} from '../core/agents/agent-message-decide'
-import { noteNewTurn, noteSent, reserveFlow } from '../core/agents/agent-message-flow'
-import { recordDelivery } from '../core/agents/agent-message-trace'
-import { resolveDeliveryScope, scopeRefusal } from '../core/agents/agent-message-scope'
+} from './agent-message-decide'
+import { noteNewTurn, noteSent, reserveFlow } from './agent-message-flow'
+import { recordDelivery } from './agent-message-trace'
+import { resolveDeliveryScope, scopeRefusal } from './agent-message-scope'
 import {
   DeliveryQueue,
   type DeliveryQueueDeps,
   type QueuedDeliveryRequest
-} from '../core/agents/delivery-queue'
+} from './delivery-queue'
 import { randomUUID } from 'crypto'
-import { nodeTokenFilePresent } from '../core/agents/node-token-files'
-import { mirrorEntry as coreMirrorEntry, type MirrorEntry } from '../core/agent-status-mirror'
+import { nodeTokenFilePresent } from './node-token-files'
+import { mirrorEntry as coreMirrorEntry, type MirrorEntry } from '../agent-status-mirror'
 import {
   projectCapabilityGrantedFor,
   type CapabilityAckMap
-} from '../core/project-capability-consent'
-import type { ProjectCapability } from '../shared/project-capabilities'
+} from '../project-capability-consent'
+import type {
+  CapabilityMachineDefaults,
+  ProjectCapability
+} from '../../shared/project-capabilities'
 
 /** The little the service needs to know about a stored node. */
 export interface MessagingStoredNode {
@@ -89,6 +91,12 @@ export interface AgentMessagingDeps {
    * refuse `unproven-target-owner`.
    */
   paneOwnerProject(nodeId: string): string | undefined
+  /**
+   * Optional shell-specific creator gate. Server Edition supplies its process-local caller→target
+   * proof so message delivery cannot type into a session the caller did not spawn. Desktop omits
+   * this because its control path remains user-confirmed. Checked on every queued flush too.
+   */
+  callerOwnsTarget?(sourceNodeId: string, targetNodeId: string): boolean
   customAgents(): readonly { id: string; launchCmd: string }[] | undefined
   appendBoardLog(projectId: string, entry: BoardLogEntry): Promise<boolean>
   /** Test seam: override the receipt subscription. Production uses the module bus below. */
@@ -132,9 +140,15 @@ export function messagingEnabledVia(
     projectId: string
   ) =>
     | (Partial<Record<ProjectCapability, unknown>> & { capabilityAck?: CapabilityAckMap })
-    | undefined
+    | undefined,
+  /** This machine's settings, read per call like the project — so a change to the machine default
+   *  (settings.json, `agentMessagingDefault`) takes effect on the next delivery, exactly as an
+   *  off-toggle does. Required: a shell that forgot it would read every unconfigured project as off
+   *  while the Settings page reads it as on. */
+  getDefaults: () => CapabilityMachineDefaults
 ): (projectId: string) => boolean {
-  return (projectId) => projectCapabilityGrantedFor(getProject(projectId), 'agentMessaging')
+  return (projectId) =>
+    projectCapabilityGrantedFor(getProject(projectId), 'agentMessaging', getDefaults())
 }
 
 // ── The receipt bus ───────────────────────────────────────────────────────────────────────────
@@ -150,11 +164,9 @@ function subscribeBus(cb: (e: ReceiptEvent) => void): () => void {
 
 /**
  * The process-lifetime deliver-on-idle queue (PR 7), wired once by the desktop shell. Held at module
- * scope — not threaded through `AgentMessagingDeps` on the event path — because the flush trigger is
- * the SAME normalized event stream `onMessagingAgentEvent` already taps, and a target going idle is
- * what a flush waits for. Null on the Server Edition and until wired (messaging does not exist
- * there). The verb path still takes the queue through `deps.queue` so a test can drive enqueue in
- * isolation.
+ * scope for the desktop shell. The Server Edition passes its own queue explicitly to
+ * `onMessagingAgentEvent`, which avoids coupling two independently-constructed runtimes in tests.
+ * The verb path also takes the queue through `deps.queue` so either shell can drive enqueue.
  */
 let deliveryQueue: DeliveryQueue | null = null
 
@@ -249,7 +261,8 @@ export function createDeliveryQueue(
  * designed direction) but can never confirm a delivery (fail-closed, the receipt's).
  */
 export function onMessagingAgentEvent(
-  e: Pick<NormalizedAgentEvent, 'nodeId' | 'state' | 'newTurn' | 'verified'>
+  e: Pick<NormalizedAgentEvent, 'nodeId' | 'state' | 'newTurn' | 'verified'>,
+  queue: DeliveryQueue | null = deliveryQueue
 ): void {
   if (!e?.nodeId) return
   if (e.newTurn === true) noteNewTurn(e.nodeId)
@@ -264,7 +277,7 @@ export function onMessagingAgentEvent(
   // re-runs the whole delivery per queued message (the flush-time re-validation), so a `done` that
   // is actually still-not-deliverable (an unverified or inferred idle) simply re-queues — this only
   // needs to be a cheap "maybe now" nudge, not a precise idle verdict.
-  if (e.state === 'done') void deliveryQueue?.onTargetIdle(e.nodeId)
+  if (e.state === 'done') void queue?.onTargetIdle(e.nodeId)
 }
 
 // ── The per-node delivery lock ────────────────────────────────────────────────────────────────
@@ -295,14 +308,31 @@ const NOT_PERMITTED_TEXT: Record<NotPermittedReason, string> = {
   'self-send': 'a node cannot message itself.',
   'unsupported-edition': 'agent messaging does not exist on this edition.',
   'unaddressable-node-id': 'that node id cannot be addressed safely.',
+  'caller-not-owner':
+    'the sending agent did not spawn the target during this Server run, so it may not type into ' +
+    'or notify that session. This ownership refusal is permanent for this target.',
   'ambiguous-target-node-id':
     'that node id exists in more than one project, so the target pane cannot be attributed to a ' +
     'single project\'s messaging grant. De-duplicate the id (re-add the cloned folder to mint ' +
     'fresh ids) before messaging it.',
+  // The remedy sentence here USED TO SAY "Re-open the target node so its owner is recorded, then
+  // try again", and that was false in the commonest case it fires in. Ownership is recorded only
+  // on a GENUINE FRESH SPAWN (`shouldRecordOwnership`, `fresh === true`); after an app restart the
+  // tmux server has survived, so re-opening the node ATTACHES to the session that is already
+  // running and records NOTHING. A caller that followed the advice got the identical refusal, and
+  // the one thing that does fix it — respawning the session — was the one thing the text did not
+  // say. It also told a LANGUAGE MODEL to do something only a human can do.
+  //
+  // `pane-ownership.ts` explains why attaching deliberately does not record (there is no
+  // cross-restart signal a hostile pane's own shell could not also write), so this is a permanent
+  // property to describe honestly, not a gap to promise around. No retry advice is spelled out
+  // here: `renderMessageOutcome` appends it from `RETRYABLE`, where `notPermitted` is false.
   'unproven-target-owner':
     'the target pane\'s owning project cannot be proven at runtime (it was not freshly spawned in ' +
     'this session, or its ownership is disputed), so a per-project messaging grant cannot be ' +
-    'applied to it. Re-open the target node so its owner is recorded, then try again.'
+    'applied to it. Attaching to the running session cannot prove this — only a fresh spawn ' +
+    'records the owner — so the USER has to end that session and start it again (an app restart ' +
+    'leaves it unproven; a machine restart clears it). Ask them, or reach that agent another way.'
 }
 
 /**
@@ -470,6 +500,10 @@ export async function runDelivery(
   const scope = resolveDeliveryScope(projects, req.sourceNodeId, req.targetNodeId)
   let notPermitted = scopeRefusal(scope)
   const projectId = scope.kind === 'same-project' ? scope.projectId : undefined
+  if (!notPermitted && deps.callerOwnsTarget &&
+      !deps.callerOwnsTarget(req.sourceNodeId, req.targetNodeId)) {
+    notPermitted = 'caller-not-owner'
+  }
   if (!notPermitted) {
     // OWNERSHIP IS PROVEN AT RUNTIME, NOT READ FROM THE STORE (PR #237 fix round 2). The scope
     // above resolved `projectId` from the persisted node-set, which is attacker-writable — a
@@ -501,10 +535,11 @@ export async function runDelivery(
   const owner = projects.find((p) => p.id === projectId)
   const sourceNode = owner?.nodes.find((n) => n.id === req.sourceNodeId)
   const targetNode = owner?.nodes.find((n) => n.id === req.targetNodeId)
-  // The spawn-time default (`options.agentId ?? 'claude'`), mirrored: a plain terminal node got
-  // the claude hook env at spawn, so its pane is judged against claude's binaries — and a bare
-  // shell in it still refuses as `targetNotAgentPane`.
-  const targetAgentId = targetNode?.agentId ?? 'claude'
+  // A plain terminal is not Claude by default. A hand-launched agent may still prove its runtime
+  // identity through a hook event; absent either stored or runtime evidence, the binary predicate
+  // receives an unknowable identity and refuses instead of guessing a provider.
+  const targetAgentId = targetNode?.agentId ??
+    (deps.mirrorEntry ?? coreMirrorEntry)(req.targetNodeId)?.agentId ?? ''
 
   const delivery: DeliveryDeps = {
     paneOwner: (id) => deps.paneOwner(id),

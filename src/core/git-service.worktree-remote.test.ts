@@ -23,7 +23,14 @@ const svc = new GitService()
 /** Make the resolver claim exactly `repoPath` — i.e. "this repo lives on an SSH host". */
 function claimAsRemote(repoPath: string): void {
   setGitRemoteResolver((cwd) =>
-    cwd === repoPath ? { conn: { host: 'h', user: 'u' }, controlPath: '/tmp/cm.sock' } : undefined
+    cwd === repoPath
+      ? {
+          // An invalid port makes any accidental SSH execution fail locally and immediately.
+          // Do not depend on DNS/network timeouts or contact an external host from this test.
+          conn: { host: '127.0.0.1', user: 'u', port: 65_536 },
+          controlPath: path.join(repoPath, 'missing-control.sock')
+        }
+      : undefined
   )
 }
 
@@ -119,7 +126,7 @@ describe('history routing', () => {
   })
 
   it('a remote-claimed repo never gets LOCAL git run against its (remote) path', async () => {
-    claimAsRemote(repo) // bogus master socket → the remote git fails
+    claimAsRemote(repo) // invalid local-only SSH endpoint → the remote git fails
     // The invariant is "the local repo's commits are never served as if they were the host's".
     // With every remote call failing, the loader lands on its empty result (or throws) — either
     // reads as a failed load; what it must NOT contain is the LOCAL repo's history.

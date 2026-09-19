@@ -8,14 +8,14 @@
  * real tmux in `agent-message.realtty.test.ts` — this file assumes both and tests only what the
  * service adds.
  */
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import {
   deliverFromControl,
   renderMessageOutcome,
   onMessagingAgentEvent,
   createDeliveryQueue,
   type AgentMessagingDeps
-} from './agent-messaging'
+} from '../core/agents/agent-messaging'
 import type { BoardLogEntry } from '../shared/types'
 import { RETRYABLE, type AgentMessageOutcome } from '../core/agents/agent-message-decide'
 import { resetMessageFlow, FANOUT_PER_TURN } from '../core/agents/agent-message-flow'
@@ -110,6 +110,21 @@ describe('deliverFromControl', () => {
     expect(outcome).toEqual({ kind: 'notPermitted', reason: 'switch-off' })
     expect(reply.ok).toBe(false)
     expect(reply.error).toContain('switch')
+    expect(deps.rec.paneOwnerCalls).toEqual([])
+    expect(deps.rec.sent).toEqual([])
+  })
+
+  it('revalidates an injected caller-to-target creator gate before touching the pane', async () => {
+    const owns = vi.fn(() => false)
+    const deps = fakeDeps({ callerOwnsTarget: owns })
+    const { outcome, reply } = await deliverFromControl(req(), deps)
+
+    expect(outcome).toEqual({ kind: 'notPermitted', reason: 'caller-not-owner' })
+    expect(reply).toMatchObject({
+      ok: false,
+      error: expect.stringContaining('caller-not-owner')
+    })
+    expect(owns).toHaveBeenCalledWith('a1', 'b1')
     expect(deps.rec.paneOwnerCalls).toEqual([])
     expect(deps.rec.sent).toEqual([])
   })
@@ -359,6 +374,65 @@ describe('deliver-on-idle wiring (PR 7)', () => {
     expect(outcome.kind).toBe('queued')
     expect(queue.depth('b1')).toBe(1)
     expect(deps.rec.sent).toEqual([]) // queued is NOT delivered — no bytes yet
+  })
+
+  it('the Server Edition explicit queue tap flushes a busy send on the target idle event', async () => {
+    const flushed = vi.fn(async () => ({
+      kind: 'delivered' as const,
+      traceId: 'delivered-trace',
+      traced: 'memory' as const,
+      receipt: 'observed' as const,
+      signal: 'newTurn' as const
+    }))
+    const queue = new DeliveryQueue({
+      now: () => 0,
+      deliver: flushed,
+      trace: async () => ({ traceId: 'queue-trace', traced: 'memory' }),
+      schedule: () => () => {}
+    })
+    const busy: MirrorEntry = {
+      state: 'working',
+      updatedAt: 1,
+      stateVerified: true,
+      clientRevision: MANAGED_SCRIPT_REVISION
+    }
+    const deps = fakeDeps({ mirrorEntry: () => busy, queue })
+    expect((await deliverFromControl(req(), deps)).outcome.kind).toBe('queued')
+    expect(queue.depth('b1')).toBe(1)
+
+    onMessagingAgentEvent(
+      { nodeId: 'b1', state: 'done', verified: true, newTurn: false },
+      queue
+    )
+    await vi.waitFor(() => expect(queue.depth('b1')).toBe(0))
+    expect(flushed).toHaveBeenCalledTimes(1)
+  })
+
+  it('drops a queued send if caller ownership is gone before the idle flush', async () => {
+    let owns = true
+    const busy: MirrorEntry = {
+      state: 'working',
+      updatedAt: 1,
+      stateVerified: true,
+      clientRevision: MANAGED_SCRIPT_REVISION
+    }
+    const deps = fakeDeps({
+      mirrorEntry: () => busy,
+      callerOwnsTarget: () => owns
+    })
+    const queue = createDeliveryQueue(deps, { schedule: () => () => {} })
+    deps.queue = queue
+
+    expect((await deliverFromControl(req(), deps)).outcome.kind).toBe('queued')
+    expect(queue.depth('b1')).toBe(1)
+    owns = false
+
+    onMessagingAgentEvent(
+      { nodeId: 'b1', state: 'done', verified: true, newTurn: false },
+      queue
+    )
+    await vi.waitFor(() => expect(queue.depth('b1')).toBe(0))
+    expect(deps.rec.sent).toEqual([])
   })
 
   it('without a queue, the same busy target is refused `targetBusy` (old behaviour intact)', async () => {

@@ -177,3 +177,86 @@ describe('codex thread identity prelude — account scoping', () => {
     ).toBe('||')
   })
 })
+
+// ── The prelude EXPORTS WHAT THE RECORD SAYS ─────────────────────────────────────────────────
+//
+// `NODETERM_AGENT_ID=codex` and `NODETERM_CANVAS_CONTROL=1` used to be constants here. Both are
+// `buildPtyEnv`'s answers about the pane — it labels a node with its OWN agent id (`custom:<uuid>`
+// for a custom agent inheriting the codex harness) and gates the grant on `canControlCanvas` — so
+// the constants mislabelled every such node and asserted a grant the pane might not hold.
+//
+// A SECOND script, deliberately, rather than widening the printf above: every expectation in this
+// file is a pin on behaviour that must not change for a pre-agent record, and rewriting them all to
+// carry a new field would destroy that evidence.
+let agentScript = ''
+
+beforeAll(() => {
+  agentScript = path.join(dir, 'prelude-agent.sh')
+  fs.writeFileSync(
+    agentScript,
+    `#!/bin/sh\n${codexThreadIdentityResolverSh(root)}\n` +
+      `printf '%s|%s|%s\\n' "\${NODETERM_NODE_ID-}" "\${NODETERM_AGENT_ID-}" "\${NODETERM_CANVAS_CONTROL-}"\n`,
+    { mode: 0o755 }
+  )
+})
+
+/** node|agentId|canvasControl, so the exported label and grant can both be asserted. */
+async function resolveAgent(env: Record<string, string>): Promise<string> {
+  const { stdout } = await run('/bin/sh', [agentScript], {
+    env: { PATH: process.env.PATH ?? '', HOME: dir, ...env }
+  })
+  return stdout.trim()
+}
+
+/** A record body that NAMES its agent and grant, as every record written now does. */
+function agentBody(nodeId: string, agentId: string, grant: boolean): string {
+  return (
+    `accountId=\nnodeId=${nodeId}\nendpoint=${dir}/hook-endpoint.env\n` +
+    `agentId=${agentId}\ncanvasControl=${grant ? '1' : '0'}\nsignature=x\n`
+  )
+}
+
+describe('codex thread identity prelude — the exported agent label and grant', () => {
+  it('exports the recorded agent id, not the constant codex', async () => {
+    record('thr-a', agentBody('node-7', 'custom:abc', true))
+    expect(await resolveAgent({ CODEX_THREAD_ID: 'thr-a' })).toBe('node-7|custom:abc|1')
+  })
+
+  it('leaves the grant UNSET when the record withholds it', async () => {
+    // Absent, never '0' — both shims gate on `[ -z "$NODETERM_CANVAS_CONTROL" ]`, and this is the
+    // shape `buildPtyEnv` produces for an agent `canControlCanvas` refuses.
+    record('thr-b', agentBody('node-7', 'custom:abc', false))
+    expect(await resolveAgent({ CODEX_THREAD_ID: 'thr-b' })).toBe('node-7|custom:abc|')
+  })
+
+  it('falls back to codex WITH the grant for a pre-agent record', async () => {
+    // The back-compat contract, exercised end to end: a record written before these fields existed
+    // came from this same Codex spine, and codex is unconditionally canvas-control-capable.
+    record('thr-c', body('node-7'))
+    expect(await resolveAgent({ CODEX_THREAD_ID: 'thr-c' })).toBe('node-7|codex|1')
+  })
+
+  it('resolves NOTHING when the recorded agent id is outside the alphabet', async () => {
+    // Re-validated here because this prelude cannot check the signature (no key in an agent's
+    // shell), and the value becomes an environment variable. A bad shape resolves nothing at all
+    // rather than falling back to codex — the record is not one we wrote, so none of it is trusted.
+    record('thr-d', agentBody('node-7', 'bad id', true))
+    expect(await resolveAgent({ CODEX_THREAD_ID: 'thr-d' })).toBe('||')
+  })
+
+  it('carries the agent label through a managed account scope', async () => {
+    scopedRecord(
+      'acct-A',
+      'thr-e',
+      `accountId=acct-A\nnodeId=node-A\nendpoint=${dir}/hook-endpoint.env\n` +
+        `agentId=custom:abc\ncanvasControl=0\nsignature=x\n`
+    )
+    expect(
+      await resolveAgent({ CODEX_THREAD_ID: 'thr-e', NODETERM_CODEX_ACCOUNT_ID: 'acct-A' })
+    ).toBe('node-A|custom:abc|')
+  })
+
+  it('is valid POSIX sh', async () => {
+    await expect(run('/bin/sh', ['-n', agentScript])).resolves.toBeTruthy()
+  })
+})

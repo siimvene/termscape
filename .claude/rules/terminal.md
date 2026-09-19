@@ -326,8 +326,10 @@ registered session and so never kills the remote tmux — both pre-date this cha
 
 tmux only survives an **app** restart — a **machine reboot kills the tmux server**, so every
 `nt-<nodeId>` session is gone. To bridge that, `create()` returns `PtyCreateResult` with a
-`fresh` flag: it runs `tmux has-session` *before* spawning, so `fresh=false` means a warm
-reattach (tmux redraws) and `fresh=true` means a cold start (first open OR post-reboot). On a
+`fresh` flag: it asks the tmux server whether the session already exists *before* spawning, so
+`fresh=false` means a warm reattach (tmux redraws) and `fresh=true` means a cold start (first open
+OR post-reboot). Locally that ask is one `tmux has-session` per node; on an SSH project it is one
+coalesced `tmux list-sessions` per host per burst (see `.claude/rules/terminal-ssh.md`). On a
 cold start the renderer (`TerminalNode.tsx`) reconstructs state instead of relying on the dead
 session (you can't keep a live OS process across a reboot):
 - **Scrollback replay** — `core/scrollback-store.ts` keeps a byte-capped (`256 KB`) snapshot of
@@ -358,6 +360,23 @@ session (you can't keep a live OS process across a reboot):
   resumes normally (the gate is exactly the flag, nothing more). The minted id is still correct — it
   IS the conversation the launch creates and hooks key on — so the fix is a gate, not a change to the
   assignment.
+- **A persisted session id is not evidence the conversation still exists**, and a dead one is not a
+  no-op: `claude --resume <dead id>` prints "No conversation found…" and EXITS to a bare shell under a
+  node still wearing its agent badge (measured 2026-09-09: 20 of 108 sessions in that state, none with
+  a `<id>.jsonl` under the system or managed-account root — Claude's 30-day cleanup, a `/clear`, a
+  removed account, or an id for a session that never ran all cause it). So cold restore asks
+  `chat.transcriptExists` first (`registerTranscriptIpc`, both shells) and on a positive `absent`
+  launches **bare** with a slim `CoState.lostSession` banner. Three rules: **(1)** the answer is
+  TRI-state (`present | absent | unknown`) and only `absent` drops the id — resuming a dead id costs
+  one line, dropping a LIVE id strands real work, so an unreadable root, a downed master, a relay tab,
+  a rejected call, an un-command-line-able id, and a not-yet-mounted boot `$HOME` are ALL `unknown` =
+  resume as before (`transcriptPresence`, `core/transcript-reader.ts`). **(2)** the remote leg's
+  `unknown` is TERMINAL — a remote transcript is on the host, so `remoteTranscriptPresence` reads
+  `locateRemoteTranscriptCommand` (exit 0 = clean miss), erring toward `present`. **(3)** Claude only
+  (`readsClaudeTranscript`); other agents keep prior behaviour until `handoff/locate.ts` learns their
+  layouts. Logic is the pure `cold-resume-session.ts`; **adding a `CoState` field owes the hand-written
+  equality list in `setCo`** or the banner is silently swallowed (`nodes/cold-resume-wiring.test.ts`
+  pins it). Not yet on the kanban CARD MODAL (`ModalTerminal` reads no `CoState`).
 
 ### We have our own VT emulator — check it before asking tmux
 
@@ -468,6 +487,17 @@ write-callback error: `ECANCELED` (libuv cancelling an in-flight write when the 
 destroyed) and read-side failures surfacing through a write callback may cover bytes the host already
 received and acted upon, so they stay uncertainty and reject the caller.
 
+**The SESSION HOST is the opposite case to a tmux client** (issue #686): on Windows there is no tmux
+between the pane's app and the headless emulator, so a `?2004h` the host sees was written by the app
+itself — what `paste-buffer -p` asks tmux for. `HostSession.bracketedPasteRequested()` reads it
+(behind `outputTail`, since xterm writes are async) and `sendKeysWrites` (`send-keys-delivery.ts`)
+mirrors the tmux plan: `sanitizePasteText` ALWAYS, the frame only when the app asked, the Enter as its
+own write AFTER the close marker (never inside the framed burst, the shape #453 measured as mangled);
+unframed stays one write. Before this the host sent a raw `text + '\r'`, so an injected prompt landed
+in a paste-aware composer (Codex, Claude) and never submitted. **NOT device-verified**: whether ConPTY
+re-emits an app's `?2004h` into the pty stream — if not, the mode is always false and every write is
+the old one (no fix, no regression).
+
 ## Terminal node lifecycle (gotchas)
 
 `src/renderer/nodes/TerminalNode.tsx` is the trickiest file:
@@ -498,3 +528,26 @@ received and acted upon, so they stay uncertainty and reject the caller.
 - A `ResizeObserver` drives `FitAddon.fit()` + `transport.resize`. Canvas zoom is a CSS
   transform, so it does *not* change `clientWidth` — cols/rows stay stable across zoom.
   `scale-fix.ts` patches xterm's mouse coords so text selection stays aligned when zoomed.
+- **A shared Codex daemon restart is NOT a terminal-session restart.** tmux and the thread survive,
+  but every `codex --remote unix://` TUI on that account's one app-server socket exits together, so
+  `buildCodexLauncherScript` stays in the pane as a bounded supervisor after binding a thread instead
+  of `exec`ing the TUI. It resumes that exact thread ONLY when `app-server daemon version` stops
+  reporting `status: running` or the control-socket inode changed (a healthy generation returns the
+  original status, so a deterministic CLI error cannot relaunch forever); it never replays the launch
+  prompt, and three rapid resets stop with a manual `codex resume` receipt. A stale PID-ownership
+  record on a responsive shared process must not trigger killing the "orphan". Both shells wire the
+  spine (`server/codex-shared-identity.ts`); generated-shell tests cover replaced-socket,
+  missing-daemon, healthy-client-error (the mutation guard) and responsive-orphan under real `/bin/sh`.
+- **Where the wheel stops being the terminal's is decided by HIT TEST, per packet** (`Canvas.tsx`
+  `overNativeScrollable` = `target?.closest('.nowheel')`, the class React Flow's `panOnScroll` walks
+  too). (a) **Inside the body the wheel is already the terminal's, inset band included**:
+  `.term-node__xterm` carries `nowheel` at `inset: 0` over a padding/border-free body, so the visible
+  inset band is the HOST's hit area — the styles.css inset is PAINT, not hit testing (pinned by
+  `canvas/terminal-wheel-boundary.test.ts`). So an overlay over a LIVE terminal owes
+  `pointer-events: none` (`.term-node__stalecwd`), while one REPLACING a dead view
+  (`.term-node__offscreen` / `__closed`) keeps the canvas wheel. (b) **The boundary that actually
+  moves is TEMPORAL**: while up, `.term-hover-guard` covers the body and is NOT `nowheel`, so for the
+  first `panHoverDelay` after the pointer enters (and after it leaves) a wheel over terminal text pans
+  the canvas — the guard's "quick drag = move, scroll = pan" contract, and why issue #767's incidents
+  cannot be reproduced on demand. Do not hoist `nowheel` to `.term-node__body` (swallows the guard) or
+  to the whole node (kills wheel-zoom-to-cursor).

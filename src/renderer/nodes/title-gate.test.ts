@@ -37,11 +37,11 @@ describe('session-name title gates', () => {
   })
 
   it('the `/rename` push is gated on the WRITE capability', () => {
-    // Matched on `renameCommand(` rather than the literal `/rename `: the line is no longer
-    // composed here — see the next test for why that matters.
+    // Matched on `pushSessionRename(`: the push is delegated to the shared helper,
+    // which owns both the pane probe and renameCommand composition.
     const pushes = terminalNode
       .split('\n')
-      .filter((l) => l.includes('renameCommand(') && l.includes('sendText'))
+      .filter((l) => l.includes('pushSessionRename('))
     expect(pushes.length).toBe(1)
     expect(pushes[0]).toContain('canRenameNode')
   })
@@ -114,16 +114,20 @@ describe('session-name title gates', () => {
 })
 
 /**
- * The claude-transcript gates: `claudeTranscript` (`readsClaudeTranscript(agentId)`), NOT `showUsage`
+ * The claude-transcript gate: `claudeTranscript` (`readsClaudeTranscript(agentId)`), NOT `showUsage`
  * (`hasUsage(agentId)`).
  *
- * `USAGE_CAPABLE` grew to claude + codex + gemini, so `showUsage` is now true for three agents while
- * only ONE of them has a claude transcript. Both readers behind these gates resolve a session id
+ * `USAGE_CAPABLE` grew to claude + codex + gemini + grok, so `showUsage` is now true for four agents
+ * while only ONE of them has a claude transcript. The reader behind this gate resolves a session id
  * through claude's `resolveTranscript`, whose cwd fallback answers *the newest claude transcript for
- * that cwd* — so on a codex or gemini node they resolve an UNRELATED claude session and then meter
- * it, and search it, under this node's session id. That was this branch's own Critical fix, and
- * reverting either gate to `showUsage` left the full suite green: nothing in this repo renders
- * `TerminalNode`, so this file is the only thing standing between the bug and a re-landing.
+ * that cwd* — so on a codex or gemini node it resolves an UNRELATED claude session and searches it
+ * under this node's session id. That was this branch's own Critical fix, and reverting the gate to
+ * `showUsage` left the full suite green: nothing in this repo renders `TerminalNode`, so this file
+ * is the only thing standing between the bug and a re-landing.
+ *
+ * `context.ensure` USED to be gated here too and deliberately is not any more — see its own test
+ * below. Its handler stopped resolving every agent through claude's resolver, which is the only
+ * thing that ever made the shared gate necessary; the find bar's index still does, so it stays.
  *
  * Asserted per LINE rather than with `toContain` over a 6000-line file: a whole-file `toContain`
  * failure dumps the file as its diff, and a per-line assertion names the site instead.
@@ -140,14 +144,32 @@ describe('claude-transcript gates', () => {
     expect(terminalNode).toContain('const showUsage = !!agentId && hasUsage(agentId)')
   })
 
-  it('gates the mount-time meter rehydration (`context.ensure`)', () => {
+  /**
+   * `context.ensure` is the ONE site that legitimately left this gate, and what makes that safe is
+   * the argument it now passes instead.
+   *
+   * The gate never protected the meter; it protected against a HANDLER that resolved every agent
+   * through claude's `resolveTranscript`. That handler is now `core/context-ensure.ts`, which
+   * routes on `agentId` to each agent's own locator and tail — so the renderer can gate on the
+   * meter's own capability (`showUsage`), and a codex node reaches codex's locator rather than
+   * nothing at all.
+   *
+   * The pin therefore moves with the mechanism rather than being deleted: `agentId` MUST reach the
+   * call, because a widened gate that does not pass it is precisely the original bug (every agent
+   * resolving as claude, on claude's cwd fallback, adopting a stranger's session). `id` is pinned
+   * for the same reason on the remote leg: without it the handler cannot tell an SSH-project node
+   * from a local one, which is what issue #813 reported. `core/context-ensure.test.ts` pins the
+   * routing itself.
+   */
+  it('passes the agent + node id to the mount-time meter rehydration (`context.ensure`)', () => {
     const found = sites('window.nodeTerminal.context.ensure(')
     expect(found.length).toBe(1)
     const [lineNo] = found[0]
-    // The `if (…) ensure(…)` guard is the line above the call.
-    const guard = lines.slice(Math.max(0, lineNo - 3), lineNo).join('\n')
-    expect(guard, `${lineNo}: context.ensure guard`).toContain('claudeTranscript')
-    expect(guard, `${lineNo}: context.ensure guard`).not.toContain('showUsage')
+    // The `if (…) ensure(…)` guard is the line above the call; the arguments follow it.
+    const call = lines.slice(Math.max(0, lineNo - 3), lineNo + 7).join('\n')
+    expect(call, `${lineNo}: context.ensure guard`).toContain('showUsage')
+    expect(call, `${lineNo}: context.ensure routes per agent`).toContain('agentId')
+    expect(call, `${lineNo}: context.ensure carries the node id`).toMatch(/^\s*id,$/m)
   })
 
   it('gates the find bar’s transcript index (`searchTranscript`)', () => {

@@ -1,5 +1,13 @@
-import { describe, expect, it } from 'vitest'
-import { largestFreeRect, rectToPadding, rectsOverlap, type FitRect } from './fit-view'
+// @vitest-environment jsdom
+import { afterEach, describe, expect, it } from 'vitest'
+import {
+  FIT_VIEW_GAP,
+  largestFreeRect,
+  rectToPadding,
+  rectsOverlap,
+  solveFitFrame,
+  type FitRect
+} from './fit-view'
 
 /**
  * Geometry measured from a real 1264x722 canvas (see docs/superpowers/specs) — the chrome rects
@@ -120,5 +128,50 @@ describe('rectToPadding', () => {
       right: '0px',
       bottom: '0px'
     })
+  })
+})
+
+describe('solveFitFrame answers in the pane\u2019s own coordinates', () => {
+  // The camera transform lives in pane space, so a caller that computes the viewport itself
+  // (`viewportForRectInFrame`) needs the frame there — converting per call site is how the two
+  // would drift. `solveFitPadding` is expressed through this, so both stay one solve.
+  function pane(rect: { left: number; top: number; width: number; height: number }): HTMLElement {
+    const el = document.createElement('div')
+    el.getBoundingClientRect = () =>
+      ({
+        left: rect.left,
+        top: rect.top,
+        right: rect.left + rect.width,
+        bottom: rect.top + rect.height,
+        width: rect.width,
+        height: rect.height,
+        x: rect.left,
+        y: rect.top
+      }) as DOMRect
+    return el
+  }
+
+  afterEach(() => {
+    document.body.innerHTML = ''
+  })
+
+  it('offsets the frame by the pane origin, so an inset pane does not shift the camera', () => {
+    const flush = pane({ left: 0, top: 0, width: 1200, height: 800 })
+    const inset = pane({ left: 300, top: 120, width: 1200, height: 800 })
+    expect(solveFitFrame(inset, 600, 400)).toEqual(solveFitFrame(flush, 600, 400))
+  })
+
+  it('keeps the frame clear of visible chrome', () => {
+    document.body.innerHTML = '<div class="dock"></div>'
+    const dock = document.querySelector('.dock')!
+    dock.getBoundingClientRect = () =>
+      ({ left: 0, top: 700, right: 1200, bottom: 800, width: 1200, height: 100, x: 0, y: 700 }) as DOMRect
+    const frame = solveFitFrame(pane({ left: 0, top: 0, width: 1200, height: 800 }), 600, 400)!
+    expect(frame.bottom).toBeLessThanOrEqual(700 - FIT_VIEW_GAP)
+  })
+
+  it('gives up rather than returning a degenerate frame', () => {
+    expect(solveFitFrame(pane({ left: 0, top: 0, width: 8, height: 8 }), 600, 400)).toBeNull()
+    expect(solveFitFrame(pane({ left: 0, top: 0, width: 1200, height: 800 }), 0, 400)).toBeNull()
   })
 })

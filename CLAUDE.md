@@ -8,6 +8,11 @@ testing habits). This file is what you reach for when you need to know *why* a r
 is, or you are changing a subsystem it describes. A change that other developers must know about
 belongs in BOTH (see Conventions).
 
+**PR text (title, description, comments, review responses) follows the `pr-writing` skill**: what
+changed and why it matters, then how it was checked and what was not, then risks or follow-up when
+there are any. Structure proportional to the change. `CONTRIBUTING.md` § Pull requests is the
+human-facing half of the same rule.
+
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## How this documentation is organized (read this first)
@@ -36,11 +41,19 @@ file has been opened yet. A rule you did not load is an invariant you will viola
 | `.claude/rules/agents.md` | Agent support: registry + capabilities, hooks, permission mode, transcripts, subagent/workflow viz, adding a new agent |
 | `.claude/rules/agents-canvas-control.md` | Canvas control (nodeterm.sh shim, verbs, fan-in, --after, verify panel) and Context Link |
 | `.claude/rules/agents-accounts-usage.md` | Managed Claude/Codex accounts, account switch, usage indicator scope, remote usage |
+| `.claude/rules/agents-grok.md` | Grok agent per-CLI deep reference: capabilities, hook-directory dialect, subagent-card keying |
+| `.claude/rules/agents-codex.md` | Codex shared-thread node identity: tool-shell recovery, the exported HMAC record |
 | `.claude/rules/session-memory.md` | Session memory: the RAM pill, the per-session panel, socket fan-out kills |
 | `.claude/rules/keybindings.md` | Keybindings (registry, overrides, dispatch) and window chrome / menu stand-down |
 | `.claude/rules/canvas.md` | Canvas interaction & panels: menus, undo, zoom, goToNode, breadcrumbs, palette, sidebar, explorer, settings, theme |
 | `.claude/rules/source-control-worktrees.md` | Source Control panel, AI commit messages, git worktrees bound to group frames |
 | `.claude/rules/kanban.md` | Kanban view: dual-source board, card modal, board log, labels, metadata |
+| `.claude/rules/terminal-ssh.md` | SSH remote terminals: ControlMaster early-publish + boot pre-warm, per-host freshness read, late cold-start self-heal, remote pty spawn pacing, remote node teardown / owed kills |
+| `.claude/rules/canvas-layouts.md` | Canvas layouts: named node-geometry snapshots per project (save/restore/update/delete) |
+| `.claude/rules/canvas-idle-energy.md` | Idle-energy animation frame-loop gate (styles.css `--nt-anim-state`, window/board attributes) |
+| `.claude/rules/window-behavior.md` | Main-process window behavior: geometry restore + window-raise policy |
+| `.claude/rules/node-colors.md` | Node colors: one palette (system + agent sections), swatches, `color --color` boundary |
+| `.claude/rules/files-node.md` | The `files` node (file-manager node) |
 | `.claude/rules/relay.md` | Remote access (phone relay): free, not Pro |
 | `.claude/rules/speech.md` | Speech / dictation (desktop + server) |
 | `.claude/rules/packaging.md` | Packaging, Windows beta, auto-update, check feed, telemetry |
@@ -131,6 +144,17 @@ means — and what you may assume when writing a feature — is three tiers, not
   fails on any such read that does not. `*.bat`/`*.cmd`/`*.ps1` are the deliberate exception and
   keep CRLF: cmd.exe is not reliably tolerant of LF, and those are the files a Windows contributor
   runs before anything else works.
+- **PATH resolution and direct execution are separate on Windows.** `findInPathString` correctly
+  follows `PATHEXT`, which means an npm-installed CLI may resolve to `<name>.cmd`; Node's
+  `execFile`/`spawn` still cannot execute that path directly (`spawn EINVAL`). App-owned
+  subprocesses must pass their resolved executable and argv through `directExecutableInvocation`
+  (`src/core/exec-path.ts`), which invokes `.cmd` through a hidden `cmd.exe` with explicit escaping,
+  verbatim arguments and delayed expansion off. Never replace this with `shell:true`: commit prompts
+  and other user-controlled arguments would then be reinterpreted as shell syntax. The helper fails
+  closed for `.bat`/`.ps1`, CR/LF/NUL inside argv, and command lines above cmd's real 8,191-character
+  ceiling. stdin stays a byte stream directly into the shim; routing it through an npm `.ps1` shim's
+  `$input | & node` text pipeline corrupts Unicode and line endings under Windows PowerShell 5.1.
+  Interactive terminal agent launches keep using `agent-launch.ts`'s separately tested shell plan.
 
 ## Commands
 
@@ -262,9 +286,13 @@ The codebase is split by Electron process boundary — keep code on the correct 
   bridge, so agent-status badges, subagent cards, and the context meter now work in the
   browser (transcript-path jailed against forged POSTs). It also serves the two transcript READ
   channels (`registerTranscriptIpc` — the ⌘M chat view + the find-bar's transcript index; see the
-  ⌘M bullet in `.claude/rules/agents.md`). Still deferred:
-  **canvas-control** (`agent:control`) is not wired. (The SDK **chat node** — once listed here
-  as deferred — was removed entirely, 2026-07; see the chat-node note in `.claude/rules/nodes.md`.)
+  ⌘M bullet in `.claude/rules/agents.md`). **Canvas control is opt-in**
+  (`NODETERM_SERVER_CANVAS_CONTROL=1` / `--canvas-control`): the Server shell installs its own shim
+  and runs a serialized `HeadlessNodeFactory`; disabled remains the default. Its project writes
+  broadcast on `workspace:server-change`, NOT the outside-edit channel — they are this core's own
+  writes and are three-way merged by the renderer, never put behind the conflict bar (see
+  `.claude/rules/persistence.md`). (The SDK **chat node** — once listed here as deferred — was
+  removed entirely, 2026-07; see the chat-node note in `.claude/rules/nodes.md`.)
 - **`src/preload/`** — the only bridge. `index.ts` uses `contextBridge` to expose a
   narrow API on `window.nodeTerminal` (typed in `index.d.ts`). `contextIsolation` is on,
   `nodeIntegration` off.

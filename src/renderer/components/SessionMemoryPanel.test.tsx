@@ -7,6 +7,7 @@ import { useAgentStatus } from '../state/agentStatus'
 import { useProjects } from '../state/projects'
 import { useSessionMemory } from '../state/sessionMemory'
 import { SessionMemoryPanel } from './SessionMemoryPanel'
+import type { SessionPauseOffer } from '../lib/sessionPause'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -64,6 +65,11 @@ let onClose: Mock<() => void>
 let refreshFull: Mock<(scopeKey: string, projectId?: string) => Promise<void>>
 let startHostPoll: Mock<(scopeKey: string, projectId?: string) => void>
 let stopHostPoll: Mock<() => void>
+let onPauseSession: Mock<(nodeId: string) => Promise<void>>
+/** What `pauseOfferFor` answers for a row. Canvas owns the real decision (`sessionPauseOffer`);
+ *  the panel only draws it, so the harness supplies it directly. Default = the pre-feature panel:
+ *  no row offers a pause, so every existing assertion sees exactly the old DOM. */
+let pauseOffer: (nodeId: string) => SessionPauseOffer = () => ({ show: false })
 
 function mount(over: Partial<ReturnType<typeof useSessionMemory.getState>> = {}): void {
   useSessionMemory.setState({
@@ -80,7 +86,13 @@ function mount(over: Partial<ReturnType<typeof useSessionMemory.getState>> = {})
   root = createRoot(host)
   act(() =>
     root.render(
-      <SessionMemoryPanel onGoToNode={onGoToNode} onKillSession={onKillSession} onClose={onClose} />
+      <SessionMemoryPanel
+        onGoToNode={onGoToNode}
+        onKillSession={onKillSession}
+        pauseOfferFor={(id) => pauseOffer(id)}
+        onPauseSession={onPauseSession}
+        onClose={onClose}
+      />
     )
   )
 }
@@ -90,6 +102,8 @@ const mainOf = (i: number): HTMLButtonElement =>
   rowsOf()[i].querySelector<HTMLButtonElement>('.sessmem-row__main')!
 const killOf = (i: number): HTMLButtonElement =>
   rowsOf()[i].querySelector<HTMLButtonElement>('.sessmem-row__kill')!
+const pauseOf = (i: number): HTMLButtonElement | null =>
+  rowsOf()[i].querySelector<HTMLButtonElement>('.sessmem-row__pause')
 const text = (): string => host.textContent ?? ''
 
 beforeEach(() => {
@@ -99,6 +113,8 @@ beforeEach(() => {
   refreshFull = vi.fn<(scopeKey: string, projectId?: string) => Promise<void>>(async () => {})
   startHostPoll = vi.fn<(scopeKey: string, projectId?: string) => void>()
   stopHostPoll = vi.fn<() => void>()
+  onPauseSession = vi.fn<(nodeId: string) => Promise<void>>(async () => {})
+  pauseOffer = () => ({ show: false })
   useProjects.setState({ projects: PROJECTS, activeProjectId: 'p1' })
   useAgentStatus.setState({ byId: { t1: { state: 'working', unread: false } } })
 })
@@ -352,5 +368,84 @@ describe('SessionMemoryPanel', () => {
     expect(startHostPoll).not.toHaveBeenCalled()
     expect(stopHostPoll).not.toHaveBeenCalled()
     root = createRoot(document.createElement('div'))
+  })
+
+  describe('pause control', () => {
+    it('renders nothing in the slot for a row that cannot be paused', () => {
+      // The default offer in this harness is `{show:false}` for every row, which is also the
+      // pre-feature DOM — so every other test in this file asserts the unchanged panel.
+      mount()
+      expect(pauseOf(0)).toBeNull()
+      expect(pauseOf(1)).toBeNull()
+    })
+
+    it('pauses the row it was clicked on, then re-sweeps so the freed memory shows', () => {
+      pauseOffer = () => ({ show: true, disabled: false, hint: 'Pause session' })
+      mount()
+      refreshFull.mockClear()
+      const btn = pauseOf(0)!
+      act(() => btn.click())
+      expect(onPauseSession).toHaveBeenCalledWith(ROWS[0].nodeId)
+      // The sweep is what turns the action into a visible number; without it the row keeps
+      // reporting the memory of a process that has just exited.
+      return Promise.resolve().then(() => {
+        expect(refreshFull).toHaveBeenCalled()
+      })
+    })
+
+    it('does not fire for a disabled offer, even if the click gets through', () => {
+      // `disabled` is the DOM's answer; the handler carries the code's, so a synthetic click (or a
+      // browser that dispatches one anyway) cannot type `/exit` into a busy session.
+      pauseOffer = () => ({ show: true, disabled: true, hint: 'This session is busy' })
+      mount()
+      const btn = pauseOf(0)!
+      expect(btn.disabled).toBe(true)
+      act(() => btn.click())
+      expect(onPauseSession).not.toHaveBeenCalled()
+    })
+
+    it('carries the offer hint as the tooltip, so a refusal explains itself', () => {
+      pauseOffer = () => ({ show: true, disabled: true, hint: 'Open this session on its canvas' })
+      mount()
+      expect(pauseOf(0)!.title).toBe('Open this session on its canvas')
+    })
+
+    it('draws the shared power icon, and the shared spinner while the pause is in flight', async () => {
+      // The panel's pause is the SAME action as the node menu's "Pause session", which draws
+      // `IconPower` — one action seen in two places must not speak in two voices.
+      let settle = (): void => {}
+      onPauseSession.mockImplementation(
+        () =>
+          new Promise<void>((res) => {
+            settle = () => res()
+          })
+      )
+      pauseOffer = () => ({ show: true, disabled: false, hint: 'Pause session' })
+      mount()
+      const btn = pauseOf(0)!
+      expect(btn.querySelector('svg')).not.toBeNull()
+      expect(btn.querySelector('.ui-spinner')).toBeNull()
+
+      act(() => btn.click())
+      expect(btn.querySelector('.ui-spinner')).not.toBeNull()
+      expect(btn.querySelector('svg')).toBeNull()
+
+      // Settle inside `act` so the icon is back before the test ends — a promise still pending at
+      // teardown resolves into an unmounted tree.
+      await act(async () => {
+        settle()
+      })
+      expect(pauseOf(0)!.querySelector('svg')).not.toBeNull()
+    })
+
+    it('asks per row, so one row may offer a pause while another does not', () => {
+      pauseOffer = (id) =>
+        id === ROWS[0].nodeId
+          ? { show: true, disabled: false, hint: 'Pause session' }
+          : { show: false }
+      mount()
+      expect(pauseOf(0)).not.toBeNull()
+      expect(pauseOf(1)).toBeNull()
+    })
   })
 })

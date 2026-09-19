@@ -21,7 +21,7 @@ import {
   deliverFromControl,
   messagingEnabledVia,
   type AgentMessagingDeps
-} from './agent-messaging'
+} from '../core/agents/agent-messaging'
 import type { CapabilityAckMap } from '../core/project-capability-consent'
 import { resetMessageFlow } from '../core/agents/agent-message-flow'
 import {
@@ -106,11 +106,11 @@ describe('messagingEnabledVia — the grant, never the raw file bit', () => {
   const run = (project: (Partial<Record<'agentMessaging', unknown>> & { capabilityAck?: CapabilityAckMap }) | undefined) =>
     deliverFromControl(
       req,
-      baseDeps({ messagingEnabled: messagingEnabledVia(() => project) })
+      baseDeps({ messagingEnabled: messagingEnabledVia(() => project, () => ({})) })
     )
 
   it('flag true but the clone notice UNANSWERED: refused as switch-off, no pane touched', async () => {
-    const deps = baseDeps({ messagingEnabled: messagingEnabledVia(() => ({ agentMessaging: true })) })
+    const deps = baseDeps({ messagingEnabled: messagingEnabledVia(() => ({ agentMessaging: true }), () => ({})) })
     const { outcome, reply } = await deliverFromControl(req, deps)
     expect(outcome).toEqual({ kind: 'notPermitted', reason: 'switch-off' })
     expect(reply.ok).toBe(false)
@@ -127,7 +127,7 @@ describe('messagingEnabledVia — the grant, never the raw file bit', () => {
       messagingEnabled: messagingEnabledVia(() => ({
         agentMessaging: true,
         capabilityAck: { agentMessaging: 'kept' as const }
-      }))
+      }), () => ({}))
     })
     const { outcome, reply } = await deliverFromControl(req, deps)
     expect(outcome.kind).toBe('delivered')
@@ -180,7 +180,7 @@ describe('end to end through a REAL WorkspaceStore — the desktop wiring, minus
   const storeDeps = (store: WorkspaceStore) =>
     baseDeps({
       projects: () => store.persistedCanvases(),
-      messagingEnabled: messagingEnabledVia((id) => store.capabilityProjectFor(id)),
+      messagingEnabled: messagingEnabledVia((id) => store.capabilityProjectFor(id), () => ({})),
       paneOwnerProject: (id) => paneOwnerProject(id)
     })
 
@@ -209,6 +209,72 @@ describe('end to end through a REAL WorkspaceStore — the desktop wiring, minus
     const { outcome } = await deliverFromControl(req, deps)
     expect(outcome).toEqual({ kind: 'notPermitted', reason: 'switch-off' })
     expect(deps.sent).toEqual([])
+  })
+
+  describe('the MACHINE DEFAULT (settings.json agentMessagingDefault), read per call', () => {
+    let defaults: { agentMessagingDefault?: boolean }
+    const defaultDeps = (store: WorkspaceStore) =>
+      baseDeps({
+        projects: () => store.persistedCanvases(),
+        messagingEnabled: messagingEnabledVia(
+          (id) => store.capabilityProjectFor(id),
+          () => defaults
+        ),
+        paneOwnerProject: (id) => paneOwnerProject(id)
+      })
+    beforeEach(() => {
+      defaults = { agentMessagingDefault: true }
+    })
+
+    it('a project.json with NO agentMessaging field delivers under the default — and stops the moment it is turned off', async () => {
+      const store = new WorkspaceStore()
+      await store.save(ws(project({ cwd: projRoot })))
+      const raw = await fs.readFile(path.join(projRoot, '.nodeterm/project.json'), 'utf-8')
+      expect(raw).not.toContain('agentMessaging')
+      recordFreshSpawnOwner('b1', 'p1')
+      const deps = defaultDeps(store)
+      expect((await deliverFromControl(req, deps)).outcome.kind).toBe('delivered')
+      defaults = { agentMessagingDefault: false }
+      resetMessageFlow()
+      expect((await deliverFromControl(req, defaultDeps(store))).outcome).toEqual({
+        kind: 'notPermitted',
+        reason: 'switch-off'
+      })
+    })
+
+    it('an explicit false committed in project.json refuses, even with the default on', async () => {
+      const store = new WorkspaceStore()
+      await store.save(ws(project({ cwd: projRoot, agentMessaging: false })))
+      const raw = await fs.readFile(path.join(projRoot, '.nodeterm/project.json'), 'utf-8')
+      expect(raw).toContain('"agentMessaging": false')
+      recordFreshSpawnOwner('b1', 'p1')
+      const deps = defaultDeps(store)
+      expect((await deliverFromControl(req, deps)).outcome).toEqual({
+        kind: 'notPermitted',
+        reason: 'switch-off'
+      })
+      expect(deps.sent).toEqual([])
+    })
+
+    it('a CLONED true with no answer on this machine refuses, even with the default on', async () => {
+      const store = new WorkspaceStore()
+      await store.save(ws(project({ cwd: projRoot, agentMessaging: true })))
+      recordFreshSpawnOwner('b1', 'p1')
+      expect((await deliverFromControl(req, defaultDeps(store))).outcome).toEqual({
+        kind: 'notPermitted',
+        reason: 'switch-off'
+      })
+    })
+
+    it('the default does not rescue an UNPROVEN pane — ownership still gates first', async () => {
+      const store = new WorkspaceStore()
+      await store.save(ws(project({ cwd: projRoot })))
+      // No recordFreshSpawnOwner: e.g. a pane that survived an app restart.
+      expect((await deliverFromControl(req, defaultDeps(store))).outcome).toEqual({
+        kind: 'notPermitted',
+        reason: 'unproven-target-owner'
+      })
+    })
   })
 
   it('flag committed but DECLINED on this machine: refused as switch-off', async () => {
@@ -331,7 +397,7 @@ describe('runtime pane-ownership gate (PR #237 fix round 2) — over a REAL stor
   const storeDeps = (store: WorkspaceStore) =>
     baseDeps({
       projects: () => store.persistedCanvases(),
-      messagingEnabled: messagingEnabledVia((id) => store.capabilityProjectFor(id)),
+      messagingEnabled: messagingEnabledVia((id) => store.capabilityProjectFor(id), () => ({})),
       paneOwnerProject: (id) => paneOwnerProject(id)
     })
 

@@ -43,6 +43,7 @@ export type CommandId =
   | 'app.settings'
   | 'app.shortcutsPanel'
   | 'view.kanbanToggle'
+  | 'view.globalKanbanToggle'
   | 'view.focusMode'
   | 'panel.explorer'
   | 'panel.sourceControl'
@@ -105,6 +106,8 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     defaultBindings: both('Cmd+Slash'), allowInTerminal: true },
   { id: 'view.kanbanToggle', title: 'Toggle kanban board', group: 'General', scope: 'app',
     defaultBindings: both('Cmd+Shift+B'), allowInTerminal: true },
+  { id: 'view.globalKanbanToggle', title: 'Toggle global kanban (Omni)', group: 'General', scope: 'app',
+    defaultBindings: both(), allowInTerminal: true },
   // Focus mode fills the window with one node — most naturally invoked from INSIDE the terminal
   // being enlarged, hence allowInTerminal. Scope stays 'canvas': over the kanban board or while
   // typing in an input there is no node geometry for the toggle to act on (the pre-registry

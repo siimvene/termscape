@@ -42,6 +42,23 @@ export type ServerConfig = {
    */
   installHooks?: boolean
   /**
+   * Enable the Server Edition `/control/*` canvas runtime. Defaults OFF so an upgrade cannot
+   * silently grant agents a new local execution surface. Environment:
+   * NODETERM_SERVER_CANVAS_CONTROL=1;
+   * CLI: --canvas-control.
+   *
+   * Enabling it lets an agent session run arbitrary commands on this host as the user the server
+   * runs as: `open-terminal --cmd <command>` is executed in a PTY this process spawns, with that
+   * user's environment, files and credentials. Hook endpoint authentication, verified node
+   * identity and per-project capability gates still apply when enabled, but they decide WHICH
+   * agent may ask, not WHAT may be asked for — the surface this flag opens is the host, not the
+   * canvas. Boot announces it on stdout for the same reason (see startServer).
+   *
+   * The server-process env name is deliberately distinct from the per-session
+   * NODETERM_CANVAS_CONTROL discovery bit injected by HookServer.
+   */
+  canvasControl?: boolean
+  /**
    * Reverse-proxy SSO trust (issue #29): requests whose TCP peer is inside `nets` and
    * which carry `header` (non-empty) are authenticated without a session cookie.
    * Absent = feature off (default). See src/server/proxy-trust.ts and docs/SERVER.md.
@@ -108,6 +125,16 @@ export function resolveConfig(env: NodeJS.ProcessEnv, argv: string[]): ServerCon
   const peerMirror = (env.NODETERM_PEER_STATUS_MIRROR || '').trim()
   const peerUserDataDir =
     (env.NODETERM_PEER_USER_DATA || '').trim() || (peerMirror ? path.dirname(peerMirror) : undefined)
+  const truthy = (value: unknown): boolean => {
+    if (value === true) return true
+    if (typeof value !== 'string') return false
+    const normalized = value.trim().toLowerCase()
+    return normalized === '1' || normalized === 'true' || normalized === 'yes'
+  }
+  const canvasControl =
+    args['canvas-control'] !== undefined
+      ? truthy(args['canvas-control'])
+      : truthy(env.NODETERM_SERVER_CANVAS_CONTROL)
 
   // Headless binds nothing, so the "plain HTTP on a public interface" hazard the loopback refusal
   // guards against does not apply — a stray NODETERM_HOST must not fail a headless boot.
@@ -148,6 +175,7 @@ export function resolveConfig(env: NodeJS.ProcessEnv, argv: string[]): ServerCon
     passwordSeed,
     trustProxy,
     headless,
+    canvasControl,
     ...(peerUserDataDir ? { peerUserDataDir } : {})
   }
 }

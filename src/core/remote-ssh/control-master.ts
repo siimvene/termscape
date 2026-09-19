@@ -226,9 +226,6 @@ export function checkMasterArgs(conn: SshConnection, controlPath: string): strin
 export function exitMasterArgs(conn: SshConnection, controlPath: string): string[] {
   return ['-O', 'exit', '-o', `ControlPath=${controlPath}`, ...portArgs(conn), target(conn)]
 }
-export function remoteTmuxHasSessionArgs(conn: SshConnection, controlPath: string, sessionId: string): string[] {
-  return childArgs(conn, controlPath, tmuxCmd(`tmux -L ${RMT_TMUX_SOCKET} has-session -t ${sessionId}`))
-}
 /**
  * Every nodeterm tmux session on the host, by name.
  *
@@ -478,6 +475,49 @@ export function remoteCapturePaneArgs(conn: SshConnection, controlPath: string, 
     tmuxCmd(`tmux -L ${RMT_TMUX_SOCKET} capture-pane -p -e -t ${sessionId} -S ${full ? '-' : '-200'}`)
   )
 }
+/**
+ * Ask the REMOTE tmux when a node's session was created, AND what the host's clock says now — in
+ * one round trip, because the caller wants an AGE and the two clocks are not the same clock.
+ *
+ * `#{session_created}` is an epoch stamp taken on the HOST, so subtracting our own `Date.now()`
+ * would fold that host's clock skew (and every NTP correction) into the answer. Computing the
+ * difference from two numbers the host produced in the same shell removes the question entirely.
+ *
+ * Verified on tmux 3.3a and 3.4: `session_created` has been a format variable since long before
+ * either (unlike `#{bracket_paste_flag}`, the version trap this file's neighbours document), and
+ * `new-session -A` on an EXISTING session preserves the original creation time — which is the whole
+ * reason the answer can distinguish "this session was already here" from "our attach made it".
+ * Targeted `-t '=<name>:'` — the same exact-match form `PtyManager.paneCwdStale` documents, and
+ * for the same measured reason: without `=` tmux falls back to fnmatch then PREFIX matching, so
+ * `nt-abc` could answer about `nt-abcdef`, and a bare `=name` (no trailing colon) resolves NOTHING
+ * for a target-PANE query — exit 0, every format empty. Re-measured here on tmux 3.3a and 3.4.
+ */
+export function remoteSessionAgeArgs(conn: SshConnection, controlPath: string, sessionId: string): string[] {
+  return childArgs(
+    conn,
+    controlPath,
+    tmuxCmd(
+      `printf '%s %s\n' "$(tmux -L ${RMT_TMUX_SOCKET} display-message -p -t '=${sessionId}:' '#{session_created}')" "$(date +%s)"`
+    )
+  )
+}
+
+/**
+ * Seconds since a tmux session was created, from the `"<created> <now>"` line
+ * `remoteSessionAgeArgs` (and its local twin) produce. `null` for anything we cannot read as two
+ * epoch numbers — a missing session, an empty format, a shell that printed something else. Never
+ * negative: a host whose clock stepped backwards between the two `$( )` is unknowable, not brand
+ * new, and the caller ACTS on a small age.
+ */
+export function parseSessionAge(stdout: string): number | null {
+  const [created, now] = stdout.trim().split(/\s+/)
+  const a = Number(created)
+  const b = Number(now)
+  if (!Number.isFinite(a) || !Number.isFinite(b) || a <= 0 || b <= 0) return null
+  const age = b - a
+  return age < 0 ? null : age
+}
+
 /**
  * Ask the REMOTE tmux which command is in the foreground of a node's pane — the remote
  * counterpart of `PtyManager.paneCommand`'s local `display-message` path. The format is

@@ -10,6 +10,7 @@ import { machineNoun, otherMachines, thisMachine } from '@renderer/lib/machineNa
 import { Input } from '@renderer/ui/Input'
 import {
   licenseSentence,
+  proStatusLine,
   canReleaseDevices,
   canUseKeyElsewhere,
   releaseFailureSentence,
@@ -115,13 +116,7 @@ export function LicenseSection({ isActive }: { isActive: boolean }): React.JSX.E
         {ent.isPremium ? (
           <div className="space-y-3">
             <ProCompare />
-            <p className="text-sm text-muted">
-              Pro — active
-              {ent.status.expiresAt
-                ? ` until ${new Date(ent.status.expiresAt * 1000).toLocaleDateString()}`
-                : ''}
-              .
-            </p>
+            <p className="text-sm text-muted">{proStatusLine(ent.status)}</p>
             {detail ? (
               <>
                 {/* No key ⇒ no field. A row reading "not available" beside a sentence saying there

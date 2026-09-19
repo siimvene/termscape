@@ -17,6 +17,15 @@ export const IPC = {
   ptyGenerateName: 'pty:generate-name',
   ptyGenerateGroupName: 'pty:generate-group-name',
   ptyCapture: 'pty:capture',
+  /** Renderer → core: has the host behind this ControlMaster POSITIVELY listed the node's remote
+   *  tmux session? The strict half of the coalesced `tmux list-sessions` read behind
+   *  `PtyManager.remoteSessionConfirmed` — an unreadable host answers false, not "assume warm".
+   *  Gates the early-attach path (attach as soon as the master answers `-O check`, before the
+   *  connect's remote setup chain finishes); desktop-only, like SSH projects themselves. */
+  ptyRemoteSessionConfirmed: 'pty:remote-session-confirmed',
+  /** Renderer → core: seconds since this node's tmux session was created, measured on the machine
+   *  that holds it (`PtyApi.sessionAge`). The late cold-start check behind `freshUnverified`. */
+  ptySessionAge: 'pty:session-age',
   ptyReadScrollback: 'pty:read-scrollback',
   ptySendText: 'pty:send-text',
   ptyTmuxStatus: 'pty:tmux-status',
@@ -40,6 +49,10 @@ export const IPC = {
   claudeReadTranscript: 'claude:read-transcript',
   claudeCopySessionTranscript: 'claude:copy-session-transcript',
   chatReadTranscript: 'chat:read-transcript',
+  /** Does a claude-shaped transcript exist for this session id? Tri-state
+   *  (`present | absent | unknown`) — see `TranscriptPresence`. The one caller that ACTS on a
+   *  negative is cold restore, so "we could not look" must never read as "it is gone". */
+  transcriptExists: 'transcript:exists',
   claudeAccountsAdd: 'claude-accounts:add',
   claudeAccountsWaitLogin: 'claude-accounts:wait-login',
   claudeAccountsCancelWait: 'claude-accounts:cancel-wait',
@@ -47,6 +60,8 @@ export const IPC = {
   /** Server Edition beside a desktop peer: the peer's managed Claude accounts a spawn here can run
    *  under (read-only list; see `src/core/peer-claude-accounts.ts`). Not registered on desktop. */
   claudeAccountsPeerList: 'claude-accounts:peer-list',
+  claudeAccountsLink: 'claude-accounts:link',
+  claudeAccountsSetSkillSharing: 'claude-accounts:set-skill-sharing',
   // Machine-scoped managed Codex accounts (S6). Add/device-login/removal, plus the three-phase,
   // owner-authorized account switch (resume the SAME conversation id, never fork) and the
   // source-side leg of moving an idle conversation to an SSH account. See main/codex-accounts.ts.
@@ -413,6 +428,10 @@ export const IPC = {
   /** Payload: the `workspace.json.corrupt-<ts>` filename the unreadable index was preserved as. */
   workspaceCorruptRecovered: 'workspace:corrupt-recovered',
   workspaceExternalChange: 'workspace:external-change',
+  /** Server-originated project writes (Server Edition headless canvas control: an agent opened,
+   *  renamed, moved or closed a node and this core saved the file itself). NOT an outside edit —
+   *  the renderer three-way merges it instead of raising the conflict bar. */
+  workspaceServerChange: 'workspace:server-change',
   githubIssuesSubscribe: 'githubIssues:subscribe',
   githubIssuesUnsubscribe: 'githubIssues:unsubscribe',
   githubIssuesQuery: 'githubIssues:query',

@@ -35,6 +35,14 @@ afterAll(() => {
 })
 
 describe('hookServer.buildPtyEnv — canvas control gate', () => {
+  it('gives a plain terminal node identity without pretending it is an agent', () => {
+    const env = hookServer.buildPtyEnv('plain')
+    expect(env.NODETERM_NODE_ID).toBe('plain')
+    expect(env).not.toHaveProperty('NODETERM_AGENT_ID')
+    expect(env).not.toHaveProperty('NODETERM_CANVAS_CONTROL')
+    expect(env).not.toHaveProperty('NODETERM_PERM_WAIT_SECS')
+  })
+
   it('arms canvas control for a grok session', () => {
     expect(hookServer.buildPtyEnv('n1', 'grok').NODETERM_CANVAS_CONTROL).toBe('1')
   })

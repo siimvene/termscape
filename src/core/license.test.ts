@@ -376,6 +376,122 @@ describe('license seats entitlement', () => {
   })
 })
 
+describe('license subscription term (issue #800)', () => {
+  let fetchMock: ReturnType<typeof vi.fn>
+  let fake: import('./platform-fake').FakePlatform
+  const sent = (): LicenseStatus[] =>
+    fake.sent.filter((s) => s.channel === IPC.licenseChanged).map((s) => s.args[0] as LicenseStatus)
+  const status = (): Promise<LicenseStatus> =>
+    fake.handlers[IPC.licenseStatus]() as Promise<LicenseStatus>
+  const stored = (): { token?: string; termEndsAt?: number } =>
+    JSON.parse(readFileSync(path.join(h.userData, 'license.json'), 'utf-8'))
+
+  const WEEK_S = 7 * 24 * 60 * 60
+  /** A yearly App Store term: what the reporter bought, ~51 weeks past the token's own expiry. */
+  const yearly = (): number => Math.floor(Date.now() / 1000) + 365 * 24 * 60 * 60
+
+  beforeEach(async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'Date'] })
+    h.userData = mkdtempSync(path.join(tmpdir(), 'nt-license-term-'))
+    writeFileSync(path.join(h.userData, 'device-id'), 'test-device')
+    delete process.env.DO_NOT_TRACK
+    delete process.env.NODETERM_TELEMETRY_DISABLED
+    process.env.NODETERM_API_BASE = 'http://127.0.0.1:1'
+    fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    vi.resetModules()
+    const { initPlatform } = await import('./platform')
+    const { fakePlatform } = await import('./platform-fake')
+    fake = fakePlatform({ userDataDir: h.userData, isPackaged: false })
+    initPlatform(fake)
+  })
+
+  afterEach(async () => {
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
+    const { resetPlatformForTests } = await import('./platform')
+    resetPlatformForTests()
+    rmSync(h.userData, { recursive: true, force: true })
+  })
+
+  it('a reply with no term states NONE — the token expiry is never promoted to one', async () => {
+    // Exactly what every server in the field answers today: token + its own 7-day expiresAt.
+    const token = mint(WEEK_S)
+    fetchMock.mockResolvedValue(
+      jsonResponse({ active: true, token, tier: 'pro', expiresAt: Math.floor(Date.now() / 1000) + WEEK_S })
+    )
+    const { initLicense } = await import('./license')
+    initLicense()
+    await refreshed()
+
+    expect(sent().at(-1)!.active).toBe(true)
+    expect(sent().at(-1)!.termEndsAt).toBeNull()
+    expect((await status()).termEndsAt).toBeNull()
+  })
+
+  it('carries the stated term beside the token, persists it, and keeps it through offline grace', async () => {
+    const term = yearly()
+    fetchMock.mockResolvedValue(jsonResponse({ active: true, token: mint(WEEK_S), termEndsAt: term }))
+    const { initLicense } = await import('./license')
+    initLicense()
+    await refreshed()
+
+    expect(sent().at(-1)!.termEndsAt).toBe(term)
+    expect(stored().termEndsAt).toBe(term)
+    // …and the token's expiry stays what it is: the grace window, not the term.
+    expect(sent().at(-1)!.expiresAt).toBeLessThan(term)
+
+    fetchMock.mockRejectedValue(new Error('offline'))
+    await vi.advanceTimersByTimeAsync(6 * HOUR)
+    await refreshed()
+    expect(sent().at(-1)!.active).toBe(true)
+    expect(sent().at(-1)!.termEndsAt).toBe(term)
+  })
+
+  it('a later reply without a term clears the old one — a term belongs to its token', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ active: true, token: mint(WEEK_S), termEndsAt: yearly() }))
+    const { initLicense } = await import('./license')
+    initLicense()
+    await refreshed()
+    expect(stored().termEndsAt).toBeTypeOf('number')
+
+    fetchMock.mockResolvedValue(jsonResponse({ active: true, token: mint(WEEK_S) }))
+    await vi.advanceTimersByTimeAsync(6 * HOUR)
+    await refreshed()
+    expect(sent().at(-1)!.termEndsAt).toBeNull()
+    expect(stored().termEndsAt).toBeUndefined()
+  })
+
+  it.each([
+    ['null (a lifetime entitlement)', null],
+    ['zero', 0],
+    ['negative', -5],
+    ['a string', '2027-09-13'],
+    ['NaN-ish', 'NaN']
+  ])('a term that is %s reads as no term, never as a date', async (_label, termEndsAt) => {
+    fetchMock.mockResolvedValue(jsonResponse({ active: true, token: mint(WEEK_S), termEndsAt }))
+    const { initLicense } = await import('./license')
+    initLicense()
+    await refreshed()
+    expect(sent().at(-1)!.active).toBe(true)
+    expect(sent().at(-1)!.termEndsAt).toBeNull()
+    expect((await status()).termEndsAt).toBeNull()
+  })
+
+  it('a device the server no longer entitles loses its term with its token', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ active: true, token: mint(WEEK_S), termEndsAt: yearly() }))
+    const { initLicense } = await import('./license')
+    initLicense()
+    await refreshed()
+
+    fetchMock.mockResolvedValue(jsonResponse({ active: false }))
+    await vi.advanceTimersByTimeAsync(6 * HOUR)
+    await refreshed()
+    expect(sent().at(-1)!.termEndsAt).toBeNull()
+    expect(stored().termEndsAt).toBeUndefined()
+  })
+})
+
 describe('license detail + release', () => {
   let fake: import('./platform-fake').FakePlatform
 

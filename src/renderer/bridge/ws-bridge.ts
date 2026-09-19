@@ -25,11 +25,13 @@ import {
   type LogRecord,
   type BoardLogReadResult,
   type ChatTranscriptResult,
+  type TranscriptPresence,
   type ClaudeApi,
   type ClaudeCliCaps,
   type CopySessionTranscriptResult,
   type GrokApi,
   type GrokCliCaps,
+  type ClaudeSkillShareResult,
   type CodexApi,
   type CodexIdentityCaps,
   UNKNOWN_CODEX_IDENTITY_CAPS,
@@ -243,6 +245,16 @@ export function buildRealApi(
     generateGroupName: () => Promise.resolve(AI_NAMING_UNAVAILABLE),
     capture: (persistKey, full) =>
       client.request(IPC.ptyCapture, persistKey, full).catch(() => '') as Promise<string>,
+    // Documented degrade, not a stub with a hole in it: SSH PROJECTS are desktop-only (the whole
+    // `sshProject` surface is `U(...)`-stubbed here), so no browser session ever holds a remote
+    // ControlMaster to attach early over. `false` = "never attach early" = the pre-feature wait,
+    // which is exactly right for a shell that cannot produce the question.
+    remoteSessionConfirmed: () => Promise.resolve(false),
+    // REAL, unlike `remoteSessionConfirmed` above: the server runs on the machine whose tmux it is
+    // reading, so the local leg of this probe is exactly right there. Fail-open to `null` = "could
+    // not tell", the same answer every other failure path gives.
+    sessionAge: (persistKey) =>
+      client.request(IPC.ptySessionAge, persistKey).catch(() => null) as Promise<number | null>,
     readScrollback: (persistKey) =>
       client.request(IPC.ptyReadScrollback, persistKey) as Promise<string>,
     sendText: (persistKey, text, opts) =>
@@ -301,13 +313,14 @@ export function buildRealApi(
     onMigrated: (cb) => client.subscribe(IPC.workspaceMigrated, cb as Listener),
     // REAL: core broadcasts IPC.workspaceCorruptRecovered from the load path (workspace-store.ts).
     onCorruptRecovered: (cb) => client.subscribe(IPC.workspaceCorruptRecovered, cb as Listener),
-    // Deliberate degrade: the external-change WATCHER (core/workspace-watcher.ts) is only started
-    // by the desktop shell (src/main/index.ts), so the server never broadcasts
-    // IPC.workspaceExternalChange and there is nothing to subscribe to. Effect in the browser:
-    // an outside edit (git pull / a teammate's push) is not picked up until reload — no silent
-    // data loss (the store's own rev reconciliation still guards writes). Booting the watcher in
-    // src/server is the follow-up.
-    onExternalChange: () => () => {}
+    // Server Edition runs the shared WorkspaceWatcher and broadcasts outside file edits here.
+    // Remote-node adoption (the phone appending a session it started) rides it too: that IS
+    // "another device", which is what this channel means.
+    onExternalChange: (cb) => client.subscribe(IPC.workspaceExternalChange, cb as Listener),
+    // REAL: Server Edition canvas control broadcasts its own persisted bridge/rope changes here —
+    // wider than the node-only canvas:mut vocabulary, but ours, so they must not travel the
+    // outside-edit channel and end up behind the conflict bar (see server/canvas-control.ts).
+    onServerChange: (cb) => client.subscribe(IPC.workspaceServerChange, cb as Listener)
   }
 
   // REAL: WorkspaceStore (core) registers the project-settings:* channels too — same
@@ -586,8 +599,8 @@ export function buildFilesApi(
 
   const context: ContextApi = {
     onUpdate: (listener) => client.subscribe(IPC.contextUpdate, listener as Listener),
-    ensure: (sessionId, cwd, accountId) =>
-      client.cast(IPC.contextEnsure, sessionId, cwd, accountId)
+    ensure: (sessionId, cwd, accountId, nodeId, agentId) =>
+      client.cast(IPC.contextEnsure, sessionId, cwd, accountId, nodeId, agentId)
   }
 
   // Board-log: REAL over the bridge for local projects (the server routes local; SSH projects on the
@@ -919,7 +932,20 @@ export function buildTranscriptApi(
           accountId,
           nodeId,
           agentId
-        ) as Promise<ChatTranscriptResult>
+        ) as Promise<ChatTranscriptResult>,
+      // A REAL implementation, not a stub: the server runs on the machine holding these
+      // transcripts, so its answer is as good as the desktop's local leg. A failed request
+      // degrades to `unknown` (never `absent`) — cold restore acts on a negative, so the wrong
+      // degrade would drop a live conversation's `--resume` because a socket blipped.
+      transcriptExists: (sessionId, accountId, nodeId) =>
+        (
+          client.request(
+            IPC.transcriptExists,
+            sessionId,
+            accountId,
+            nodeId
+          ) as Promise<TranscriptPresence>
+        ).catch(() => 'unknown' as const)
     },
     claudeReadTranscript: (sessionId, cwd, accountId, nodeId) =>
       client.request(
@@ -960,7 +986,21 @@ export function buildClaudeAccountsApi(client: RpcClient): Pick<NodeTerminalApi,
         client.request(IPC.claudeAccountsWaitLogin, id, ctx) as Promise<{ email: string } | null>,
       cancelWaitLogin: (id) =>
         client.request(IPC.claudeAccountsCancelWait, id) as Promise<void>,
-      remove: (id, ctx) => client.request(IPC.claudeAccountsRemove, id, ctx) as Promise<void>
+      remove: (id, ctx) => client.request(IPC.claudeAccountsRemove, id, ctx) as Promise<void>,
+      link: (configDir) =>
+        client.request(IPC.claudeAccountsLink, configDir) as Promise<{
+          id: string
+          configDir: string
+          email: string | null
+        }>,
+      // Real, not a stub: the whole implementation is core, so the machine the browser is served
+      // FROM is exactly the machine whose `~/.claude/skills` the option shares (issue #643).
+      setSkillSharing: (id, enabled) =>
+        client.request(
+          IPC.claudeAccountsSetSkillSharing,
+          id,
+          enabled
+        ) as Promise<ClaudeSkillShareResult>
     }
   }
 }

@@ -7,6 +7,7 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  utimesSync,
   writeFileSync
 } from 'fs'
 import net from 'net'
@@ -218,4 +219,117 @@ describe('session-host startup ownership reads', () => {
     expect(statSync(paths.statePath).isDirectory()).toBe(true)
     await expect(endpointAcceptsConnections(paths.endpoint)).resolves.toBe(false)
   }, 15_000)
+})
+
+/** Poll until `check` is true, or fail after `budgetMs`. */
+async function waitUntil(check: () => boolean, budgetMs: number, what: string): Promise<void> {
+  const deadline = Date.now() + budgetMs
+  while (Date.now() < deadline) {
+    if (check()) return
+    await new Promise((r) => setTimeout(r, 100))
+  }
+  throw new Error(`timed out waiting for ${what}`)
+}
+
+const publishedState = (statePath: string): boolean =>
+  existsSync(statePath) && statSync(statePath).size > 0
+
+describe('session-host startup lock liveness (issue #783)', () => {
+  it('reclaims an EMPTY lock nothing has touched — the host that died mid-startup', async () => {
+    // Before this, the fail-closed reader could only say "file is empty" about such a lock, so the
+    // probe threw on all 10 attempts and every later launch exited fatally. The app then could not
+    // start a terminal again until someone deleted the file by hand.
+    const fixtureDir = mkdtempSync(path.join(os.tmpdir(), 'nt-session-host-abandoned-lock-'))
+    cleanupPaths.push(fixtureDir)
+    const dataDir = path.join(fixtureDir, 'user-data')
+    mkdirSync(dataDir)
+    const paths = sessionHostPaths(dataDir)
+    if (process.platform !== 'win32') cleanupPaths.push(paths.endpoint)
+    writeFileSync(paths.statePath, '')
+    const longAgo = new Date(Date.now() - 60_000)
+    utimesSync(paths.statePath, longAgo, longAgo)
+
+    const { child } = await buildAndStartHost(fixtureDir, dataDir, [inertPtyPlugin()])
+    try {
+      await waitUntil(() => publishedState(paths.statePath), 10_000, 'the host to publish its state')
+      const state = JSON.parse(readFileSync(paths.statePath, 'utf8'))
+      expect(state.endpoint).toBe(paths.endpoint)
+      await expect(endpointAcceptsConnections(paths.endpoint)).resolves.toBe(true)
+    } finally {
+      child.kill()
+    }
+  }, 30_000)
+
+  it('still refuses a FRESH empty lock — another host may be seconds from publishing', async () => {
+    const fixtureDir = mkdtempSync(path.join(os.tmpdir(), 'nt-session-host-fresh-lock-'))
+    cleanupPaths.push(fixtureDir)
+    const dataDir = path.join(fixtureDir, 'user-data')
+    mkdirSync(dataDir)
+    const paths = sessionHostPaths(dataDir)
+    if (process.platform !== 'win32') cleanupPaths.push(paths.endpoint)
+    writeFileSync(paths.statePath, '')
+
+    const { child } = await buildAndStartHost(fixtureDir, dataDir, [inertPtyPlugin()])
+    const outcome = await waitForExit(child, 15_000)
+
+    expect(outcome.timedOut).toBe(false)
+    expect(outcome.code).not.toBe(0)
+    // The lock is left exactly as found: it is not ours to delete.
+    expect(existsSync(paths.statePath)).toBe(true)
+    expect(statSync(paths.statePath).size).toBe(0)
+    await expect(endpointAcceptsConnections(paths.endpoint)).resolves.toBe(false)
+  }, 30_000)
+
+  // Occupying the endpoint differs per platform, the failure does not: `listen` answers
+  // EADDRINUSE and the host must wait rather than die. On Windows that is another server holding
+  // the named pipe — the shape #783 actually hit, where the killed host's pipe stayed busy for
+  // ~1.5 min. On POSIX a squatting server would NOT reproduce it (the host unlinks a stale socket
+  // path before binding), so a DIRECTORY takes the path instead: the unlink fails, and listen
+  // answers EADDRINUSE just the same.
+  const occupyEndpoint = async (endpoint: string): Promise<() => Promise<void>> => {
+    if (process.platform === 'win32') {
+      const squatter = net.createServer()
+      await new Promise<void>((resolve, reject) => {
+        squatter.once('error', reject)
+        squatter.listen(endpoint, () => resolve())
+      })
+      return () => new Promise<void>((resolve) => squatter.close(() => resolve()))
+    }
+    mkdirSync(endpoint, { recursive: true })
+    return async () => rmSync(endpoint, { recursive: true, force: true })
+  }
+
+  it('waits out an endpoint someone else still holds, instead of dying on it', async () => {
+    const fixtureDir = mkdtempSync(path.join(os.tmpdir(), 'nt-session-host-busy-endpoint-'))
+    cleanupPaths.push(fixtureDir)
+    const dataDir = path.join(fixtureDir, 'user-data')
+    mkdirSync(dataDir)
+    const paths = sessionHostPaths(dataDir)
+    if (process.platform !== 'win32') cleanupPaths.push(paths.endpoint)
+
+    const release = await occupyEndpoint(paths.endpoint)
+    const { child } = await buildAndStartHost(fixtureDir, dataDir, [inertPtyPlugin()])
+    try {
+      // Alive, lock held and empty, and its mtime moving: the heartbeat is what tells other
+      // launches (and the client) that this is a live starter rather than a corpse.
+      //
+      // `exitCode` is the load-bearing assertion. The first version of this retry unref'd its
+      // timer, so with `listen` failed the server held no handle, the event loop emptied, and the
+      // host exited 0 while its log still said it was retrying — a silent no-retry.
+      await waitUntil(() => existsSync(paths.statePath), 10_000, 'the startup lock')
+      const firstTouch = statSync(paths.statePath).mtimeMs
+      await new Promise((r) => setTimeout(r, 3_000))
+      expect(child.exitCode).toBeNull()
+      expect(statSync(paths.statePath).size).toBe(0)
+      expect(statSync(paths.statePath).mtimeMs).toBeGreaterThan(firstTouch)
+
+      // Release it: the host must take the endpoint without being restarted.
+      await release()
+      await waitUntil(() => publishedState(paths.statePath), 20_000, 'the host to bind and publish')
+      await expect(endpointAcceptsConnections(paths.endpoint)).resolves.toBe(true)
+    } finally {
+      child.kill()
+      await release().catch(() => undefined)
+    }
+  }, 60_000)
 })
