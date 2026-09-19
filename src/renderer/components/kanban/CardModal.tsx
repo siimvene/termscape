@@ -1,12 +1,22 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { isTopDialog, nextDialogId, popDialog, pushDialog } from '../dialog-stack'
-import { IconChat, IconMic, IconSearch, IconSmiley } from '../icons'
+import {
+  IconChat,
+  IconClose,
+  IconExternal,
+  IconMaximize,
+  IconMic,
+  IconRestoreSize,
+  IconSearch,
+  IconSmiley
+} from '../icons'
 import { NodeIconView } from '../NodeIcon'
 import { nodeIconDialog } from '../NodeIconPicker'
 import { applyIconChoice } from '../../lib/nodeIconChoice'
 import type { NodeIcon } from '@shared/node-icon'
 import { ContextMeter } from '../ContextMeter'
+import { AccountChip, useAccountChip } from '../AccountChip'
 import { useAgentStatus } from '../../state/agentStatus'
 import { useCardPanel } from '../../state/cardPanel'
 import {
@@ -69,6 +79,11 @@ export function CardModal({ session, columnTitle, board, onChangeBoard, onClose,
   const [editingNote, setEditingNote] = useState(false)
   const agentSessionId = useAgentStatus((st) => st.byId[session.id]?.sessionId)
   const paused = useAgentStatus((st) => !!st.byId[session.id]?.paused)
+  const dropped = useAgentStatus((st) => !!st.byId[session.id]?.dropped)
+  // Same chip as the card and the canvas node header — the modal is where a user checks WHICH
+  // session this is, so the account belongs in its header chips, not only two views away.
+  const observedAccount = useAgentStatus((st) => st.byId[session.id]?.account)
+  const accountChip = useAccountChip(session.spawn.accountId, observedAccount)
   const [naming, setNaming] = useState(false)
   // Comments & activity panel: OPEN by default in the modal; the header 💬 collapses it. The
   // choice is remembered (localStorage) — once collapsed, later cards open collapsed too.
@@ -274,11 +289,26 @@ export function CardModal({ session, columnTitle, board, onChangeBoard, onClose,
             </span>
           )}
           <span className="kanban-modal__column">{columnTitle ?? 'Ungrouped'}</span>
+          {isTerminal && <AccountChip chip={accountChip} />}
           {/* The driving chip, so a user watching a browser card THROUGH the modal is not
               driving-blind. The lease is keyed by node id (not by webview object), so this shows
               when the node is being driven even though the drive lands on the CANVAS webview, not
               this modal's — which is what the user needs to know (Task 6.3). */}
           {isBrowser && <BrowserDrivingIndicator nodeId={session.id} />}
+          {isTerminal && dropped && (
+            // Same argument as PAUSED below, with a worse cause: the modal co-attaches a live view
+            // of a pane that holds a bare shell, and without this the user would be looking at the
+            // CLI's own parting "Resume this session with: …" line with nothing saying what it
+            // means. The wake trigger admits `dropped` for exactly this click.
+            <button
+              className="kanban-badge kanban-badge--dropped"
+              style={{ cursor: 'pointer', border: 'none' }}
+              title="This session's agent process is gone (it did not exit cleanly) — click to resume the conversation"
+              onClick={() => wakeHibernatedNode(session.id)}
+            >
+              DROPPED
+            </button>
+          )}
           {isTerminal && paused && (
             // Opening the card is one of the modal-open wake triggers `TerminalNode` publishes
             // (see `setKanbanModalNode`), and it deliberately skips a PAUSED node — so the modal
@@ -338,13 +368,13 @@ export function CardModal({ session, columnTitle, board, onChangeBoard, onClose,
             aria-pressed={maximized}
             onClick={() => setMaximized(!maximized)}
           >
-            {maximized ? '❐' : '⤢'}
+            {maximized ? <IconRestoreSize /> : <IconMaximize />}
           </button>
           <button className="kanban-modal__action" title="Open on canvas" onClick={onOpenCanvas}>
-            ↗
+            <IconExternal />
           </button>
           <button className="kanban-modal__action" title="Close" onClick={onClose}>
-            ✕
+            <IconClose />
           </button>
         </div>
         <CardMetaBar nodeId={session.id} board={board} onChange={onChangeBoard} />

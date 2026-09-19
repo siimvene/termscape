@@ -630,6 +630,8 @@ suite('REAL bash through REAL tmux: the payload cannot become key input', () => 
     // real command after the payload closed the frame early. Waiting for it before the drain means
     // the attack has fired by the time C-c lands — the flush can no longer swallow it — and a
     // sanitized delivery (marker never appears) fails loudly here instead of passing vacuously.
+    // (Upstream split this into a bare waitFor + 2-arg bashDrain; the fork's bashDrain folds the
+    // settle predicate in, so this single call carries upstream's settle-before-drain intent.)
     bashDrain('nt-sec-ctl', 'nt-sec-ctl', () => fs.existsSync(m), 'the attack to create its marker')
     expect(fs.existsSync(m), 'the attack no longer works — these tests are vacuous').toBe(true)
   })

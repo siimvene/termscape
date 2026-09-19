@@ -41,8 +41,22 @@ export interface ServerContextLinkDeps {
   /** nodeId → hook-fed transcript path; part of the change signature, not of the map. */
   transcriptOf?: (nodeId: string) => string
   sweepMs?: number
-  /** Respect the server's installHooks gate for writes into agent configuration directories. */
-  installAgentIntegrations?: boolean
+  /**
+   * Whether to write the context-link discovery surface into the machine's REAL agent
+   * configuration directories: `~/.claude/skills/get-linked-context/SKILL.md` and the marker
+   * block in `~/.codex/AGENTS.md`, `~/.gemini/GEMINI.md` and opencode's `AGENTS.md`. `true` =
+   * the server's `installHooks` gate said yes; `false` = leave them alone (the read handler and
+   * the shim under `dataDir` are registered either way, so the feature still works for sessions
+   * that already know about it).
+   *
+   * REQUIRED, and deliberately not defaulted — same reason as
+   * `ServerCanvasControlDeps.installAgentIntegrations`: a service process writing into a user's
+   * `$HOME` is a documented hazard (issue #490), those instruction files are read by every agent
+   * session on the machine rather than only ours, and an OPTIONAL flag read as `!== false` made
+   * the write the thing you got by saying nothing. Omission must be a compile error, not a
+   * silent install.
+   */
+  installAgentIntegrations: boolean
 }
 
 /**

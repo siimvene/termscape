@@ -5,6 +5,7 @@ import { useSshConn } from '../state/sshConn'
 import { useSessionMemory } from '../state/sessionMemory'
 import { usageScopeKey } from '../lib/usageScope'
 import { SessionMemoryPanel } from './SessionMemoryPanel'
+import type { SessionPauseOffer } from '../lib/sessionPause'
 import { IconResource } from './icons'
 
 /** `formatBytes` speaks bytes; every number in this feature is MB. */
@@ -20,6 +21,10 @@ export interface SystemResourcePillProps {
    *  a panel whose rows silently do nothing. */
   onGoToNode: (nodeId: string) => void
   onKillSession: (nodeId: string, orphan: boolean) => void
+  /** Straight passthroughs to the panel — see SessionMemoryPanelProps. The pill is the panel's
+   *  only mount point, so every panel prop has to come through here. */
+  pauseOfferFor: (nodeId: string) => SessionPauseOffer
+  onPauseSession: (nodeId: string) => Promise<void>
 }
 
 /**
@@ -35,7 +40,9 @@ export interface SystemResourcePillProps {
 export function SystemResourcePill({
   overBoard = false,
   onGoToNode,
-  onKillSession
+  onKillSession,
+  pauseOfferFor,
+  onPauseSession
 }: SystemResourcePillProps): JSX.Element | null {
   const [open, setOpen] = useState(false)
   const wrapRef = useRef<HTMLDivElement>(null)
@@ -128,6 +135,8 @@ export function SystemResourcePill({
         <SessionMemoryPanel
           onGoToNode={onGoToNode}
           onKillSession={onKillSession}
+          pauseOfferFor={pauseOfferFor}
+          onPauseSession={onPauseSession}
           onClose={() => setOpen(false)}
         />
       )}

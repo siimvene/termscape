@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { readExistingSessionHostIdentity } from './existing-host-state'
+import { EMPTY_LOCK_STALE_MS, readExistingSessionHostIdentity, startupLockState } from './existing-host-state'
 
 const statePath = 'session-host.json'
 const tokenPath = 'session-host.token'
@@ -154,5 +154,35 @@ describe('existing session-host ownership reads', () => {
     }).toThrow(field === 'endpoint' ? 'derived endpoint' : 'derived token path')
     expect(reads).toEqual([statePath])
     expect(helloTarget).toBeUndefined()
+  })
+})
+
+describe('startupLockState', () => {
+  const stat = (size: number, ageMs: number) => () => ({ size, mtimeMs: 1_000_000 - ageMs })
+  const now = 1_000_000
+
+  it('calls an empty lock that is still being touched a live starter', () => {
+    expect(startupLockState('s', now, stat(0, 0))).toBe('starting')
+    expect(startupLockState('s', now, stat(0, EMPTY_LOCK_STALE_MS - 1))).toBe('starting')
+  })
+
+  it('calls an empty lock nothing has touched abandoned', () => {
+    expect(startupLockState('s', now, stat(0, EMPTY_LOCK_STALE_MS + 1))).toBe('abandoned')
+  })
+
+  it('never judges a lock with content — the fail-closed reader owns that', () => {
+    expect(startupLockState('s', now, stat(120, 60_000))).toBe('other')
+  })
+
+  it('reads a missing or unreadable lock as nothing to say', () => {
+    expect(
+      startupLockState('s', now, () => {
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+      })
+    ).toBe('other')
+  })
+
+  it('treats a future mtime as fresh, so a backwards clock cannot orphan a live starter', () => {
+    expect(startupLockState('s', now, stat(0, -60_000))).toBe('starting')
   })
 })

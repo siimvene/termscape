@@ -1,9 +1,9 @@
 // Pure model for the canvas-control `sticky` verb (issue #144): argument validation, resolving
 // which note a `--node <id|title>` ref names, and composing the note's next body from
-// --text/--append. In lib/ so it is unit-testable off the Canvas dispatch — same reasoning as
-// controlRouting, and the id-then-title convention follows kanban's `resolveColumnRef` ("agents
+// --text/--append. In shared so both renderer and Server Edition use the exact same model, and the
+// id-then-title convention follows kanban's `resolveColumnRef` ("agents
 // naturally pass a title; ids come from `list`").
-import { oneLine } from '@shared/one-line'
+import { oneLine } from './one-line'
 
 /** What the resolver needs to know about one canvas node. */
 export interface StickyCandidate {

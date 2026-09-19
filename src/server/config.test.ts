@@ -56,6 +56,19 @@ describe('resolveConfig', () => {
     expect(() => resolveConfig({ NODETERM_HOST: '0.0.0.0', NODETERM_HEADLESS: '1' }, [])).not.toThrow()
   })
 
+  it('server canvas control is opt-in, with argv taking precedence over env', () => {
+    expect(resolveConfig({}, []).canvasControl).toBe(false)
+    expect(resolveConfig({ NODETERM_SERVER_CANVAS_CONTROL: '1' }, []).canvasControl).toBe(true)
+    expect(resolveConfig({ NODETERM_SERVER_CANVAS_CONTROL: 'true' }, []).canvasControl).toBe(true)
+    expect(resolveConfig({}, ['--canvas-control']).canvasControl).toBe(true)
+    expect(
+      resolveConfig({ NODETERM_SERVER_CANVAS_CONTROL: '1' }, ['--canvas-control', 'false'])
+        .canvasControl
+    ).toBe(false)
+    // The per-session discovery bit is not the server's authority switch.
+    expect(resolveConfig({ NODETERM_CANVAS_CONTROL: '1' }, []).canvasControl).toBe(false)
+  })
+
   it('proxy trust: off by default', () => {
     expect(resolveConfig({}, []).trustProxy).toBeUndefined()
   })

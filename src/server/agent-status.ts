@@ -7,7 +7,7 @@
 // local logic.
 //
 // This module must import nothing from electron or `../main` (see no-electron.test.ts).
-import { grokHomeDir } from '../core/agents/grok-paths'
+import { grokHomeDir, grokSessionDir, grokSessionsDir } from '../core/agents/grok-paths'
 import { join, resolve } from 'path'
 import { homedir } from 'os'
 import { hookServer } from '../core/agents/hook-server'
@@ -20,13 +20,15 @@ import { createContextTail, type ContextTail, type TaskNotification } from '../c
 import { geminiContextParse } from '../core/gemini-session'
 import { codexContextParse } from '../core/codex-session'
 import { grokContextParse, GROK_SIGNALS_FILE } from '../core/grok-signals'
+import { GROK_CHAT_HISTORY_FILE } from '../core/agents/grok-paths'
+import { createGrokSubagentFormatter } from '../core/grok-subagent-format'
 import { createCodexSubagentFormatter } from '../core/codex-subagent-format'
 import { codexHome } from '../core/usage/codex-usage'
 import { setNodeTranscript } from '../core/context-link'
 import { isSafeLocalTranscriptPath } from '../core/claude-accounts-core'
-import { grokRawFields, isAsyncSubagentLaunch, type NormalizedAgentEvent } from '../shared/agents/normalize'
-import { grokSessionDir, grokSessionsDir } from '../core/agents/grok-paths'
-import { forgetGrokSession, rememberGrokSessionDir } from '../core/grok-session'
+import { linkedClaudeConfigDirs } from '../core/claude-config-dir'
+import { isAsyncSubagentLaunch, grokRawFields, type NormalizedAgentEvent } from '../shared/agents/normalize'
+import { applyGrokHookSession } from '../core/grok-hook-session'
 import { IPC } from '../shared/ipc'
 import type { ServerPlatform } from './platform-server'
 
@@ -48,6 +50,9 @@ export interface WireAgentStatusOptions {
   subagentTail?: SubagentTail
   workflowTail?: WorkflowAgentsTail
   contextTail?: ContextTail
+  /** One tap on the normalized, mirror-enriched stream for in-process consumers such as the
+   * Server Edition delivery queue and `--after` scheduler. */
+  onEvent?: (event: NormalizedAgentEvent) => void
 }
 
 /**
@@ -65,7 +70,7 @@ export interface WireAgentStatusOptions {
 export function wireAgentStatus(
   platform: ServerPlatform,
   opts: WireAgentStatusOptions = {}
-): { contextTail: ContextTail; geminiContextTail: ContextTail } {
+): { contextTail: ContextTail; geminiContextTail: ContextTail; codexContextTail: ContextTail } {
   const hooks = opts.hooks ?? hookServer
   // nodeId → the agent session id of whichever hook-capable CLI runs in that node (claude's, and
   // since the grok branch below, grok's)
@@ -184,6 +189,7 @@ export function wireAgentStatus(
     // keys off the same single source of truth as the mirror/phone. Then broadcast the enriched one.
     const enriched = recordAgentEvent(e) ?? e
     platform.broadcast(IPC.agentStatus, enriched)
+    opts.onEvent?.(enriched)
   })
 
   // Security: hook POSTs can be forged, so a forged POST could set transcript_path to an
@@ -201,6 +207,9 @@ export function wireAgentStatus(
     // so a relocated grok home would silently never resolve a context link. BOTH shells pass it
     // (invariant 11) — a jail widened in one shell only is a feature the Server Edition lacks with
     // nothing to say so.
+    // Linked accounts' dirs come from SETTINGS, never from the POST — `<dir>/projects/**` only,
+    // so `~/.claude-2/.ssh` is as refused as it ever was. Without them the meter and the subagent
+    // cards silently never fill for a pane running the user's own CLAUDE_CONFIG_DIR.
     // The peer root (Server Edition beside a desktop, `NODETERM_PEER_USER_DATA`): a session spawned
     // into the desktop's managed-account dir writes its transcript there — jailing to our own
     // userData alone would drop every payload of such a node (blind security side-pass, 2026-09-07).
@@ -210,6 +219,7 @@ export function wireAgentStatus(
       platform.userDataDir,
       codexHome(),
       grokHomeDir(),
+      linkedClaudeConfigDirs(),
       platform.peerUserDataDir
     )
       ? abs
@@ -225,39 +235,35 @@ export function wireAgentStatus(
   hooks.setRawListener((agentId, nodeId, payload, _meta) => {
     if (agentId === 'grok') {
       // This branch records two associations, neither of which grok's envelope states outright.
-      // Everything the claude path does below hangs off `transcript_path`, and grok has none.
-      // Read through `grokRawFields` so grok's two field dialects (camelCase and the SDK's
-      // snake_case) are decoded in exactly one place.
-      const g = grokRawFields(payload)
-      // 1. node → session: read by the phone's context ring and the ⌘K session lookup.
-      if (nodeId && g.sessionId) nodeContextSession.set(nodeId, g.sessionId)
-      // 2. session → its session DIRECTORY, derived from (cwd, sessionId) — the two fields every
-      // grok hook does carry — and remembered here, the one place they arrive together. That is
-      // what lets the session-name read (core/grok-session.ts) be a direct open rather than a scan
-      // of grok's sessions tree, which is how one node would end up adopting another's name.
-      // `grokSessionDir` returns null for a cwd grok stored under its slug+hash scheme instead, in
-      // which case we learn nothing about this session rather than build half a path.
+      // Everything the claude path does below hangs off `transcript_path`. Grok DOES send one --
+      // `transcriptPath`, MEASURED on 1.0.13 in 14 of 15 captured payloads -- but it names
+      // `updates.jsonl`, which holds no readable conversation, so this path deliberately ignores
+      // the advertised value and derives the session directory instead. Core
+      // owns the node/session/directory transition (`applyGrokHookSession`) so desktop and Server
+      // Edition cannot implement different event branches. Written inline, that transition existed
+      // in two copies and neither knew it. (An earlier version of this comment claimed PostCompact
+      // mints a NEW session id and retires the prior one. Measured on 1.0.13: it does not —
+      // `pre_compact` and `post_compact` carry the SAME id — and the branch that acted on the
+      // belief is gone. SessionEnd is the only event that retires an id.)
       //
-      // The Server Edition populates it exactly as the desktop does; what it does not yet serve is
-      // the READ (IPC.ptyReadSessionName has no server handler — see the ws-bridge stub).
-      if (g.sessionId && g.cwd) {
+      // What stays HERE is what needs a shell to exist: the per-shell context tail and the phone
+      // mirror. `plan` carries the decoded event/session/cwd, so the dialect is still decoded in
+      // exactly one place.
+      const plan = applyGrokHookSession(nodeId, payload, nodeContextSession)
+      // Context meter: grok's numbers are NOT in the transcript, so the advertised `transcriptPath`
+      // has nothing here to point at. They live in
+      // `signals.json`, the sibling of `chat_history.jsonl`, which is why this tail is tracked from
+      // the DERIVED directory rather than from a hook field — and why it is created with
+      // `wholeFile` (that file is rewritten in place, not appended to).
+      if (plan.sessionId && plan.cwd) {
         const dir = grokSessionDir({
           sessionsDir: grokSessionsDir(),
-          cwd: g.cwd,
-          sessionId: g.sessionId
+          cwd: plan.cwd,
+          sessionId: plan.sessionId
         })
-        if (dir) {
-          rememberGrokSessionDir(g.sessionId, dir)
-          // Context meter: grok's numbers are NOT in the transcript, so there is nothing here for
-          // `transcript_path` to point at even once grok starts sending one. They live in
-          // `signals.json`, the sibling of `chat_history.jsonl`, which is why this tail is tracked
-          // from the DERIVED directory rather than from a hook field — and why it is created with
-          // `wholeFile` (that file is rewritten in place, not appended to).
-          const signals = join(dir, GROK_SIGNALS_FILE)
-          grokContextTail.track(g.sessionId, signals)
-        }
+        if (dir) grokContextTail.track(plan.sessionId, join(dir, GROK_SIGNALS_FILE))
       }
-      // 3. node → what it is doing NOW (the phone's per-node activity line).
+      // node → what it is doing NOW (the phone's per-node activity line).
       //
       // §8.3 of docs/grok-agent.md said grok's file hooks "never send PreToolUse", so calling this
       // was a no-op and it was deleted. MEASURED on 1.0.13 (2026-09-02), that is wrong in wording
@@ -266,10 +272,11 @@ export function wireAgentStatus(
       // never matched. The blocker was a SPELLING, not an absence, which is why deleting the call
       // looked correct and closed the door on a working feature.
       //
-      // Translated here rather than by loosening that gate: the mirror is claude-shaped on purpose,
-      // and grok's dialect is decoded in exactly one place (`grokRawFields`). `toolActivity` knows
-      // grok's fifteen tool names, so the line reads "Reading fichero.txt", never a claude phrase.
-      if (nodeId && g.event === 'pretooluse' && g.toolName) {
+      // Translated here rather than by loosening that gate: the mirror is claude-shaped on purpose.
+      // `toolActivity` knows grok's fifteen tool names, so the line reads "Reading fichero.txt",
+      // never a claude phrase.
+      const g = grokRawFields(payload)
+      if (nodeId && plan.event === 'pretooluse' && g.toolName) {
         recordRawToolEvent(nodeId, {
           hook_event_name: 'PreToolUse',
           tool_name: g.toolName,
@@ -277,18 +284,52 @@ export function wireAgentStatus(
         })
       }
       // The turn is over: clear the activity line the same way the claude path does.
-      if (nodeId && (g.event === 'stop' || g.event === 'sessionend')) {
+      if (nodeId && (plan.event === 'stop' || plan.event === 'sessionend')) {
         recordRawToolEvent(nodeId, { hook_event_name: 'Stop' })
       }
-      // The session is over, so nothing will read its directory again — and forgetting costs
-      // nothing even though grok IS resumable and `grok --resume <id>` reuses BOTH the id and the
-      // directory: a resumed session fires its own hooks, whose (cwd, sessionId) re-derive and
-      // re-remember the very same path. The map is bounded, so dropping now beats waiting for
-      // eviction to reach an entry nobody is asking about.
-      if (g.event === 'sessionend') {
-        forgetGrokSession(g.sessionId)
-        grokContextTail.untrack(g.sessionId)
+      // 3. SUBAGENT CARDS. Keyed by `subagentId` — the per-instance id, and the ONLY id both
+      // events share. On SubagentStart `sessionId` is the PARENT's; on SubagentStop it is the
+      // CHILD's own. Keying on it would file the start and the stop under different cards, and the
+      // started one would never close: a badge lit forever, with no error to show for it.
+      //
+      // The child's transcript is DERIVED from `subagentId`, never taken from the payload's
+      // `transcriptPath`. On the start that path is the PARENT's session — following it paints the
+      // parent's conversation inside the child's card, full and plausible and somebody else's — and
+      // on the stop the directory is finally the child's but the file is still `updates.jsonl`,
+      // which parses to nothing. Both spellings of that trap are documented at `handoff/locate.ts`.
+      if (g.subagentId && g.cwd) {
+        if (g.event === 'subagentstart') {
+          const childDir = grokSessionDir({
+            sessionsDir: grokSessionsDir(),
+            cwd: g.cwd,
+            sessionId: g.subagentId
+          })
+          if (childDir) {
+            subagentTail.trackFile(
+              g.subagentId,
+              join(childDir, GROK_CHAT_HISTORY_FILE),
+              createGrokSubagentFormatter
+            )
+            if (nodeId) {
+              const set = nodeSubagents.get(nodeId) ?? new Set<string>()
+              set.add(g.subagentId)
+              nodeSubagents.set(nodeId, set)
+            }
+          }
+        } else if (g.event === 'subagentstop') {
+          subagentTail.finish(g.subagentId)
+          if (nodeId) nodeSubagents.get(nodeId)?.delete(g.subagentId)
+        }
       }
+      // A CHILD's teardown is not this node's. `session_end` carries `subagentType` only in a
+      // subagent session (measured: 2 of the 4 captured ends had it, and those two were the
+      // children). Without this guard a subagent finishing would forget the PARENT's session
+      // directory and clear its context tail — the node would go quiet mid-turn.
+      if (g.event === 'sessionend' && g.subagentType) return
+      // Forgetting the MAP entry and untracking the TAIL are two different things and neither
+      // substitutes for the other: `applyGrokHookSession` did the first (and does it for PostCompact
+      // too, which this call site cannot see). The tail is this shell's, so it is released here.
+      if (plan.forgetSessionId) grokContextTail.untrack(plan.forgetSessionId)
       return
     }
     // gemini and codex both carry `transcript_path` in their hook envelope (gemini: the base input
@@ -431,5 +472,8 @@ export function wireAgentStatus(
   platform.on(IPC.ptyDestroy, (nodeId: string) => releaseNodeTails(nodeId))
   platform.on(IPC.ptyRecycle, (nodeId: string) => releaseNodeTails(nodeId))
 
-  return { contextTail, geminiContextTail }
+  // `codexContextTail` joins the two already returned so `src/server/index.ts` can register the
+  // context-meter rehydration over all three. Keeping a tail private here would mean a second
+  // instance somewhere else metering the same sessions twice.
+  return { contextTail, geminiContextTail, codexContextTail }
 }

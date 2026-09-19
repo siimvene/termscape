@@ -16,14 +16,18 @@ alwaysOnTop:true, focusable:false, skipTaskbar:true}` + `setAlwaysOnTop(true,'sc
 `renderer.input`) sharing the existing preload plus a small HUD-specific API.
 
 - **Geometry** is the pure `hudGeometry` (`notch-hud-geometry.ts`, unit-tested); the controller
-  only feeds it `screen.getPrimaryDisplay()`. The window spans the full top edge (`bounds`,
-  `y = bounds.y`), sized to `bar + HUD_WINDOW_HEIGHT` so the EXPANDED box clears the top strip in
-  either layout; we never resize the frame. Main sends the renderer everything it needs to draw the
+  only feeds it `screen.getPrimaryDisplay()` — the PRIMARY display's LIVE bounds on every call,
+  never a cached rectangle. The window spans the full top edge (`bounds`,
+  `y = bounds.y`), sized to `bar + HUD_WINDOW_HEIGHT` (+ a positive vertical offset, so a lowered
+  panel is not clipped) so the EXPANDED box clears the top strip in
+  either layout; we never resize the frame except for that offset (`setTunables` → `reposition`).
+  Main sends the renderer everything it needs to draw the
   capsule: `bar` (= `workArea.y - bounds.y`, floor `NOTCH_BAR_FLOOR` 24 — the fused top zone
   height), `width`, `notchWidth` (`settings.notchWidth` clamped to `NOTCH_WIDTH_MIN/MAX` 100–320,
-  falling back to `NOTCH_WIDTH` **168** — Electron exposes no `auxiliaryTopLeftArea`, so assume a
-  centered notch of this width; 200 left a visible gap), `notchCenterX` (= `bounds.width/2`), and
-  `hasNotch`. Re-asserted on `screen` `display-metrics-changed` + `display-added/removed`.
+  falling back to `NOTCH_WIDTH_DEFAULT` **168** — Electron exposes no `auxiliaryTopLeftArea`, so
+  assume a centered notch of this width; 200 left a visible gap), `notchCenterX`
+  (= `bounds.width/2`), and the **placement** below. Re-asserted on `screen`
+  `display-metrics-changed` + `display-added/removed`.
 
   **`hasNotch` = `display.internal && safeAreaTop > 0`, with `inset >= NOTCH_BAR_MIN_PT` (27 pt)
   ONLY as the fallback when the probe did not answer.** `safeAreaTop` is `NSScreen.safeAreaInsets.top`
@@ -46,6 +50,40 @@ alwaysOnTop:true, focusable:false, skipTaskbar:true}` + `setAlwaysOnTop(true,'sc
   renderer also refuses to pad the notchless pill by the notch width (`capsuleOverhangPx`, pure +
   tested), so a misdetection in either direction costs a misplaced capsule, never a 170 px black bar
   with the mascots at one end.
+- **Placement** is the pure `hudPlacement` (same file, unit-tested), fed the geometry plus the
+  user's two placement settings — `settings.notchAlign` (`left | center | right`, default
+  `center`) and `settings.notchOffsetY` (px, positive = DOWN, default 0) — and it answers with
+  everything the renderer positions by: `fused`, `anchor`, `capsuleX`, `capsuleTop`, `panelLeft`,
+  `panelWidth` (pushed as CSS variables + root classes; the renderer decides nothing itself).
+  **`hasNotch` still decides the SHAPE, and the table says what each combination draws:**
+
+  | display | side | offset | draws |
+  |---|---|---|---|
+  | notch | center | ≤ 0 | **fused** to the notch — the historical layout, bit-for-bit (a negative offset cannot go above the top edge, so it stays fused at 0) |
+  | notch | center | > 0 | a **pill** hanging centred BELOW the notch (a detached surface with square top corners is the "black box below the menu bar" field bug, so it rounds) |
+  | notch | left / right | any | a **pill** at that edge (`HUD_EDGE_MARGIN` 12 from it), below the menu-bar strip ± offset |
+  | no notch | any | any | a **pill** on that side, below the strip ± offset — the old notchless fallback, now movable |
+
+  Rules the placement keeps: **(1)** a pill's top is `bar + PILL_TOP_GAP + offset`, clamped at
+  **0** — there is nothing above the display's top edge, which is why the Settings copy says "up
+  stops at the top edge" instead of implying the capsule can leave the screen, and why `-48`
+  (`NOTCH_OFFSET_MIN`) is enough travel: it reaches the edge from every real menu bar. **(2)** the
+  expanded panel keeps the capsule's side but its left edge is clamped ON SCREEN (`panelLeft`:
+  margin-flush at an edge, centred for `center`, and on a display too narrow for panel + margin it
+  hugs the CHOSEN edge — a bare clamp dropped the margin on the far side), the #791 class of bug.
+  **(3)** click-through follows the capsule for free — the capsule ELEMENT is the hotspot
+  (`pointerenter`/`pointerleave` on it toggle `setIgnoreMouseEvents`), so wherever these numbers
+  put it, the interactive region is exactly there and the rest of the strip stays transparent.
+  **(4)** the grow-left overhang (`syncCapsuleOverhang`) applies to the FUSED shape only: a pill
+  has no notch to cover, and the padding would be a dead black tail (which the notchless pill
+  drew before this landed) or, at an edge, a black bar over the menu-bar items.
+  **(5)** a hand-edited settings.json is hostile input: both values are re-validated at the point
+  of use (`sanitizeNotchAlign` → `center` for an unknown string; `sanitizeNotchOffsetY` → 0 for a
+  non-number, the nearest bound for out-of-range — the same rule as `sanitizeNotchWidth`), and the
+  Settings section reads them through the same sanitizers so a control never binds to a value it
+  cannot draw. All three live in `src/shared/notch-hud.ts`, which is also where the slider bounds
+  come from — the section used to carry hand-copied `WIDTH_MIN/MAX` with a "keep in sync" comment.
+
 - **Click-through with a hotspot**: window stays mouse-ignoring; the renderer reports pointer
   enter/leave of the indicator rect over IPC → main toggles `setIgnoreMouseEvents(false/true,
   {forward:true})`. Click in the hotspot → expand; click outside the expanded panel → collapse
@@ -165,39 +203,49 @@ the transparent rest of the window stays click-through. Hidden entirely when idl
   `IPC.hudDismiss` → `model.dismiss(nodeId)`. It latches the state the row was hidden AT
   (`dismissedAt`), so a session hung in `working` (agent died mid-turn) stays hidden while any
   genuine state change brings the row back. HUD-local only — the node/terminal is untouched.
-- **Notchless fallback** (`hasNotch === false`, e.g. an external monitor or a display with no menu
-  bar): the `.notchless` root class draws the capsule as a **standalone floating pill** — all-corner
-  `--pill-radius`, since there is no notch to fuse with. Collapsed height = `--pill-height`; the
-  mascots center in the pill (no `--bar` padding to clear).
+- **Pill** (`fused === false` from `hudPlacement` — a notchless display, a left/right side, or a
+  centred capsule lowered off the notch): the `.pill` root class (renamed from `.notchless`,
+  because the shape is no longer only about the display) draws the capsule as a **standalone
+  floating pill** — all-corner `--pill-radius`, since there is no notch to fuse with. Collapsed
+  height = `--pill-height`; the mascots center in the pill (no `--bar` padding to clear).
 
-  **The pill hangs BELOW the top strip** (`top: calc(var(--bar) + var(--pill-top-gap))`), and that
-  is load-bearing rather than cosmetic. The window's top edge is the display's, so the first
-  `--bar` px are the menu-bar / notch strip; a pill placed there is centred on exactly the
-  coordinates a notch occupies, which made every notch MISdetection invisible instead of merely
+  **The pill rests BELOW the top strip** (`--capsule-top` = `bar + PILL_TOP_GAP + offset`, clamped
+  ≥ 0), and that is load-bearing rather than cosmetic. The window's top edge is the display's, so
+  the first `--bar` px are the menu-bar / notch strip; a pill placed there is centred on exactly
+  the coordinates a notch occupies, which made every notch MISdetection invisible instead of merely
   wrong — the visible half of issue #508. Clearing the strip means the fallback layout stays safe
   even when the detector is not, and on a genuine notchless display the pill no longer paints over
-  the menu bar it used to overlap.
+  the menu bar it used to overlap. The user CAN raise it into the strip with a negative offset —
+  that is an explicit choice made in Settings, not the detector's guess, and it stops at the edge.
 
-**Tunables** (main constants in `notch-hud.ts` and `notch-hud-geometry.ts`; CSS vars in
-`hud.css :root`, defaults in parens — tune on a Mac): `NOTCH_WIDTH` (168) / `--notch-width` (main
-pushes the real value on the first geometry push), `NOTCH_WIDTH_MIN/MAX` (100/320, the settings
-clamp), `NOTCH_BAR_MIN_PT` (27, notch-detection threshold: top-strip height in points on a built-in panel),
+**Tunables** (shared constants in `src/shared/notch-hud.ts`, main constants in `notch-hud.ts` and
+`notch-hud-geometry.ts`; CSS vars in `hud.css :root`, defaults in parens — tune on a Mac):
+`NOTCH_WIDTH_DEFAULT` (168) / `--notch-width` (main pushes the real value on the first geometry
+push), `NOTCH_WIDTH_MIN/MAX` (100/320, the settings clamp), `NOTCH_OFFSET_MIN/MAX` (-48/240, the
+vertical-offset clamp), `NOTCH_BAR_MIN_PT` (27, notch-detection FALLBACK threshold: top-strip
+height in points on a built-in panel, used only when the safe-area probe did not answer),
 `NOTCH_BAR_FLOOR` (24), `HUD_WINDOW_HEIGHT` (460, added ON TOP of `bar`),
+`HUD_PANEL_WIDTH` (400, pushed as `--panel-width` — main reasons with it for `panelLeft`, so the
+CSS must not carry its own number), `PILL_TOP_GAP` (6), `HUD_EDGE_MARGIN` (12),
 `--capsule-drop` (0 — the bulge was dropped; kept only for the expand math),
-`--capsule-radius` (16), `--panel-width` (400), `--panel-max-h` (420), `--capsule-dur` (0.22s)/`--capsule-ease`,
-and the notchless `--pill-top-gap` (6) / `--pill-radius` (18) / `--pill-height` (30).
+`--capsule-radius` (16), `--panel-max-h` (420), `--capsule-dur` (0.22s)/`--capsule-ease`,
+and the pill's `--pill-radius` (18) / `--pill-height` (30).
 
 ## Settings + lifecycle
 
 **Settings → Interface → Notch** (`NotchSection.tsx`, macOS-only: `nav.ts` marks the section
-`macOnly` and `visibleSettingsGroups(isMac)` drops it elsewhere) owns all three knobs:
-`notchHud` (default **true**), `notchWidth` (default 168 — the assumed notch width, i.e. the
-flush-alignment knob, clamped to `NOTCH_WIDTH_MIN/MAX` in main) and `notchHoverExpand`
+`macOnly` and `visibleSettingsGroups(isMac)` drops it elsewhere) owns all five knobs:
+`notchHud` (default **true**), `notchAlign` (default `center` — Left / Center / Right segmented
+pill), `notchOffsetY` (default 0 — the "Vertical position" slider, signed readout, whose copy
+says up stops at the screen edge and that lowering the fused capsule detaches it into a pill),
+`notchWidth` (default 168 — the assumed notch width, i.e. the flush-alignment knob, clamped to
+`NOTCH_WIDTH_MIN/MAX` in main; only the fused shape uses it) and `notchHoverExpand`
 (default true; off = click-only, the renderer reads it from the `hoverExpand` push field).
 `initNotchHud(deps, tunables)` from `index.ts`, guarded `process.platform === 'darwin'`;
 `settingsStore.onChange` → `applyNotchHudSettings(tunables)` creates/destroys the window on the
-enable toggle and pushes width/hover into a RUNNING controller (`setTunables`), so the width
-slider moves the capsule as you drag it.
+enable toggle and pushes width/side/offset/hover into a RUNNING controller (`setTunables`, which
+goes through `reposition` because the offset can change the window height), so every slider moves
+the capsule as you drag it — no restart, no toggle-off-on.
 
 The first-run tour has a macOS-only **notch step** (`OnboardingFlow`'s `STEPS` is ID-keyed
 precisely so this step can be absent off macOS, plus `SceneNotch` in `scenes.tsx`): scene on the

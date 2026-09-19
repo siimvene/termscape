@@ -19,6 +19,12 @@ const launcherMocks = vi.hoisted(() => ({
 
 const identityMocks = vi.hoisted(() => ({
   readExistingSessionHostIdentity: vi.fn(),
+  // The client also classifies the startup lock (issue #783): "empty and still being touched" =
+  // a host is starting, so keep waiting. These boundary tests are about the identity read, so the
+  // lock answers 'other' — nothing is starting — and the launch budget stays the ordinary one.
+  startupLockState: vi.fn(() => "other"),
+  LISTEN_RETRY_BUDGET_MS: 120_000,
+  EMPTY_LOCK_STALE_MS: 15_000,
 }));
 
 vi.mock("./session-host-launcher", () => launcherMocks);

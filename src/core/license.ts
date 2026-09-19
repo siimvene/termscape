@@ -41,6 +41,10 @@ interface Stored {
   token?: string
   /** Largest unix-seconds timestamp this install has observed — the clock-rollback anchor. */
   lastSeen?: number
+  /** The subscription term the server stated BESIDE `token` (unix seconds), for display only.
+   *  It belongs to that token: written and replaced together with it (`withToken`), so a reply
+   *  that states no term clears an old one instead of leaving it to describe a newer token. */
+  termEndsAt?: number
 }
 
 function file(): string {
@@ -147,16 +151,42 @@ function isCount(v: unknown): v is number {
   return typeof v === 'number' && Number.isFinite(v)
 }
 
-function statusFrom(token: string | undefined, error: string | null = null): LicenseStatus {
+/**
+ * The subscription term a server reply stated, or null. NOT the token's `exp`: that is a 7-day offline
+ * grace window re-minted every refresh, and printing it as "active until" told a yearly subscriber
+ * they were a week from losing Pro (issue #800). The term is its own field (`termEndsAt`), and null
+ * is a real answer — a lifetime entitlement, a license with no expiry, or a server that predates the
+ * field. Anything that is not a positive, finite number is null too: a 0 would render as 1970.
+ * Unsigned and display-only; nothing gates on it.
+ */
+function termFrom(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : null
+}
+
+/** The stored state after a reply that minted `r.token`: the token and ITS term, replaced together. */
+function withToken(stored: Stored, r: { token?: string; termEndsAt?: unknown }): Stored {
+  return { ...stored, token: r.token, termEndsAt: termFrom(r.termEndsAt) ?? undefined }
+}
+
+function statusFrom(
+  token: string | undefined,
+  error: string | null = null,
+  termEndsAt: number | null = null
+): LicenseStatus {
   // SELF-HOST UNGATE: report Pro unconditionally so the renderer's `isPremium` (= status.active)
-  // is always true and every gated feature defaults on. Token/error are ignored by design.
+  // is always true and every gated feature defaults on. Token/error/term are ignored by design.
   if (SELF_HOST_UNGATE) {
-    return { tier: 'pro', active: true, expiresAt: null, seats: SELF_HOST_SEATS, error: null }
+    return { tier: 'pro', active: true, expiresAt: null, termEndsAt: null, seats: SELF_HOST_SEATS, error: null }
   }
   const p = verify(token)
   return p
-    ? { tier: p.tier, active: true, expiresAt: p.exp, seats: seatsFrom(p), error: null }
-    : { tier: null, active: false, expiresAt: null, seats: 0, error }
+    ? { tier: p.tier, active: true, expiresAt: p.exp, termEndsAt, seats: seatsFrom(p), error: null }
+    : { tier: null, active: false, expiresAt: null, termEndsAt: null, seats: 0, error }
+}
+
+/** Status of what is on disk, the stored token's term included. */
+function statusOf(stored: Stored, error: string | null = null): LicenseStatus {
+  return statusFrom(stored.token, error, termFrom(stored.termEndsAt))
 }
 
 /**
@@ -180,7 +210,14 @@ export function licensedSeats(): number {
  */
 const REQUEST_TIMEOUT_MS = 8000
 
-async function call(path: string, body: unknown): Promise<{ token?: string; error?: string }> {
+/** What a minting route answers. `termEndsAt` is optional on the wire: older servers never send it. */
+interface MintReply {
+  token?: string
+  error?: string
+  termEndsAt?: unknown
+}
+
+async function call(path: string, body: unknown): Promise<MintReply> {
   if (!allowed()) return { error: 'disabled' }
   const ctrl = new AbortController()
   const t = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS)
@@ -192,7 +229,7 @@ async function call(path: string, body: unknown): Promise<{ token?: string; erro
       signal: ctrl.signal
     })
     if (res.status === 204) return {}
-    const json = (await res.json().catch(() => ({}))) as { token?: string; error?: string }
+    const json = (await res.json().catch(() => ({}))) as MintReply
     if (!res.ok) return { error: json.error ?? 'network' }
     return json
   } catch {
@@ -203,13 +240,13 @@ async function call(path: string, body: unknown): Promise<{ token?: string; erro
 }
 
 // GET helper for the device-bound status poll.
-async function getJson(path: string): Promise<{ active?: boolean; token?: string; error?: string }> {
+async function getJson(path: string): Promise<MintReply & { active?: boolean }> {
   if (!allowed()) return { error: 'disabled' }
   const ctrl = new AbortController()
   const t = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS)
   try {
     const res = await fetch(`${API_BASE}${path}`, { signal: ctrl.signal })
-    const json = (await res.json().catch(() => ({}))) as { active?: boolean; token?: string; error?: string }
+    const json = (await res.json().catch(() => ({}))) as MintReply & { active?: boolean }
     if (!res.ok) return { error: json.error ?? 'network' }
     return json
   } catch {
@@ -268,7 +305,7 @@ export function initLicense(onChange?: () => void): void {
     onChange?.()
   }
 
-  platform().handle(IPC.licenseStatus, () => statusFrom(load().token))
+  platform().handle(IPC.licenseStatus, () => statusOf(load()))
 
   // Both routes are authorized by the stored entitlement token. Sending a deviceId instead would
   // hand a key — which works on ANY machine — to whoever learned an id that rides query strings,
@@ -356,8 +393,9 @@ export function initLicense(onChange?: () => void): void {
         }
         const r = await getJson(`/v1/license/status?deviceId=${encodeURIComponent(deviceId)}`)
         if (r.active && r.token) {
-          await save({ ...load(), token: r.token })
-          broadcast(statusFrom(r.token))
+          const next = withToken(load(), r)
+          await save(next)
+          broadcast(statusOf(next))
           polling = false
           return
         }
@@ -365,13 +403,19 @@ export function initLicense(onChange?: () => void): void {
       }
       setTimeout(() => void poll(), 4000)
     }
-    return statusFrom(load().token)
+    return statusOf(load())
   })
 
   platform().handle(IPC.licenseActivate, async (key: string) => {
     const r = await call('/v1/license/activate', { key: String(key).trim(), deviceId })
-    if (r.token) await save({ ...load(), key: String(key).trim(), token: r.token })
-    const status = statusFrom(r.token, r.error ?? null)
+    let status: LicenseStatus
+    if (r.token) {
+      const next = { ...withToken(load(), r), key: String(key).trim() }
+      await save(next)
+      status = statusOf(next, r.error ?? null)
+    } else {
+      status = statusFrom(undefined, r.error ?? null)
+    }
     broadcast(status)
     return status
   })
@@ -400,25 +444,27 @@ export function initLicense(onChange?: () => void): void {
       // Key-paste flow: refresh against the stored key.
       const r = await call('/v1/license/refresh', { key: stored.key, deviceId })
       if (r.token) {
-        await save({ ...stored, token: r.token })
-        broadcast(statusFrom(r.token))
+        const next = withToken(stored, r)
+        await save(next)
+        broadcast(statusOf(next))
       } else {
-        broadcast(statusFrom(stored.token, r.error ?? null)) // offline grace
+        broadcast(statusOf(stored, r.error ?? null)) // offline grace
       }
     } else {
       // Device-bound flow (no key): re-poll status by deviceId. Covers a purchase that completed
       // after the in-app Upgrade poll window, and every later relaunch.
       const r = await getJson(`/v1/license/status?deviceId=${encodeURIComponent(deviceId)}`)
       if (r.active && r.token) {
-        await save({ ...stored, token: r.token })
-        broadcast(statusFrom(r.token))
+        const next = withToken(stored, r)
+        await save(next)
+        broadcast(statusOf(next))
       } else if (r.error === 'offline' || r.error === 'network' || r.error === 'disabled') {
         // Couldn't reach the server → offline grace: keep the last valid token.
-        if (stored.token) broadcast(statusFrom(stored.token))
+        if (stored.token) broadcast(statusOf(stored))
       } else {
         // Server responded: this device is no longer entitled (canceled / suspended / expired)
         // → drop Pro and clear the cached token, even though it hasn't expired yet.
-        if (stored.token) await save({ ...stored, token: undefined })
+        if (stored.token) await save({ ...stored, token: undefined, termEndsAt: undefined })
         broadcast(statusFrom(undefined))
       }
     }

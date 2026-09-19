@@ -5,7 +5,9 @@
 // document per node (linked nodes' titles, transcript paths learned from hooks, cwds, tmux
 // session names) and answers reads over the hook server's /context-link/ route. A POSIX-sh shim
 // (context.sh) is the client; a globally-installed Claude skill (plus instruction blocks for the
-// agents that have no skill system) tells the agent how + when to call it.
+// agents that have no skill system) tells the agent how + when to call it. The local shim is built
+// with the shared-Codex thread resolver before its node-id gate; the SSH installer keeps the
+// machine-neutral body because this machine's ownership-record path is meaningless on the host.
 //
 // The reading and parsing happen HERE, on the desktop, not in the CLI. That is what lets an SSH
 // project's remote agent use the feature at all: its transcripts live on the host, reachable over
@@ -19,9 +21,10 @@ import { platform } from './platform'
 import { IPC } from '../shared/ipc'
 import type { ContextLinkMap } from '../shared/types'
 import { type PtyManager } from './pty-manager'
+import { directExecutableInvocation, findInLoginPath } from './exec-path'
 import { TMUX_SOCKET } from './tmux-naming'
 import {
-  CONTEXT_SHIM_SCRIPT,
+  buildContextShimScript,
   buildContextLinkSkillBody,
   buildLinkDoc,
   buildLinkedContextInstructions,
@@ -31,6 +34,7 @@ import {
   type LinkDoc,
   type LinkDocEntry
 } from './context-link-core'
+import { codexThreadIdentityRoot } from './codex-identity-proxy'
 import {
   CONTEXT_LINK_VERBS,
   renderContextLink,
@@ -58,7 +62,7 @@ function skillPath(): string {
 function writeCliFiles(): void {
   const d = contextLinkDir()
   fs.mkdirSync(d, { recursive: true })
-  fs.writeFileSync(cliShimPath(), CONTEXT_SHIM_SCRIPT)
+  fs.writeFileSync(cliShimPath(), buildContextShimScript(codexThreadIdentityRoot()))
   try {
     fs.chmodSync(cliShimPath(), 0o755)
   } catch {
@@ -199,6 +203,24 @@ async function fetchTranscript(node: LinkDocEntry): Promise<string | null> {
   }
 }
 
+export async function opencodeExportAt(bin: string, sessionId: string): Promise<string | null> {
+  const invocation = directExecutableInvocation(bin, ['export', sessionId])
+  if (!invocation) return null
+  try {
+    const { execFile } = await import('node:child_process')
+    return await new Promise<string | null>((resolve) => {
+      execFile(
+        invocation.executable,
+        invocation.args,
+        { ...invocation.options, encoding: 'utf-8' },
+        (err, stdout) => resolve(err ? null : stdout)
+      )
+    })
+  } catch {
+    return null
+  }
+}
+
 async function fetchOpencodeExport(node: LinkDocEntry): Promise<string | null> {
   if (!node.sessionId) return null
   if (deps.isRemoteNode?.(node.id)) {
@@ -206,16 +228,8 @@ async function fetchOpencodeExport(node: LinkDocEntry): Promise<string | null> {
       ? await deps.runRemoteCommand(node.id, `opencode export ${shellQuote(node.sessionId)}`)
       : null
   }
-  try {
-    const { execFile } = await import('node:child_process')
-    return await new Promise<string | null>((resolve) => {
-      execFile('opencode', ['export', node.sessionId ?? ''], { encoding: 'utf-8' }, (err, stdout) =>
-        resolve(err ? null : stdout)
-      )
-    })
-  } catch {
-    return null
-  }
+  const bin = await findInLoginPath('opencode')
+  return bin ? opencodeExportAt(bin, node.sessionId) : null
 }
 
 /** Single-quote for a POSIX shell. The session id reaches a remote command line, and it is
@@ -331,10 +345,27 @@ export function setContextLinks(map: ContextLinkMap): Promise<void> {
   return writeChain
 }
 
+/**
+ * Boot Context Link: register the hook-server read handler, (re)write the shim under `dataDir`,
+ * and — only when `options.installAgentIntegrations` says so — install the discovery surface into
+ * the machine's REAL agent configuration directories (`~/.claude/skills/get-linked-context`, plus
+ * the marker block in `~/.codex/AGENTS.md`, `~/.gemini/GEMINI.md` and opencode's `AGENTS.md`).
+ *
+ * `options` is REQUIRED and its flag is a plain `boolean`, deliberately: those instruction files
+ * belong to the user and are loaded by every agent session on the machine, ours or not, so
+ * writing them is a decision each caller owes an answer to (issue #490). The previous shape —
+ * an optional options bag whose flag was read as `!== false` — meant the WRITE was what you got
+ * by saying nothing, which is the wrong default direction for a filesystem effect outside our own
+ * data dir, and it is exactly how a unit test that never thought about `HOME` came to rewrite the
+ * developer's own `~/.codex/AGENTS.md` on every run. Same asymmetry as
+ * `session-memory-service.ts`'s required `remote.isRemoteProject`: acting-without-knowing is a
+ * compile error. `platformDeps` lost its default with it — every caller already passes one, and a
+ * defaulted parameter in front of a required one is unreachable anyway.
+ */
 export function initContextLink(
   ptyManager: PtyManager,
-  platformDeps: ContextLinkDeps = {},
-  options: { installAgentIntegrations?: boolean } = {}
+  platformDeps: ContextLinkDeps,
+  options: { installAgentIntegrations: boolean }
 ): void {
   pty = ptyManager
   deps = platformDeps
@@ -347,7 +378,7 @@ export function initContextLink(
       if (f.endsWith('.json')) fs.rmSync(path.join(d, f), { force: true })
     }
     writeCliFiles()
-    if (options.installAgentIntegrations !== false) {
+    if (options.installAgentIntegrations) {
       installSkill()
       installAgentInstructions()
     }

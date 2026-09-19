@@ -63,8 +63,41 @@
      without touching 54 rules. Scrims are excluded: darkening IS a scrim's job. */
   --shadow-k: 1;
 
+  /* One distance between every floating overlay and the edge it hugs (the dock's, historically):
+     the dock, the pill cluster, the minimap, the sidebars and the top-right cluster each used to
+     carry their own 14 to 22px, which read as a ragged margin. Top-anchored chrome adds the tab bar's
+     height (`--tabbar-h`) on top of it. */
+  --float-gap: 22px;
+  /* The tab bar's height. Every dependant reads this token (the kanban overlay's top, the floating
+     panels' offsets, the usage popover's cap) and main derives the macOS traffic-light `y` from the
+     SAME number via `@shared/window-chrome-metrics` (`TABBAR_HEIGHT_PX`), so the bar and the lights
+     cannot drift apart — `styles.tabbar.test.ts` pins this literal to that constant. */
+  --tabbar-h: 40px;
+  /* Chrome-style tab geometry (see the tab bar block). `--tab-inset` is the gap between the bar's
+     top edge and a tab; the hover pill also keeps it at the bottom, the active tab does not.
+     `--tab-flare` is the radius of the active tab's concave bottom corners AND the strip's side
+     padding that keeps them from being clipped. */
+  --tab-inset: 4px;
+  --tab-radius: 8px;
+  --tab-flare: 8px;
+  /* The only limit on a tab's width. A tab is otherwise as wide as its own name, so the strip
+     scrolls instead of shortening anything; this stops a project named after a whole sentence
+     from taking the strip on its own, and is the ONLY case in which a name ellipsises. */
+  --tab-max: 260px;
+  --tab-divider-h: 16px;
+  /* The strip behind the tabs. In dark it is the panel colour (#282828 over a #000 canvas, the
+     active tab reads as a hole). In LIGHT the panel and the canvas are one value apart (#f3efe7 vs
+     #f4efe6) and a canvas-coloured active tab would vanish, so the strip steps back to the deeper
+     surface — Chrome's own light strip is a grey behind a paler active tab. Themed per block. */
+  --tabbar-bg: var(--panel);
+
+  /* Outer width of the bottom-left controls column: one button plus the column's 1px border on
+     each side. The pill cluster clears the column by reading this, so resizing the buttons cannot
+     silently drop the pills back on top of them. */
+  --controls-w: 30px;
+
   /* Canvas chrome that lives on React Flow props rather than in a rule. */
-  --canvas-dot: #4a4a4a;
+  --canvas-dot: #303030;
   --minimap-mask: rgba(10, 12, 18, 0.6);
   --git-graph-ref: var(--accent);
   --git-graph-remote-ref: #bf5af2;
@@ -84,6 +117,34 @@
   /* Tells the engine which way its OWN chrome should go — scrollbars, form controls, the
      `<select>` popups the settings panel is full of. Without it those stay dark on a light page. */
   color-scheme: dark;
+}
+
+/* ---- Idle-window animation gate --------------------------------------------------------------
+   Every `infinite` animation in this file is a STATUS or DECORATION — a pulsing dot, a glow, a
+   spinner, a walking mascot. None of them settles, so none of them carries state that is lost by
+   being held still; they exist to catch the eye of somebody who is looking at this window.
+
+   While nobody is (the window is not focused, or the page is hidden), they are pure battery. A
+   running CSS animation obliges the compositor to produce a frame every vsync — 120/s on a
+   ProMotion display — for as long as it runs, and each of those frames re-rasters and re-composites
+   the window. MEASURED on the Server Edition with a 40-terminal canvas, idling for 25 s under
+   headless Chrome: 1.5 % total browser CPU with nothing animating, 33 % with ONE node pulsing,
+   101 % with twenty. The same twenty with `animation-play-state: paused`: 1.6 %. The step happens
+   at the FIRST animation — what costs is that frames are produced at all — which is why this is
+   applied to every infinite animation in the file rather than to the worst few: one that keeps
+   running holds the frame loop open and the rest of the fix buys nothing. `lib/windowActivity.ts`
+   sets the attribute; `styles.animation-gate.test.ts` fails if a new `infinite` animation is added
+   without joining in.
+
+   `paused` is deliberately not `none`: it freezes each animation where it stands instead of
+   snapping it to its resting frame, so nothing MOVES at the moment the window loses focus, and
+   refocusing resumes rather than restarts. The three node glows below are the one exception. */
+:root {
+  --nt-anim-state: running;
+}
+
+:root[data-nt-window='idle'] {
+  --nt-anim-state: paused;
 }
 
 /* ---- Light appearance ----------------------------------------------------------------------
@@ -141,6 +202,9 @@
   /* The canvas sits BELOW every node, so it is the one surface that must be darker than the
      panels — otherwise the nodes dissolve into the field and the layout loses its edges. */
   --canvas-bg: #f4efe6;
+  /* The tab strip steps back one surface so the canvas-coloured active tab comes forward (see the
+     dark block's `--tabbar-bg` note). */
+  --tabbar-bg: var(--surface-deep);
   /* Floating surfaces come UP the ramp (see the elevation note above) without going white. */
   --menu-rgb: 253, 251, 247;
   --popover-rgb: 253, 251, 247;
@@ -163,7 +227,7 @@
 
   /* Dots must read as a grid, not as noise: the dark-mode grey is far too heavy on a pale field,
      and a neutral one would be the only cold thing on screen. */
-  --canvas-dot: #d8cdba;
+  --canvas-dot: #eae3d6;
   --minimap-mask: rgba(251, 248, 243, 0.6);
 }
 
@@ -190,16 +254,25 @@ body,
   flex-direction: column;
 }
 
-/* ---- Top project tab bar ---- */
+/* ---- Top project tab bar (Chrome-style strip) ----
+   Three states, exactly as a browser draws them:
+   - INACTIVE tabs have no fill. They sit on the strip, told apart only by a 1px divider at each
+     tab's left edge, and that divider is dropped on BOTH sides of a hovered or active tab.
+   - HOVER is a soft rounded pill lighter than the strip, inset from the bar's top and bottom. It
+     is a hover state, not a selection: it connects to nothing.
+   - ACTIVE takes the colour of the surface UNDER the bar (`--canvas-bg`, which the kanban overlay
+     shares) and merges into it: rounded top corners, square bottom, and a concave flare at each
+     bottom corner that curves out into the page. No line between the tab and the canvas.
+   Every tab is as wide as its own NAME (capped at `--tab-max`), so the strip scrolls rather than
+   shortening anything, and the actions stay pinned to the tab's right edge. */
 .tabbar {
   position: relative;
   display: flex;
   align-items: center;
-  gap: 14px;
-  height: 44px;
-  padding: 0 12px;
-  background: var(--panel);
-  border-bottom: 1px solid var(--border);
+  gap: 10px;
+  height: var(--tabbar-h);
+  padding: 0 10px;
+  background: var(--tabbar-bg);
   /* Above the canvas and the menu backdrop so tabs/inputs stay interactive. */
   z-index: 30;
   flex-shrink: 0;
@@ -210,9 +283,26 @@ body,
 /* Leave room for the macOS traffic lights on the left — ONLY where they are drawn inside the web
    contents (Electron `titleBarStyle: 'hiddenInset'`, darwin desktop). The attribute is stamped by
    `lib/windowChrome.ts` at boot; without it the reservation applied on Windows and Linux too,
-   pushing the logo in by 86px and taking the same 86px off the tab strip (issue #564). */
+   pushing the logo in by 86px and taking the same 86px off the tab strip (issue #564). The lights
+   themselves are centred on the bar by main (`trafficLightY` in `@shared/window-chrome-metrics`),
+   from the same height `--tabbar-h` is pinned to. */
 :root[data-window-chrome='inset'] .tabbar {
   padding-left: 86px;
+}
+
+/* The separator between the bar and the canvas, as a pseudo-element rather than the bar's own
+   `border-bottom`: the ACTIVE tab has to break that line to read as a tab whose body IS the
+   canvas. It is z-index:auto, so the active tab's `z-index: 1` paints over the pixels it and its
+   flares cover, and the line still runs under every inactive tab and the bar's empty stretch. */
+.tabbar::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 1px;
+  background: var(--border);
+  pointer-events: none;
 }
 
 /* Interactive elements inside the bar must not drag the window. */
@@ -227,7 +317,7 @@ body,
 .brand {
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 7px;
   white-space: nowrap;
   -webkit-app-region: drag;
 }
@@ -237,26 +327,55 @@ body,
 }
 
 .brand__name {
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 700;
   color: var(--text);
   letter-spacing: 0.2px;
 }
 
-/* Tabs as a single rounded pill of segments */
+/* The + is a sibling of the strip so it cannot scroll away with the tabs (issue #375). The
+   wrapper is flex:1 and is NOT in the no-drag list — it is the remaining title-bar drag region. */
+.tabbar__projects {
+  display: flex;
+  align-items: stretch;
+  /* The bar centers its items, so without this the wrapper is only as tall as its content and the
+     tabs stretch to THAT — they have to reach the bar's own bottom to merge into the canvas. */
+  align-self: stretch;
+  gap: 0;
+  flex: 1;
+  /* Load-bearing (issue #375): a flex item's min-width defaults to `auto`, which resolves against
+     the strip's full content width — so with many tabs the wrapper refuses to shrink and shoves
+     the + past the window edge. Measured: 1280 px / 12 projects, + at x=1382 without this. */
+  min-width: 0;
+}
+
 .tabbar__tabs {
   display: flex;
-  align-items: center;
-  gap: 2px;
-  height: 34px;
-  padding: 3px;
-  background: rgba(var(--tint-rgb), 0.05);
-  border: 1px solid var(--border);
-  border-radius: 17px;
+  align-items: stretch;
+  /* No gap: the dividers ARE the seams, and the active tab's flares reach into its neighbours. */
+  gap: 0;
+  align-self: stretch;
+  /* Room for the active tab's flares, which reach `--tab-flare` past the tab on each side: this
+     is a scroll container and would clip the first and last tab's flare without it. */
+  padding: 0 var(--tab-flare);
+  /* Content-sized until the bar runs out of room, then it shrinks (min-width 0, as a scroller
+     may) and the tabs inside shrink with it — evenly, since they share one flex basis. */
+  flex: 0 1 auto;
+  min-width: 0;
   overflow-x: auto;
   /* Scrollable but without the native scrollbar (foreign-looking in a title-bar tab strip);
      trackpad swipe / wheel still scroll, and the active tab is scrolled into view. */
   scrollbar-width: none;
+  /* One more divider at the strip's end, between the last tab and the +. A background rather than
+     a border so it is the same 16px stroke as the dividers between tabs, and so `:has` below can
+     drop it when the last tab is hovered or active, as every other divider is dropped. */
+  background: linear-gradient(var(--border), var(--border)) right 50% / 1px var(--tab-divider-h)
+    no-repeat;
+}
+
+.tabbar__tabs:has(> .tab:last-of-type:hover),
+.tabbar__tabs:has(> .tab.active:last-of-type) {
+  background-image: none;
 }
 
 .tabbar__tabs::-webkit-scrollbar {
@@ -267,22 +386,98 @@ body,
   position: relative;
   display: flex;
   align-items: center;
-  gap: 7px;
-  padding: 0 12px;
-  height: 100%;
-  border-radius: 14px;
+  gap: 6px;
+  /* A tab is as wide as its own NAME, capped, and never shrinks: the project name is the thing
+     the strip exists to show, so the strip SCROLLS when the tabs stop fitting rather than
+     squeezing every name towards its floor. That is the deliberate departure from Chrome, which
+     shrinks because it must keep every tab reachable without scrolling; here the sessions sidebar
+     and Cmd+1..9 both reach a project without touching the strip, so a readable name is worth
+     more than a visible tab edge.
+     `max-width` is the one limit: a project whose folder is named after a whole sentence would
+     otherwise take the strip on its own — past it, and only past it, the name ellipsises. */
+  max-width: var(--tab-max);
+  flex: 0 0 auto;
+  /* Inset from the bar's top and bottom: the hover pill floats, it does not touch the edges. */
+  margin: var(--tab-inset) 0;
+  /* Asymmetric on purpose: the right edge ends in the options button, whose three dots are a far
+     narrower glyph than the name on the left, so an equal padding reads as a gap there. */
+  padding: 0 4px 0 10px;
+  border-radius: var(--tab-radius);
   color: var(--muted);
-  font-size: 13px;
+  font-size: 12.5px;
+  /* One weight for every tab: a heavier active tab shifts the whole strip's metrics as you switch,
+     and the fill already says which one is active. */
+  font-weight: 500;
   cursor: pointer;
   white-space: nowrap;
+  /* The divider, at this tab's LEFT edge: a 1px stroke, `--tab-divider-h` tall, centred. It is a
+     background image so a hover or active FILL replaces it in the same declaration. */
+  background: linear-gradient(var(--border), var(--border)) 0 50% / 1px var(--tab-divider-h)
+    no-repeat;
 }
 
-.tab:hover {
-  background: rgba(var(--tint-rgb), 0.05);
+/* No divider before the first tab, nor to the right of a hovered or active one (the next tab's
+   left edge). The hover rule sits below these so a hovered tab that FOLLOWS an active one still
+   gets its pill. */
+.tab:first-child,
+.tab:hover + .tab,
+.tab.active + .tab {
+  background-image: none;
+}
+
+.tab:not(.active):hover {
+  background: rgba(var(--tint-rgb), 0.1);
+  color: var(--text);
 }
 
 .tab.active {
-  background: rgba(var(--tint-rgb), 0.09);
+  /* THE tab look: the active tab is the page's own surface, reaching down into it. */
+  background: var(--canvas-bg);
+  /* Neutral, never the project colour: the fill alone says which tab is active and `.tab__dot`
+     says which project it is, so tinting the label would say the same thing twice. */
+  color: var(--text);
+  /* Square bottom, sitting ON the bar's bottom edge, so the fill runs straight into the canvas. */
+  margin-bottom: 0;
+  border-radius: var(--tab-radius) var(--tab-radius) 0 0;
+  /* Above `.tabbar::after` and the neighbouring tabs, so the tab's own bottom pixels and its
+     flares replace the separator line, and the flares paint over the neighbours' edges. */
+  z-index: 1;
+}
+
+/* The two concave flares. One pseudo-element a flare wider than the tab on each side, painted
+   with a radial gradient in each corner: the quarter-disc nearest the tab stays transparent (the
+   strip shows through) and everything past `--tab-flare` from that corner is the surface colour,
+   which is the inverted curve that runs the tab out into the page. The half-pixel between the two
+   stops is the anti-aliasing. The middle of the pseudo is transparent — the tab's own fill is
+   there. `::before` is taken by the drop-reorder insertion line. */
+.tab.active::after {
+  content: '';
+  position: absolute;
+  left: calc(-1 * var(--tab-flare));
+  right: calc(-1 * var(--tab-flare));
+  bottom: 0;
+  height: var(--tab-flare);
+  pointer-events: none;
+  background:
+    radial-gradient(
+        circle at 0 0,
+        transparent calc(var(--tab-flare) - 0.5px),
+        var(--canvas-bg) calc(var(--tab-flare) + 0.5px)
+      )
+      left / var(--tab-flare) var(--tab-flare) no-repeat,
+    radial-gradient(
+        circle at 100% 0,
+        transparent calc(var(--tab-flare) - 0.5px),
+        var(--canvas-bg) calc(var(--tab-flare) + 0.5px)
+      )
+      right / var(--tab-flare) var(--tab-flare) no-repeat;
+}
+
+/* In the all-projects board the highlighted tab follows the selected swimlane, not necessarily
+   the project whose canvas is mounted underneath. Keep that selection visible in the tab strip. */
+.tab.tab--swimlane-highlight {
+  background: rgba(var(--tint-rgb), 0.16);
+  box-shadow: inset 0 -2px 0 currentColor;
   font-weight: 600;
 }
 
@@ -336,10 +531,10 @@ body,
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
   min-width: 17px;
   height: 17px;
   padding: 0 5px;
-  margin-left: 2px;
   border-radius: 9px;
   background: var(--accent);
   color: #fff;
@@ -349,56 +544,79 @@ body,
   line-height: 1;
 }
 
+/* The project name is shown WHOLE. Two earlier rounds tried to keep every tab on screen and ration
+   the name between them — a shared basis (#789: three letters per tab at 8 tabs), then a floor
+   plus shed furniture (#790) — and both spent the one thing the strip is for. The strip scrolls
+   now, which it could always do, and nothing here shortens a name except `--tab-max`. */
 .tab__name {
-  max-width: 160px;
+  /* Its own width, so the tab is sized by the name rather than the name by the tab. It only ever
+     shortens because the TAB hit `--tab-max`, and that case ellipsises rather than fading: a mask
+     gradient is unconditional — it would fade the last characters of a name that fits perfectly —
+     while `text-overflow` is self-conditioning by construction. */
+  flex: 0 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
 .tab__edit {
+  flex: 1 1 0;
+  width: 0;
+  min-width: 48px;
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 5px;
   color: var(--text);
-  font-size: 13px;
+  font-size: 12.5px;
   padding: 2px 6px;
-  width: 120px;
   outline: none;
 }
 
-.tab__board-toggle {
+/* The two tab actions read as one cluster pinned to the tab's right edge: a hair between them,
+   and a step from the name (which stops at the fade) wider than the tab's own 6px gap. */
+.tab__actions {
   display: inline-flex;
   align-items: center;
-  background: transparent;
-  border: none;
-  color: currentColor;
-  cursor: pointer;
-  line-height: 1;
-  padding: 2px 2px;
-  border-radius: 4px;
-  opacity: 0.55;
-}
-.tab__board-toggle:hover {
-  opacity: 1;
+  flex-shrink: 0;
+  gap: 1px;
+  margin-left: 2px;
 }
 
+.tab__board-toggle,
 .tab__caret {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   background: transparent;
   border: none;
   color: currentColor;
   cursor: pointer;
-  font-size: 12px;
   line-height: 1;
-  padding: 2px 2px;
-  border-radius: 4px;
-  opacity: 0;
+  /* A fixed box, not padding around the glyph: these two sit side by side and their glyphs fill
+     very different amounts of a 14px square — the board's bars run edge to edge, the three dots
+     stand alone in the middle — so a padded box would give them hover plates of two widths and
+     read as two kinds of control. */
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border-radius: 5px;
+  /* Reachable on every tab, not only the active one, so it is never hidden: an affordance that
+     appears on hover cannot be found by someone who does not already know it is there. */
+  opacity: 0.45;
+  transition: background 0.12s ease, opacity 0.12s ease;
 }
 
+.tab:hover .tab__board-toggle,
 .tab:hover .tab__caret {
   opacity: 0.7;
 }
 
+/* Same answer a node's header buttons give (`.term-node__refresh` and friends): a tinted plate
+   under the glyph, not just a brighter glyph. */
+.tab__board-toggle:hover,
 .tab__caret:hover {
+  background: rgba(var(--tint-rgb), 0.1);
+  color: var(--text);
   opacity: 1;
 }
 
@@ -407,18 +625,22 @@ body,
   align-items: center;
   justify-content: center;
   align-self: center;
+  /* Load-bearing: without this a squeezed bar shrinks the + instead of scrolling the tabs. */
+  flex-shrink: 0;
+  /* The strip's end divider already separates the + from the last tab; this is only the step
+     between that divider and the glyph. */
+  margin-left: 2px;
   width: 28px;
   height: 28px;
   background: transparent;
   border: none;
-  border-radius: 14px;
+  border-radius: 8px;
   color: var(--muted);
-  font-size: 17px;
   cursor: pointer;
 }
 
 .tab__add:hover {
-  background: rgba(var(--tint-rgb), 0.07);
+  background: rgba(var(--tint-rgb), 0.1);
   color: var(--text);
 }
 
@@ -523,14 +745,14 @@ body,
 
 .dock {
   position: absolute;
-  bottom: 22px;
+  bottom: var(--float-gap);
   left: 50%;
   transform: translateX(-50%);
   z-index: 20;
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 7px 10px;
+  padding: 7px;
   background: rgba(var(--menu-rgb), 0.92);
   backdrop-filter: blur(10px);
   border: 1px solid var(--border);
@@ -566,12 +788,12 @@ body,
   color: #fff;
 }
 
-.dock-add:hover {
-  background: var(--accent-hover);
+.dock-btn.dock-add:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 85%, black);
 }
 
-.dock-add.active {
-  background: #0060df;
+.dock-btn.dock-add.active:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 72%, black);
   color: #fff;
 }
 
@@ -585,11 +807,6 @@ body,
   height: 22px;
   background: var(--border);
   margin: 0 4px;
-}
-
-.dock-zoom-btn {
-  width: 30px;
-  height: 30px;
 }
 
 .dock-zoom-wrap {
@@ -726,6 +943,104 @@ body,
   flex-shrink: 0;
 }
 
+/* Saved layouts, anchored to their own button like the zoom presets rather than to the dock's left
+   edge. Wider than the add menu because each row carries a name plus its subtitle. */
+.dock-layouts-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.dock-layouts-menu {
+  left: 50%;
+  transform: translateX(-50%);
+  min-width: 260px;
+  max-width: 340px;
+}
+
+/* A row is a container, not a button: the restore action and the two per-row actions are separate
+   buttons, and a button cannot legally nest inside another one. */
+.dock-menu__row {
+  display: flex;
+  align-items: center;
+  border-radius: 8px;
+}
+
+.dock-menu__row:hover,
+.dock-menu__row:focus-within {
+  background: var(--panel-header);
+}
+
+/* Qualified with `button` throughout this group: the generic `.dock-menu button` rules above are
+   (0,1,1) and would otherwise out-specify a bare class whatever the source order. */
+.dock-menu button.dock-menu__row-main {
+  flex: 1;
+  min-width: 0;
+}
+
+/* The row already carries the hover background; a second one on the button would sit on top of it
+   with square corners at the trailing edge. */
+.dock-menu button.dock-menu__row-main:hover:not(:disabled) {
+  background: transparent;
+}
+
+.dock-menu__row-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.dock-menu__row-name,
+.dock-menu__row-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dock-menu__row-sub {
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Revealed on hover or keyboard focus. Kept in the layout at all times (opacity, not display) so a
+   row's width does not jump as the pointer crosses it. */
+.dock-menu__row-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding-right: 6px;
+  opacity: 0;
+}
+
+.dock-menu__row:hover .dock-menu__row-actions,
+.dock-menu__row:focus-within .dock-menu__row-actions {
+  opacity: 1;
+}
+
+.dock-menu button.dock-menu__row-act {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.dock-menu button.dock-menu__row-act:hover {
+  background: var(--surface-overlay);
+  color: var(--text);
+}
+
+.dock-menu button.dock-menu__row-act:hover svg {
+  color: inherit;
+}
+
 /* One level of flyout submenu — for a builtin harness that has inheriting custom agents (e.g. a
  * claude-compatible proxy). The parent button carries a ▸ chevron; hovering/focusing it opens the
  * flyout to the right of the menu. Reused only when there is something to nest, so a menu with no
@@ -780,7 +1095,7 @@ body,
 /* ---- Dictation overlay: bottom-center floating card above the Dock ---- */
 .dictation {
   position: fixed;
-  bottom: 88px;
+  bottom: calc(var(--float-gap) + 52px + var(--float-gap));
   left: 50%;
   transform: translateX(-50%);
   z-index: 60; /* above the kanban board (25) and the card modal scrim (55) — the mic works there too */
@@ -868,6 +1183,7 @@ body,
   border-color: rgba(255, 69, 58, 0.5);
   color: var(--danger);
   animation: dictation-pulse 1.4s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 
 .dictation__mic--small {
@@ -936,6 +1252,7 @@ body,
   border-top-color: transparent;
   opacity: 0.85;
   animation: ui-spin 0.8s linear infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 @keyframes ui-spin {
   to {
@@ -950,6 +1267,7 @@ body,
   border: 2px solid var(--border);
   border-top-color: var(--accent);
   animation: dictation-spin 0.8s linear infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 
 @keyframes dictation-spin {
@@ -1259,6 +1577,62 @@ body,
   }
 }
 
+/* The three glows above, while the window is idle (see the animation gate near the top of the
+   file). They do NOT take the shared `--nt-anim-state: paused`, because pausing freezes an
+   animation wherever its clock happened to stop and `nt-unread-glow` rests at `opacity: 0` — a
+   coin flip on whether the glow that says "this agent finished while you were away" is still on
+   screen when you come back to look for it. So each one goes STATIC-LIT instead: no frames, and
+   the state reads at a glance from across the room, which is the whole job of a glow you are not
+   in front of. The value sits between each keyframe's floor and its peak, so the node neither
+   flashes brighter nor drops out at the moment focus leaves.
+
+   `will-change` is dropped with the animation: it is a promise about a property that is about to
+   change, and nothing is about to change any more — holding the compositor layer for every idle
+   working/unread/attention node on a 100-node canvas is exactly the cost this block is removing. */
+:root[data-nt-window='idle'] .react-flow__node:has(.term-node.unread)::after {
+  animation: none;
+  opacity: 0.85;
+  will-change: auto;
+}
+
+:root[data-nt-window='idle'] .react-flow__node:has(.term-node.working)::after {
+  animation: none;
+  opacity: 0.7;
+  will-change: auto;
+}
+
+:root[data-nt-window='idle'] .react-flow__node:has(.term-node.attention)::after {
+  animation: none;
+  opacity: 0.8;
+  will-change: auto;
+}
+
+/* ---- Covered-canvas animation gate -----------------------------------------------------------
+   The kanban board is an opaque overlay and the canvas stays MOUNTED underneath it, because
+   `display: none` would resize every terminal to 0x0 and fire a tmux SIGWINCH. So every glow and
+   pulse on that canvas keeps the compositor producing frames for something nobody can see through.
+   MEASURED with twenty pulsing nodes: 101 % total browser CPU uncovered, 12.8 % under an opaque
+   full-screen div (Chromium culls a lot of it, but not the frame loop), 1.5 % with this rule.
+
+   `--nt-anim-state` INHERITS, so overriding it on the canvas subtree is the whole gate for every
+   animation that reads it — no second list of selectors to keep in step. The three node glows are
+   not in that scheme (see the idle rules above) and take an explicit pause here; under an opaque
+   board there is no readability argument for freezing them lit, so they simply stop.
+
+   A SEPARATE attribute from `data-nt-window` on purpose: the two facts are independent (a board on
+   a focused window, an unfocused window with no board), and one attribute with two writers is a
+   race over who clears it. Scoped to the canvas and nothing else — the controls cluster and the
+   pills sit ABOVE the board (z 26) and are genuinely on screen, so they keep animating. */
+:root[data-nt-canvas='covered'] .react-flow {
+  --nt-anim-state: paused;
+}
+
+:root[data-nt-canvas='covered'] .react-flow__node:has(.term-node.unread)::after,
+:root[data-nt-canvas='covered'] .react-flow__node:has(.term-node.working)::after,
+:root[data-nt-canvas='covered'] .react-flow__node:has(.term-node.attention)::after {
+  animation-play-state: paused;
+}
+
 /* Bridge link handles (Claude nodes): dots on the header row, on top of the node so they're
    never buried under the terminal body. Subtle until you hover the node, then prominent.
    Never set `transform` on a React Flow handle: the side classes (.react-flow__handle-left/right/
@@ -1320,7 +1694,7 @@ body,
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 8px;
+  padding: 6px;
   background: var(--panel-header);
   cursor: grab;
   user-select: none;
@@ -1335,25 +1709,7 @@ body,
   flex-shrink: 0;
 }
 
-/* Maximize toggle (issue #399): a regular right-group header icon button, next to the close ×.
-   Same recipe as .term-node__refresh — the toggle is ordinary chrome, not a traffic light. */
-.term-node__maximize {
-  background: transparent;
-  border: none;
-  color: var(--muted);
-  cursor: pointer;
-  line-height: 1;
-  padding: 2px 5px;
-  border-radius: 4px;
-  flex-shrink: 0;
-  display: inline-flex;
-  align-items: center;
-}
 
-.term-node__maximize:hover {
-  background: rgba(10, 132, 255, 0.18);
-  color: var(--accent-text);
-}
 
 .term-node__title {
   flex: 1;
@@ -1447,6 +1803,30 @@ body,
   background: rgba(255, 159, 10, 0.16);
 }
 
+/* Observed-account variants. The base chip is the managed-account look; these keep the three
+   other cases distinguishable at a glance, before anyone hovers for the tooltip. */
+
+/* The system account (~/.claude). Shown only when a second identity is in play, so it must read
+   as "the ordinary one" next to the account that is the exception. */
+.node-account-chip--system {
+  background: rgba(var(--tint-rgb), 0.08);
+}
+
+/* A config dir the user linked: theirs, not one nodeterm minted — a hairline instead of a fill. */
+.node-account-chip--linked {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px rgba(10, 132, 255, 0.35);
+}
+
+/* A config dir nodeterm has no record of. Dashed = provisional: the tooltip says to link it in
+   Settings → Accounts. The padding drops by the border's width so the chip keeps the height of
+   the filled chips beside it. */
+.node-account-chip--unlinked {
+  background: transparent;
+  border: 1px dashed var(--border);
+  padding: 0 7px;
+}
+
 /* Claude Code status: RUNNING badge while working, unread dot when finished. */
 .term-node__status {
   display: inline-flex;
@@ -1474,6 +1854,7 @@ body,
 
 .term-node__status--busy .term-node__status-dot {
   animation: nt-pulse 1.1s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 
 /* DRIVING: an agent holds a control lease on this browser node (S8 PR 6). Same clay as RUNNING so
@@ -1487,6 +1868,7 @@ body,
 
 .term-node__status--driven .term-node__status-dot {
   animation: nt-pulse 1.1s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 
 .browser-driving__label {
@@ -1544,6 +1926,7 @@ body,
   height: var(--mascot-h);
   background-size: calc(var(--mascot-w) * 2) var(--mascot-h);
   animation: mascot-walk-claude 0.8s steps(1) infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 
 /* Grok, gemini and opencode have no critter: their RUNNING indicator is the brand mark itself,
@@ -1556,6 +1939,7 @@ body,
    Agent-neutral by design: no rule below names an agent. */
 .term-node__mascot--pulse {
   animation: mascot-pulse-brand 1.6s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 
 @keyframes mascot-pulse-brand {
@@ -1605,6 +1989,7 @@ body,
   background-position: 0 0;
   background-size: var(--cmascot-sheet-w) var(--cmascot-sheet-h);
   animation: mascot-walk-codex 0.96s steps(8) infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 
 @keyframes mascot-walk-codex {
@@ -1627,6 +2012,26 @@ body,
 
 .term-node__status--loop {
   color: #bf7af0;
+}
+
+/* DROPPED: the agent process is gone and nothing accounted for it (see agent-liveness.ts). Warn
+   colour, not danger — the conversation is intact on disk and one click brings it back — and the
+   dot does NOT pulse: nothing is happening, this is a verdict about a process that already died.
+   A <button> like SLEEPING/PAUSED, so it needs the same base-chip reset. */
+.term-node__status--dropped {
+  color: var(--warn);
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+}
+
+.term-node__status--dropped:hover {
+  color: var(--text);
 }
 
 /* SLEEPING: the agent CLI was exited to reclaim its RAM (Eco); the session itself is fine, so
@@ -1668,6 +2073,7 @@ body,
 
 .term-node__status--attention .term-node__status-dot {
   animation: nt-pulse 1.1s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 
 .term-node__status--unread {
@@ -1773,21 +2179,105 @@ body,
   white-space: nowrap;
 }
 
-.term-node__ai {
-  background: transparent;
-  border: none;
-  color: var(--muted);
-  cursor: pointer;
-  font-size: 13px;
-  line-height: 1;
-  padding: 2px 5px;
-  border-radius: 4px;
-  flex-shrink: 0;
+/* Opens upward: the anchor y is the trigger's TOP edge, so the bubble is pulled fully above it. */
+.tooltip--top {
+  transform: translate(-50%, -100%);
 }
 
-.term-node__ai:hover:not(:disabled) {
-  background: rgba(10, 132, 255, 0.18);
-  color: var(--accent-text);
+/* Opens sideways: the anchor x is the trigger's RIGHT edge and is already the bubble's left edge,
+   so the base rule's horizontal pull is dropped and the centering moves to the other axis. */
+.tooltip--right {
+  transform: translateY(-50%);
+}
+
+
+
+/* Icon sizing for the boxes that are smaller than the shared 16px glyph. The icon set is one
+   family on one viewBox (see icons.tsx); where a button is tight, the BUTTON scales it down
+   rather than the icon carrying a second size of its own. */
+.tab__board-toggle svg,
+.tab__caret svg,
+.sessmem-row__kill svg,
+.welcome__recent-del svg {
+  width: 14px;
+  height: 14px;
+}
+
+.loop-node__expand svg,
+.subagent-node__expand svg,
+.ex-dls__dismiss svg,
+.term-node__stalecwd-dismiss svg,
+.node-tag button svg {
+  width: 12px;
+  height: 12px;
+}
+
+/* Boxes smaller than the shared 16px glyph, scaled by the BUTTON (see icons.tsx: one family,
+   one viewBox). */
+.scm-iconbtn svg,
+.ss-row__close svg,
+.account-identity-check svg,
+.kanban-modal__action svg {
+  width: 13px;
+  height: 13px;
+}
+
+/* ---- Node header actions ----
+   ONE recipe for every icon-only button in a node header (terminal, editor, diff, video, web,
+   browser, sticky, dino). Each of these used to carry its own copy of the same six declarations
+   plus a hand-typed hover colour; the copies had already drifted (collapse hovered grey where its
+   neighbours hovered blue, and the close button's red was not the --danger hue).
+   Buttons carrying TEXT (approve, queued-run, Save/Preview, the status pills, the title) keep
+   their own shape: a word needs room a 22px square does not have. */
+.term-node__collapse,
+.term-node__ai,
+.term-node__chat,
+.term-node__mic,
+.term-node__search,
+.term-node__refresh,
+.term-node__external,
+.term-node__maximize,
+.term-node__close,
+.term-node__move-worktree,
+.term-node__hide-fanout,
+.term-node__tidy-fanout {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: var(--muted);
+  line-height: 1;
+  cursor: pointer;
+}
+
+/* A neutral wash, not the accent: a header full of blue-on-hover buttons competes with the
+   status badges and the project colour, which are the things in that row that carry meaning.
+   Only the destructive action below answers in colour. */
+.term-node__collapse:hover,
+.term-node__ai:hover:not(:disabled),
+.term-node__chat:hover,
+.term-node__mic:hover,
+.term-node__search:hover,
+.term-node__refresh:hover,
+.term-node__external:hover,
+.term-node__maximize:hover,
+.term-node__move-worktree:hover,
+.term-node__hide-fanout:hover,
+.term-node__tidy-fanout:hover {
+  background: rgba(var(--tint-rgb), 0.1);
+  color: var(--text);
+}
+
+/* Closing a node ends its session, so it is the one header action that answers in --danger. */
+.term-node__close:hover {
+  background: color-mix(in srgb, var(--danger) 20%, transparent);
+  color: var(--danger);
 }
 
 .term-node__ai:disabled {
@@ -1795,114 +2285,18 @@ body,
   cursor: default;
 }
 
-.term-node__move-worktree {
-  background: transparent;
-  border: none;
-  color: var(--muted);
-  cursor: pointer;
-  font-size: 13px;
-  line-height: 1;
-  padding: 2px 5px;
-  border-radius: 4px;
-  flex-shrink: 0;
-}
 
-.term-node__move-worktree:hover {
-  background: rgba(10, 132, 255, 0.18);
-  color: var(--accent-text);
-}
 
-.term-node__search {
-  background: transparent;
-  border: none;
-  color: var(--muted);
-  cursor: pointer;
-  line-height: 1;
-  padding: 2px 5px;
-  border-radius: 4px;
-  flex-shrink: 0;
-  display: inline-flex;
-  align-items: center;
-}
 
-.term-node__search:hover {
-  background: rgba(10, 132, 255, 0.18);
-  color: var(--accent-text);
-}
 
-.term-node__refresh {
-  background: transparent;
-  border: none;
-  color: var(--muted);
-  cursor: pointer;
-  line-height: 1;
-  padding: 2px 5px;
-  border-radius: 4px;
-  flex-shrink: 0;
-  display: inline-flex;
-  align-items: center;
-}
 
-.term-node__refresh:hover {
-  background: rgba(10, 132, 255, 0.18);
-  color: var(--accent-text);
-}
 
-.term-node__mic {
-  background: transparent;
-  border: none;
-  color: var(--muted);
-  cursor: pointer;
-  line-height: 1;
-  padding: 2px 5px;
-  border-radius: 4px;
-  flex-shrink: 0;
-  display: inline-flex;
-  align-items: center;
-}
 
-.term-node__mic:hover {
-  background: rgba(10, 132, 255, 0.18);
-  color: var(--accent-text);
-}
 
-.term-node__chat {
-  background: transparent;
-  border: none;
-  color: var(--muted);
-  cursor: pointer;
-  line-height: 1;
-  padding: 2px 5px;
-  border-radius: 4px;
-  flex-shrink: 0;
-  display: inline-flex;
-  align-items: center;
-}
 
-.term-node__chat:hover {
-  background: rgba(10, 132, 255, 0.18);
-  color: var(--accent-text);
-}
 
-.term-node__hide-fanout,
-.term-node__tidy-fanout {
-  background: transparent;
-  border: none;
-  color: var(--muted);
-  cursor: pointer;
-  line-height: 1;
-  padding: 2px 5px;
-  border-radius: 4px;
-  flex-shrink: 0;
-  display: inline-flex;
-  align-items: center;
-}
 
-.term-node__hide-fanout:hover,
-.term-node__tidy-fanout:hover {
-  background: rgba(10, 132, 255, 0.18);
-  color: var(--accent-text);
-}
+
 
 .term-node__hide-fanout[aria-pressed='true'] {
   color: var(--accent-text);
@@ -1953,14 +2347,18 @@ body,
   cursor: pointer;
   font-size: 12px;
   line-height: 1;
-  padding: 2px 5px;
   border-radius: 4px;
   flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
 }
 
 .term-node__find-btn:hover:not(:disabled) {
-  background: rgba(10, 132, 255, 0.18);
-  color: var(--accent-text);
+  background: rgba(var(--tint-rgb), 0.1);
+  color: var(--text);
 }
 
 .term-node__find-btn:disabled {
@@ -2000,21 +2398,7 @@ body,
   color: var(--accent-text);
 }
 
-.term-node__close {
-  background: transparent;
-  border: none;
-  color: var(--muted);
-  cursor: pointer;
-  font-size: 16px;
-  line-height: 1;
-  padding: 2px 6px;
-  border-radius: 4px;
-}
 
-.term-node__close:hover {
-  background: rgba(247, 118, 142, 0.2);
-  color: var(--danger);
-}
 
 .term-node__body {
   position: relative;
@@ -2101,6 +2485,7 @@ body,
   border: 2px solid var(--border);
   border-top-color: var(--accent);
   animation: dictation-spin 0.8s linear infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 
 /* Drop-target hint while dragging a file from Finder into the terminal. */
@@ -2346,10 +2731,28 @@ body,
   color: #ffd9a8;
   background: rgba(120, 70, 10, 0.92);
   border-bottom: 1px solid rgba(255, 180, 80, 0.35);
+  /* Issue #767. The canvas routes a wheel packet by HIT TEST — `closest('.nowheel')` in
+     `Canvas.tsx` and React Flow's own `noWheelClassName` — so whatever element sits under the
+     pointer decides whether the wheel scrolls the terminal or pans the canvas. `.nowheel` lives on
+     `.term-node__xterm`, which is `position: absolute; inset: 0` and therefore owns the WHOLE body
+     including its own inset padding and a co-attach letterbox band (measured; see
+     `terminal-wheel-boundary.test.ts`). This banner was the one thing that broke that: it is a
+     strip laid OVER a terminal that is still alive and still scrollable, outside the `.nowheel`
+     subtree, so two rows of live output answered the wheel with a canvas pan.
+
+     `pointer-events: none` hands those pixels back to the host underneath — the same trick, and
+     the same reasoning, as `.term-node__upload` and `.term-copy-pill` above. Its two BUTTONS opt
+     back in below; nothing else in here is interactive. */
+  pointer-events: none;
 }
 .term-node__stalecwd-text {
   flex: 1;
   min-width: 0;
+}
+/* The interactive halves opt back in — see the `pointer-events: none` note on the banner. */
+.term-node__stalecwd-restart,
+.term-node__stalecwd-dismiss {
+  pointer-events: auto;
 }
 .term-node__stalecwd-restart {
   padding: 2px 10px;
@@ -2364,15 +2767,18 @@ body,
 .term-node__stalecwd-restart:hover {
   background: rgba(255, 255, 255, 0.2);
 }
-.term-node__stalecwd-dismiss {
-  padding: 0 4px;
-  border: none;
+.term-node__stalecwd-dismiss {  border: none;
   background: none;
   color: inherit;
-  font-size: 14px;
   line-height: 1;
   cursor: pointer;
   opacity: 0.7;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
 }
 .term-node__stalecwd-dismiss:hover {
   opacity: 1;
@@ -2681,22 +3087,7 @@ body,
   display: none;
 }
 
-.term-node__collapse {
-  background: transparent;
-  border: none;
-  color: var(--muted);
-  cursor: pointer;
-  font-size: 11px;
-  line-height: 1;
-  padding: 2px 4px;
-  border-radius: 4px;
-  flex-shrink: 0;
-}
 
-.term-node__collapse:hover {
-  background: rgba(var(--tint-rgb), 0.08);
-  color: var(--text);
-}
 
 /* ---- Node tags ---- */
 .node-tags {
@@ -2728,7 +3119,9 @@ body,
   cursor: pointer;
   font-size: 12px;
   line-height: 1;
-  padding: 0 1px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .node-tag button:hover {
@@ -2767,9 +3160,11 @@ body,
   top: 26px;
   left: 6px;
   z-index: 5;
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  /* Sections stack; the swatches inside each one keep the old 4-up grid via --swatch-cols. */
+  display: flex;
+  flex-direction: column;
   gap: 6px;
+  --swatch-cols: 4;
   background: var(--panel-header);
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -2819,9 +3214,14 @@ body,
   background: transparent;
   border: none;
   color: rgba(var(--tint-rgb), 0.55);
-  font-size: 18px;
   line-height: 1;
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
 }
 .remote-dialog__x:hover {
   color: var(--text-strong);
@@ -3147,6 +3547,10 @@ body,
 }
 .ctx-submenu {
   position: absolute;
+  /* Default side. `useSubmenuFlip` measures the open flyout and stamps `data-side` — the rule
+     below opens it leftwards when the row sits too close to the viewport's right edge. The
+     4px is the overlap that keeps the cursor on a hovered surface the whole way across
+     (SUBMENU_OVERLAP_PX). */
   left: calc(100% - 4px);
   top: -6px;
   /* Absolutely positioned inside a ~menu-width row, shrink-to-fit would clamp the flyout to
@@ -3155,6 +3559,10 @@ body,
   max-width: 320px;
   max-height: min(70vh, 520px);
   overflow-y: auto;
+}
+.ctx-submenu[data-side='left'] {
+  left: auto;
+  right: calc(100% - 4px);
 }
 .ctx-submenu .ctx-item {
   /* Keep the label and its default ✓ on one line (labels ellipsize past max-width). */
@@ -3178,10 +3586,33 @@ body,
 }
 
 .ctx-colors {
-  display: grid;
-  grid-template-columns: repeat(7, 1fr);
+  display: flex;
+  flex-direction: column;
   gap: 5px;
+  --swatch-cols: 7;
   padding: 6px 8px;
+}
+
+/* Shared by every palette surface (NodeColorSwatches). The heading is what tells the user which
+   circle is Claude's — an agent brand color is unidentifiable as a bare dot. */
+.swatch-section__label {
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.swatch-section__grid {
+  display: grid;
+  grid-template-columns: repeat(var(--swatch-cols, 7), 1fr);
+  gap: 5px;
+}
+
+.color-popover button[data-selected='true'],
+.ctx-colors button[data-selected='true'] {
+  outline: 1.5px solid var(--text);
+  outline-offset: 1.5px;
 }
 
 .ctx-colors button {
@@ -3344,7 +3775,7 @@ body,
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 5px 8px;
+  padding: 5px;
   cursor: grab;
   user-select: none;
 }
@@ -3444,8 +3875,8 @@ body,
 /* ---- Top-right controls cluster ---- */
 .controls-cluster {
   position: absolute;
-  top: 54px;
-  right: 14px;
+  top: calc(var(--tabbar-h) + var(--float-gap));
+  right: var(--float-gap);
   z-index: 26; /* above the kanban overlay (25) — the view toggle must stay reachable on the board */
   display: flex;
   align-items: center; /* center the presence facepile (26px) against the 34px toolbar buttons */
@@ -3475,7 +3906,7 @@ body,
 /* Stack of notification strips (update + announcements), just below the tab bar. */
 .top-banners {
   position: absolute;
-  top: 46px;
+  top: calc(var(--tabbar-h) + var(--float-gap));
   left: 50%;
   transform: translateX(-50%);
   z-index: 27; /* above the kanban overlay (25) and the cluster (26), below the tab bar (30) */
@@ -3652,7 +4083,7 @@ body,
   border-left: 3px solid var(--accent);
   border-radius: 10px;
   box-shadow: 0 8px 28px rgba(0, 0, 0, calc(0.45 * var(--shadow-k)));
-  font-size: 12.5px;
+  font-size: 13px;
   color: var(--text);
 }
 
@@ -3801,6 +4232,21 @@ body,
   background: rgba(255, 159, 10, 0.18);
 }
 
+/* The whole-workspace save did not land. Red, not amber: the conflict bar asks a question, this
+   one reports that the canvas on screen is not the canvas on disk. */
+.save-failure-bar {
+  background: rgba(255, 69, 58, 0.15);
+  border-color: rgba(255, 69, 58, 0.45);
+}
+
+.save-failure-bar button {
+  border-color: rgba(255, 69, 58, 0.6);
+}
+
+.save-failure-bar button:hover {
+  background: rgba(255, 69, 58, 0.18);
+}
+
 /* Direct children only — the presence facepile's face buttons are nested inside .presence-facepile
    and must keep their own round, peer-colored styling, not the toolbar button chrome. */
 .controls-cluster > button {
@@ -3836,13 +4282,8 @@ body,
 /* Search button shows the ⌘K shortcut so its purpose is obvious */
 .cluster-search {
   width: auto !important;
-  gap: 7px;
+  gap: 10px;
   padding: 0 10px;
-}
-
-.cluster-search__icon {
-  font-size: 15px;
-  color: var(--muted);
 }
 
 .kbd {
@@ -3900,7 +4341,7 @@ body,
 
 /* Pinned explorer: no scrim, clicks pass through to the canvas. The drawer is a floating
    card on the right — same shape as the sessions sidebar on the left — so the controls
-   cluster (top: 54px, right: 14px, 34px tall) stays reachable. z 26 sits with that cluster
+   cluster (one --float-gap below the tab bar, 34px tall) stays reachable. z 26 sits with that cluster
    above the kanban board (25) and below the tab bar (30) / dialogs (55+). pointer-events
    on the overlay is load-bearing: a transparent overlay that still captures would freeze
    the canvas even with the click-to-close handler removed. */
@@ -3912,9 +4353,10 @@ body,
 .drawer-overlay--pinned .drawer--pinned {
   pointer-events: auto;
   position: absolute;
-  top: 96px; /* 54 (cluster) + 34 (buttons) + 8 (gap) — must sit BELOW the cluster */
-  right: 14px;
-  bottom: 14px;
+  /* Below the cluster: its own top + its 34px height + a gap. Same stack as .resume-card. */
+  top: calc(var(--tabbar-h) + var(--float-gap) + 34px + 12px);
+  right: var(--float-gap);
+  bottom: var(--float-gap);
   height: auto;
   max-height: none;
   width: 320px;
@@ -3941,9 +4383,14 @@ body,
   background: transparent;
   border: none;
   color: var(--muted);
-  font-size: 20px;
   line-height: 1;
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
 }
 
 .drawer__close:hover {
@@ -4471,6 +4918,7 @@ body,
 
 .scm-gen.is-generating {
   animation: scm-gen-pulse 0.9s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 
 @keyframes scm-gen-pulse {
@@ -4523,6 +4971,12 @@ body,
   font-size: 16px;
   line-height: 1;
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
 }
 
 .ex-head-actions button:hover {
@@ -4656,6 +5110,7 @@ body,
   border-top-color: var(--accent);
   border-radius: 50%;
   animation: ex-dls-spin 0.8s linear infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 
 /* Download strip: pinned under the tree, one row per transfer. */
@@ -4697,9 +5152,20 @@ body,
   background: transparent;
   border: none;
   color: var(--accent);
-  font-size: 12px;
   cursor: pointer;
+  font-size: 12px;
   padding: 0 2px;
+}
+
+/* The dismiss half of the download row: `.ex-dls__act` is shared with the text "Reveal" button,
+   so the icon box lives here rather than on the shared class. */
+.ex-dls__dismiss {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
 }
 
 /* The `+ .ex-dls__act` sibling is the dismiss ×: only the FIRST action pushes right. */
@@ -4716,6 +5182,7 @@ body,
   border-top-color: var(--accent);
   border-radius: 50%;
   animation: ex-dls-spin 0.8s linear infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 
 @keyframes ex-dls-spin {
@@ -5143,6 +5610,24 @@ body,
   cursor: pointer;
 }
 
+/* The "how far" radios under a confirm's opt-in (canvas control's "Don't ask again"). Indented
+   under the checkbox they qualify, so the pair reads as one control rather than two questions. */
+.confirm__scopes {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: -8px 0 14px 22px;
+}
+
+.confirm__scope {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: rgba(var(--tint-rgb), 0.55);
+  cursor: pointer;
+}
+
 .confirm__input {
   width: 100%;
   box-sizing: border-box;
@@ -5175,7 +5660,11 @@ body,
   gap: 8px;
 }
 
-.confirm__btn {
+/* The app's default button. `.announce-banner__action` shares the recipe rather than restating it:
+   a banner offering an ordinary next step ("Go there") is not asking for the accent treatment
+   `.announce-banner__btn` gives an install or a reload, and two copies of a default button drift. */
+.confirm__btn,
+.announce-banner__action {
   background: var(--panel-header);
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -5185,8 +5674,13 @@ body,
   cursor: pointer;
 }
 
-.confirm__btn:hover {
+.confirm__btn:hover,
+.announce-banner__action:hover {
   background: rgba(var(--tint-rgb), 0.1);
+}
+
+.announce-banner__action {
+  flex: none;
 }
 
 .confirm__btn.danger {
@@ -5231,6 +5725,9 @@ body,
   color: var(--text);
   font-size: 14px;
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .dir-picker__up:hover:not(:disabled) {
@@ -5792,6 +6289,15 @@ body,
   display: none;
 }
 
+/* A tooltip wraps its trigger in a span, so inside the pill, the worktree chip and the actions row
+   the WRAPPER is the flex item, not the button. Without this the fixed-size buttons would shrink
+   under the 180px name input instead of holding their 11px / 22px boxes. */
+.group-node__label > .tooltip-trigger,
+.group-node__wt > .tooltip-trigger,
+.group-node__actions > .tooltip-trigger {
+  flex: none;
+}
+
 .group-node__dot {
   width: 11px;
   height: 11px;
@@ -5893,9 +6399,13 @@ button.group-node__setup:disabled {
   border: 1px solid var(--border);
   color: var(--muted);
   border-radius: 7px;
-  font-size: 13px;
-  padding: 2px 8px;
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
 }
 
 .group-node__wt-btn:hover {
@@ -5903,7 +6413,8 @@ button.group-node__setup:disabled {
   color: var(--text);
 }
 
-/* ungroup / × — top-right, revealed on hover or when selected. */
+/* Ungroup, top-right, revealed on hover or when selected. One action, so no gap: the frame's
+   × called the same handler under a second name and was removed. */
 .group-node__actions {
   position: absolute;
   top: 0;
@@ -5911,7 +6422,6 @@ button.group-node__setup:disabled {
   transform: translateY(-50%);
   display: flex;
   align-items: center;
-  gap: 5px;
   opacity: 0;
   transition: opacity 0.12s;
 }
@@ -5921,24 +6431,26 @@ button.group-node__setup:disabled {
   opacity: 1;
 }
 
-.group-node__ungroup,
-.group-node__close {
+.group-node__ungroup {
   background: var(--surface-sunken);
   border: 1px solid var(--border);
   color: var(--muted);
   border-radius: 7px;
-  font-size: 11px;
-  padding: 3px 8px;
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
 }
 
-.group-node__close {
-  padding: 3px 8px;
-  line-height: 1;
+.group-node__ungroup svg {
+  width: 14px;
+  height: 14px;
 }
 
-.group-node__ungroup:hover,
-.group-node__close:hover {
+.group-node__ungroup:hover {
   background: var(--panel-header);
   color: var(--text);
 }
@@ -6004,6 +6516,12 @@ button.group-node__setup:disabled {
   color: #d6d6d6;
   white-space: pre-wrap;
   word-break: break-word;
+  /* The transcript is TEXT, not a terminal emulator: drag-select + copy must work (the node
+     root's canvas-drag suppression must not swallow it — keep `nowheel` for scroll, but the
+     selection below is what makes the content usable). */
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
 }
 
 /* The expanded body renders typed segments (lib/subagentActivity.ts) like a regular agent
@@ -6049,6 +6567,7 @@ button.group-node__setup:disabled {
 
 .subagent-node.working .subagent-node__dot {
   animation: nt-pulse 1.1s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 
 .subagent-node.done .subagent-node__dot {
@@ -6214,6 +6733,7 @@ button.group-node__setup:disabled {
 
 .loop-node.working .loop-node__dot {
   animation: nt-pulse 1.1s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 
 .loop-node__type {
@@ -6324,8 +6844,72 @@ button.group-node__setup:disabled {
   color: var(--muted);
 }
 
+/* ---- Canvas controls (bottom-left) ----
+   Same plate and --float-gap offset as the other floating chrome; the library's own glyphs are
+   replaced in Canvas.tsx, so these rules only size and color our 16px icons.
+   The plate, the blur and the border sit on the COLUMN, matching .dock: with a background on each
+   button instead, the four read as four stacked chips and the border around them had nothing to
+   enclose. */
+.react-flow__controls {
+  margin: var(--float-gap) !important;
+  background: rgba(var(--menu-rgb), 0.92);
+  backdrop-filter: blur(10px);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, calc(0.4 * var(--shadow-k)));
+}
+
+/* Each button wraps in a Tooltip span, which must not break the library's vertical stack. */
+.react-flow__controls .tooltip-trigger {
+  display: block;
+}
+
+.react-flow__controls-button {
+  width: calc(var(--controls-w) - 2px);
+  height: calc(var(--controls-w) - 2px);
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--text);
+}
+
+/* ONE separator, where there used to be a rule under every button. Zoom in, zoom out and fit view
+   are all camera moves; the lock is a mode toggle, and it is the only one that changes what the
+   other three are allowed to do. The lock already carries its own class, so this needs no
+   nth-child over the Tooltip spans that wrap each button. */
+.react-flow__controls-button.canvas-lock-btn {
+  border-top: 1px solid var(--border);
+}
+
+.react-flow__controls-button svg {
+  width: 15px;
+  height: 15px;
+  max-width: none;
+  max-height: none;
+  fill: none;
+  stroke: currentColor;
+}
+
+.react-flow__controls-button:hover {
+  background: var(--panel-header);
+}
+
+/* Canvas lock toggle. The padlock strokes with currentColor, so the locked state tints via
+   `color`. */
+.react-flow__controls-button.canvas-lock-btn.locked {
+  color: var(--accent);
+  background: rgba(10, 132, 255, 0.14);
+}
+
 /* ---- Minimap ---- */
 .minimap {
+  /* React Flow places its panels with a 15px margin; the app's overlays all sit one --float-gap
+     from their edge, and the minimap and the controls are the two the library positions. */
+  margin: var(--float-gap) !important;
   background: rgba(var(--menu-rgb), 0.85) !important;
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -6344,10 +6928,12 @@ button.group-node__setup:disabled {
 .minimap .mm-working {
   filter: drop-shadow(0 0 3px rgba(255, 214, 10, 0.8));
   animation: mm-pulse-soft 2.6s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 .minimap .mm-attention {
   filter: drop-shadow(0 0 3px rgba(255, 69, 58, 0.9));
   animation: mm-pulse 1.8s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 /* Unread = clay, the agent-hook colour (RUNNING badge, working glow). Its own keyframes: at
    minimap scale a node is a few pixels tall, so opacity alone reads as a faint flicker — the
@@ -6355,6 +6941,7 @@ button.group-node__setup:disabled {
 .minimap .mm-unread {
   filter: drop-shadow(0 0 4px rgba(217, 119, 87, 0.95));
   animation: mm-pulse-unread 1.6s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 @keyframes mm-pulse-unread {
   0%,
@@ -6477,26 +7064,28 @@ button.group-node__setup:disabled {
    Deliberately carries NO z-index: an absolutely positioned box with `z-index: auto` establishes no
    stacking context, so each pill's own z-index (5 / 13 / 26 / 60) keeps competing with the sessions
    sidebar and the kanban overlay exactly as it did when each was anchored on its own. Do not add
-   z-index, transform, filter or opacity here — any of them would trap both pills below the sidebar. */
+   z-index, transform, filter or opacity here — any of them would trap both pills below the sidebar.
+   The left offset clears the controls column, which shares this corner: --controls-w plus the 12px
+   the other chrome already uses between two adjacent clusters (see .resume-card). */
 .canvas-pills {
   position: absolute;
-  left: 60px; /* clear the React Flow Controls column */
-  bottom: 18px;
+  left: calc(var(--float-gap) + var(--controls-w) + 12px);
+  bottom: var(--float-gap);
   display: flex;
   align-items: center;
   gap: 8px;
 }
 
 /* ---- Resume-where-you-left-off card (breadcrumb trail, once per project activation) ---- */
-/* Anchored in .flow-wrap under the controls cluster (top: 54px, 34px tall) rather than beside it,
-   so the two never overlap; the left side is the sessions sidebar's (top: 54px, left: 14px).
+/* Anchored in .flow-wrap under the controls cluster (one --float-gap below the tab bar, 34px tall)
+   rather than beside it, so the two never overlap; the left side is the sessions sidebar's.
    z-index 11 sits above the canvas and BELOW the sidebar (12) — a card the user has not dismissed
    must never cover a panel they deliberately opened — and below the kanban overlay (25), where the
    canvas and everything on it is correctly hidden. */
 .resume-card {
   position: absolute;
-  top: 100px;
-  right: 14px;
+  top: calc(var(--tabbar-h) + var(--float-gap) + 34px + 12px);
+  right: var(--float-gap);
   z-index: 11;
   width: 260px;
   max-width: calc(100vw - 28px);
@@ -6664,7 +7253,7 @@ button.group-node__setup:disabled {
 .usage-pill__dim,
 .sysres-pill__dim { color: rgba(var(--tint-rgb), 0.5); }
 .usage-pill__pulse,
-.sysres-pill__pulse { animation: usage-pulse 1.2s ease-in-out infinite; }
+.sysres-pill__pulse { animation: usage-pulse 1.2s ease-in-out infinite; animation-play-state: var(--nt-anim-state); }
 @keyframes usage-pulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
 
 /* Expanded: hover, keyboard focus, or an open panel. `width: auto` cannot be transitioned, so the
@@ -6743,12 +7332,18 @@ button.group-node__setup:disabled {
   background: rgba(var(--card-rgb), 0.92);
   border: 1px solid rgba(var(--tint-rgb), 0.08);
   color: rgba(var(--tint-rgb), 0.7);
-  font-size: 13px;
   cursor: pointer;
 }
 .usage-refresh:hover { color: var(--text-strong); }
 .usage-refresh:disabled { opacity: 0.4; cursor: default; }
-.usage-refresh.spin { animation: usage-spin 0.9s linear infinite; }
+/* Smaller than the shared 16px icon: these two live in a dense pill row and replaced a 13px
+   glyph, so the row's height must not change. */
+.usage-refresh svg,
+.sessmem-panel__refresh svg {
+  width: 14px;
+  height: 14px;
+}
+.usage-refresh.spin svg { animation: usage-spin 0.9s linear infinite; animation-play-state: var(--nt-anim-state); }
 @keyframes usage-spin { to { transform: rotate(360deg); } }
 
 .usage-popover {
@@ -6772,9 +7367,9 @@ button.group-node__setup:disabled {
   /* Issue #503: each account is a tall block (label + Session/Weekly/Opus meters), so past
      about four accounts the panel grew off the TOP of the window — the first account's header
      and meter were clipped with no way to reach them. Capped to the space between the pill
-     (bottom: 34px) and the tab bar (44px at z 30, which paints over this panel in canvas mode),
-     with the blocks scrolling inside __body while the heading and footer action stay put. */
-  max-height: calc(100vh - 86px);
+     (bottom: 34px) and the tab bar (`--tabbar-h` at z 30, which paints over this panel in canvas
+     mode), with the blocks scrolling inside __body while the heading and footer action stay put. */
+  max-height: calc(100vh - var(--tabbar-h) - 34px - 8px);
   display: flex;
   flex-direction: column;
 }
@@ -6999,6 +7594,7 @@ button.group-node__setup:disabled {
   background: var(--success);
   /* Reuse the terminal-header badge pulse rather than a bespoke keyframe. */
   animation: nt-pulse 1.1s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 .sessmem-row__dot--attention { background: var(--warn); }
 .sessmem-row__dot--idle { background: rgba(var(--tint-rgb), 0.3); }
@@ -7040,6 +7636,31 @@ button.group-node__setup:disabled {
   font-variant-numeric: tabular-nums;
   color: var(--text-strong);
 }
+/* Pause: the non-destructive reclaim, sharing the kill button's geometry so the two controls line
+   up, but never its danger colour on hover — this one keeps the session. A disabled offer stays
+   VISIBLE and dimmed rather than hidden, because it carries the reason in its tooltip. */
+.sessmem-row__pause {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: rgba(var(--tint-rgb), 0.45);
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.sessmem-row__pause:hover:not(:disabled) {
+  color: var(--accent);
+  background: rgba(var(--tint-rgb), 0.08);
+}
+.sessmem-row__pause:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
 .sessmem-row__kill {
   flex: 0 0 auto;
   width: 20px;
@@ -7048,9 +7669,11 @@ button.group-node__setup:disabled {
   border-radius: 10px;
   background: transparent;
   color: rgba(var(--tint-rgb), 0.45);
-  font-size: 14px;
   line-height: 1;
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 .sessmem-row__kill:hover { color: var(--danger); background: rgba(var(--tint-rgb), 0.08); }
 /* The pane's descendants — the agent CLI itself included, since pane_pid is the pane's shell. */
@@ -7089,13 +7712,12 @@ button.group-node__setup:disabled {
   border-radius: 11px;
   background: transparent;
   color: rgba(var(--tint-rgb), 0.7);
-  font-size: 13px;
   cursor: pointer;
 }
 .sessmem-panel__refresh:hover { color: var(--text-strong); background: rgba(var(--tint-rgb), 0.08); }
 .sessmem-panel__refresh:disabled { opacity: 0.4; cursor: default; }
 /* Same spin as the usage panel's refresh. */
-.sessmem-panel__refresh.spin { animation: usage-spin 0.9s linear infinite; }
+.sessmem-panel__refresh.spin svg { animation: usage-spin 0.9s linear infinite; animation-play-state: var(--nt-anim-state); }
 
 /* ---- Claude context-window meter (per-node header pill + popover) ---- */
 .ctx-meter {
@@ -7454,48 +8076,102 @@ button.group-node__setup:disabled {
 .ss-dot--done { background: var(--success); }
 .ss-check { color: var(--success); margin-top: 2px; flex: 0 0 auto; line-height: 0; }
 /* Unread: the same check, accent-blue and pulsing until the user visits the node. */
-.ss-check--unread { color: var(--accent); animation: nt-pulse 1.1s ease-in-out infinite; }
+.ss-check--unread { color: var(--accent); animation: nt-pulse 1.1s ease-in-out infinite; animation-play-state: var(--nt-anim-state); }
 .ss-check svg { width: 13px; height: 13px; }
 /* attention renders as a red bell (ss-bell) — "it's ringing for you". Gentle pulse,
    same cadence as the header badge dot. */
-.ss-bell { color: var(--danger); margin-top: 2px; flex: 0 0 auto; line-height: 0; animation: nt-pulse 1.1s ease-in-out infinite; }
+.ss-bell { color: var(--danger); margin-top: 2px; flex: 0 0 auto; line-height: 0; animation: nt-pulse 1.1s ease-in-out infinite; animation-play-state: var(--nt-anim-state); }
 .ss-bell svg { width: 13px; height: 13px; }
 .ss-dot--working {
   background: transparent;
   border: 2px solid var(--agent-working);
   border-top-color: transparent;
   animation: nt-spin 1s steps(12, end) infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 
 .ss-row__body { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px; }
-.ss-row__titleline { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.ss-row__titleline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  /* The actions cluster is absolutely positioned inside this line (see `.ss-row__actions`). */
+  position: relative;
+  /* The title's floor. The sidebar is 300px wide and the row already carries a status dot, a
+     monogram, a session chip, a context pill and two buttons, so the NAME is the only thing that
+     can absorb another chip — and it did: with the account chip present the title measured 45px
+     (4-5 characters) against 128px without it. Everything else in the line yields before the name
+     does. ~10 characters at 12.5px, which is what makes two similarly-named sessions
+     distinguishable. */
+  --ss-title-min: 120px;
+}
 .ss-mark { width: 9px; height: 9px; border-radius: 3px; flex: 0 0 auto; }
-.ss-title { font-size: 12.5px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ss-title { font-size: 12.5px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto; min-width: var(--ss-title-min); }
 .ss-title.is-unread { font-weight: 600; }
 .ss-title-input { font-size: 12.5px; background: var(--panel); color: var(--text); border: 1px solid var(--accent); border-radius: 4px; padding: 1px 4px; }
-.ss-chip { font-size: 10px; color: var(--text); opacity: 0.7; background: var(--panel-header); border-radius: 4px; padding: 0 5px; max-width: 9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 0 0 auto; }
+.ss-chip { font-size: 10px; color: var(--text); opacity: 0.7; background: var(--panel-header); border-radius: 4px; padding: 0 5px; max-width: 9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 0 1 auto; min-width: 0; }
+/* The shared account chip, sized for THIS row rather than the node header it was built for:
+   the header's 120px cap and `flex-shrink: 0` are what crushed the title here. Same scale as
+   `.ss-chip` beside it, and it yields before the name — its tooltip keeps the full label. */
+.ss-account { margin-left: 0; max-width: 5.5rem; font-size: 10px; padding: 0 5px; flex: 0 1 auto; min-width: 0; }
 .ss-loop { font-size: 9.5px; color: var(--caution); border: 1px solid rgba(255, 214, 10, 0.4); border-radius: 4px; padding: 0 4px; flex: 0 0 auto; }
 .ss-meta { display: flex; align-items: center; gap: 6px; font-size: 10.5px; color: var(--muted); min-width: 0; }
 .ss-meta__cwd { font-family: monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ss-meta__ssh { display: inline-flex; align-items: center; gap: 3px; flex: 0 0 auto; }
 .ss-meta__state-age { margin-left: auto; flex: 0 0 auto; font-variant-numeric: tabular-nums; }
 .ss-ctx { font-size: 9.5px; padding: 0 5px; border-radius: 4px; color: #000; font-weight: 600; flex: 0 0 auto; }
-.ss-row__ai { margin-left: auto; opacity: 0; border: none; background: transparent; color: var(--text); cursor: pointer; font-size: 12px; line-height: 1; padding: 0 2px; flex: 0 0 auto; }
+/* Out of FLOW, not merely invisible. Both buttons already appeared only on hover, yet they held
+   46px of a 253px line — measured — away from the name at every other moment. Floated over the
+   line's tail instead: that tail is what the ellipsis was eating anyway, and the fade in front of
+   them keeps the text from running into the glyphs. `pointer-events` follows the opacity so a
+   hidden cluster cannot swallow a click meant for the row. */
+.ss-row__actions {
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-left: 14px;
+  opacity: 0;
+  pointer-events: none;
+  background: linear-gradient(90deg, transparent, var(--panel-header) 14px);
+}
+.ss-row:hover .ss-row__actions,
+.ss-row__actions:focus-within {
+  opacity: 1;
+  pointer-events: auto;
+}
+/* The active row paints its own tint, so the fade must end in THAT colour or the cluster sits on a
+   visible patch of the wrong grey. */
+.ss-row.is-active .ss-row__actions {
+  background: linear-gradient(90deg, transparent, var(--panel-header) 14px);
+}
+.ss-row__ai { opacity: 0; border: none; background: transparent; color: var(--text); cursor: pointer; font-size: 12px; line-height: 1; padding: 0 2px; flex: 0 0 auto; }
 .ss-row:hover .ss-row__ai { opacity: 0.6; }
 .ss-row__ai:hover { opacity: 1 !important; color: var(--accent); }
 .ss-row__ai:disabled { opacity: 0.6; cursor: default; color: var(--accent); }
-.ss-row__close { opacity: 0; border: none; background: transparent; color: var(--text); cursor: pointer; font-size: 14px; line-height: 1; padding: 0 2px; flex: 0 0 auto; }
+.ss-row__close { opacity: 0; border: none; background: transparent; color: var(--text); cursor: pointer; font-size: 14px; line-height: 1; padding: 0 2px; flex: 0 0 auto; 
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+}
 .ss-row:hover .ss-row__close { opacity: 0.6; }
 .ss-row__close:hover { opacity: 1 !important; color: var(--danger); }
 
 /* Sessions sidebar — shell */
 .sessions-sidebar {
   position: absolute;
-  top: 54px;
-  left: 14px;
+  top: calc(var(--tabbar-h) + var(--float-gap));
+  left: var(--float-gap);
   z-index: 12;
   width: 300px;
-  max-height: calc(100vh - 96px);
+  max-height: calc(100vh - var(--tabbar-h) - 26px - 2 * var(--float-gap));
   display: flex;
   flex-direction: column;
   background: rgba(var(--card-rgb), 0.96);
@@ -7752,6 +8428,7 @@ button.group-node__setup:disabled {
   border: 1.5px solid var(--agent-working);
   border-top-color: transparent;
   animation: nt-spin 1s steps(12, end) infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 /* Respect the OS setting: spinning ring/arc badges freeze in place rather than
    keep animating forever. */
@@ -7801,7 +8478,27 @@ button.group-node__setup:disabled {
 .ss-rowdrop.is-drop-before::before { content: ''; position: absolute; top: -1px; left: 6px; right: 6px; height: 2px; border-radius: 1px; background: var(--accent); pointer-events: none; }
 /* Project reorder: vertical insertion line before the tab / horizontal line above the
    sidebar project header the dragged project will land before */
-.tab.is-drop-before::before { content: ''; position: absolute; left: -3px; top: 4px; bottom: 4px; width: 2px; border-radius: 1px; background: var(--accent); pointer-events: none; }
+/* The insertion line, drawn INSIDE the tab it lands in front of. Two things it must not do:
+   hang outside the tab (at `left: -3px` the first tab's line fell outside `.tabbar__tabs`, which
+   is `overflow-x: auto` and clipped it — so the leftmost drop target showed nothing), and sit
+   under the ACTIVE tab, whose `z-index: 1` swallowed it whenever the target was the tab right
+   after it. Hence `left: 0` and z-index 2. */
+.tab.is-drop-before::before { content: ''; position: absolute; left: 0; top: 6px; bottom: 6px; width: 2px; border-radius: 1px; background: var(--accent); pointer-events: none; z-index: 2; }
+
+/* The same line for "after the last tab", which has no tab to hang off. A real flex item rather
+   than a pseudo-element: the strip scrolls, and an absolutely positioned marker on a scroll
+   container drifts away from the end it is marking. The -1px side margins cancel its 2px width,
+   so the tabs do not shift when it appears. */
+.tab__dropline {
+  flex: 0 0 2px;
+  align-self: stretch;
+  /* The tabs are inset by `--tab-inset` and their own line stops 6px inside that, so this one
+     (which spans the full strip height) stops at the same two rows. */
+  margin: calc(var(--tab-inset) + 6px) -1px;
+  border-radius: 1px;
+  background: var(--accent);
+  pointer-events: none;
+}
 .ss-group { position: relative; }
 .ss-group.is-drop-before::before { content: ''; position: absolute; top: -1px; left: 6px; right: 6px; height: 2px; border-radius: 1px; background: var(--accent); pointer-events: none; z-index: 1; }
 
@@ -7843,7 +8540,7 @@ button.group-node__setup:disabled {
 .ss-meta__project { color: var(--muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ss-meta__project + .ss-meta__cwd::before { content: '· '; }
 
-.sessions-icon-cluster { position: absolute; top: 54px; left: 14px; z-index: 11; }
+.sessions-icon-cluster { position: absolute; top: calc(var(--tabbar-h) + var(--float-gap)); left: var(--float-gap); z-index: 11; }
 .sessions-icon-cluster button { width: 34px; height: 34px; display: inline-flex; align-items: center; justify-content: center; background: rgba(var(--menu-rgb), 0.92); border: 1px solid var(--border); border-radius: 9px; color: var(--text); cursor: pointer; box-shadow: 0 6px 20px rgba(0, 0, 0, calc(0.3 * var(--shadow-k))); }
 .sessions-icon-cluster button:hover { background: var(--panel-header); }
 
@@ -7865,7 +8562,7 @@ button.group-node__setup:disabled {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 6px;
+  padding: 4px;
   background: var(--surface-overlay);
 }
 .dino-node__body {
@@ -7898,7 +8595,7 @@ button.group-node__setup:disabled {
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 4px 6px;
+  padding: 4px;
   border-bottom: 1px solid var(--border, #333);
 }
 .browser-node__btn {
@@ -7906,8 +8603,13 @@ button.group-node__setup:disabled {
   border: none;
   color: var(--text, #ddd);
   cursor: pointer;
-  padding: 2px 6px;
   border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
 }
 .browser-node__btn:disabled {
   opacity: 0.35;
@@ -7943,6 +8645,95 @@ button.group-node__setup:disabled {
   color: var(--muted);
   font-size: 12px;
 }
+/* A main-frame load failure, OVER the guest rather than beside it: Chromium paints its own error
+   page inside the <webview>, which is another product's chrome in the middle of a node and offers
+   no way back. Shared by the web node and the browser surface (WebviewErrorPlate). */
+.browser-node__failed {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 16px;
+  text-align: center;
+  background: var(--bg);
+}
+.browser-node__failed-msg {
+  color: var(--text);
+  font-size: 13px;
+}
+.browser-node__failed-url,
+.browser-node__failed-hint {
+  color: var(--muted);
+  font-size: 11px;
+  max-width: 100%;
+}
+.browser-node__failed-url {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.browser-node__failed-code {
+  color: var(--muted);
+  opacity: 0.6;
+  font-size: 10px;
+  letter-spacing: 0.02em;
+}
+.browser-node__failed-retry {
+  margin-top: 4px;
+  background: rgba(var(--tint-rgb), 0.08);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 4px 12px;
+}
+.browser-node__failed-retry:hover {
+  background: rgba(var(--tint-rgb), 0.14);
+}
+
+/* Navigation in flight. Indeterminate on purpose: a guest reports only start and stop, so any
+   percentage here would be invented. */
+.webview-progress {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  overflow: hidden;
+  background: rgba(var(--tint-rgb), 0.1);
+  pointer-events: none;
+}
+.webview-progress::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 35%;
+  background: var(--accent);
+  animation: webview-progress-slide 1.1s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
+}
+@keyframes webview-progress-slide {
+  from {
+    left: -35%;
+  }
+  to {
+    left: 100%;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .webview-progress::after {
+    animation: none;
+    left: 0;
+    width: 100%;
+    opacity: 0.5;
+  }
+}
+
 .browser-node__error {
   position: absolute;
   left: 0;
@@ -8124,12 +8915,14 @@ button.group-node__setup:disabled {
   color: #d97757;
   background: rgba(217, 119, 87, 0.15);
   animation: nt-pulse 1.1s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 /* NEEDS YOU is red everywhere (same as the terminal attention badge). */
 .chat-node__badge--needs {
   color: var(--danger);
   background: rgba(255, 69, 58, 0.15);
   animation: nt-pulse 1.1s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 .chat-node__cost {
   flex: 0 0 auto;
@@ -8162,6 +8955,7 @@ button.group-node__setup:disabled {
   border-radius: 50%;
   background: rgba(var(--tint-rgb), 0.55);
   animation: chat-typing 1.2s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 .chat-node__typing span:nth-child(2) {
   animation-delay: 0.15s;
@@ -8620,6 +9414,7 @@ button.group-node__setup:disabled {
    warning. It decays ~2s after the last keystroke (TYPING_DECAY_MS, swept in state/presence.ts). */
 .presence-chip--typing {
   animation: nt-typing-pulse 1.1s ease-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 
 @keyframes nt-typing-pulse {
@@ -8657,8 +9452,8 @@ button.group-node__setup:disabled {
 /* ---- first-connect name/color prompt ---- */
 .presence-prompt {
   position: absolute;
-  top: 46px;
-  right: 12px;
+  top: calc(var(--tabbar-h) + var(--float-gap));
+  right: var(--float-gap);
   z-index: 14;
   width: 260px;
   padding: 12px;
@@ -8868,7 +9663,7 @@ button.group-node__setup:disabled {
 /* ---- Kanban view (full-page board over the canvas; the canvas stays mounted under it) ---- */
 .kanban-overlay {
   position: fixed;
-  top: 44px; /* below the tab bar (.tabbar height) */
+  top: var(--tabbar-h); /* below the tab bar */
   left: 0;
   right: 0;
   bottom: 0;
@@ -9365,6 +10160,143 @@ button.group-node__setup:disabled {
     flex-direction: column;
   }
 }
+/* Global swimlane kanban — one swimlane per project */
+.global-kanban {
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: block;
+}
+.global-kanban__scroll {
+  display: block;
+  overflow: visible;
+  flex: none;
+  min-height: auto;
+  padding-bottom: 24px;
+}
+.kanban-swimlane {
+  margin: 14px 16px;
+  border: 1px solid rgba(var(--tint-rgb), 0.08);
+  border-left: 4px solid var(--swimlane-color, rgba(var(--tint-rgb), 0.15));
+  border-radius: 12px;
+  background: rgba(var(--tint-rgb), 0.02);
+  scroll-margin-top: 12px;
+  overflow: visible;
+  position: relative;
+  z-index: 1;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, calc(0.12 * var(--shadow-k)));
+}
+.kanban-swimlane:nth-child(even) {
+  background: rgba(var(--tint-rgb), 0.035);
+}
+.kanban-swimlane--highlight {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  animation: kanban-swimlane-highlight 1.5s ease;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, calc(0.2 * var(--shadow-k)));
+}
+@keyframes kanban-swimlane-highlight {
+  0% { outline-color: var(--accent); }
+  100% { outline-color: transparent; }
+}
+.kanban-swimlane__header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 18px 10px;
+  border-bottom: 1px solid rgba(var(--tint-rgb), 0.06);
+  background: linear-gradient(90deg, rgba(var(--tint-rgb), 0.04), transparent);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  cursor: pointer;
+}
+.kanban-swimlane__header:hover {
+  background: rgba(var(--tint-rgb), 0.06);
+}
+.kanban-swimlane__header:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.kanban-swimlane__toggle {
+  width: 12px;
+  color: rgba(var(--tint-rgb), 0.55);
+  font-size: 12px;
+  text-align: center;
+  flex: 0 0 12px;
+}
+.kanban-swimlane__count {
+  margin-left: auto;
+  font-size: 11px;
+  color: rgba(var(--tint-rgb), 0.45);
+  background: rgba(var(--tint-rgb), 0.08);
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+.kanban-swimlane__hint {
+  margin-left: auto;
+  font-size: 11px;
+  color: rgba(var(--tint-rgb), 0.5);
+}
+.kanban-swimlane__board {
+  padding: 12px 16px 16px;
+  flex: none;
+  overflow-x: auto;
+  overflow-y: visible;
+  height: auto;
+  max-height: none;
+}
+.global-kanban__nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 18px;
+  border-bottom: 1px solid rgba(var(--tint-rgb), 0.06);
+  background: rgba(var(--tint-rgb), 0.015);
+}
+.global-kanban__pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(var(--tint-rgb), 0.12);
+  background: rgba(var(--tint-rgb), 0.06);
+  color: rgba(var(--tint-rgb), 0.85);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, transform 0.1s;
+}
+.global-kanban__pill:hover {
+  background: rgba(var(--tint-rgb), 0.1);
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+.global-kanban__pill--active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.kanban-header__close {
+  margin-left: 12px;
+  border: 0;
+  background: rgba(var(--tint-rgb), 0.06);
+  color: rgba(var(--tint-rgb), 0.6);
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+}
+.kanban-header__close:hover {
+  background: rgba(var(--tint-rgb), 0.12);
+  color: var(--text-strong);
+}
+.kanban-empty {
+  padding: 40px 18px;
+  color: rgba(var(--tint-rgb), 0.5);
+  font-size: 13px;
+}
 .kanban-card__nodedot {
   width: 8px;
   height: 8px;
@@ -9408,6 +10340,7 @@ button.group-node__setup:disabled {
   background: rgba(50, 215, 75, 0.12);
   /* reuse the terminal-header badge pulse (nt-pulse) rather than a bespoke keyframe */
   animation: nt-pulse 1.1s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 .kanban-badge--needs {
   color: var(--warn);
@@ -9417,6 +10350,12 @@ button.group-node__setup:disabled {
 .kanban-badge--sleeping {
   color: var(--muted);
   background: rgba(var(--tint-rgb), 0.08);
+}
+/* The agent process is gone and nothing accounted for it. Warn-coloured like NEEDS YOU, because it
+   does need the user — but for a different reason, which is why it gets its own label. */
+.kanban-badge--dropped {
+  color: var(--warn);
+  background: rgba(255, 159, 10, 0.12);
 }
 .kanban-card__unread {
   width: 7px;
@@ -9546,12 +10485,19 @@ button.group-node__setup:disabled {
   display: flex;
   flex-direction: column;
 }
-/* Flipped up when the column sits near the window's bottom edge (see KanbanColumn's layout effect). */
-.kanban-col__newmenu--up {
-  top: auto;
-  bottom: 100%;
-  margin-top: 0;
-  margin-bottom: 4px;
+/* Global swimlanes contain horizontally scrolling boards, so an in-column menu would be clipped
+   before z-index can lift it above the next lane. The React portal is positioned against the
+   viewport instead; the component supplies its measured coordinates after mounting. */
+.kanban-col__newmenu--portal {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: auto;
+  bottom: auto;
+  margin: 0;
+  width: 0;
+  visibility: hidden;
+  z-index: 29;
 }
 .kanban-col__newmenu button {
   display: flex;
@@ -9699,12 +10645,16 @@ button.group-node__setup:disabled {
   margin-right: auto;
 }
 .kanban-modal__action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
   background: rgba(var(--tint-rgb), 0.06);
   border: none;
   border-radius: 6px;
   color: rgba(var(--tint-rgb), 0.7);
-  font-size: 13px;
-  padding: 4px 10px;
   cursor: pointer;
 }
 .kanban-modal__action:hover {
@@ -10112,9 +11062,13 @@ button.group-node__setup:disabled {
   border: none;
   color: rgba(var(--tint-rgb), 0.55);
   cursor: pointer;
-  padding: 4px 8px;
   border-radius: 5px;
-  font-size: 15px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
 }
 .label-picker__more:hover {
   background: rgba(var(--tint-rgb), 0.1);
@@ -10517,7 +11471,9 @@ button.group-node__setup:disabled {
 
 .onb-skip {
   position: absolute;
-  top: 40px; /* clears the traffic lights / tab bar drag region */
+  /* Clears the traffic lights and the tab bar's drag region: the onboarding overlay covers the
+     window, so this is the bar's own height (it was a literal 40 that happened to match it). */
+  top: var(--tabbar-h);
   right: 24px;
   background: transparent;
   border: none;
@@ -10595,6 +11551,7 @@ button.group-node__setup:disabled {
   border-radius: 10px;
   background: rgba(163, 141, 255, 0.045);
   animation: onb-float 9s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 .onb-ghost--a { top: 14%; left: 12%; }
 .onb-ghost--b { top: 22%; right: 14%; width: 180px; animation-delay: -3s; }
@@ -10612,6 +11569,7 @@ button.group-node__setup:disabled {
   stroke-width: 1.5;
   stroke-dasharray: 6 7;
   animation: onb-dash 14s linear infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 @keyframes onb-float {
   0%, 100% { transform: translateY(0); }
@@ -10932,6 +11890,7 @@ button.group-node__setup:disabled {
   left: 30px;
   top: 200px;
   animation: onb-cursor-path 7s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
   filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.6));
 }
 @keyframes onb-cursor-path {
@@ -10949,6 +11908,7 @@ button.group-node__setup:disabled {
   border: 1.5px solid rgba(163, 141, 255, 0.8);
   opacity: 0;
   animation: onb-ripple 7s ease-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 @keyframes onb-ripple {
   0%, 16% { opacity: 0; transform: scale(0.3); }
@@ -10967,6 +11927,7 @@ button.group-node__setup:disabled {
   opacity: 0;
   transform-origin: top left;
   animation: onb-menu 7s ease infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 @keyframes onb-menu {
   0%, 19% { opacity: 0; transform: scale(0.92); }
@@ -10979,6 +11940,7 @@ button.group-node__setup:disabled {
 }
 .onb-menu__hl {
   animation: onb-menu-hl 7s ease infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 @keyframes onb-menu-hl {
   0%, 30% { background: transparent; }
@@ -10999,6 +11961,7 @@ button.group-node__setup:disabled {
   box-shadow: 0 8px 28px rgba(0, 0, 0, calc(0.4 * var(--shadow-k)));
   opacity: 0;
   animation: onb-node-pop 7s cubic-bezier(0.34, 1.4, 0.5, 1) infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 @keyframes onb-node-pop {
   0%, 56% { opacity: 0; transform: scale(0.7); }
@@ -11073,6 +12036,7 @@ button.group-node__setup:disabled {
   font-size: 15px;
   font-weight: 600;
   animation: onb-keypress 8s ease infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 .onb-kbd--hold {
   animation-name: onb-keyhold;
@@ -11093,6 +12057,7 @@ button.group-node__setup:disabled {
   margin-left: 4px;
   opacity: 0;
   animation: onb-holdhint 8s ease infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 @keyframes onb-holdhint {
   0%, 5% { opacity: 0; }
@@ -11103,6 +12068,7 @@ button.group-node__setup:disabled {
 .onb-mic-wrap {
   opacity: 0;
   animation: onb-micgate 8s ease infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 @keyframes onb-micgate {
   0%, 6% { opacity: 0; transform: scale(0.9); }
@@ -11125,6 +12091,7 @@ button.group-node__setup:disabled {
   border-radius: 50%;
   border: 1.5px solid rgba(255, 55, 95, 0.5);
   animation: onb-ring 2.4s ease-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 .onb-mic__ring--late {
   animation-delay: 1.2s;
@@ -11145,6 +12112,7 @@ button.group-node__setup:disabled {
   border-radius: 2px;
   background: rgba(255, 55, 95, 0.85);
   animation: onb-wave 1s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 @keyframes onb-wave {
   0%, 100% { height: 6px; }
@@ -11171,6 +12139,7 @@ button.group-node__setup:disabled {
   white-space: nowrap;
   max-width: 0;
   animation: onb-type 8s steps(32) infinite;
+  animation-play-state: var(--nt-anim-state);
   color: rgba(235, 235, 245, 0.85);
 }
 /* types only AFTER the release (58%) — the transcription arrives when you let go */
@@ -11183,6 +12152,7 @@ button.group-node__setup:disabled {
   height: 13px;
   background: rgba(235, 235, 245, 0.8);
   animation: onb-caret 1s steps(1) infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 @keyframes onb-caret {
   50% { opacity: 0; }
@@ -11305,6 +12275,7 @@ button.group-node__setup:disabled {
   background: var(--canvas-bg);
   border-radius: 0 0 10px 10px;
   animation: onb-capsule 6s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 .onb-capsule__left {
   display: flex;
@@ -11322,6 +12293,7 @@ button.group-node__setup:disabled {
   border-radius: 50%;
   background: rgb(48, 209, 88);
   animation: onb-blob 1.6s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 @keyframes onb-capsule {
   0%, 10% { padding-right: 8px; }
@@ -11344,6 +12316,7 @@ button.group-node__setup:disabled {
   border-radius: 0 0 12px 12px;
   transform-origin: top center;
   animation: onb-notchpanel 6s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 .onb-notchpanel__row {
   display: flex;
@@ -11376,6 +12349,7 @@ button.group-node__setup:disabled {
   color: rgba(235, 235, 245, 0.45);
   transform-origin: top center;
   animation: onb-bell 5s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 @keyframes onb-bell {
   0%, 8% { transform: rotate(0); }
@@ -11395,6 +12369,7 @@ button.group-node__setup:disabled {
   padding: 10px 12px;
   box-shadow: 0 14px 36px rgba(0, 0, 0, calc(0.5 * var(--shadow-k)));
   animation: onb-notif 5s ease infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 @keyframes onb-notif {
   0%, 6% { opacity: 0; transform: translateX(60px); }
@@ -11445,6 +12420,7 @@ button.group-node__setup:disabled {
   box-shadow: 0 18px 50px rgba(0, 0, 0, calc(0.55 * var(--shadow-k)));
   padding: 28px 10px 12px;
   animation: onb-float 7s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 .onb-phone__notch {
   position: absolute;
@@ -11506,6 +12482,7 @@ button.group-node__setup:disabled {
   border-radius: 999px;
   box-shadow: 0 8px 20px rgba(0, 0, 0, calc(0.4 * var(--shadow-k)));
   animation: onb-soon 3.2s ease-in-out infinite;
+  animation-play-state: var(--nt-anim-state);
 }
 @keyframes onb-soon {
   0%, 100% { transform: rotate(8deg) scale(1); }
@@ -12006,9 +12983,14 @@ body.focus-mode .dock:hover {
 }
 .account-identity-check {
   flex: none;
-  font-size: 12px;
   line-height: 1;
   color: var(--accent);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
 }
 /* A managed home that is missing / an account that cannot be operated: the same cluster, warned.
    Recolour text + outline with the warn token; no tinted fill (there is no --warn-rgb to build
@@ -12290,4 +13272,172 @@ body.focus-mode .dock:hover {
   margin: 8px 0 0;
   font-size: 12px;
   color: var(--danger);
+}
+
+/* ── File manager node ─────────────────────────────────────────────────────────────────────
+   A directory listing pinned to the canvas. Shaped like the sticky note (card + grab header)
+   rather than the terminal, because it is content you arrange, not a session you attach to. */
+.files-node {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: rgba(var(--card-rgb), 0.96);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, calc(0.35 * var(--shadow-k)));
+}
+
+.files-node.selected {
+  box-shadow: 0 0 0 1px var(--accent), 0 8px 28px rgba(0, 0, 0, calc(0.4 * var(--shadow-k)));
+}
+
+.files-node__header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  cursor: grab;
+  flex-shrink: 0;
+}
+
+.files-node__chip {
+  font-size: 10px;
+  letter-spacing: 0.4px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(var(--tint-rgb), 0.12);
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.files-node__btn {
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+.files-node__btn:hover:not(:disabled) {
+  background: rgba(var(--tint-rgb), 0.1);
+  color: var(--text);
+}
+.files-node__btn:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+/* The breadcrumb is one line and never wraps: a two-line path would push the listing down on
+   every navigation, and the listing is the thing the node exists to show. Deep paths are
+   collapsed upstream (see `breadcrumbs`), so this only has to refuse to grow. */
+.files-node__crumbs {
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  overflow: hidden;
+  padding: 0 8px 4px;
+  font-size: 11px;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.files-node__crumb-wrap {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.files-node__sep {
+  opacity: 0.4;
+  margin: 0 2px;
+}
+
+.files-node__crumb {
+  background: none;
+  border: none;
+  padding: 1px 2px;
+  color: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  border-radius: 3px;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.files-node__crumb:hover {
+  color: var(--text);
+  background: rgba(var(--tint-rgb), 0.1);
+}
+
+.files-node__filter {
+  margin: 0 8px 6px;
+  padding: 3px 7px;
+  background: rgba(var(--tint-rgb), 0.06);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 12px;
+  outline: none;
+  flex-shrink: 0;
+}
+.files-node__filter:focus {
+  border-color: var(--accent);
+}
+
+.files-node__list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 4px 6px;
+  min-height: 0;
+}
+
+.files-node__row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 6px;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text);
+}
+.files-node__row:hover {
+  background: rgba(var(--tint-rgb), 0.08);
+}
+/* Dimmed exactly like the Explorer drawer dims them — same fact (`DirEntry.ignored`), so it must
+   read the same way in both places. */
+.files-node__row.is-ignored {
+  opacity: 0.45;
+}
+
+.files-node__glyph {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  color: var(--muted);
+}
+
+.files-node__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.files-node__empty {
+  padding: 10px 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.files-node__empty--error {
+  color: var(--danger);
+}
+
+.files-node.collapsed .files-node__header {
+  border-bottom: none;
 }

@@ -66,7 +66,7 @@ function button(label: string): HTMLButtonElement {
 
 /** The grantedness the ledger/messaging wiring computes from the live store, per call. */
 function grantedNow(): boolean {
-  return projectCapabilityGrantedFor(useProjects.getState().getProject('p1'), cap)
+  return projectCapabilityGrantedFor(useProjects.getState().getProject('p1'), cap, {})
 }
 
 beforeEach(() => {
@@ -222,12 +222,31 @@ describe('the one-time clone notice', () => {
     expect(text).toContain(PROJECT_CAPABILITY_COPY.agentMessaging.description)
     // Unanswered = refused: the exact predicate messagingEnabled consults.
     expect(
-      projectCapabilityGrantedFor(useProjects.getState().getProject('p1'), 'agentMessaging')
+      projectCapabilityGrantedFor(useProjects.getState().getProject('p1'), 'agentMessaging', {})
+    ).toBe(false)
+    // …and a machine default that is ON does not change that: an explicit `true` from a clone still
+    // needs this machine's answer, whatever the default says.
+    expect(
+      projectCapabilityGrantedFor(useProjects.getState().getProject('p1'), 'agentMessaging', {
+        agentMessagingDefault: true
+      })
     ).toBe(false)
     act(() => button('Turn it off').click())
     const p = useProjects.getState().getProject('p1')!
-    expect(p.agentMessaging).toBeUndefined()
+    // Messaging has a machine default, so "off" is WRITTEN — an absent field would mean "use the
+    // default", and a default that is on would undo the answer the user just gave.
+    expect(p.agentMessaging).toBe(false)
     expect(p.capabilityAck).toEqual({ agentMessaging: 'declined' })
+    expect(
+      projectCapabilityGrantedFor(p, 'agentMessaging', { agentMessagingDefault: true })
+    ).toBe(false)
+  })
+
+  it('a project that is on only by this machine’s default raises NO notice', () => {
+    // Nothing arrived from a stranger: the file says nothing, the answer is this machine's own.
+    useProjects.setState({ projects: [project()], activeProjectId: 'p1' })
+    mount()
+    expect(dialog()).toBeNull()
   })
 
   it('stays silent when the switch is off', () => {

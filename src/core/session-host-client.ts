@@ -9,7 +9,12 @@ import { randomUUID } from 'crypto'
 // socket 'close' events dispatch first, even inside fake-timer tests.
 import { setImmediate as realSetImmediate } from 'timers'
 import { sessionHostPaths } from '../session-host/paths'
-import { readExistingSessionHostIdentity } from '../session-host/existing-host-state'
+import {
+  EMPTY_LOCK_STALE_MS,
+  LISTEN_RETRY_BUDGET_MS,
+  readExistingSessionHostIdentity,
+  startupLockState
+} from '../session-host/existing-host-state'
 import {
   SESSION_HOST_PROTOCOL_VERSION,
   LineFramer,
@@ -267,6 +272,7 @@ export class SessionHostClient {
     private readonly deps: {
       userDataDir: string
       resourcesPath?: string | null
+      appPath?: string | null
       repoRoot?: string | null
     }
   ) {}
@@ -275,6 +281,7 @@ export class SessionHostClient {
     return (
       resolveSessionHostScript({
         resourcesPath: this.deps.resourcesPath,
+        appPath: this.deps.appPath,
         repoRoot: this.deps.repoRoot
       }) !== null
     )
@@ -374,6 +381,7 @@ export class SessionHostClient {
 
     const script = resolveSessionHostScript({
       resourcesPath: this.deps.resourcesPath,
+      appPath: this.deps.appPath,
       repoRoot: this.deps.repoRoot
     })
     if (!script) {
@@ -382,9 +390,13 @@ export class SessionHostClient {
           'or `npm run build` which now runs it too)'
       )
     }
-    spawnSessionHost(script, this.deps.userDataDir)
+    // A host that is ALREADY starting needs no second one. Spawning anyway is not harmful (it
+    // exits on the exclusive-create lock), but it is a process per create during the window this
+    // wait exists for — see `hostIsStarting`.
+    if (!this.hostIsStarting()) spawnSessionHost(script, this.deps.userDataDir)
     let lastPublicationError: Error | null = null
-    for (let attempt = 0; attempt < 30; attempt++) {
+    const waitStartedAt = Date.now()
+    for (let attempt = 0; ; attempt++) {
       await sleep(150)
       try {
         if (await this.tryConnectOnce()) {
@@ -398,6 +410,15 @@ export class SessionHostClient {
         if (!this.isTransientPublicationLock(typed)) throw typed
         lastPublicationError = typed
       }
+      if (attempt < 29) continue
+      // Past the ordinary 4.5 s budget. Keep waiting ONLY while a host is demonstrably still
+      // starting — an empty startup lock whose mtime it keeps moving. That is a host waiting out
+      // an endpoint someone else still holds (issue #783: a Windows named pipe stayed busy for
+      // ~1.5 min after its owner was killed), and erroring here left every node that mounted in
+      // that window on a permanent "could not be started" until the user clicked Try again.
+      // A lock that stops being touched is abandoned, so this can never wait forever.
+      if (!this.hostIsStarting()) break
+      if (Date.now() - waitStartedAt > LISTEN_RETRY_BUDGET_MS + EMPTY_LOCK_STALE_MS) break
     }
     if (lastPublicationError) throw lastPublicationError
     throw new Error('session-host did not come up in time')
@@ -405,6 +426,12 @@ export class SessionHostClient {
 
   private isTransientPublicationLock(error: Error): boolean {
     return error.message === 'invalid session-host state: file is empty'
+  }
+
+  /** Is a host process between its exclusive-create lock and publication right now? True only for
+   *  an EMPTY lock it is still touching; a lock nobody moves is abandoned (see startupLockState). */
+  private hostIsStarting(): boolean {
+    return startupLockState(sessionHostPaths(this.deps.userDataDir).statePath) === 'starting'
   }
 
   /** An exclusive-create startup lock is briefly empty before atomic state publication. Retry
@@ -419,6 +446,9 @@ export class SessionHostClient {
         const typed = asError(error)
         if (!this.isTransientPublicationLock(typed)) throw typed
         lastError = typed
+        // Still empty after the small bound — but a host that is heartbeating that lock is simply
+        // still starting, so the launch path's own wait owns it rather than failing this create.
+        if (this.hostIsStarting()) return false
         await sleep(50)
       }
     }

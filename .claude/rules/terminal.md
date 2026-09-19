@@ -498,3 +498,273 @@ received and acted upon, so they stay uncertainty and reject the caller.
 - A `ResizeObserver` drives `FitAddon.fit()` + `transport.resize`. Canvas zoom is a CSS
   transform, so it does *not* change `clientWidth` — cols/rows stay stable across zoom.
   `scale-fix.ts` patches xterm's mouse coords so text selection stays aligned when zoomed.
+
+
+---
+
+## Upstream v0.3.7 merge additions (9e76faf84a5f..upstream/main (v0.3.7))
+
+> Appended verbatim during the v0.3.7 upstream merge (2026-09-20). Upstream keeps ONE CLAUDE.md;
+> the fork keeps this subsystem's deep reference in this rule file, so its new material lands
+> here rather than re-inlining the root. New/changed text only; `[~ replaced N base line(s)
+> here]` marks where upstream reworded text this file already carries above — reconcile at leisure.
+
+### From CLAUDE.md § Terminal session continuity (tmux)
+
+  **Whether a node IS remote is answered WITHOUT a live session** (`core/remote-end.ts`,
+  `planRemoteEnd`). `runEndSession` used to read it off the dying `Session` alone
+  (`dying?.sshRemote`), and its comment claimed "both callers run while the session is still live"
+  — which is false for the case that matters: a delete arrives precisely when there may be nothing
+  attached (an app restart, the offscreen release, the 5-min park expiry, a project that is not
+  even open). `dying` was then `undefined`, remoteness read as "local", the remote branch was
+  skipped **in silence**, and the one kill that went out went to the LOCAL socket, where a
+  `requireRemote` node has nothing at all. Everything else about the teardown ran, so the node left
+  the canvas looking deleted while its `nt-<id>` kept running on the host — a leak with no surface
+  anywhere. The durable answer is the machine-local index: the shell wires
+  `PtyManager.setRemoteNodeOwner` to `workspaceStore.sshProjectIdForNode` + that project's
+  ControlMaster (`refForProject`). A LIVE `sshRemote` still wins when there is one — it is the exact
+  master the session was spawned over, and a node created seconds ago may not be in the index cache
+  yet — so the two sources are complementary, not redundant. The Server Edition wires no resolver
+  (it has no SSH-project manager) and its deletes stay on the local path unchanged.
+  **And the kill is CHECKED.** The old `catch {}` read "remote session may not exist / master down;
+  ignore", which are not the same fact: tmux's own exit 1 ("can't find session", `probeSaysAbsent`)
+  is an ANSWER, while ssh's 255 / a 127 / a spawn error is a NON-answer with the session still
+  running. A non-answer — and a node whose project has no master at all — is **recorded**
+  (`core/pending-remote-kills.ts`, atomic JSON under userData, keyed by `user@host` because several
+  projects share one host's tmux server) and settled the next time that host connects
+  (`SshProjectManager.settleOwedKills`, hung on the shared connect attempt so the REUSE branch pays
+  too; an entry is dropped only on tmux exit 0 or 1). The delete itself is **never refused** over an
+  unreachable host: the node is going, and a refusal strands it on the canvas with the same session
+  still running plus a dialog — the user answers that by deleting it again. That trade is only
+  defensible BECAUSE the debt is durable; drop the store and refusing becomes the honest option.
+  **Only a `delete` may owe a debt.** A `recycle` keeps the node (worktree move, model switch,
+  "pause & end session"), so a kill deferred to a later reconnect would land on the session that
+  node has since RESPAWNED under the same name — ending live work hours after the action that
+  queued it, with nothing on screen connecting the two. A recycle still ATTEMPTS the remote kill;
+  it just records nothing when it cannot land, exactly as before.
+- **A shared Codex daemon restart is NOT a terminal-session restart.** tmux survives, and the Codex
+  rollout/thread survives, but every `codex --remote unix://` TUI attached to that account's one
+  app-server socket exits together. `buildCodexLauncherScript` therefore stays in the pane as a
+  bounded transport supervisor after binding a thread instead of `exec`ing the remote TUI. On an
+  abnormal client exit it resumes that exact thread only when `app-server daemon version` no longer
+  reports `status: running` or the known control-socket inode changed; the same healthy generation
+  returns the original status so a deterministic CLI error cannot relaunch forever. A reconnect
+  never replays the launch prompt/options (that would duplicate the user's turn), and three rapid
+  resets stop with a manual `codex resume <thread>` receipt. Preflight probes live protocol health
+  before lifecycle start: Codex's PID ownership record can go stale while the shared process remains
+  responsive, and killing that "orphan" would fan one bookkeeping failure out across every node.
+  The generated-shell tests run the replaced-socket, missing-daemon, healthy-client-error, and
+  responsive-orphan cases under real `/bin/sh`; the healthy-error case is the mutation guard.
+  **Both shells wire this spine.** Electron and Server Edition arm the same signed record secret,
+  thread start/bind handlers, capability refresh, and UI identity events; the server composition is
+  isolated in `server/codex-shared-identity.ts` and behavior-tested. The old Server Edition
+  "deliberate plain Codex" answer bypassed the launcher entirely, so a reconnect implementation in
+  the launcher could be perfectly green while every headless pane still fell back to its shell.
+    [~ replaced 2 base line(s) here]
+`fresh` flag: it asks the tmux server whether the session already exists *before* spawning, so
+`fresh=false` means a warm reattach (tmux redraws) and `fresh=true` means a cold start (first open
+OR post-reboot). Locally that ask is one `tmux has-session` per node; **on an SSH project it is ONE
+`tmux list-sessions` per host per burst** (`core/remote-ssh/remote-session-index.ts`), because a
+project switch mounts every node in the same tick and N probe channels on top of N pty channels
+overrun a stock host's `MaxSessions 10`. The measurement and the failure chain it closes are in
+that module's header; the two rules a refactor must not undo are **(1)** only tmux's own exit 1 is
+evidence of absence — every other outcome answers "exists", because a transport failure read as
+"cold" replays a snapshot and types `claude --resume …` into a LIVE agent pane — and **(2)** a
+session this process just spawned is recorded (`markPresent`) and a remote kill invalidates the
+cached list, so nothing inside the cache window can be told it is cold when it is not. On a
+  **A persisted session id is not evidence the conversation still exists**, and a dead one is not a
+  no-op: `claude --resume <dead id>` prints *"No conversation found with session ID: <uuid>"* and
+  EXITS, leaving the pane at a bare shell under a node still wearing its agent badge. Measured
+  2026-09-09 on the reporting host (`nodeterm-rmt`, 108 live sessions): **20** panes sat in exactly
+  that state, and not one of those 20 ids had a `<id>.jsonl` anywhere under the system
+  `~/.claude/projects` or the managed account root. Claude's own 30-day cleanup, a `/clear`, a
+  removed account and an id minted for a session that never ran all produce it. So the cold-restore
+  branch now asks `chat.transcriptExists` first (`transcript:exists`, served by
+  `registerTranscriptIpc` in BOTH shells) and, on a POSITIVE `absent`, launches the agent **bare**
+  and raises a slim `CoState.lostSession` banner on the node — "The previous conversation could not
+  be found — this agent started fresh." — instead of opening a blank session in silence. Three
+  rules make that safe:
+  - **The answer is a TRI-state** (`TranscriptPresence`: `present | absent | unknown`) and only
+    `absent` drops the id. The two errors are wildly asymmetric — wrongly resuming a dead id costs
+    one line and a bare shell (today's bug), wrongly dropping a LIVE id strands work the user
+    believes is continuing — so an unreadable root, a `readdir` that threw, a downed ControlMaster,
+    a relay tab, a rejected call and an id we would not put on a command line are ALL `unknown` =
+    resume exactly as before. `transcriptPresence` (`core/transcript-reader.ts`) is
+    `resolveTranscriptPath` plus that one distinction, not a second way of finding a transcript,
+    and a root that does not exist at all still answers `unknown` on purpose: cold restore runs at
+    boot, where a not-yet-mounted `$HOME` is indistinguishable from an empty one.
+  - **The remote leg's `unknown` is TERMINAL, never a fallthrough.** A remote session's transcript
+    is on the host, so searching this machine for it would find nothing and report `absent` about
+    the wrong computer. `remoteTranscriptPresence` (`src/main`) exists beside
+    `remoteTranscriptRefFor` rather than reusing it because that function collapses "not remote" /
+    "no home" / "ssh failed" / "the host looked and there is nothing" into one `undefined` — fine
+    for a reader that falls back, fatal for a caller that acts on absence.
+    `locateRemoteTranscriptCommand` was already built for this distinction (it exits 0 on a clean
+    miss, "so no transcript is an ANSWER, not a failed ssh"), and that is the property this reads;
+    it is deliberately more permissive than the local leg (it searches the account root AND the
+    system root), which errs toward `present` = keep the resume.
+  - **Claude only**, gated by `readsClaudeTranscript` — a codex/gemini/grok id misses this
+    resolver by construction every time, so probing one would answer `absent` for a healthy
+    session and drop its resume. Those agents keep the pre-existing behaviour until the probe
+    learns their layouts (`handoff/locate.ts` has the per-agent locators; that is the seam).
+  Decision logic is the pure `terminal/cold-resume-session.ts`. **Adding a `CoState` field owes the
+  hand-written equality list in `setCo`** — a patch touching only an uncompared field is SWALLOWED
+  and its banner silently never renders (it happened once to `spawnError`);
+  `nodes/cold-resume-wiring.test.ts` now asserts every field of the interface appears there.
+  Surfaces: Desktop full; Server Edition full (the handler is core, the ws-bridge leg is real, and
+  that shell runs on the host whose transcripts it reads, so it needs no remote leg); relay tabs
+  answer `unknown` and resume as before. **Not yet on the kanban CARD MODAL** — `ModalTerminal`
+  reads no `CoState`, so a user who only ever opens the session from the board does not see the
+  notice; the honest fix is a shared node-notice surface rather than a second copy of the banner.
+
+### SSH connect: the ControlMaster is published BEFORE its setup chain
+
+`connectOnce` (`main/remote-ssh/ssh-project.ts`) used to publish a project's ControlMaster only with
+`status: 'connected'` — i.e. after the reverse hook tunnel, ~23 serialized per-agent hook installs,
+`printf $HOME`, the remote tmux.conf write + `source-file` and the Codex runtime staging had all
+run. MEASURED against a real sshd through a 25 ms one-way delay proxy (50 ms RTT): that chain is
+**3.54 s** on a fully-provisioned host, while **18 remote terminals attaching in parallel over a
+warm master paint in a median of 0.16 s** and are all settled by 0.71 s. So the attach was never the
+bottleneck — every terminal of a switched-to project simply sat in `resolveSshRemote`'s 20 s wait
+printing `[connecting to user@host…]` into a blank pane, for a transport that was ready the whole
+time.
+
+Two additive changes, and the rules that keep them safe:
+
+- **The early signal.** The moment `ssh -O check` answers, `connectOnce` emits
+  `SshProjectStatusEvent.masterControlPath` on a `connecting` event. `connected` keeps its exact
+  meaning (the whole chain finished) and everything hanging off it — git routing, the remote claude
+  probe, the tunnel resync, the connection banner — is untouched. The renderer keeps it in its own
+  map (`useSshConn.earlyByProject`), **never in `byProject`**, which a dozen readers treat as "this
+  project is connected".
+  - **Only a node whose remote tmux session ALREADY EXISTS may act on it**
+    (`PtyApi.remoteSessionConfirmed` → `RemoteSessionIndex.verdict`, the strict `present`-only half
+    of the coalesced `tmux list-sessions` read `create()` already makes, so a warm switch pays no
+    extra round trip). `new-session -A` on a live session merely attaches, and the two things the
+    setup chain provides — the remote tmux config (`-f`) and the hook/account environment (tmux
+    `-e`) — are read at session CREATION only. A node whose session is ABSENT, **or whose host
+    could not be read**, waits for `connected`: creating its session without the hook env costs it
+    its agent-status badges silently, with no later event to repair it. That is why the index now
+    exposes a TRI-STATE (`present | absent | unknown`) — `exists()` folds `unknown` into "exists"
+    for its own caller, and this one needs the opposite fold. Decision logic is the pure
+    `renderer/lib/sshRemoteWait.ts`; a cold node's wait is pinned by its own test.
+  - **Never for an ADOPTED live-orphan master.** The tunnel-verification failure path may `-O exit`
+    that master and rebuild it, which would kill a terminal that had attached over it meanwhile.
+    The rebuild clears `reusedOrphan` and re-enters the loop, so a rebuilt master does publish.
+- **The boot-time pre-warm** (`core/remote-ssh/ssh-prewarm.ts`, planner + runner pure and tested;
+  wired in `main/index.ts`). The master for a project was dialed only when the user first switched
+  to it, so the first visit of every app run paid the cold establish (**0.44 s** measured) plus the
+  whole chain. `SshProjectManager.prewarm` now dials the masters of OPEN SSH projects shortly after
+  boot, **one host at a time** (a burst of fresh masters is what trips a host's `MaxStartups`; the
+  `SshChildGate` caps exec children per control path and does nothing about logins).
+  - **A pre-warm is SILENT — no status event at all.** The user is by definition not looking (if
+    they were, the active-project effect would have connected it loudly), so a failure must not
+    raise the connection banner for a project they never opened. The mark is lifted the moment a
+    real connect arrives for the same project, including one that coalesces onto the pre-warm's own
+    in-flight attempt.
+  - **It never prompts for a passphrase either** (`isQuietMasterPid` → main's prompt handler
+    declines): a modal in front of a user who opened nothing is the loudest thing an SSH connect can
+    do. That master fails auth quietly; the user's own connect spawns a new one and prompts normally.
+  - **CLOSED projects are never dialed**, and neither is a project that already has a master or an
+    attempt in flight. `closeProject` is non-destructive, so a closed tab is the user saying "not
+    now".
+
+### When a freshness verdict was a GUESS: the late cold-start check
+
+The cold-restore section above states the rule that makes the remote freshness read safe: only
+tmux's own exit 1 is evidence of absence, and every other outcome answers "exists", because a
+transport failure read as "cold" types `claude --resume …` into a LIVE agent pane. That rule is
+right and does not change. What it costs, and what this closes, is the other side of the fold.
+
+**THE INCIDENT (measured on the reporting host, 2026-09-15).** The host's `nodeterm-rmt` tmux
+server died, so every remote session was gone; ten minutes later a 108-node SSH project was opened
+and 107 sessions had to be created in one mount burst. sshd logged **757 `Accepted publickey` full
+logins in seven minutes** — on a healthy ControlMaster that number is ~0, because everything
+multiplexes over one connection. Under that pressure the freshness read times out, the fold answers
+"exists", `tmux new-session -A` CREATES an empty session, `fresh:false` skips cold restore, and the
+node sits at a bare shell with the user's conversation stranded on disk:
+
+    15:29 burst,  22 sessions: 18 claude /  4 bash  ->  82% resumed
+    15:39 burst, 107 sessions: 41 claude / 66 bash  ->  38% resumed
+
+Load-dependent, i.e. a race. Three changes, and the order matters — the first saves the
+conversation, the other two stop the burst that strands it:
+
+- **A second opinion, never a different fold.** `create()` now reports `freshUnverified` when
+  `fresh:false` came from an `unknown` verdict rather than a read. The renderer re-asks ONCE, after
+  the attach has landed and the burst is over, and tmux settles it authoritatively:
+  `#{session_created}` survives a `new-session -A` attach, so a session created within seconds of
+  our own attach is one WE made (`PtyApi.sessionAge` → `remoteSessionAgeArgs`, which prints the
+  stamp AND the host's `date +%s` on one line so the host's clock skew never enters the number).
+  Every rule in `renderer/terminal/cold-self-heal.ts` is a refusal: never for a verdict that was
+  READ (that would spend a round trip per warm node on every switch), never for an unknown age,
+  never past the window, and never unless a SHELL still owns the pane — the same gate the
+  hibernation wake and the resume-miss watcher keep. The scrollback replay is deliberately NOT
+  re-run: by then tmux has painted the live pane, and writing a snapshot over it splices two points
+  in time (the warm-attach seeding rule). The agent relaunch is what matters and is what runs.
+- **The per-node token write is coalesced, not gated** — the brief that prompted this said
+  `ensureRemoteNodeToken` bypassed the `SshChildGate`, and that was measurably wrong: main wires
+  `RemoteHooks` with the gated runner, so it queues like everything else. The real cost was that it
+  is one round trip PER SPAWN for work the connect path already did (`materialiseNodeTokens` writes
+  every node's token), competing for a budget of 6 for the whole burst. It now memoizes per
+  (control path, node) for the app run — seeded by the connect — and coalesces a burst into ONE
+  remote write.
+- **Remote pty spawns are paced** (`core/remote-ssh/pty-spawn-gate.ts`, cap 4 per ControlMaster).
+  A pty deliberately never went through the `SshChildGate` — "a terminal is never queued for a
+  screen the user is looking at" — which is right for a handful of terminals and wrong for a
+  canvas. The one thing that makes pacing acceptable is that a slot is held only until the session
+  starts painting: released on the pty's FIRST OUTPUT (one round trip for a warm attach) and
+  unconditionally after `REMOTE_PTY_SPAWN_SETTLE_MS`, because a gate that can hang is worse than no
+  gate. A node that ends up waiting SAYS so (`SLOW_REMOTE_SPAWN_NOTICE_MS`), for the same reason the
+  `[connecting…]` line exists. Measured in the lab (real sshd, `MaxSessions 10`, 50 ms RTT, one warm
+  master, 107 attaches):
+
+  | | full logins | panes painted | wall |
+  |---|---|---|---|
+  | ungated | 72 / 77 | 102 and 96 of 107 | 2.1 / 2.3 s |
+  | gated at 4 | **1** / **1** | **107 / 107** | 3.2 / 4.0 s |
+
+  Wall time is the price and it is the right trade: ungated, five to eleven panes never painted at
+  all inside a 20 s budget — the same shape `remote-session-index.ts` reports for its own burst.
+
+**That paragraph is about a tmux CLIENT, and the SESSION HOST is the opposite case** (issue #686).
+On Windows there is no tmux, so nothing sits between the pane's app and the host's headless
+emulator: a `?2004h` it sees was written by the app itself, which is exactly the fact
+`paste-buffer -p` asks tmux for. `HostSession.bracketedPasteRequested()` reads it (behind
+`outputTail`, like `serialize` — xterm applies writes asynchronously, so an early read answers "no"
+for the turn that just enabled it) and `sendKeysWrites` (`session-host/send-keys-delivery.ts`)
+mirrors the tmux plan: `sanitizePasteText` ALWAYS, the frame only when the app asked, and the Enter
+as its own write AFTER the close marker — never inside the framed burst, which is the shape #453
+measured as mangled. Unframed it stays one write, byte-identical to the pre-fix path. Before this
+the host answered `sendKeys` with a single raw `text + '\r'`, so an injected prompt landed in a
+paste-aware composer (Codex, Claude) and was never submitted. **NOT verified on a device**: whether
+ConPTY re-emits an app's `?2004h` into the pty stream the host reads. If it does not, the mode is
+always false and every write is the old one — no fix, never a regression.
+
+
+### From CLAUDE.md § Terminal node lifecycle (gotchas)
+
+- **Where the wheel stops being the terminal's is decided by HIT TEST, per packet** — `Canvas.tsx`
+  answers `overNativeScrollable` with `target?.closest('.nowheel')`, and React Flow's own
+  `panOnScroll` walks the same class (`noWheelClassName`). Two consequences, and issue #767 reported
+  the second as the first. **(a) Inside the body the wheel is already the terminal's, band
+  included.** `.term-node__xterm` carries `nowheel` AND is `position: absolute; inset: 0` over a
+  body with no padding and no border, so the visible inset band (the host's own `4px 2px 6px 6px`)
+  and a co-attach letterbox band are part of the HOST's hit area — MEASURED with `elementFromPoint`
+  under headless Chromium against the verbatim rules, and now pinned as a three-link CSS invariant
+  by `canvas/terminal-wheel-boundary.test.ts`. The styles.css line the report reads ("insets the
+  xterm by a few px") is about PAINT — the band shows the body's `--term-bg` because the host paints
+  none — and paint is not hit testing. An overlay laid over a LIVE terminal therefore owes
+  `pointer-events: none` (`.term-node__stalecwd`, joining `.term-node__upload` and
+  `.term-copy-pill`); an overlay that REPLACES a dead view (`.term-node__offscreen`,
+  `.term-node__closed`) deliberately keeps the canvas wheel — there is nothing underneath to
+  scroll, so panning is the useful answer. **(b) The boundary that actually moves is TEMPORAL, not
+  spatial**: while it is up, `.term-hover-guard` covers the whole body and is NOT `nowheel`, so for
+  the first `panHoverDelay` after the pointer enters — and again after it leaves — a wheel over
+  terminal TEXT pans the canvas. That is the guard's own contract ("quick drag = move node, scroll
+  = pan canvas") and the reason those incidents cannot be reproduced on demand. Hoisting `nowheel`
+  to `.term-node__body` would swallow the guard with it (a second consumer, React Flow's, reads the
+  class the same way and no per-element opt-out can reach it); hoisting it to the whole NODE would
+  additionally take wheel-zoom-to-cursor away over every node, which is exactly where a
+  `wheelZoom` user aims.
+

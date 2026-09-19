@@ -49,7 +49,13 @@ function mount(mem: MemInfo | null, overBoard = false): void {
   root = createRoot(host)
   act(() =>
     root.render(
-      <SystemResourcePill overBoard={overBoard} onGoToNode={vi.fn()} onKillSession={vi.fn()} />
+      <SystemResourcePill
+        overBoard={overBoard}
+        onGoToNode={vi.fn()}
+        onKillSession={vi.fn()}
+        pauseOfferFor={() => ({ show: false })}
+        onPauseSession={async () => {}}
+      />
     )
   )
 }

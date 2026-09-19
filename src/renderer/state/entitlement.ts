@@ -55,7 +55,14 @@ interface EntitlementState {
   releaseOthers(): Promise<string | null>
 }
 
-const EMPTY: LicenseStatus = { tier: null, active: false, expiresAt: null, seats: 0, error: null }
+const EMPTY: LicenseStatus = {
+  tier: null,
+  active: false,
+  expiresAt: null,
+  termEndsAt: null,
+  seats: 0,
+  error: null
+}
 
 const EMPTY_DETAIL: LicenseDetail = {
   key: null,

@@ -30,6 +30,10 @@ export type NotPermittedReason =
   | 'self-send'
   | 'unsupported-edition'
   | 'unaddressable-node-id'
+  /** Server Edition's process-local creator ledger says the sender did not spawn this target in
+   *  the current server run. This is separate from pane/project ownership: proving which project
+   *  spawned a pane does not prove which agent is allowed to control it. */
+  | 'caller-not-owner'
   /** The target id names nodes in MORE THAN ONE project while panes are keyed by the bare id —
    *  one global pane, several possible owners, and one of them may be ungranted. Refused because
    *  the per-project grant cannot be attributed (PR #237 review I-1); its own word because the

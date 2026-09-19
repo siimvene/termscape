@@ -14,7 +14,7 @@ import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { CONTROL_SHIM_SCRIPT } from './canvas-control-core'
+import { CONTROL_SHIM_SCRIPT } from '../core/canvas-control-core'
 
 let dir = ''
 
@@ -124,6 +124,10 @@ describe('the control shim translates flags', () => {
   // subtle part of this script and a reordering would mean the drain went wrong.
   it('the bare positional forms still work', () => {
     expect(run(['write', 'n7', '--text', 'hi'])).toEqual(['arg.node=n7', 'arg.text=hi'])
+    expect(run(['color', 'n7,n8', '--color', '#32d74b'])).toEqual([
+      'arg.node=n7,n8',
+      'arg.color=#32d74b'
+    ])
   })
 
   // Task 5.4: the messaging verbs take the same "first bare word is the node" convenience —

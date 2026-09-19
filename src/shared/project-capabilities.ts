@@ -21,7 +21,25 @@
  *
  * If (2) is ever dropped as friction, this field must move to a machine-local store. That is the
  * trigger, written down where the decision is, not only in the design doc.
+ *
+ * ── MACHINE DEFAULTS (agentMessaging only) ──────────────────────────────────────────────────────
+ * A capability may name a MACHINE-LOCAL default in settings.json (`CAPABILITY_MACHINE_DEFAULTS`)
+ * that answers for a project whose file carries NO value. This does not trip the trigger above,
+ * and the reason is the whole design: (2) is not dropped — a literal `true` in the file still
+ * grants only with this machine's `'kept'` answer, so a stranger's `true` still raises the notice.
+ * What the default decides is ABSENCE, and absence is not something a clone can hand anyone: the
+ * value that answers it lives in this machine's own settings.json, set by this machine's user. A
+ * hostile repo can at most OMIT the field, which yields exactly what the user already chose for
+ * every project they did not configure.
+ *
+ * Absence therefore stops meaning "off" for such a capability, so OFF has to be written: the file
+ * carries a literal `false` (`projectCapabilityFileState` → `'off'`), which beats any default. And a
+ * recorded `'declined'` keeps an absent field off too — that is how every pre-default build wrote
+ * "turn it off" (delete the field + decline), and a user's explicit no must not be undone by a
+ * default they turned on later.
  */
+import type { Settings } from './types'
+
 export type ProjectCapability = 'agentBrowserControl' | 'agentMessaging'
 
 export const PROJECT_CAPABILITIES: readonly ProjectCapability[] = [
@@ -67,6 +85,48 @@ export const PROJECT_CAPABILITY_COPY: Record<ProjectCapability, ProjectCapabilit
 }
 
 /**
+ * Capabilities whose ABSENT file value is answered by a machine-local setting, and which setting.
+ * Only these may carry a literal `false` in the file — for every other capability off is still
+ * "no field", byte-identical to before.
+ */
+export const CAPABILITY_MACHINE_DEFAULTS: Partial<
+  Record<ProjectCapability, keyof Pick<Settings, 'agentMessagingDefault'>>
+> = {
+  agentMessaging: 'agentMessagingDefault'
+}
+
+export function capabilityHasMachineDefault(cap: ProjectCapability): boolean {
+  return Object.prototype.hasOwnProperty.call(CAPABILITY_MACHINE_DEFAULTS, cap)
+}
+
+/** The machine-local defaults a grant check needs — `settings.json`, read STRICTLY (`=== true`):
+ *  the file is hand-editable, and `"true"` there must not turn a capability on everywhere. */
+export type CapabilityMachineDefaults = Partial<Pick<Settings, 'agentMessagingDefault'>>
+
+export function capabilityMachineDefault(
+  defaults: CapabilityMachineDefaults | undefined | null,
+  cap: ProjectCapability
+): boolean {
+  const key = CAPABILITY_MACHINE_DEFAULTS[cap]
+  return !!key && defaults?.[key] === true
+}
+
+/** What the shared file says: a literal `true` (`on`), a literal `false` on a capability that has a
+ *  machine default (`off`), or nothing usable (`absent`). Own properties only; every other value —
+ *  `"true"`, `1`, a `false` on a capability without a default — is `absent`. */
+export type CapabilityFileState = 'on' | 'off' | 'absent'
+
+export function projectCapabilityFileState(
+  p: Partial<Record<ProjectCapability, unknown>> | undefined | null,
+  cap: ProjectCapability
+): CapabilityFileState {
+  if (!p || !Object.prototype.hasOwnProperty.call(p, cap)) return 'absent'
+  if (p[cap] === true) return 'on'
+  if (p[cap] === false && capabilityHasMachineDefault(cap)) return 'off'
+  return 'absent'
+}
+
+/**
  * Is the capability's raw switch set in this project's shared file? STRICT `=== true`, own
  * properties only: .nodeterm/project.json is hostile input — git-shared, hand-editable,
  * auto-adopted (@shared/node-exec) — so `"true"`, `1`, `{}` and a prototype-inherited `true` are
@@ -87,25 +147,24 @@ export function projectCapabilityFlagInFile(
   return p[cap] === true
 }
 
-/** The capability half of a ProjectFileV1, normalised: known keys only, literal `true` only,
- *  own properties only (M-1: no consent inherited through a prototype chain). */
-export function readProjectCapabilities(f: unknown): Partial<Record<ProjectCapability, true>> {
-  const out: Partial<Record<ProjectCapability, true>> = {}
+/** The capability half of a ProjectFileV1, normalised: known keys only, own properties only (M-1:
+ *  no consent inherited through a prototype chain), literal `true` — plus a literal `false` for a
+ *  capability with a machine default, where off must be written to beat that default. */
+export function readProjectCapabilities(f: unknown): Partial<Record<ProjectCapability, boolean>> {
+  const out: Partial<Record<ProjectCapability, boolean>> = {}
   if (!f || typeof f !== 'object') return out
   for (const cap of PROJECT_CAPABILITIES) {
-    if (
-      Object.prototype.hasOwnProperty.call(f, cap) &&
-      (f as Record<string, unknown>)[cap] === true
-    )
-      out[cap] = true
+    const state = projectCapabilityFileState(f as Partial<Record<ProjectCapability, unknown>>, cap)
+    if (state === 'on') out[cap] = true
+    else if (state === 'off') out[cap] = false
   }
   return out
 }
 
-/** The spread `projectToFile` uses. Absent keys are omitted, so an off capability adds no bytes to
- *  the committed file and no churn to anyone's git diff. */
+/** The spread `projectToFile` uses. Absent keys are omitted, so a capability without a machine
+ *  default adds no bytes when off; one WITH a default writes its explicit `false`. */
 export function projectCapabilityFields(
   p: Partial<Record<ProjectCapability, unknown>> | undefined | null
-): Partial<Record<ProjectCapability, true>> {
+): Partial<Record<ProjectCapability, boolean>> {
   return readProjectCapabilities(p ?? {})
 }

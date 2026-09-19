@@ -23,8 +23,8 @@ export async function armServerNodeIdentity(
   const nodeAuthSecret = await loadOrCreateNodeAuthSecret()
   hookServer.setNodeAuthSecret(nodeAuthSecret)
   // Managed Codex accounts on a headless host can then sign/verify their ownership records instead
-  // of throwing "identity authentication is unavailable". Orthogonal to the shared-app-server
-  // degrade (Codex nodes still launch bare here); this only makes the record layer able to sign.
+  // of throwing "identity authentication is unavailable". The server's shared-app-server wiring
+  // and headless launch factory consume this same identity spine after boot.
   setCodexThreadIdentityAuthSecret(nodeAuthSecret)
   // Already-running sessions become verified at their next hook event with no restart. No-ops into
   // legacy mode without a secret.

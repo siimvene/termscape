@@ -27,7 +27,8 @@ export const HIDEABLE_MENU_ITEMS: readonly HideableRow[] = [
   { id: 'snap-zone', label: 'Snap to zone' },
   { id: 'collapse', label: 'Collapse / Expand' },
   { id: 'markdown-view', label: 'Markdown view' },
-  { id: 'refresh-terminal', label: 'Refresh terminal' }
+  { id: 'refresh-terminal', label: 'Refresh terminal' },
+  { id: 'vanilla-restart', label: 'Restart on subscription' }
 ]
 
 /** Hideable terminal node header buttons, in header order. */
@@ -37,7 +38,7 @@ export const HIDEABLE_HEADER_BUTTONS: readonly HideableRow[] = [
   { id: 'mic', label: 'Dictate' },
   { id: 'ai-name', label: 'Name with AI' },
   { id: 'comments', label: 'Comments' },
-  { id: 'hide-fanout', label: 'Hide subagent/loop cards' },
+  { id: 'hide-fanout', label: 'Hide cards & connections' },
   { id: 'tidy-fanout', label: 'Tidy subagent cards' }
 ]
 

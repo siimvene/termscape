@@ -35,6 +35,7 @@ export const TERMINAL_RESET_KEYS = [
 export const APPEARANCE_RESET_KEYS = [
   'appTheme',
   'uiScale',
+  'tabBarHeight',
   'accent',
   'hiddenNodeMenuItems',
   'hiddenHeaderButtons',

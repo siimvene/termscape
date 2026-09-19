@@ -12,6 +12,7 @@ import {
   createDiffNode,
   createStickyNode,
   createDinoNode,
+  createFilesNode,
   isAccountLoginNode
 } from '@renderer/state/workspace'
 import { absolutePosition, type FocusableNode } from './nodeFocus'
@@ -167,6 +168,13 @@ function buildBase(snapshot: ReopenNodeSnapshot, ctx: RecreateContext): CanvasNo
       return d.filePath ? createEditorNode(0, d.filePath, undefined, d.sshFs) : null
     case 'video':
       return d.filePath ? createVideoNode(0, d.filePath, undefined, d.sshFs) : null
+    // A files node IS restorable — its whole state is the directory it shows — so it gets a case
+    // here rather than a seat in UNRESTORABLE beside 'trigger'. Registering it in neither list is
+    // the trap the 'trigger' comment above warns about: the snapshot is taken, the reopen entry is
+    // written, and `default: return null` then makes it a dead click. Compiles and typechecks
+    // either way, which is why the rule is written down rather than left to be noticed.
+    case 'files':
+      return d.cwd ? createFilesNode(0, d.cwd, undefined, d.sshFs) : null
     case 'diff':
       return d.cwd && d.filePath ? createDiffNode(0, d.cwd, d.filePath, !!d.diffStaged, undefined, d.commitOid) : null
     case 'web':

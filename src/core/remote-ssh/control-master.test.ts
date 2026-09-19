@@ -4,7 +4,6 @@ import {
   controlPathFor,
   masterArgs,
   childArgs,
-  remoteTmuxHasSessionArgs,
   remoteTmuxPasteArgs,
   remoteTmuxEnterArgs,
   probeSaysAbsent,
@@ -169,16 +168,6 @@ describe('childArgs', () => {
   })
   it('regression: never ControlMaster=no — a dead master made every child a silent fresh direct connection', () => {
     expect(childArgs(conn, '/s.sock')).not.toContain('ControlMaster=no')
-  })
-})
-
-describe('remoteTmuxHasSessionArgs', () => {
-  it('checks the remote socket for the node session', () => {
-    expect(remoteTmuxHasSessionArgs(conn, '/s.sock', 'nt-x')).toEqual([
-      ...childPrefix,
-      'deploy@h.example.com',
-      `${TP}tmux -L ${RMT_TMUX_SOCKET} has-session -t nt-x`
-    ])
   })
 })
 

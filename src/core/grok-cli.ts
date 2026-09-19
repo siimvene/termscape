@@ -11,8 +11,10 @@
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { IPC } from '../shared/ipc'
+import { directExecutableInvocation } from './exec-path'
 import { findInLoginPath } from './pty-manager'
 import { platform } from './platform'
+import { grokModelsFrom } from '../shared/agents/model-gateway'
 import { listGrokSessionIds } from './grok-session-mint'
 import { grokSessionsDir } from './agents/grok-paths'
 import { UNKNOWN_GROK_CLI_CAPS, type GrokCliCaps } from '../shared/types'
@@ -29,24 +31,61 @@ export { UNKNOWN_GROK_CLI_CAPS, type GrokCliCaps }
  * answer yes for `--session-id`; and grok's own help MENTIONS `--session-id` inside the description
  * of `--fork-session`, wrapped in backticks — a looser match would report the flag from prose alone.
  */
-export function grokCliCapsFrom(helpOutput: string | null | undefined): GrokCliCaps {
-  return { sessionIdFlag: /(^|\s)--session-id(\s|=|$)/m.test(helpOutput ?? '') }
+export function grokCliCapsFrom(
+  helpOutput: string | null | undefined,
+  modelsOutput?: string | null
+): GrokCliCaps {
+  return {
+    sessionIdFlag: /(^|\s)--session-id(\s|=|$)/m.test(helpOutput ?? ''),
+    models: grokModelsFrom(modelsOutput).map((m) => m.id)
+  }
+}
+
+/**
+ * The two spawns, separated from HOW they are spawned so the composition is testable.
+ *
+ * `run` returns the subcommand's stdout, or null when it failed. Exported for tests: the wiring
+ * between "ask `--help`" and "ask `models`" is precisely the kind of code the typecheck validates
+ * and nothing exercises — drop the second call and every pure-parser test stays green while model
+ * switching silently disappears.
+ */
+export async function grokCapsFromRunner(
+  run: (args: string[]) => Promise<string | null>
+): Promise<GrokCliCaps> {
+  const help = await run(['--help'])
+  if (help === null) return UNKNOWN_GROK_CLI_CAPS
+  // A second spawn, paid once per process (the whole probe is memoized). Its failure must not cost
+  // us the help answer, so it degrades on its own: no model list just means no model switching.
+  const models = await run(['models'])
+  return grokCliCapsFrom(help, models)
+}
+
+/** Probe the grok binary at `bin`, which may be a Windows npm shim the platform cannot spawn
+ *  directly — `directExecutableInvocation` decides how it is run, once, for both subcommands. */
+export function probeGrokCliAt(bin: string): Promise<GrokCliCaps> {
+  return grokCapsFromRunner(async (args) => {
+    try {
+      const invocation = directExecutableInvocation(bin, args)
+      if (!invocation) return null
+      const { stdout } = await execFileP(invocation.executable, invocation.args, {
+        ...invocation.options,
+        timeout: PROBE_TIMEOUT_MS
+      })
+      return stdout
+    } catch {
+      // Missing CLI, timeout, non-zero exit — all mean "unknown", which means "omit the flag".
+      return null
+    }
+  })
 }
 
 let cached: Promise<GrokCliCaps> | null = null
 
 async function probe(): Promise<GrokCliCaps> {
-  try {
-    // GUI apps don't inherit the shell PATH — resolve through the login shell like every other CLI
-    // lookup in the app.
-    const bin = await findInLoginPath('grok')
-    if (!bin) return UNKNOWN_GROK_CLI_CAPS
-    const { stdout } = await execFileP(bin, ['--help'], { timeout: PROBE_TIMEOUT_MS })
-    return grokCliCapsFrom(stdout)
-  } catch {
-    // Missing CLI, timeout, non-zero exit — all mean "unknown", which means "omit the flag".
-    return UNKNOWN_GROK_CLI_CAPS
-  }
+  // GUI apps don't inherit the shell PATH — resolve through the login shell like every other CLI
+  // lookup in the app.
+  const bin = await findInLoginPath('grok').catch(() => null)
+  return bin ? probeGrokCliAt(bin) : UNKNOWN_GROK_CLI_CAPS
 }
 
 /** The local grok CLI's capabilities. Memoized for the process lifetime. Never rejects. */

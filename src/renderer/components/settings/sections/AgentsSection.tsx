@@ -5,15 +5,24 @@ import { useBrowserLease, drivingNodeIds } from '../../../state/browserLease'
 import {
   PROJECT_CAPABILITIES,
   PROJECT_CAPABILITY_COPY,
+  capabilityHasMachineDefault,
+  capabilityMachineDefault,
   projectCapabilityFlagInFile
 } from '@shared/project-capabilities'
+import {
+  applyCapabilityChoice,
+  capabilityChoiceLabel,
+  capabilityChoiceOf,
+  capabilityStatusText,
+  type CapabilityChoice
+} from '../../../lib/capabilityChoice'
 import {
   isAgentEnabled,
   setAgentEnabled,
   setDefaultAgent
 } from '../../../state/agentAvailability'
 import { ensureClaudeCliCaps } from '../../../state/permissionMode'
-import type { ClaudeCliCaps } from '@shared/types'
+import type { AgentLaunchMode, ClaudeCliCaps } from '@shared/types'
 import {
   AGENT_CONFIG,
   ALL_PERMISSION_MODES,
@@ -33,6 +42,12 @@ import {
 import { AgentIcon } from '../../../lib/agentIcons'
 import { chipFor } from '../../../lib/keybindingOverrides'
 import { NODE_IDENTITY_STRICT_DATE } from '@shared/node-identity'
+import {
+  CONFIRM_WAIVABLE_VERBS,
+  pruneControlConfirmWaivers,
+  sanitizeControlConfirmWaivers
+} from '@shared/control-confirm'
+import { useControlConfirm } from '../../../state/controlConfirm'
 import { SegmentedPill } from '@renderer/ui/SegmentedPill'
 import { Button } from '@renderer/ui/Button'
 import { Input } from '@renderer/ui/Input'
@@ -67,6 +82,29 @@ const ROWS = {
       'opencode'
     ]
   },
+  vanillaLaunch: {
+    title: 'Launch mode',
+    keywords: [
+      'launch mode',
+      'subscription',
+      'vanilla',
+      'gateway',
+      'gateway model',
+      'provider',
+      'default',
+      'default model',
+      'anthropic',
+      'openai',
+      'copilot',
+      'env',
+      'credentials',
+      'clear env'
+    ]
+  },
+  messagingDefault: {
+    title: 'Agent messaging in projects that do not set it',
+    keywords: ['agent', 'message', 'messaging', 'default', 'project', 'send', 'reply', 'orchestration']
+  },
   permissionMode: {
     title: 'Permission mode',
     keywords: [
@@ -90,6 +128,40 @@ const ROWS = {
   hookReplyApprovals: {
     title: 'One-click approvals',
     keywords: ['approve', 'deny', 'approval', 'permission', 'hook', 'phone', 'canvas', 'one click', 'claude']
+  },
+  autoHideFinishedSubagentCards: {
+    title: 'Hide finished subagent cards',
+    keywords: [
+      'subagent',
+      'card',
+      'fan out',
+      'hide',
+      'remove',
+      'finished',
+      'done',
+      'clutter',
+      'canvas',
+      'task'
+    ]
+  },
+  controlConfirm: {
+    title: 'Destructive canvas-control confirmations',
+    keywords: [
+      'confirm',
+      'confirmation',
+      'dialog',
+      'ask',
+      "don't ask again",
+      'dont ask again',
+      'waive',
+      'write',
+      'close',
+      'destructive',
+      'canvas control',
+      'bypass',
+      'permission mode',
+      'security'
+    ]
   },
   nodeIdentity: {
     title: 'Verified node identity',
@@ -158,6 +230,7 @@ const CAPABILITY_ROWS = PROJECT_CAPABILITIES.map((cap) => ({
     ...PROJECT_CAPABILITY_COPY[cap].label.toLowerCase().split(/\s+/)
   ]
 }))
+const CAPABILITY_CHOICES: readonly CapabilityChoice[] = ['default', 'on', 'off']
 const ENTRIES = [
   ...Object.values(ROWS),
   ...CAPABILITY_ROWS.map(({ title, keywords }) => ({ title, keywords }))
@@ -180,6 +253,38 @@ function permissionModeDescription(): string {
   ]
     .filter(Boolean)
     .join(' ')
+}
+
+/**
+ * The waivable destructive verbs, in the order they are shown, with a sentence each.
+ *
+ * The LIST comes from the shared table (`CONFIRM_WAIVABLE_VERBS`) rather than being typed here, so
+ * a verb that becomes waivable cannot be waivable-in-code and invisible-in-Settings — a loosening
+ * the user cannot see or revoke is exactly what this section exists to prevent. An unknown verb
+ * falls back to its own name, which is honest and ugly rather than absent.
+ */
+const CONTROL_CONFIRM_VERB_COPY: Record<string, { label: string; description: string }> = {
+  write: {
+    label: 'Ask before an agent types into a node',
+    description:
+      'The `write` verb sends text straight into another session\u2019s terminal. Waiving the dialog lets any canvas-control agent do that without asking.'
+  },
+  close: {
+    label: 'Ask before an agent closes nodes',
+    description:
+      'The `close` verb deletes nodes and ends their terminal sessions. Waiving the dialog lets any canvas-control agent do that without asking.'
+  }
+}
+
+const CONTROL_CONFIRM_CHOICES = ['ask', 'never'] as const
+type ControlConfirmChoice = (typeof CONTROL_CONFIRM_CHOICES)[number]
+
+const CONTROL_CONFIRM_LABELS: Record<ControlConfirmChoice, string> = {
+  ask: 'Always ask',
+  // Says "permanently" in the option itself: the only other way to waive one of these is the
+  // dialog's own checkbox, which is bounded by the app's lifetime, and the difference between the
+  // two is the entire safety story.
+  never: 'Never ask (permanently, this computer)'
 }
 
 // The agents claude's version gate does NOT apply to — every other capable agent. Module level: the
@@ -220,16 +325,68 @@ export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.El
   // off-toggle re-renders immediately — and consumers read the switch per call from the store,
   // never from a snapshot taken when a lease started (agents-capabilities.test.tsx "takes effect
   // LIVE"; browser PR 4 / messaging PR 6 rely on that shape).
+  // Destructive canvas-control confirmations (@shared/control-confirm). Read through the SANITIZER,
+  // never raw: `settings.json` is hand-editable and a bogus entry there must degrade to "ask", so
+  // the section shows what the GATES will actually honour rather than what the file happens to say.
+  const waivers = sanitizeControlConfirmWaivers(settings.controlConfirmWaivers)
+  const waivableVerbs = [...CONFIRM_WAIVABLE_VERBS]
+  // Subscribed, not getState(): granting or revoking an app-run waiver must repaint this row.
+  const sessionWaivedVerbs = useControlConfirm((s) => s.sessionWaived)
+  /** Persist a PERMANENT waiver. Writes the sanitized shape back, so a hand-edited file is
+   *  normalized by the first UI touch instead of silently surviving beside it. */
+  const setAlwaysWaived = (verb: string, on: boolean): void => {
+    const next = on
+      ? [...new Set([...(waivers.always ?? []), verb])]
+      : (waivers.always ?? []).filter((v) => v !== verb)
+    update({
+      controlConfirmWaivers: sanitizeControlConfirmWaivers({ ...waivers, always: next })
+    })
+  }
+  const setBypassWaived = (on: boolean): void => {
+    update({
+      controlConfirmWaivers: sanitizeControlConfirmWaivers({ ...waivers, bypassMode: on })
+    })
+  }
+  // Every project the store holds, CLOSED ones included: `closeProject` keeps the project, its
+  // nodes and its running sessions, so a closed project is parked and its waiver is still live.
+  // Subscribed, so revoking one repaints the list.
+  const allProjects = useProjects((s) => s.projects)
+  /**
+   * The per-project waivers, as ROWS the user can read: a project id alone names nothing they
+   * recognise. A waiver whose project is gone is not rendered as an unnamed row — it is pruned on
+   * the next write, exactly as `sidebarCollapsedItems` keys are (`pruneControlConfirmWaivers`).
+   */
+  const projectWaiverRows = Object.entries(waivers.projects ?? {})
+    .map(([id, verbs]) => ({
+      id,
+      name: allProjects.find((p) => p.id === id)?.name,
+      verbs
+    }))
+    .filter((r) => r.name !== undefined)
+    .sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''))
+  /** Revoke one verb's per-project waiver. Prunes dead projects in the same write — this section
+   *  is the only surface that ever sees the whole map, so it is the natural place to tidy it. */
+  const revokeProjectWaiver = (projectId: string, verb: string): void => {
+    const live = new Set(allProjects.map((p) => p.id))
+    const pruned = pruneControlConfirmWaivers(waivers, live)
+    const rest = (pruned.projects?.[projectId] ?? []).filter((v) => v !== verb)
+    const projects = { ...(pruned.projects ?? {}) }
+    if (rest.length) projects[projectId] = rest
+    else delete projects[projectId]
+    update({
+      controlConfirmWaivers: sanitizeControlConfirmWaivers({ ...pruned, projects })
+    })
+  }
   const activeProjectId = useProjects((s) => s.activeProjectId)
   const activeProject = useProjects((s) => s.projects.find((p) => p.id === activeProjectId))
   const setProjectCapability = useProjects((s) => s.setProjectCapability)
+  const resetProjectCapabilityToDefault = useProjects((s) => s.resetProjectCapabilityToDefault)
   // The kill row (Task 6.4): browser nodes an agent is driving RIGHT NOW, across every open project,
   // each with a Stop and one Stop-all. The precedent is the identity escape hatch — a user who
   // notices their browser doing something needs one obvious place to end it, not a per-node hunt.
   // Stop revokes for real in main (detach + drop), and there is deliberately NO global "disable
   // browser control" toggle here: one concept, one switch (the per-project capability below).
   const browserLeaseEntries = useBrowserLease((s) => s.entries)
-  const allProjects = useProjects((s) => s.projects)
   const nodeTitleById = (id: string): string => {
     for (const p of allProjects) {
       const n = p.nodes.find((node) => node.id === id)
@@ -363,6 +520,29 @@ export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.El
           ))}
         </div>
       </SearchableRow>
+      <SearchableRow {...ROWS.vanillaLaunch}>
+        <FieldRow
+          label="Launch mode"
+          description="The default provider behavior for a fresh canvas agent session. “Gateway (CLI default)” injects the model gateway but lets the CLI pick its own default model. “Gateway (default model)” additionally launches on the default model chosen in Settings → Model gateway. “Subscription” strips the gateway + inherited provider env so the agent runs against its OWN provider (Claude’s subscription, Copilot’s GitHub routing) — the global counterpart of the per-node “Restart on subscription” action. The managed-account config dir is kept, so account isolation survives."
+          control={
+            <Select
+              aria-label="Agent launch mode"
+              value={settings.agentLaunchMode}
+              onChange={(e) =>
+                update({ agentLaunchMode: e.target.value as AgentLaunchMode })
+              }
+            >
+              <option value="gateway">Gateway (CLI default model)</option>
+              <option value="gateway-model">
+                {settings.modelGatewayDefaultModel
+                  ? `Gateway (default model: ${settings.modelGatewayDefaultModel})`
+                  : 'Gateway (default model — none configured)'}
+              </option>
+              <option value="subscription">Subscription (own provider credentials)</option>
+            </Select>
+          }
+        />
+      </SearchableRow>
       <SearchableRow {...ROWS.permissionMode}>
         <FieldRow
           label="Permission mode"
@@ -399,6 +579,114 @@ export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.El
             />
           }
         />
+      </SearchableRow>
+      <SearchableRow {...ROWS.autoHideFinishedSubagentCards}>
+        <FieldRow
+          label="Hide finished subagent cards"
+          description="Remove a subagent's card from the canvas as soon as that subagent finishes, instead of keeping it until the agent's next turn. Cards for subagents that are still running are never removed."
+          control={
+            <Switch
+              checked={settings.autoHideFinishedSubagentCards}
+              ariaLabel="Hide finished subagent cards"
+              onChange={(on) => update({ autoHideFinishedSubagentCards: on })}
+            />
+          }
+        />
+      </SearchableRow>
+      <SearchableRow {...ROWS.controlConfirm}>
+        <div className="space-y-4">
+          {waivableVerbs.map((v) => {
+            const copy =
+              CONTROL_CONFIRM_VERB_COPY[v] ??
+              ({ label: `Ask before an agent runs \`${v}\``, description: '' } as const)
+            const sessionWaived = sessionWaivedVerbs.includes(v)
+            const always = (waivers.always ?? []).includes(v)
+            // Named per project below rather than counted here: "waived in 3 projects" tells the
+            // user a number when what they need is which ones.
+            const inProjects = projectWaiverRows.filter((r) => r.verbs.includes(v))
+            return (
+              <FieldRow
+                key={v}
+                label={copy.label}
+                description={copy.description}
+                // A live app-run waiver is a STATE, not help text — the warning accent is right,
+                // and it must name how to end it, because the dialog that granted it is gone.
+                note={
+                  always
+                    ? undefined
+                    : sessionWaived
+                      ? 'Waived until nodeterm quits (you ticked "Don\u2019t ask again"). Revoke restores the dialog now.'
+                      : inProjects.length
+                        ? `Waived permanently in ${inProjects.map((r) => `"${r.name}"`).join(', ')} \u2014 revoke below.`
+                        : undefined
+                }
+                control={
+                  <div className="flex items-center gap-2">
+                    {sessionWaived && !always ? (
+                      <Button
+                        variant="default"
+                        onClick={() => useControlConfirm.getState().revokeForSession(v)}
+                      >
+                        Revoke
+                      </Button>
+                    ) : null}
+                    <Select
+                      aria-label={copy.label}
+                      value={always ? 'never' : 'ask'}
+                      onChange={(e) => setAlwaysWaived(v, e.target.value === 'never')}
+                    >
+                      {CONTROL_CONFIRM_CHOICES.map((c) => (
+                        <option key={c} value={c}>
+                          {CONTROL_CONFIRM_LABELS[c]}
+                        </option>
+                      ))}
+                    </Select>
+                  </div>
+                }
+              />
+            )
+          })}
+          {projectWaiverRows.length > 0 && (
+            <FieldRow
+              label="Waived in these projects"
+              // The rule this section exists for: every loosening stays visible and revocable. A
+              // per-project waiver is granted from a DIALOG, which is gone the moment it is
+              // answered — so without this row the grant would be permanent, invisible, and
+              // findable only by hand-editing settings.json.
+              description="You ticked \u201cDon\u2019t ask again\u201d and chose one project. These survive restarts, and apply only inside the project named. A project you delete takes its waivers with it."
+              control={
+                <div className="flex flex-col items-end gap-2">
+                  {projectWaiverRows.map((row) =>
+                    row.verbs.map((v) => (
+                      <div key={`${row.id}:${v}`} className="flex items-center gap-2">
+                        <span className="text-[12px] opacity-70">
+                          {CONTROL_CONFIRM_VERB_COPY[v]?.label ?? v} \u2014 {row.name}
+                        </span>
+                        <Button
+                          variant="default"
+                          onClick={() => revokeProjectWaiver(row.id, v)}
+                        >
+                          Revoke
+                        </Button>
+                      </div>
+                    ))
+                  )}
+                </div>
+              }
+            />
+          )}
+          <FieldRow
+            label="Also skip them while your permission mode is Bypass"
+            description="When YOUR global permission mode (above) is Bypass permissions, treat that as covering these dialogs too. A project that overrides the mode never counts \u2014 an override is saved in .nodeterm/project.json and travels to everyone who clones the repo, so a repository you cloned must not be able to switch your confirmations off."
+            control={
+              <Switch
+                checked={waivers.bypassMode === true}
+                ariaLabel="Skip destructive canvas-control confirmations in Bypass permissions mode"
+                onChange={setBypassWaived}
+              />
+            }
+          />
+        </div>
       </SearchableRow>
       <SearchableRow {...ROWS.nodeIdentity}>
         <FieldRow
@@ -452,44 +740,91 @@ export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.El
           )}
         </div>
       </SearchableRow>
-      {CAPABILITY_ROWS.map(({ cap, title, keywords }) => (
-        <SearchableRow key={cap} title={title} keywords={keywords}>
-          <FieldRow
-            label={title}
-            note={
-              activeProject
-                ? `Applies to the active project: ${activeProject.name}.`
-                : 'Open a project to change this — the switch belongs to a project, not to the app.'
-            }
-            // The description carries the capability's own copy AND its cloneWarning — the same
-            // "this is in the project file" sentence the clone notice shows, so the two git-shared
-            // grants read alike wherever they appear (pinned by agents-capabilities.test.tsx).
-            description={`${PROJECT_CAPABILITY_COPY[cap].description} ${PROJECT_CAPABILITY_COPY[cap].cloneWarning}`}
-            control={
-              <Switch
-                // The raw FILE FLAG is the right thing for a settings switch to display — it
-                // mirrors what is written in .nodeterm/project.json. It is NEVER the grant check:
-                // grants require the machine-local 'kept' too (projectCapabilityGrantedFor).
-                checked={projectCapabilityFlagInFile(activeProject, cap)}
-                ariaLabel={title}
-                disabled={!activeProject}
-                onChange={(on) => {
-                  // The ONE strict setter: literal `true` on, field deleted on off. Writing the
-                  // value any other way (a string, a stored false) is the bug the validators
-                  // exist to refuse.
-                  if (activeProject) setProjectCapability(activeProject.id, cap, on)
-                  // Turning browser control OFF revokes any live lease in this project immediately
-                  // (Task 6.4) — detach now, don't wait for the next drive to read the switch. Read
-                  // live off this toggle, never cached at lease start.
-                  if (activeProject && cap === 'agentBrowserControl' && !on) {
-                    window.nodeTerminal?.browser?.stopProject?.(activeProject.id)
-                  }
-                }}
-              />
-            }
-          />
-        </SearchableRow>
-      ))}
+      <SearchableRow {...ROWS.messagingDefault}>
+        <FieldRow
+          label={ROWS.messagingDefault.title}
+          description="What agent messaging does in a project whose settings do not say. It is stored on this computer only, never in a project file: a project set to on or off keeps its own setting, and a project file that turns messaging on still asks you to confirm it before it takes effect here."
+          control={
+            <Switch
+              checked={settings.agentMessagingDefault === true}
+              ariaLabel={ROWS.messagingDefault.title}
+              onChange={(on) => update({ agentMessagingDefault: on })}
+            />
+          }
+        />
+      </SearchableRow>
+      {CAPABILITY_ROWS.map(({ cap, title, keywords }) =>
+        capabilityHasMachineDefault(cap) ? (
+          // A capability with a machine default has THREE file states (on / off / use default), so
+          // it is a choice plus a sentence saying what is in effect — see lib/capabilityChoice.
+          <SearchableRow key={cap} title={title} keywords={keywords}>
+            <FieldRow
+              label={title}
+              note={capabilityStatusText(activeProject, cap, settings)}
+              description={`${PROJECT_CAPABILITY_COPY[cap].description} ${PROJECT_CAPABILITY_COPY[cap].cloneWarning}`}
+              control={
+                <Select
+                  aria-label={title}
+                  disabled={!activeProject}
+                  value={capabilityChoiceOf(activeProject, cap)}
+                  onChange={(e) => {
+                    if (!activeProject) return
+                    applyCapabilityChoice(
+                      { setProjectCapability, resetProjectCapabilityToDefault },
+                      activeProject.id,
+                      cap,
+                      e.target.value as CapabilityChoice
+                    )
+                  }}
+                >
+                  {CAPABILITY_CHOICES.map((c) => (
+                    <option key={c} value={c}>
+                      {capabilityChoiceLabel(c, capabilityMachineDefault(settings, cap))}
+                    </option>
+                  ))}
+                </Select>
+              }
+            />
+          </SearchableRow>
+        ) : (
+          <SearchableRow key={cap} title={title} keywords={keywords}>
+            <FieldRow
+              label={title}
+              note={
+                activeProject
+                  ? `Applies to the active project: ${activeProject.name}.`
+                  : 'Open a project to change this — the switch belongs to a project, not to the app.'
+              }
+              // The description carries the capability's own copy AND its cloneWarning — the same
+              // "this is in the project file" sentence the clone notice shows, so the two git-shared
+              // grants read alike wherever they appear (pinned by agents-capabilities.test.tsx).
+              description={`${PROJECT_CAPABILITY_COPY[cap].description} ${PROJECT_CAPABILITY_COPY[cap].cloneWarning}`}
+              control={
+                <Switch
+                  // The raw FILE FLAG is the right thing for a settings switch to display — it
+                  // mirrors what is written in .nodeterm/project.json. It is NEVER the grant check:
+                  // grants require the machine-local 'kept' too (projectCapabilityGrantedFor).
+                  checked={projectCapabilityFlagInFile(activeProject, cap)}
+                  ariaLabel={title}
+                  disabled={!activeProject}
+                  onChange={(on) => {
+                    // The ONE strict setter: literal `true` on, field deleted on off. Writing the
+                    // value any other way (a string, a stored false) is the bug the validators
+                    // exist to refuse.
+                    if (activeProject) setProjectCapability(activeProject.id, cap, on)
+                    // Turning browser control OFF revokes any live lease in this project immediately
+                    // (Task 6.4) — detach now, don't wait for the next drive to read the switch. Read
+                    // live off this toggle, never cached at lease start.
+                    if (activeProject && cap === 'agentBrowserControl' && !on) {
+                      window.nodeTerminal?.browser?.stopProject?.(activeProject.id)
+                    }
+                  }}
+                />
+              }
+            />
+          </SearchableRow>
+        )
+      )}
       <SearchableRow {...ROWS.hibernation}>
         <FieldRow
           label="Hibernate idle agents"

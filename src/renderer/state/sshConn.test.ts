@@ -4,6 +4,7 @@ import { useSshConn } from './sshConn'
 beforeEach(() => {
   useSshConn.setState({
     byProject: {},
+    earlyByProject: {},
     attachments: {},
     autoPermByProject: {},
     remoteClaudeVersionByProject: {}
@@ -218,5 +219,56 @@ describe('useSshConn — remote Codex runtime (getCodexRuntime)', () => {
       codexRelayScriptPath: undefined,
       codexRelayRuntimePath: undefined
     })
+  })
+})
+
+// The early (pre-setup) ControlMaster path lives in its OWN map. `byProject[id]` is read all over
+// the app as "this project is connected"; an early entry there would make the usage pill, the RAM
+// pill, Source Control and the accounts picker all claim a connection whose remote setup has not
+// run. Its ONE consumer is resolveSshRemote's early-attach path.
+describe('useSshConn — early ControlMaster path', () => {
+  it('is kept out of byProject, so nothing else reads it as "connected"', () => {
+    useSshConn.getState().setEarlyControlPath('p1', '/cm/p1')
+    expect(useSshConn.getState().getEarlyControlPath('p1')).toBe('/cm/p1')
+    expect(useSshConn.getState().byProject.p1).toBeUndefined()
+    expect(useSshConn.getState().getControlPath('p1')).toBeUndefined()
+  })
+
+  it('is superseded (and dropped) by the full connection info', () => {
+    useSshConn.getState().setEarlyControlPath('p1', '/cm/p1')
+    useSshConn.getState().setConn('p1', { controlPath: '/cm/p1', remoteHome: '/home/u' })
+    expect(useSshConn.getState().getEarlyControlPath('p1')).toBeUndefined()
+    expect(useSshConn.getState().getControlPath('p1')).toBe('/cm/p1')
+  })
+
+  it('cannot walk a full entry back to an early one', () => {
+    useSshConn.getState().setConn('p1', { controlPath: '/cm/p1', remoteHome: '/home/u' })
+    useSshConn.getState().setEarlyControlPath('p1', '/cm/p1')
+    expect(useSshConn.getState().getEarlyControlPath('p1')).toBeUndefined()
+  })
+
+  it('is cleared when the master goes away, without touching the rest of the entry', () => {
+    useSshConn.getState().setEarlyControlPath('p1', '/cm/p1')
+    useSshConn.getState().clearEarlyControlPath('p1')
+    expect(useSshConn.getState().getEarlyControlPath('p1')).toBeUndefined()
+    // Idempotent, and a no-op write keeps the SAME map object (no needless re-render).
+    const before = useSshConn.getState().earlyByProject
+    useSshConn.getState().clearEarlyControlPath('p1')
+    expect(useSshConn.getState().earlyByProject).toBe(before)
+  })
+
+  it('goes with the scope on clear() and clearAttachment()', () => {
+    useSshConn.getState().setEarlyControlPath('p1', '/cm/p1')
+    useSshConn.getState().clear('p1')
+    expect(useSshConn.getState().getEarlyControlPath('p1')).toBeUndefined()
+
+    useSshConn.getState().registerAttachment('a1', {
+      conn: { host: 'h', user: 'u' },
+      hostKey: 'u@h',
+      ownerProjectId: 'p9'
+    })
+    useSshConn.getState().setEarlyControlPath('a1', '/cm/a1')
+    useSshConn.getState().clearAttachment('a1')
+    expect(useSshConn.getState().getEarlyControlPath('a1')).toBeUndefined()
   })
 })

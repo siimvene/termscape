@@ -53,6 +53,39 @@ collide; a remote host has one home root, so the remote digest is over `accountI
 pre-migration long home (`<userData>/codex-accounts/<id>`) is moved to its short home at boot,
 fail-closed (no-op if absent, if the target exists, or on an invalid id).
 
+## Shared-daemon restart continuity
+
+The control socket is not one process per canvas node. Every `codex --remote unix://` TUI for an
+account scope rides one persistent app-server, so an app-server upgrade, repair, or crash severs all
+of them at once. Their tmux panes and Codex rollouts remain intact, but without a client supervisor
+each pane drops back to its shell and looks like a reset.
+
+The generated launcher therefore owns the remote client for the lifetime of the bound thread:
+
+1. It records the app-server control socket's inode before launching the TUI.
+2. A normal exit or terminal signal returns unchanged.
+3. After any other exit, it retries only when `codex app-server daemon version` does not report
+   `status: running`, or when a known pre-launch socket inode changed. A failed inode read alone is
+   unknown, not proof of a reset; an unrelated Codex failure against the same healthy generation
+   returns its original status.
+4. It starts a missing daemon through the same scrubbed environment used at preflight, then resumes
+   the exact already-bound thread. Only the first launch receives the caller's prompt/options;
+   recovery never replays them because that could submit the same user turn twice.
+5. Three rapid resets stop the loop and print the exact manual `codex resume <thread>` command.
+
+Protocol health is checked before lifecycle start. Codex's PID ownership record can become stale
+while the socket remains responsive; that bookkeeping failure must not trigger a kill of live,
+shared infrastructure. The behavior is failure-injection tested under real `/bin/sh` in
+`src/core/codex-launcher-sh.test.ts`, including a mutation guard proving that a healthy
+same-generation client error is not relaunched.
+
+Desktop and Server Edition both wire this same core spine. The headless shell arms the
+restart-stable record secret, registers thread start/bind handlers against its persisted canvas,
+refreshes the launcher capability, and broadcasts identity mode through its normal browser RPC.
+Mobile needs no separate implementation: it attaches to the Server Edition's existing tmux
+session. Managed Codex account administration remains desktop-only; that is separate from
+supervising the system account's shared app-server on the server host.
+
 ## The signing secret (both shells — Decision 1)
 
 Every ownership record is HMAC-signed by the **one** restart-stable 32-byte node-auth secret
@@ -66,7 +99,9 @@ Every ownership record is HMAC-signed by the **one** restart-stable 32-byte node
 It is **confidential and fail-closed**: a malformed/wrong-length persisted state **throws** rather
 than minting a fresh secret — rotating the key would orphan every bound thread on the machine — and
 the single-flight cache clears on rejection so a healed machine retries. It is wired at boot in both
-`src/main/index.ts` and `src/server/index.ts` via `setCodexThreadIdentityAuthSecret(...)`.
+`src/main/index.ts` and `src/server/index.ts` via `setCodexThreadIdentityAuthSecret(...)`. Arming
+the secret is not the same as writing records: only the desktop registers the handlers that write
+any — see the resolver section below.
 
 > No `safeStorage`-only secret module is introduced. @Corvin's `codex-node-auth-secret.ts` in
 > PR #112 is `safeStorage`-ciphertext-only and throws on a headless server; the merged both-shells
@@ -87,22 +122,55 @@ Each record is a flat `key=value` text file, mode `0600`, **parsed as data, neve
 accountId=<id or empty for system>
 nodeId=<owning canvas node>
 endpoint=<hook endpoint file path>
+agentId=<the node's own agent id>
+canvasControl=<1 or 0>
 signature=<base64url HMAC>
 ```
 
-### The signature binds the full 4-tuple
+### Why the record names the agent
+
+`agentId` and `canvasControl` were once **constants in the sh prelude** (`codex`, granted). Both are
+facts about the PANE that only `hookServer.buildPtyEnv` knows: it labels a node with the node's own
+agent id — which for a custom agent declaring `baseAgent: 'codex'` is `custom:<uuid>`, **not**
+`codex` — and gates the grant on `canControlCanvas`. A constant is the prelude asserting what it
+cannot know. It mislabelled every custom codex-based node, and it asserted a grant that agrees with
+the pane today only because `SHARED_IDENTITY_CAPABLE ⊆ CANVAS_CONTROL_CAPABLE` — a coincidence that
+list's own comment invites the next shared-identity agent to break, at which point the prelude would
+be handing a tool shell a capability its pane was denied.
+
+Who decides what: the **pane echoes its own label** on `/codex-thread/{start,bind}` (a tmux session
+outlives the app, so after a restart nothing server-side still remembers what agent a node runs, and
+the pane's environment is the only durable holder). The **grant is never echoed** — the route derives
+it with `canControlCanvas`, the same predicate in the same process that gated the pane, so there is
+exactly one decider and a forged agent id cannot manufacture a grant the capability table refuses.
+Echoing the label is not a capability claim in any case: reaching that route requires a token this
+instance minted for that node, so the caller *is* the node, and the record it shapes is re-exported
+only into that node's own tool shells.
+
+### The signature binds the full 6-tuple
 
 ```
-signature = base64url( HMAC-SHA256( key, threadId ␀ accountScope ␀ nodeId ␀ hookEndpoint ) )
+signature = base64url( HMAC-SHA256(
+  key, threadId ␀ accountScope ␀ nodeId ␀ hookEndpoint ␀ agentId ␀ canvasControl ) )
 ```
 
 `accountScope` is the account id, or the literal `system` for the system account (empty id
 normalised). Because the scope is inside the preimage, a record signed for account **A** verifies
 only under scope **A** — copying it byte-for-byte into account **B**'s directory fails the MAC.
-Verification is `timingSafeEqual`. Records written before this slice carry **no** `accountId=` line
-and are verified with the original 3-tuple preimage **at the system scope only** — the one
-back-compat door, and it is a system-scope door (a scope-less signature is never honoured under a
-managed account).
+`canvasControl` is inside it for the same class of reason: it names a capability the prelude exports
+into an agent's shell, so an unsigned copy would be a grant anyone able to write the file could add.
+Verification is `timingSafeEqual`.
+
+**The three preimage generations are SELECTED by the record's shape, never tried in turn.** An
+`agentId=` line ⇒ the 6-tuple and only that; no agent line but an `accountId=` line ⇒ the 4-tuple
+(an S6-era record); neither, at the system scope ⇒ the original 3-tuple. Falling through would be
+the door by which an agent id could be stripped or rewritten and the record still accepted. A
+pre-agent record is read with the implied values **`codex` + granted** — exactly what it meant when
+it was written, since it came from this same spine and codex is unconditionally canvas-control-capable
+— and that fallback is keyed on the **line being absent**, never on the value being empty, so nothing
+that names an agent can land back on the guess. `bindCodexThreadIdentity` likewise never downgrades a
+record that already names its agent, and never promotes a pre-agent record's *implication* into a
+signed claim.
 
 ## Fail-closed ambiguity (the house rule, reused)
 
@@ -119,9 +187,30 @@ Ownership resolution reuses the merged fail-closed posture (`pane-ownership.ts`,
 
 ## The POSIX-sh resolver
 
-`codexThreadIdentityResolverSh(root)` is prepended to every managed hook script. A shared-app-server
-tool shell inherits `CODEX_THREAD_ID` but not the pane's `NODETERM_*` (see probe U5,
-`docs/superpowers/probes/2026-08-codex-tool-shell-env.md`), so this prelude recovers the binding:
+`codexThreadIdentityResolverSh(root)` is prepended to every managed hook script and to both LOCAL
+agent shims (`nodeterm.sh` and `context.sh`) before their early environment gates. A
+shared-app-server tool shell inherits `CODEX_THREAD_ID` but not the pane's `NODETERM_*` (see probe
+U5, `docs/superpowers/probes/2026-08-codex-tool-shell-env.md`), so this prelude recovers the binding.
+Without it, Codex hook status worked while canvas control and linked-context reads misdiagnosed the
+same first-class node as being outside nodeterm. The machine-neutral shim constants copied to SSH
+hosts deliberately omit the local record path; each local installer builds its own copy with its
+own `codexThreadIdentityRoot()`.
+
+**The shim half is shared; the RECORD half is desktop-only until the Server Edition registers the
+handlers.** Both statements matter, and reading only the first overstates what that edition has.
+The prelude reaches it byte-for-byte — `context-link.ts`'s `writeCliFiles` is core, and both shells
+arm the signing secret (above) — but `src/server/handlers/index.ts` deliberately registers no
+`setCodexThreadStartHandler` / `setCodexThreadBindHandler`, and `src/main/index.ts` is the only
+non-test caller of `writeCodexThreadIdentity` / `bindCodexThreadIdentity`. **No ownership record is
+ever written on that shell**, so the resolver always finds none and takes its fallback: it exports
+nothing, and the shims stay gated exactly as they were before this prelude existed. That is
+coherent rather than merely missing — the same file answers `UNKNOWN_CODEX_IDENTITY_CAPS`
+(`shared: false`), so a Codex node there launches the bare `codex` with its own app-server, and a
+tool shell whose identity would need recovering does not exist. It becomes a real gap the day the
+Server Edition grows the shared app-server, and what closes it is those two registrations — not a
+second copy of the prelude.
+
+The resolver:
 
 - reads `NODETERM_CODEX_ACCOUNT_ID` from the daemon env to pick the scope;
 - a known safe account id ⇒ reads **only** that account's record, and requires the record's
@@ -132,6 +221,50 @@ tool shell inherits `CODEX_THREAD_ID` but not the pane's `NODETERM_*` (see probe
 - it cannot verify the HMAC (no key in an agent's shell), so it re-validates every recovered field's
   charset and the account-line/scope agreement before exporting. Its behaviour is proven under real
   `/bin/sh` against a real on-disk scope tree in `codex-thread-identity-sh.test.ts`.
+
+**It exports what the record says; it does not decide.** `NODETERM_AGENT_ID` comes from the record's
+`agentId`, and `NODETERM_CANVAS_CONTROL=1` is exported **only** when the record's `canvasControl` says
+so — left UNSET otherwise, absent rather than `0`, the same shape `buildPtyEnv` produces and the shape
+both shims' `[ -z … ]` gates expect. Withholding is the honest degrade: a tool shell loses a verb its
+pane still has, whereas asserting a grant the pane was denied is the widening direction. A pre-agent
+record (no `agentId=` line) means `codex` with the grant; a record whose agent id is outside the
+accepted alphabet resolves **nothing at all** rather than falling back, because a record we did not
+write is not one to trust field by field.
+
+## The `NODETERM_*` env gate was never a security boundary
+
+Worth stating plainly, because both the prelude and the two shims *look* like access control: they
+open with `[ -z "$NODETERM_NODE_ID" ]` / `[ -z "$NODETERM_CANVAS_CONTROL" ]` and refuse to do
+anything without them. Widening what SETS those variables — which is what recovering a shared-Codex
+tool shell's identity does — therefore reads like widening what a local attacker can reach. It is
+not, and this section is the argument.
+
+Anyone who can run `nodeterm.sh` at all is already running as the user, in a shell, and can simply
+`export NODETERM_NODE_ID=… NODETERM_CANVAS_CONTROL=1` by hand. The variables are a **routing and
+no-op gate** — they tell a generated script which node it belongs to and keep it inert in the user's
+ordinary terminals — not an authorization check. Nothing server-side consults them; they never
+travel to the hook server at all.
+
+What actually authorizes is on the other side of the socket:
+
+- **Every route requires the app-wide bearer** (`X-NodeTerm-Hook-Token`, checked before any path
+  dispatch in `hook-server.ts`), which lives in the 0600 endpoint file.
+- **`/control/*` and `/context-link/*` additionally require the per-node capability**
+  (`X-NodeTerm-Node-Token`) through the single `identityGate` → `verifyNodeToken` →
+  `controlPolicy` path. The `nodeId` a caller names is a body field, and it is the token — not the
+  environment — that decides whether that caller may speak for it. `forged` is a bare 403, and the
+  strict verbs demand a `verified` verdict outright.
+- **Context link narrows again by construction**: the link document is selected by the REQUESTER's
+  node id (`linkDocs.get(req.nodeId)`), so a token-holding caller can only read the nodes in its own
+  directional link map — an env var cannot widen that set.
+- **`/codex-thread/{start,bind}`** — the routes that shape these very records — are strict: only a
+  `verified` per-node token proceeds.
+
+So the identity prelude changes *which sessions are correctly attributed to their node*, not *what
+anyone is permitted to do*. This PR does not change the threat model. The one thing that genuinely
+would is a value the prelude exports that nothing re-derives — which is exactly why
+`canvasControl` is signed and why the route computes it with `canControlCanvas` rather than
+accepting the pane's word for it.
 
 ## Supply-chain guard
 

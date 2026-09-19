@@ -16,8 +16,15 @@ import {
   nodeIdsForCanvas,
   remoteNodeTokenMinter,
   setRemoteNodeTokenWriter,
-  ensureRemoteNodeToken
+  ensureRemoteNodeToken,
+  forgetRemoteNodeTokens,
+  seedRemoteNodeTokens,
+  REMOTE_TOKEN_COALESCE_MS
 } from './node-token-service'
+
+/** The coalescing window is a real timer (see REMOTE_TOKEN_COALESCE_MS); wait it out. */
+const flushCoalesce = (): Promise<void> =>
+  new Promise((r) => setTimeout(r, REMOTE_TOKEN_COALESCE_MS + 20))
 
 let dir = ''
 beforeEach(() => {
@@ -252,19 +259,68 @@ describe('node token service — the remote (SSH) minter', () => {
     expect(nodeIdsForCanvas('nope')).toEqual([])
   })
 
-  it('the spawn-path writer is a no-op until one is registered, and never throws', () => {
+  it('the spawn-path writer is a no-op until one is registered, and never throws', async () => {
+    forgetRemoteNodeTokens('/cm.sock')
     setRemoteNodeTokenWriter(null)
     expect(() => ensureRemoteNodeToken('/cm.sock', 'node-1')).not.toThrow()
-    const seen: string[][] = []
-    setRemoteNodeTokenWriter((cp, id) => seen.push([cp, id]))
+    const seen: [string, string[]][] = []
+    setRemoteNodeTokenWriter((cp, ids) => seen.push([cp, [...ids]]))
     ensureRemoteNodeToken('/cm.sock', 'node-1')
-    expect(seen).toEqual([['/cm.sock', 'node-1']])
+    await flushCoalesce()
+    expect(seen).toEqual([['/cm.sock', ['node-1']]])
     // a writer that throws must not reach the pty spawn that called it
+    forgetRemoteNodeTokens('/cm.sock')
     setRemoteNodeTokenWriter(() => {
       throw new Error('ssh gone')
     })
     expect(() => ensureRemoteNodeToken('/cm.sock', 'node-1')).not.toThrow()
+    await flushCoalesce()
     setRemoteNodeTokenWriter(null)
+  })
+
+  it('COALESCES a mount burst into ONE remote write, and never rewrites an id twice', async () => {
+    // The shape that prompted this: a project switch mounts every node in the same tick, and each
+    // spawn used to be its own ssh exec child on the one multiplexed connection.
+    forgetRemoteNodeTokens('/cm.sock')
+    const seen: [string, string[]][] = []
+    setRemoteNodeTokenWriter((cp, ids) => seen.push([cp, [...ids]]))
+    for (const id of ['n1', 'n2', 'n3', 'n2']) ensureRemoteNodeToken('/cm.sock', id)
+    await flushCoalesce()
+    expect(seen).toEqual([['/cm.sock', ['n1', 'n2', 'n3']]])
+    // A second burst for ids this run already wrote costs NOTHING at all.
+    seen.length = 0
+    for (const id of ['n1', 'n2', 'n3']) ensureRemoteNodeToken('/cm.sock', id)
+    await flushCoalesce()
+    expect(seen).toEqual([])
+    // …and a genuinely new node still gets its token.
+    ensureRemoteNodeToken('/cm.sock', 'n4')
+    await flushCoalesce()
+    expect(seen).toEqual([['/cm.sock', ['n4']]])
+    setRemoteNodeTokenWriter(null)
+    forgetRemoteNodeTokens('/cm.sock')
+  })
+
+  it('keeps hosts separate, and a connect-time seed silences the spawn path for what it wrote', async () => {
+    forgetRemoteNodeTokens('/a.sock')
+    forgetRemoteNodeTokens('/b.sock')
+    const seen: [string, string[]][] = []
+    setRemoteNodeTokenWriter((cp, ids) => seen.push([cp, [...ids]]))
+    // This is what `materialiseNodeTokens` records after the connect wrote every node's token.
+    seedRemoteNodeTokens('/a.sock', ['n1', 'n2'])
+    ensureRemoteNodeToken('/a.sock', 'n1') // already on that host ⇒ no round trip
+    ensureRemoteNodeToken('/b.sock', 'n1') // a DIFFERENT host has never seen it
+    await flushCoalesce()
+    expect(seen).toEqual([['/b.sock', ['n1']]])
+    // A re-connect re-seeds, and the seed RESETS: the control path is keyed by project, so it can
+    // point at a different host after a server edit, where nothing of ours has been written.
+    seen.length = 0
+    seedRemoteNodeTokens('/a.sock', [])
+    ensureRemoteNodeToken('/a.sock', 'n1')
+    await flushCoalesce()
+    expect(seen).toEqual([['/a.sock', ['n1']]])
+    setRemoteNodeTokenWriter(null)
+    forgetRemoteNodeTokens('/a.sock')
+    forgetRemoteNodeTokens('/b.sock')
   })
 })
 

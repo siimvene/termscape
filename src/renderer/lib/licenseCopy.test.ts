@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest'
-import type { LicenseDetail } from '@shared/types'
+import { pinNeutralMachineNoun } from './testMachineNoun'
+import type { LicenseDetail, LicenseStatus } from '@shared/types'
 import {
+  proStatusLine,
   licenseSentence,
   canReleaseDevices,
   canUseKeyElsewhere,
@@ -22,6 +24,11 @@ const keygen = (over: Partial<LicenseDetail> = {}): LicenseDetail => ({
   error: null,
   ...over
 })
+
+
+// The copy under test names the machine, and `machineNoun()` sniffs the host — pin it so the
+// literals below hold on a Mac too (see testMachineNoun.ts).
+pinNeutralMachineNoun()
 
 describe('licenseSentence — a keygen license that read cleanly', () => {
   it('reports usage against the cap and names phones as devices', () => {
@@ -62,7 +69,7 @@ describe('licenseSentence — sources that have no key and no device count', () 
   it('says an App Store subscription bridged Pro here, and prints no counts', () => {
     const s = licenseSentence({ key: null, used: 0, seats: 0, source: 'apple', error: null })
     expect(s).toBe(
-      'Pro on this computer comes from the App Store subscription on your paired phone, so there is no license key or device count to show here.'
+      'Pro on this computer comes from the App Store subscription on your paired phone, so there is no license key or device count to show here. That subscription is managed by Apple, not by nodeterm: to see when it renews or to cancel it, open the App Store on that phone and go to Subscriptions in your account.'
     )
     // The zeros are "not applicable", not a measurement. Rendering them here is the exact
     // misdirection this branch exists to prevent.
@@ -359,5 +366,42 @@ describe('activationErrorSentence', () => {
       'Could not activate this key. Check it was pasted in full and try again — get in touch if it keeps failing.'
     )
     expect(s).not.toContain('gremlins')
+  })
+})
+
+describe('proStatusLine — the date is the subscription term or nothing (issue #800)', () => {
+  const NOW = Date.UTC(2026, 8, 15, 12) // the day the reporter opened the page
+  const WEEK_S = 7 * 24 * 60 * 60
+  const pro = (over: Partial<LicenseStatus>): LicenseStatus => ({
+    tier: 'pro',
+    active: true,
+    expiresAt: Math.floor(NOW / 1000) + WEEK_S,
+    termEndsAt: null,
+    seats: 3,
+    error: null,
+    ...over
+  })
+
+  it('prints no date from the token TTL', () => {
+    // The reported screen: a 7-day token beside no stated term used to read "active until 9/22/2026".
+    expect(proStatusLine(pro({}), NOW)).toBe('Pro — active.')
+  })
+
+  it('prints the term when the server stated one', () => {
+    const term = Date.UTC(2027, 8, 13) / 1000
+    expect(proStatusLine(pro({ termEndsAt: term }), NOW)).toBe(
+      `Pro — active. Current term runs through ${new Date(term * 1000).toLocaleDateString()}.`
+    )
+  })
+
+  it.each([
+    ['null', null],
+    ['zero', 0],
+    ['NaN', Number.NaN],
+    ['in the past', Math.floor(NOW / 1000) - 60]
+  ])('a term that is %s prints no date — never an epoch', (_label, termEndsAt) => {
+    const line = proStatusLine(pro({ termEndsAt }), NOW)
+    expect(line).toBe('Pro — active.')
+    expect(line).not.toContain(new Date(0).toLocaleDateString())
   })
 })

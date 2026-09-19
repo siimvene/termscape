@@ -1,9 +1,16 @@
 /**
- * The single declarative source of truth for the "add node" content items that appear in every
- * creation menu: the canvas pane right-click, the sessions-sidebar project-header "+", the bottom
- * Dock "+", and the kanban column "+ New session".
+ * The single declarative source of truth for the "add node" content items that appear in the
+ * creation menus that can offer every node kind: the canvas pane right-click, the
+ * sessions-sidebar project-header "+", and the bottom Dock "+".
  *
- * The duplication this kills: each of those four surfaces used to hand-maintain its own list of
+ * **The kanban column's "+ New session" is deliberately NOT one of them** — this doc used to list
+ * it as a fourth consumer, which was never true and is worth stating so nobody "fixes" it by
+ * wiring it up. Its `KanbanCreateChoice` is a closed union of terminal / browser / sticky / agent
+ * because those are the only kinds `canvas/toKanbanSession.ts` turns INTO A CARD; feeding it this
+ * list would offer kinds (a trigger, a worktree, an editor) that create a node the board can never
+ * show. A surface that can only render part of the list is a different list, not a lagging copy.
+ *
+ * The duplication this kills: each of those surfaces used to hand-maintain its own list of
  * which node kinds you can add, so they drifted out of parity (the pane menu had "New browser" but
  * the Dock and the sidebar "+" did not, etc.). Now they all derive their CONTENT items from
  * {@link CONTENT_ADD_ITEMS}, filtered by project context (cwd / SSH). Agent entries are layered on
@@ -11,7 +18,9 @@
  * `agentCreationItems()`, and the Dock's agent-account hover flyouts are intentionally bespoke UX —
  * so this spec owns the CONTENT list only, not the agents.
  *
- * Two render adapters map the same {@link AddItem} list to the two menu worlds:
+ * Three render adapters map the same {@link AddItem} list to the menu worlds:
+ *  - {@link buildGroupedAddMenu} → the GROUPED tree the two `ContextMenu` surfaces show (see the
+ *    grouping section at the bottom of this file for why, and for the submenu depth cap).
  *  - {@link contentAddItemsToMenuItems} → the {@link MenuItem} type the `ContextMenu` component
  *    consumes (pane menu, project-header "+").
  *  - {@link contentAddItemsToDockRows} → the Dock's custom `<button>` JSX.
@@ -20,10 +29,14 @@
  */
 import type { ReactNode } from 'react'
 import type { MenuItem } from '../components/ContextMenu'
+import { ACCOUNT_CAPABLE_AGENT_IDS } from '@shared/agents/account-binding'
 import {
+  IconAgent,
   IconBranch,
+  IconCanvasView,
   IconDino,
   IconEditor,
+  IconExplorer,
   IconGroup,
   IconNote,
   IconRemote,
@@ -46,6 +59,7 @@ export type AddItem =
   | { kind: 'browser' }
   | { kind: 'web' }
   | { kind: 'sticky' }
+  | { kind: 'files' } // requiresCwd
   | { kind: 'dino' }
   | { kind: 'trigger' }
   | { kind: 'open-file' }
@@ -66,6 +80,7 @@ export const CONTENT_ADD_ITEMS: readonly AddItem[] = [
   { kind: 'browser' },
   { kind: 'web' },
   { kind: 'sticky' },
+  { kind: 'files' },
   { kind: 'dino' },
   { kind: 'trigger' },
   { kind: 'open-file' },
@@ -96,6 +111,7 @@ export interface AddHandlers {
   browser: (at?: AddPos) => void
   web: (at?: AddPos) => void
   sticky: (at?: AddPos) => void
+  files: (at?: AddPos) => void
   dino: (at?: AddPos) => void
   /** Adds a trigger node (issue #493) — a canvas-owned schedule that fires into another node. */
   trigger: (at?: AddPos) => void
@@ -121,6 +137,8 @@ export const WORKTREE_SSH_HINT = 'Not supported in SSH projects yet'
  */
 export const NEW_FILE_NO_CWD_HINT = 'This project has no folder — set one first (tab ⌄ → “Set folder…”)'
 export const WORKTREE_NO_CWD_HINT = NEW_FILE_NO_CWD_HINT
+/** Same reason, same fix — a file manager has nothing to list without a project folder. */
+export const FILES_NO_CWD_HINT = NEW_FILE_NO_CWD_HINT
 
 /**
  * Map the canonical content list to {@link MenuItem}s for the `ContextMenu` component.
@@ -158,6 +176,20 @@ export function contentAddItemsToMenuItems(
         break
       case 'sticky':
         out.push({ label: 'New sticky note', icon: <IconNote />, onClick: () => handlers.sticky(at) })
+        break
+      case 'files':
+        // A file manager needs a directory to root itself in. This row used to be HIDDEN on a
+        // cwd-less canvas, reasoning that it was "the same as New file…" — and main has since
+        // reversed exactly that rule (`NEW_FILE_NO_CWD_HINT`): a cwd-less project is a supported,
+        // persisted canvas, so a folder-shaped row degrades EXPLICITLY rather than vanishing,
+        // because a row that is gone takes its reason with it and the fix is one menu away.
+        out.push({
+          label: 'New file manager',
+          icon: <IconExplorer />,
+          disabled: !ctx.hasCwd,
+          hint: ctx.hasCwd ? undefined : FILES_NO_CWD_HINT,
+          onClick: () => handlers.files(at)
+        })
         break
       case 'dino':
         out.push({ label: 'New dino game', icon: <IconDino />, onClick: () => handlers.dino(at) })
@@ -246,6 +278,16 @@ export function contentAddItemsToDockRows(
       case 'sticky':
         out.push({ kind: 'sticky', label: 'Sticky Note', icon: <IconNote />, onClick: () => handlers.sticky() })
         break
+      case 'files':
+        out.push({
+          kind: 'files',
+          label: 'File Manager',
+          icon: <IconExplorer />,
+          disabled: !ctx.hasCwd,
+          hint: ctx.hasCwd ? undefined : FILES_NO_CWD_HINT,
+          onClick: () => handlers.files()
+        })
+        break
       case 'dino':
         out.push({ kind: 'dino', label: 'Dino Game', icon: <IconDino />, onClick: () => handlers.dino() })
         break
@@ -285,4 +327,169 @@ export function contentAddItemsToDockRows(
     }
   }
   return out
+}
+
+// ─── Grouping (the pane right-click and the sidebar "+") ─────────────────────────────────────
+//
+// Both of those surfaces used to render the whole flat list — 18 "New …" rows before the four
+// canvas actions — which is a list you read rather than a menu you aim at. The ⌘K palette already
+// makes every one of these searchable, and the keybinding registry already carries a remappable
+// command per agent and per node kind (`node.new*`, #365), so this menu does not have to be
+// EXHAUSTIVE; it has to be FAST. Grouping trades one hover for a target you can hit without
+// reading, and leaves the exhaustive paths exactly where they already were.
+//
+// **The depth cap is structural, not stylistic.** `ContextMenu` renders a submenu's children with
+// `if (child.type === 'colors' || child.type === 'submenu') return null` — a third level is
+// silently dropped, with no error and nothing on screen. That single line decides the whole shape
+// below: an agent row that is ALREADY a submenu (Claude's and Codex's account pickers) can never
+// be nested, or the picker disappears for exactly the users who have managed accounts.
+
+/** Which section of the grouped menu a content kind belongs to. `top` = stays a first-level row. */
+export type AddGroupId = 'top' | 'view' | 'files' | 'orchestrate'
+
+/**
+ * The routing table, as a total `Record` over the kind union **on purpose**: a new `AddItem` kind
+ * is a COMPILE ERROR here until somebody decides where it belongs. The alternative (a lookup with
+ * a default) would silently drop a new kind into one bucket forever, which is the drift this
+ * module exists to prevent.
+ *
+ * `terminal` and `remote` stay at the top because they are the two fastest paths to a session, and
+ * because `remote` is not an agent — the one entry point to an SSH session must not be buried
+ * under a menu named "New agent", where nobody would look for it.
+ */
+export const ADD_ITEM_GROUP: Record<AddItem['kind'], AddGroupId> = {
+  terminal: 'top',
+  remote: 'top',
+  browser: 'view',
+  web: 'view',
+  sticky: 'view',
+  files: 'view',
+  dino: 'view',
+  'open-file': 'files',
+  'new-file': 'files',
+  'spawn-team': 'orchestrate',
+  trigger: 'orchestrate',
+  worktree: 'orchestrate'
+}
+
+/** Submenu labels, kept here so every surface names the same group the same way. */
+export const AGENT_GROUP_LABEL = 'New agent'
+export const ADD_GROUP_LABEL: Record<Exclude<AddGroupId, 'top'>, string> = {
+  view: 'New view',
+  files: 'Files',
+  orchestrate: 'Orchestrate'
+}
+
+/**
+ * One "New <agent>" row plus the agent it belongs to. The surfaces build the ROW (accounts,
+ * disabled reasons and custom agents all live in Canvas); this module only needs the id to decide
+ * whether the row may be nested.
+ */
+export interface AgentAddEntry {
+  agentId: string
+  item: MenuItem
+}
+
+/**
+ * Whether an agent row must stay at the FIRST level. Two independent reasons, and both are
+ * refusals rather than preferences:
+ *
+ *  1. **It is already a submenu.** Nesting it makes `ContextMenu` render it as nothing (see the
+ *     depth cap above) — the account picker would vanish silently, for exactly the users who have
+ *     accounts. This half is derived from the row itself, so an agent that grows a picker later is
+ *     protected on the day it does.
+ *  2. **It CAN own a managed account** (`ACCOUNT_CAPABLE_AGENT_IDS`). Rule 1 alone would move a
+ *     row in and out of the submenu as the user adds or removes accounts — a menu that rearranges
+ *     itself is a menu you cannot learn. Pinning the account-capable agents keeps the shape stable
+ *     whether or not an account exists yet.
+ *
+ * Both halves are DERIVED — no agent id is spelled here — so a new builtin agent joins the
+ * submenu by itself, and one that gains managed accounts is promoted by itself.
+ */
+export function isPinnedAgentEntry(entry: AgentAddEntry): boolean {
+  if (entry.item.type === 'submenu') return true
+  return ACCOUNT_CAPABLE_AGENT_IDS.includes(entry.agentId)
+}
+
+/**
+ * Pinned agent rows, then the rest behind one `New agent ▸`. An empty tail emits NO submenu — an
+ * empty flyout is a dead target.
+ */
+export function agentEntriesToMenuItems(agents: readonly AgentAddEntry[]): MenuItem[] {
+  const pinned = agents.filter(isPinnedAgentEntry).map((e) => e.item)
+  const rest = agents.filter((e) => !isPinnedAgentEntry(e)).map((e) => e.item)
+  return [
+    ...pinned,
+    ...(rest.length > 0
+      ? [
+          {
+            type: 'submenu',
+            label: AGENT_GROUP_LABEL,
+            icon: <IconAgent />,
+            children: rest
+          } as MenuItem
+        ]
+      : [])
+  ]
+}
+
+const GROUP_ICON: Record<Exclude<AddGroupId, 'top'>, ReactNode> = {
+  view: <IconCanvasView />,
+  files: <IconEditor />,
+  orchestrate: <IconGroup />
+}
+
+/**
+ * The grouped "add" menu shared by the canvas pane right-click and the sessions-sidebar "+".
+ *
+ * Rows come from {@link contentAddItemsToMenuItems} — the same per-kind builder the flat list and
+ * the Dock use — so a row's label, icon, handler and **disabled reason** are written exactly once.
+ * That is what keeps "New worktree…" greyed with `WORKTREE_SSH_HINT` inside its submenu instead of
+ * quietly losing the explanation on the way in: a `hint` on a leaf renders in a flyout the same as
+ * at the top level (the depth cap drops nested SUBMENUS, never a leaf's disabled state).
+ *
+ * Order is the canonical one: top rows, then agents, then view / files / orchestrate. A group
+ * whose rows are all filtered out emits no submenu at all.
+ */
+export function buildGroupedAddMenu(
+  items: readonly AddItem[],
+  handlers: AddHandlers,
+  ctx: AddCtx,
+  agents: readonly AgentAddEntry[],
+  at?: AddPos,
+  screenPos?: { x: number; y: number }
+): MenuItem[] {
+  const top: MenuItem[] = []
+  const buckets: Record<Exclude<AddGroupId, 'top'>, MenuItem[]> = {
+    view: [],
+    files: [],
+    orchestrate: []
+  }
+  for (const item of items) {
+    // Built one at a time through the SHARED mapper rather than re-implemented here: a second
+    // copy of the per-kind rows is exactly how these surfaces drifted apart before this module.
+    const [row] = contentAddItemsToMenuItems([item], handlers, ctx, at, screenPos)
+    if (!row) continue
+    const group = ADD_ITEM_GROUP[item.kind]
+    if (group === 'top') top.push(row)
+    else buckets[group].push(row)
+  }
+  const submenu = (id: Exclude<AddGroupId, 'top'>): MenuItem[] =>
+    buckets[id].length > 0
+      ? [
+          {
+            type: 'submenu',
+            label: ADD_GROUP_LABEL[id],
+            icon: GROUP_ICON[id],
+            children: buckets[id]
+          } as MenuItem
+        ]
+      : []
+  return [
+    ...top,
+    ...agentEntriesToMenuItems(agents),
+    ...submenu('view'),
+    ...submenu('files'),
+    ...submenu('orchestrate')
+  ]
 }

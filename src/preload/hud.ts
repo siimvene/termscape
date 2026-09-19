@@ -33,10 +33,22 @@ export interface HudPush {
   width: number
   /** Assumed physical notch width in px — the capsule's collapsed (fused) width. */
   notchWidth: number
-  /** Notch horizontal center in px (= width / 2) — where the capsule anchors. */
+  /** Notch horizontal center in px (= width / 2). */
   notchCenterX: number
-  /** True when a physical notch is present (fuse to it); false = draw a standalone floating pill. */
-  hasNotch: boolean
+  /** The SHAPE (main's `hudPlacement`): true = the capsule is fused to the physical notch (square
+   *  top at y=0, grows left of the notch); false = a standalone floating pill. This replaced a bare
+   *  `hasNotch` — a notched Mac with the capsule on the LEFT is also a pill. */
+  fused: boolean
+  /** Which capsule edge sits at `capsuleX` (collapsed): fused = right (butts the notch's right
+   *  edge); a pill = the side the user chose. */
+  anchor: 'left' | 'center' | 'right'
+  /** X of that anchor edge (px, window coords). */
+  capsuleX: number
+  /** Capsule top (px, window coords): 0 fused, else below the strip ± the user's offset, ≥ 0. */
+  capsuleTop: number
+  /** Expanded panel's left edge (px) — already clamped on screen by main — and its width. */
+  panelLeft: number
+  panelWidth: number
   /** Expand the panel on hover (settings.notchHoverExpand); false = click-only. */
   hoverExpand: boolean
   /** settings.usagePercentMode — how a row's context percentage renders ("42% used" / "58% left"). */

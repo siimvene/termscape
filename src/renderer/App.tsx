@@ -16,7 +16,9 @@ import { useSharedGlyph } from './canvas/SharedGlyphLayer'
 import { resolveTerminalRenderer } from '../shared/webgl'
 import { resolveTerminalTheme } from './terminal/themes'
 import { resolveUiScale } from '../shared/ui-scale'
+import { resolveTabBarHeight } from '../shared/window-chrome-metrics'
 import { useAppTheme } from './state/useAppTheme'
+import { installWindowActivityOnDocument } from './lib/windowActivity'
 
 export default function App() {
   // Apply the terminal-rendering setting to the two GPU coordinators, live. 'auto' is
@@ -43,6 +45,24 @@ export default function App() {
     const { background } = resolveTerminalTheme(terminalTheme).theme
     if (background) document.documentElement.style.setProperty('--term-bg', background)
   }, [terminalTheme])
+
+  // The tab bar's height is a setting (Settings → Appearance). Everything positioned against the
+  // bar reads the `--tabbar-h` token, so publishing the resolved value on <html> is the whole
+  // renderer side; main re-centres the macOS traffic lights from the same setting. The token's
+  // stylesheet default (`TABBAR_HEIGHT_PX`) stands until this runs, so a not-yet-hydrated
+  // settings store draws the default bar rather than none.
+  const tabBarHeight = useSettings((s) => s.settings.tabBarHeight)
+  useEffect(() => {
+    document.documentElement.style.setProperty('--tabbar-h', `${resolveTabBarHeight(tabBarHeight)}px`)
+  }, [tabBarHeight])
+
+  // Hold every infinite CSS animation still while nobody is looking at this window (the gate is
+  // `--nt-anim-state` / `[data-nt-window]` in styles.css, where the measurements live). Installed
+  // here rather than in Canvas because the surfaces that animate outside the canvas — the
+  // onboarding scenes, the settings spinners, the sessions sidebar — are mounted here too, and a
+  // gate that covers most of the animations buys nothing: one that keeps running keeps the
+  // compositor producing frames, which is the entire cost.
+  useEffect(() => installWindowActivityOnDocument(), [])
 
   // Publish the resolved appearance as `data-theme` on <html> — what the light palette in
   // styles.css keys off. Absent, or 'dark', leaves every token at its original value, so this one

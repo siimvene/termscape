@@ -10,7 +10,11 @@ import { TMUX_SOCKET, sessionName } from './tmux-naming'
 import { REAP_IDLE_MS, REAP_SWEEP_MS } from './pty-reap'
 import type { ControlSpawn } from './tmux-control-client'
 import type { PtyDevices } from './pty-devices'
-import { setRemoteNodeTokenWriter } from './agents/node-token-service'
+import {
+  setRemoteNodeTokenWriter,
+  forgetRemoteNodeTokens,
+  REMOTE_TOKEN_COALESCE_MS
+} from './agents/node-token-service'
 
 /**
  * SHADOW CLIENTS: a tmux control-mode (`-C`) client over plain pipes, attached to the tmux session
@@ -529,8 +533,8 @@ describe('control-mode shadow clients for released sessions', () => {
     // The connect writes a token for every node the canvas had THEN. Without this leg a node
     // created afterwards has no token file on the host until the next reconnect — which for a
     // long-lived SSH project is never — and spends that whole time on `legacy`.
-    const seen: string[][] = []
-    setRemoteNodeTokenWriter((controlPath, nodeId) => seen.push([controlPath, nodeId]))
+    const seen: [string, string[]][] = []
+    setRemoteNodeTokenWriter((controlPath, nodeIds) => seen.push([controlPath, [...nodeIds]]))
     try {
       await tmuxManager()
       await fake.handlers[IPC.ptyCreate](ALICE, {
@@ -539,13 +543,17 @@ describe('control-mode shadow clients for released sessions', () => {
         persistKey: 'node-r2',
         sshRemote: { conn: { host: 'h1', user: 'u' }, controlPath: '/tmp/cm', remoteCwd: '/srv/app' }
       })
-      expect(seen).toEqual([['/tmp/cm', 'node-r2']])
+      // Coalesced: the spawn path collects a burst and writes once (REMOTE_TOKEN_COALESCE_MS).
+      // Fake timers are in force for this suite, so advance rather than wait.
+      await vi.advanceTimersByTimeAsync(REMOTE_TOKEN_COALESCE_MS + 20)
+      expect(seen).toEqual([['/tmp/cm', ['node-r2']]])
       // ...and a LOCAL node never asks a host for anything.
       seen.length = 0
       await fake.handlers[IPC.ptyCreate](ALICE, { cols: 80, rows: 24, persistKey: 'node-local' })
       expect(seen).toEqual([])
     } finally {
       setRemoteNodeTokenWriter(null)
+      forgetRemoteNodeTokens('/tmp/cm')
     }
   })
 

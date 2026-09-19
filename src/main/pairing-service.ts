@@ -7,11 +7,15 @@
 // and stop the listener. The private key never leaves the phone; the only secret in the QR is the
 // single-use token.
 //
+// Windows is relay-only: no key is installed (see `directSsh` in createPairingService), the QR
+// says `"ssh":false`, and a pairing whose relay mint fails pairs nothing.
+//
 // Pure bits (payload build, key validation, LAN-IPv4 pick) live in `pairing-core.ts` so they're
 // unit-tested without spinning up a server.
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'http'
 import { connect as netConnect } from 'net'
+import { createSocket as createUdpSocket } from 'dgram'
 import { randomBytes, randomUUID } from 'crypto'
 import { promises as fs } from 'fs'
 import { execFile } from 'child_process'
@@ -25,6 +29,7 @@ import {
   normalizeAuthorizedKeysLine,
   normalizeDeviceName,
   pickLanIPv4,
+  pickPairingIPv4,
   readDevices,
   removeDevice,
   rewriteKeyComment,
@@ -39,6 +44,7 @@ import { renameAtomic, tempNameFor } from '../core/fs-atomic'
 import { publicKeyToB64, deriveSharedKey, encrypt, decrypt, type KeyPair } from './remote/e2ee'
 import { hostIdFromPublicKeyB64 } from './remote/relay-id'
 import { getDeviceId } from '../core/device-id'
+import { administratorsKeysPath, detectWindowsKeyFile, type WindowsKeyFile } from './windows-ssh-keys'
 
 const execFileAsync = promisify(execFile)
 
@@ -201,6 +207,13 @@ export interface PairingStartResult {
   payload: string
   /** True when 127.0.0.1:22 accepted a connection — sshd is (probably) running. */
   sshOpen: boolean
+  /** Will a scan install an SSH key? `false` on Windows: the phone reaches this host through the
+   *  relay only, so sshd is irrelevant and the QR is gated on the relay instead (see
+   *  `pairingGate`). */
+  sshKey: boolean
+  /** Windows only: which authorized_keys file sshd would read for this account — shown to explain
+   *  why no key is installed (issue #758). Never used to decide anything. */
+  windowsKeyFile?: WindowsKeyFile
   /** What the QR on screen will mint: 'ok' = carries a relay block, 'dev' = unpackaged build
    *  (relayAllowed() off — the QR is LAN-only regardless of the toggle), 'off' = toggle off.
    *  Known at start, so the UI can warn BESIDE the QR instead of after the pairing. */
@@ -210,6 +223,12 @@ export interface PairingStartResult {
 /** Fired once when pairing finishes: ok=true → a key was installed, ok=false → timeout/cancel. */
 export type PairingDone = {
   ok: boolean
+  /** Only on ok=false: 'timeout' (nobody finished in time) or 'relay-failed' (a relay-only
+   *  pairing whose device mint failed — nothing was paired, and the phone was told so). */
+  reason?: 'timeout' | 'relay-failed'
+  /** Only on ok=false: did ANY request reach the listener? A Windows timeout with nothing reached
+   *  is the signature of the firewall (or a wrong adapter address) blocking the phone. */
+  reached?: boolean
   /** Only on ok=true: did the pairing come with a relay leg? 'off' = toggle disabled,
    *  'failed' = enabled but the mint failed (the SILENT LAN-only degrade that cost a
    *  field debugging session — surface it, never swallow it), 'dev' = unpackaged build,
@@ -298,6 +317,41 @@ async function computerName(): Promise<string> {
   return os.hostname()
 }
 
+/**
+ * The source address the OS would use for a route to the internet — the default-route adapter.
+ * A UDP `connect` only consults the routing table; no packet is sent. Null when there is no route
+ * or anything fails.
+ */
+function defaultRouteIPv4(): Promise<string | null> {
+  return new Promise((resolve) => {
+    let settled = false
+    const sock = createUdpSocket('udp4')
+    const done = (addr: string | null): void => {
+      if (settled) return
+      settled = true
+      try {
+        sock.close()
+      } catch {
+        // already closed
+      }
+      resolve(addr)
+    }
+    sock.once('error', () => done(null))
+    try {
+      sock.connect(53, '8.8.8.8', () => {
+        try {
+          done(sock.address().address)
+        } catch {
+          done(null)
+        }
+      })
+    } catch {
+      done(null)
+    }
+    setTimeout(() => done(null), 500).unref?.()
+  })
+}
+
 /** Quick TCP probe of 127.0.0.1:22 to guess whether Remote Login (sshd) is on. */
 function probeSsh(): Promise<boolean> {
   return new Promise((resolve) => {
@@ -360,7 +414,31 @@ function readBody(req: IncomingMessage): Promise<string> {
   })
 }
 
-export function createPairingService(relayDeps?: PairingRelayDeps): PairingService {
+/** Seams for the platform decisions, so the Windows behaviour is testable on any runner. */
+export interface PairingServiceOptions {
+  /** Defaults to `process.platform`. */
+  platform?: NodeJS.Platform
+  /** Windows key-file detection (explanation only). Defaults to the real probe. */
+  detectKeyFile?: () => Promise<WindowsKeyFile>
+  /** Windows' machine-wide administrators key file, swept on revoke. */
+  administratorsKeysPath?: string
+  /** Default-route source address, for the Windows LAN-IP pick. */
+  defaultRouteAddress?: () => Promise<string | null>
+  /** Defaults to PAIR_TIMEOUT_MS. */
+  timeoutMs?: number
+}
+
+export function createPairingService(
+  relayDeps?: PairingRelayDeps,
+  options: PairingServiceOptions = {}
+): PairingService {
+  const platform = options.platform ?? process.platform
+  // Windows: no SSH key, relay only. Everything the phone sends over SSH is POSIX sh + tmux
+  // (nodeterm-ios HostCommands / TmuxBinary / TerminalTransport), Windows OpenSSH hands out
+  // cmd.exe, and sessions live in the session host — so a key sshd accepts only pins the phone to
+  // a path that cannot work, where a rejected one lets it fall through to the relay.
+  const directSsh = platform !== 'win32'
+  const adminKeysPath = options.administratorsKeysPath ?? administratorsKeysPath()
   let server: Server | null = null
   let timer: ReturnType<typeof setTimeout> | null = null
   let onDoneCb: ((result: PairingDone) => void) | null = null
@@ -451,6 +529,36 @@ export function createPairingService(relayDeps?: PairingRelayDeps): PairingServi
     await fs.chmod(AUTH_KEYS_PATH, 0o600).catch(() => {})
   }
 
+  /**
+   * Windows: also remove the device's line from `%ProgramData%\ssh\administrators_authorized_keys`.
+   * nodeterm never writes that file, but #758's manual workaround copies a paired key into it, and
+   * a revoke that only rewrote the profile file would report the device removed while the copy
+   * sshd actually reads stays authorized — for every administrator account on the machine.
+   *
+   * Rewritten IN PLACE, deliberately not temp + rename: the file's ACL must stay Administrators +
+   * SYSTEM only, and a temp file inherits the directory's ACL instead, which sshd then refuses —
+   * breaking every other administrator key in it. A line that IS there but cannot be removed
+   * throws, so the revoke reports `local: false` rather than a removal that did not happen.
+   *
+   * KNOWN RESIDUAL: an unreadable file is skipped, and unreadable is the NORMAL case — that ACL
+   * denies an unelevated process even a read. So an unelevated revoke cannot see a manually copied
+   * line and cannot say one exists; only an elevated nodeterm reaches it. Failing every unelevated
+   * revoke instead would make "Remove device" permanently impossible on any admin account with
+   * sshd installed, for a copy nodeterm never made.
+   */
+  async function removeAdministratorsKeysForDevice(deviceId: string): Promise<void> {
+    if (platform !== 'win32') return
+    let content: string
+    try {
+      content = await fs.readFile(adminKeysPath, 'utf8')
+    } catch {
+      return
+    }
+    const next = filterAuthorizedKeys(content, deviceId)
+    if (next === content) return
+    await fs.writeFile(adminKeysPath, next)
+  }
+
   const cleanup = (): void => {
     if (timer) {
       clearTimeout(timer)
@@ -476,13 +584,20 @@ export function createPairingService(relayDeps?: PairingRelayDeps): PairingServi
     cleanup()
     onDoneCb = onDone
 
-    const host = pickLanIPv4(os.networkInterfaces())
+    const host = directSsh
+      ? pickLanIPv4(os.networkInterfaces())
+      : pickPairingIPv4(
+          os.networkInterfaces(),
+          await (options.defaultRouteAddress ?? defaultRouteIPv4)().catch(() => null)
+        )
     if (!host) {
       onDoneCb = null
       throw new Error("Couldn't detect a LAN IP address — connect to Wi-Fi and try again.")
     }
     const token = randomBytes(24).toString('base64url')
     const user = os.userInfo().username
+    // Set by the first request of any kind — see PairingDone.reached.
+    let reached = false
 
     const srv = createServer((req: IncomingMessage, res: ServerResponse) => {
       void handleRequest(req, res)
@@ -500,7 +615,13 @@ export function createPairingService(relayDeps?: PairingRelayDeps): PairingServi
 
     const addr = srv.address()
     const pairPort = typeof addr === 'object' && addr ? addr.port : 0
-    const [name, sshOpen] = await Promise.all([computerName(), probeSsh()])
+    const [name, sshOpen, windowsKeyFile] = await Promise.all([
+      computerName(),
+      probeSsh(),
+      directSsh
+        ? Promise.resolve(undefined)
+        : (options.detectKeyFile ?? detectWindowsKeyFile)().catch((): WindowsKeyFile => 'unknown')
+    ])
     // Relay reachability (network-free) — embedded in the QR so the phone can reach us over the
     // relay too. Also reused in handleRequest to mint the phone's device token. LAN-only when null.
     const relayCtx = await buildRelayContext(relayDeps)
@@ -527,11 +648,15 @@ export function createPairingService(relayDeps?: PairingRelayDeps): PairingServi
       pairPort,
       name,
       hostKey,
-      relay: relayCtx?.block
+      relay: relayCtx?.block,
+      ...(directSsh ? {} : { ssh: false as const })
     })
 
-    // Give up after 2 minutes with a timeout result.
-    timer = setTimeout(() => finish({ ok: false }), PAIR_TIMEOUT_MS)
+    // Give up after PAIR_TIMEOUT_MS with a timeout result.
+    timer = setTimeout(
+      () => finish({ ok: false, reason: 'timeout', reached }),
+      options.timeoutMs ?? PAIR_TIMEOUT_MS
+    )
     timer.unref?.()
 
     // The phone reads /pair responses off a raw TCP socket (ATS blocks URLSession for bare-IP
@@ -545,6 +670,7 @@ export function createPairingService(relayDeps?: PairingRelayDeps): PairingServi
     }
 
     async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+      reached = true
       if (req.method !== 'POST' || req.url !== '/pair') {
         send(res, 404)
         return
@@ -624,24 +750,9 @@ export function createPairingService(relayDeps?: PairingRelayDeps): PairingServi
         // unchanged, and the mint still reads this same value.
         const phoneDeviceId =
           typeof body.deviceId === 'string' && body.deviceId.trim() ? body.deviceId.trim() : deviceId
-        // One unit, and queued behind any in-flight revoke: a pairing that interleaves with one
-        // would either append onto the inode the revoke is about to rename over, or lose its
-        // agent.json entry to the revoke's stale read.
-        await serialize(async () => {
-          await appendAuthorizedKey(rewriteKeyComment(publicKey, deviceId))
-          await persistDevice({
-            id: deviceId,
-            name,
-            token: agentToken,
-            pairedAt: Date.now(),
-            lastSeenAt: 0,
-            relayDeviceId: phoneDeviceId
-          })
-        })
-        // Provision relay access for the phone when enabled + Pro. Any failure ⇒ LAN-only: we
-        // never fail the pairing over a relay hiccup (the phone still got its SSH key installed).
         let relayFields: { relay?: RelayPairingBlock; relayDeviceToken?: string } = {}
-        if (relayCtx) {
+        const mint = async (): Promise<void> => {
+          if (!relayCtx) return
           const minted = await mintRelayDevice(relayDeps!.apiBase, {
             entitlement: relayCtx.entitlement,
             deviceId: phoneDeviceId,
@@ -656,6 +767,60 @@ export function createPairingService(relayDeps?: PairingRelayDeps): PairingServi
               relayDeviceToken: minted.deviceToken
             }
           }
+        }
+        if (directSsh) {
+          // One unit, and queued behind any in-flight revoke: a pairing that interleaves with one
+          // would either append onto the inode the revoke is about to rename over, or lose its
+          // agent.json entry to the revoke's stale read.
+          await serialize(async () => {
+            await appendAuthorizedKey(rewriteKeyComment(publicKey, deviceId))
+            await persistDevice({
+              id: deviceId,
+              name,
+              token: agentToken,
+              pairedAt: Date.now(),
+              lastSeenAt: 0,
+              relayDeviceId: phoneDeviceId
+            })
+          })
+          // Provision relay access for the phone when enabled. Any failure ⇒ LAN-only: we never
+          // fail the pairing over a relay hiccup (the phone still got its SSH key installed).
+          await mint()
+        } else {
+          // Relay-only (Windows). The relay IS the connection, so there is nothing to fall back
+          // to: no relay leg ⇒ nothing is paired, and both ends are told so. Minted BEFORE the
+          // device is recorded, so a failed mint leaves no half-paired entry behind. The body is
+          // plain text because the phone shows a non-2xx body verbatim ("The computer rejected
+          // pairing: …").
+          if (!relayCtx) {
+            send(
+              res,
+              409,
+              'remote access is off on the computer. On Windows the phone connects only through remote access — turn it on in nodeterm and scan the new code.'
+            )
+            return
+          }
+          await mint()
+          if (!relayFields.relayDeviceToken) {
+            send(
+              res,
+              502,
+              "the computer couldn't set up remote access, and on Windows that is how the phone connects. Check its internet connection and scan a new code."
+            )
+            finish({ ok: false, reason: 'relay-failed', reached: true })
+            return
+          }
+          await serialize(() =>
+            persistDevice({
+              id: deviceId,
+              name,
+              token: agentToken,
+              pairedAt: Date.now(),
+              lastSeenAt: 0,
+              relayDeviceId: phoneDeviceId,
+              ssh: false
+            })
+          )
         }
         // Build the response exactly as before; wrap it in the box only when the request was
         // encrypted (same shared key), so the relay device token never crosses the LAN in cleartext.
@@ -693,6 +858,8 @@ export function createPairingService(relayDeps?: PairingRelayDeps): PairingServi
     return {
       payload,
       sshOpen,
+      sshKey: directSsh,
+      ...(windowsKeyFile ? { windowsKeyFile } : {}),
       relayPlan: relayCtx ? 'ok' : relayDeps && !relayDeps.relayAllowed() ? 'dev' : 'off'
     }
   }
@@ -725,6 +892,7 @@ export function createPairingService(relayDeps?: PairingRelayDeps): PairingServi
       const found = !!entry
       try {
         await removeAuthorizedKeysForDevice(id)
+        await removeAdministratorsKeysForDevice(id)
         const obj = await readAgentJson()
         const devices = removeDevice(readDevices(obj), id)
         await writeAgentJson({ ...obj, devices })

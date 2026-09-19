@@ -97,3 +97,70 @@ builds (unless `NODETERM_API_BASE` targets a local server). Schema example:
 `docs/announcements.example.json`. **Telemetry** (`src/main/telemetry.ts`) is a separate opt-out
 ping to `api.nodeterm.dev/v1/ping` (version/OS on launch + daily), gated on
 `settings.telemetryEnabled` + the same build/DNT guards; toggle in Settings → Privacy.
+
+
+---
+
+## Upstream v0.3.7 merge additions (9e76faf84a5f..upstream/main (v0.3.7))
+
+> Appended verbatim during the v0.3.7 upstream merge (2026-09-20). Upstream keeps ONE CLAUDE.md;
+> the fork keeps this subsystem's deep reference in this rule file, so its new material lands
+> here rather than re-inlining the root. New/changed text only; `[~ replaced N base line(s)
+> here]` marks where upstream reworded text this file already carries above — reconcile at leisure.
+
+### From CLAUDE.md § Packaging & auto-update
+
+
+**Linux ships AppImage + deb + rpm**, all unsigned, all built by `release-linux` on a plain
+`ubuntu-latest` runner (`npm run dist:linux` locally). Three things about it are easy to get wrong:
+
+- **The packages are named `node-terminal`, the AppImage is named `nodeterm`.** electron-builder's
+  `linuxPackageName` is package.json's `name`, not `productName` (it only falls back to the product
+  name for an `@scope/…` name), so the artifacts are `node-terminal_<version>_amd64.deb`,
+  `node-terminal-<version>.x86_64.rpm` and `nodeterm-<version>.AppImage`, the launcher is
+  `/usr/bin/node-terminal`, and the install prefix is `/opt/nodeterm` (that one IS the productName).
+  Anything that matches on the package name (`scripts/uninstall.sh`'s `dpkg -s` / `rpm -q` probes,
+  the README's install lines) must say `node-terminal` or it silently never fires. Renaming the
+  package to match the app would strand existing `.deb` installs on a package apt no longer tracks,
+  which is why the mismatch is documented rather than fixed.
+- **The rpm target shells out to the system `rpmbuild`.** electron-builder bundles fpm, but not
+  rpmbuild, so `release-linux` installs it explicitly (`apt-get install -y rpm`); without it the
+  target dies with "Need executable 'rpmbuild' to convert dir to rpm". The default `Requires` set
+  electron-builder emits (gtk3, libnotify, nss, libXScrnSaver, `(libXtst or libXtst6)`, xdg-utils,
+  at-spi2-core, `(libuuid or libuuid1)`) resolves on Fedora 44 with nothing extra pulled in;
+  verified by installing the built rpm, which also proved rpm 6.0.2 accepts fpm's spec.
+- **Auto-update is already correct for rpm and needs no work**: `isManualUpdatePlatform`
+  (src/shared/update-platform.ts) keys off the absence of `APPIMAGE` in the environment, so a deb
+  and an rpm install both land on the manual-download card rather than downloading an AppImage
+  they cannot install.
+- **The ORDER of `build.linux.target` is load-bearing: AppImage stays FIRST.** electron-builder
+  writes the update feed from the first target it can publish, so the entry at the head of that
+  array is what `latest-linux.yml` points at — and the AppImage is the only Linux artifact
+  electron-updater can actually install in place. `deb` has sat behind it for a long time without
+  disturbing the feed, and `rpm` is appended behind both for the same reason. package.json is JSON
+  and cannot carry the comment, so it is written here: **do not alphabetize or otherwise re-sort
+  that array.**
+
+**Building on a GCC 14+ distro needs `CFLAGS=-D_GNU_SOURCE`** (Fedora, Arch, recent openSUSE; the
+CI runners are old enough not to care). smart-whisper's vendored `whisper.cpp/ggml/src/ggml.c`
+calls `CPU_ZERO`, `CPU_SET_S`, `pthread_getaffinity_np` and `getcpu` without ever defining
+`_GNU_SOURCE` (upstream ggml gets it from its CMake build, which node-gyp does not use), and GCC 14
+promoted implicit function declarations from a warning to an error, so a bare `npm install` fails
+in smart-whisper's own install script before our `postinstall` ever runs. Measured on Fedora 44 /
+GCC 16.2.1: `CFLAGS=-D_GNU_SOURCE npm install` builds both native modules clean. Two Fedora runtime
+packages are needed on top: **`libxcrypt-compat`** (fpm's bundled Ruby links `libcrypt.so.1`, which
+Fedora's glibc dropped, and without it BOTH the deb and the rpm target fail), and **`fuse-libs`**
+for anyone running the AppImage, whose default runtime is still the FUSE2 one. Switching
+`build.toolsets.appimage` to `"1.0.3"` would drop that FUSE2 requirement, but the static runtime is
+upstream-flagged beta and stops passing the `--no-sandbox` launcher argument the FUSE2 path adds,
+so it is a deliberate not-yet.
+    [~ replaced 1 base line(s) here]
+`NODETERM_BOOTSTRAP_TESTING=1` sentinel. The C++ probe also verifies the x64 Spectre runtime that
+`node-pty`'s `/Qspectre` build requires; the workload alone can be present while that optional
+component is absent, which otherwise fails only after the full install with `MSB8040`. Before
+`npm ci`, the bootstrap sets `npm_config_enable_thin_lto=false` and
+`npm_config_enable_lto=false`: official Node 26 Windows builds carry clang/lld ThinLTO settings in
+`process.config`, and node-gyp 12 copies them into an MSVC addon project where `link.exe` rejects
+`/opt:lldltojobs` with `LNK1117`. These are gyp overrides, not a reason to reject a Node version
+allowed by `package.json`. `.github/workflows/win-package-smoke.yml` is a
+

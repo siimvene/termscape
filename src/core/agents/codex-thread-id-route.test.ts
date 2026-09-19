@@ -14,7 +14,7 @@ import { hookServer } from './hook-server'
 import { nodeAuthToken } from './node-auth-token'
 import { initPlatform, resetPlatformForTests } from '../platform'
 import { fakePlatform } from '../platform-fake'
-import { codexThreadIdentityRoot } from '../codex-identity-proxy'
+import { codexThreadIdentityRoot, type CodexThreadAgent } from '../codex-identity-proxy'
 
 const SECRET = Buffer.alloc(32, 3)
 // Another instance's secret ⇒ another instance's kid ⇒ the `legacy` failover verdict.
@@ -26,10 +26,10 @@ const NODE = 'node-thread-route'
 const UNSAFE_THREAD_IDS = ['.', '..', '../x', 'a/b', '', 'x'.repeat(129)]
 
 let dir = ''
-let bound: { nodeId: string; threadId: string }[] = []
+let bound: { nodeId: string; threadId: string; agent?: CodexThreadAgent }[] = []
 let identityEvents: { nodeId: string; mode: string; reason?: string }[] = []
 
-function bind(threadId: string): Promise<Response> {
+function bind(threadId: string, agentId?: string): Promise<Response> {
   return fetch(`http://127.0.0.1:${hookServer.getPort()}/codex-thread/bind`, {
     method: 'POST',
     headers: {
@@ -37,7 +37,9 @@ function bind(threadId: string): Promise<Response> {
       'X-Nodeterm-Node-Token': nodeAuthToken(SECRET, NODE),
       'content-type': 'application/x-www-form-urlencoded'
     },
-    body: `nodeId=${encodeURIComponent(NODE)}&threadId=${encodeURIComponent(threadId)}`
+    body:
+      `nodeId=${encodeURIComponent(NODE)}&threadId=${encodeURIComponent(threadId)}` +
+      (agentId === undefined ? '' : `&agentId=${encodeURIComponent(agentId)}`)
   })
 }
 
@@ -47,8 +49,8 @@ beforeAll(async () => {
   initPlatform(fakePlatform({ userDataDir: dir }))
   await hookServer.start()
   hookServer.setNodeAuthSecret(SECRET)
-  hookServer.setCodexThreadBindHandler(async ({ nodeId, threadId }) => {
-    bound.push({ nodeId, threadId })
+  hookServer.setCodexThreadBindHandler(async ({ nodeId, threadId, agent }) => {
+    bound.push({ nodeId, threadId, agent })
   })
   hookServer.setCodexIdentityListener((e) => {
     identityEvents.push(e)
@@ -138,5 +140,45 @@ describe('/codex-thread/fallback refuses only a forged token', () => {
   it('403s OUR kid with a mac minted for another node — the one attack signal', async () => {
     expect((await fallback(nodeAuthToken(SECRET, 'some-other-node'))).status).toBe(403)
     expect(identityEvents).toEqual([])
+  })
+})
+
+// The route decides the CANVAS-CONTROL GRANT; it never accepts one.
+//
+// The agent id is echoed by the pane because the pane is the only durable holder of it — a tmux
+// session outlives the app, so a bind after a restart is the common case and nothing server-side
+// still remembers what agent a node runs. That echo is not a capability claim: reaching this route
+// takes a token this instance minted FOR THIS NODE, so the caller IS the node, and the record it
+// shapes is re-exported only into that node's own tool shells. What must not be echoed is the
+// grant, and it is not: the route runs `canControlCanvas` itself, the same predicate in the same
+// process that `buildPtyEnv` used to gate the pane, so there is exactly ONE decider.
+describe('/codex-thread/bind derives the grant from the agent id it is given', () => {
+  it('grants canvas control for codex, which is unconditionally capable', async () => {
+    expect((await bind('thread-ok', 'codex')).status).toBe(204)
+    expect(bound[0].agent).toEqual({ agentId: 'codex', canvasControl: true })
+  })
+
+  it('WITHHOLDS the grant for a custom agent that inherits nothing', async () => {
+    // The narrowing the whole change is for: a claimed id cannot manufacture a grant the capability
+    // table refuses. With no base resolver registered, `custom:abc` resolves to itself and is not in
+    // CANVAS_CONTROL_CAPABLE — so the record says so, and the prelude will export no grant.
+    expect((await bind('thread-custom', 'custom:abc')).status).toBe(204)
+    expect(bound[0].agent).toEqual({ agentId: 'custom:abc', canvasControl: false })
+  })
+
+  it('writes a PRE-AGENT record when no agent id is sent', async () => {
+    // An older launcher, or a pane whose NODETERM_AGENT_ID did not survive. `undefined` here is what
+    // makes the record carry no agent line, which reads back with the documented implied values —
+    // the behaviour that shipped before this field existed.
+    expect((await bind('thread-bare')).status).toBe(204)
+    expect(bound[0].agent).toBeUndefined()
+  })
+
+  it('treats an agent id outside the alphabet as absent, not as a reason to refuse the bind', async () => {
+    // Degrade to nothing, never to something wrong — and never to a dead node: the thread binding is
+    // what keeps the session attached to its canvas node, and losing that over a label would be a
+    // far worse failure than an unlabelled record.
+    expect((await bind('thread-bad-agent', 'bad id')).status).toBe(204)
+    expect(bound[0].agent).toBeUndefined()
   })
 })

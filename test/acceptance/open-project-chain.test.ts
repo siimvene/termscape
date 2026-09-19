@@ -20,7 +20,7 @@ import {
   gateProjectTarget,
   gateOpenProject,
   PROJECT_TARGET_REFUSED
-} from '../../src/main/project-grants'
+} from '../../src/core/project-grants'
 
 /**
  * Issue #338 Task 2.5 — THE CHAIN, once, against real primitives on both sides of the boundary:

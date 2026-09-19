@@ -5,14 +5,29 @@
 // which sentence lands beside which data, what a destructive button does before it does it, and
 // whether a failed ACTION is reported as a failed READ.
 import { describe, it, expect, beforeEach, afterEach, vi, type Mock } from 'vitest'
+import { pinNeutralMachineNoun } from '@renderer/lib/testMachineNoun'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import type { LicenseDetail, LicenseStatus } from '@shared/types'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
-const PRO: LicenseStatus = { tier: 'pro', active: true, expiresAt: null, seats: 3, error: null }
-const FREE: LicenseStatus = { tier: null, active: false, expiresAt: null, seats: 0, error: null }
+const PRO: LicenseStatus = {
+  tier: 'pro',
+  active: true,
+  expiresAt: null,
+  termEndsAt: null,
+  seats: 3,
+  error: null
+}
+const FREE: LicenseStatus = {
+  tier: null,
+  active: false,
+  expiresAt: null,
+  termEndsAt: null,
+  seats: 0,
+  error: null
+}
 /** A healthy keygen read with room to spare. */
 const KEYGEN: LicenseDetail = { key: 'NT-KEY-1', used: 2, seats: 3, source: 'keygen', error: null }
 
@@ -93,6 +108,49 @@ afterEach(() => {
   host.remove()
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
+})
+
+
+// See testMachineNoun.ts: the rendered copy names the machine, so the host OS is pinned.
+pinNeutralMachineNoun()
+
+describe('LicenseSection — the Pro line prints the subscription term, never the token TTL (#800)', () => {
+  const WEEK_S = 7 * 24 * 60 * 60
+  const APPLE: LicenseDetail = { key: null, used: 0, seats: 0, source: 'apple', error: null }
+  /** The paragraph that carries the Pro status, read on its own so another line's date cannot pass for it. */
+  const proLine = (): string =>
+    [...document.body.querySelectorAll('p')].map((p) => p.textContent ?? '').find((t) => t.startsWith('Pro —')) ??
+    ''
+
+  it('a 7-day token expiry with no stated term shows NO date', async () => {
+    // The reported screen: an App Store yearly subscriber, a token minted with the server's 7-day TTL.
+    const tokenExp = Math.floor(Date.now() / 1000) + WEEK_S
+    await mount({ ...PRO, expiresAt: tokenExp, termEndsAt: null }, APPLE)
+    expect(proLine()).toBe('Pro — active.')
+    expect(screenText()).not.toContain(new Date(tokenExp * 1000).toLocaleDateString())
+    expect(screenText()).not.toMatch(/active until/)
+  })
+
+  it('a null term renders no date — never the epoch', async () => {
+    await mount({ ...PRO, expiresAt: null, termEndsAt: null }, APPLE)
+    expect(proLine()).toBe('Pro — active.')
+    expect(screenText()).not.toContain(new Date(0).toLocaleDateString())
+    expect(screenText()).not.toMatch(/1970|1969/)
+  })
+
+  it('renders the term when the server states one, and not the token date beside it', async () => {
+    const tokenExp = Math.floor(Date.now() / 1000) + WEEK_S
+    const term = Math.floor(Date.now() / 1000) + 363 * 24 * 60 * 60
+    await mount({ ...PRO, expiresAt: tokenExp, termEndsAt: term }, APPLE)
+    expect(proLine()).toBe(`Pro — active. Current term runs through ${new Date(term * 1000).toLocaleDateString()}.`)
+    expect(screenText()).not.toContain(new Date(tokenExp * 1000).toLocaleDateString())
+  })
+
+  it('tells an App Store subscriber where the renewal is managed', async () => {
+    await mount(PRO, APPLE)
+    expect(screenText()).toMatch(/managed by Apple, not by nodeterm/)
+    expect(screenText()).toMatch(/open the App Store on that phone/)
+  })
 })
 
 describe('LicenseSection — a release that did not land', () => {

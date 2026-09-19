@@ -151,6 +151,11 @@ describe('the --project targeted-opens block (source pins)', () => {
 
   it('the store path persists (persist(), never a bare writeDisk) and states the cold-open contract in the reply', () => {
     const body = targetedOpensBody()
+    // Fork consort CRITICAL (fb351294): the store path persists through `persist()`, NEVER a bare
+    // `writeDisk()` — the latter clears `dirty` on an unchanged generation and writes the user's
+    // canvas STALE. That security invariant stays, and the resolved Canvas.tsx keeps the fork's
+    // inline "queued; starts when that project is next viewed" reply (it did NOT adopt upstream's
+    // `coldOpenMessage` builder here — the dropped upstream expectation is in the CONTROL merge notes).
     expect(body).toContain('persist()')
     expect(body).toContain('starts when that project is next viewed')
   })

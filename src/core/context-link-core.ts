@@ -7,6 +7,7 @@ import { HOOK_CURL_HEADERS_SH } from './agents/hook-curl-config-sh'
 import { CODEX_SANDBOX_BLOCKED_LINE, CODEX_SANDBOX_HINT_SH } from './agents/hook-sandbox-hint-sh'
 import { HOOK_ENDPOINT_FALLBACK_SH, STALE_ENDPOINT_HINT } from './agents/hook-endpoint-failover-sh'
 import { NODE_TOKEN_READ_SH } from './agents/node-token-sh'
+import { codexThreadIdentityResolverSh } from './codex-thread-identity-sh'
 
 /** The shim's generic transport-failure sentence — exported so the agent-facing docs below can
  *  quote it verbatim and the parity test holds the two ends together. */
@@ -171,8 +172,7 @@ export function buildLinkDoc(
 // desktop (context-link-render.ts) behind the hook server's /context-link/ route, and this shim is
 // the thin client that reaches it — over the reverse tunnel's unix socket for a remote node, over
 // loopback for a local one. Same script either way; sh + curl only.
-export const CONTEXT_SHIM_SCRIPT = `#!/bin/sh
-# nodeterm context-link CLI (auto-generated — do not edit).
+const CONTEXT_SHIM_BODY = `# nodeterm context-link CLI (auto-generated — do not edit).
 
 if [ -z "$NODETERM_NODE_ID" ]; then
   echo "Not a nodeterm session (NODETERM_NODE_ID unset) — nothing to read."
@@ -303,6 +303,21 @@ if [ -z "$nt_code" ] || [ "$nt_code" = "000" ]; then
 fi
 exit 1
 `
+
+/**
+ * Build the local context-link shim with the same shared-Codex identity recovery used by managed
+ * hooks and canvas control. The resolver has to precede the NODETERM_NODE_ID early return or a
+ * legitimate app-server tool shell is misdiagnosed as being outside nodeterm.
+ *
+ * Omit `identityRoot` for the machine-neutral script copied to SSH hosts.
+ */
+export function buildContextShimScript(identityRoot?: string): string {
+  const identityPrelude = identityRoot ? `${codexThreadIdentityResolverSh(identityRoot)}\n` : ''
+  return `#!/bin/sh\n${identityPrelude}${CONTEXT_SHIM_BODY}`
+}
+
+/** Machine-neutral variant used by SSH installation and legacy tests. */
+export const CONTEXT_SHIM_SCRIPT = buildContextShimScript()
 
 /** The get-linked-context SKILL.md body, pointing at the shim at `shimPath`. Parameterized
  *  because the same skill is installed twice with different paths: into the desktop's config

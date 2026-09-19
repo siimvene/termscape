@@ -87,6 +87,20 @@ let registeredOn: CorePlatform | null = null
  */
 let seq = 0
 
+/**
+ * Publish a mutation originated by the core itself (for example a headless Server Edition
+ * control request). It takes the same validation, execution-field sanitization and total-order
+ * stamp as a browser cast, then fans out to every connected canvas. Disk persistence remains the
+ * caller's responsibility; this function is only the live convergence leg.
+ */
+export function publishCanvasMutation(projectId: string, mutation: CanvasMutation): boolean {
+  if (!isRefId(projectId) || !isCanvasMutation(mutation)) return false
+  const p = platform()
+  const stamped = stampMutation(sanitizeInboundMutation(mutation), ++seq)
+  for (const id of p.clientIds()) p.sendTo(id, IPC.canvasMut, projectId, stamped)
+  return true
+}
+
 /** Install the `canvas:mut` reflector. Call once at boot, after initPlatform(). */
 export function initCanvasSync(): void {
   const p = platform()

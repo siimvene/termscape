@@ -1,5 +1,5 @@
 import { useSettings } from '../../../state/settings'
-import { NODE_COLORS } from '../../../state/workspace'
+import { SYSTEM_NODE_COLOR_SWATCHES } from '@shared/node-colors'
 import { SettingsSection } from '../SettingsSection'
 import { SearchableRow } from '../SearchableRow'
 import { FieldRow } from '../FieldRow'
@@ -15,6 +15,13 @@ import { cn } from '@renderer/ui/cn'
 import { Select } from '@renderer/ui/Select'
 import { isBrowserRuntime } from '@renderer/bridge/runtime'
 import { UI_SCALE_CHOICES, resolveUiScale, uiScaleLabel } from '@shared/ui-scale'
+import {
+  TABBAR_HEIGHT_MAX_PX,
+  TABBAR_HEIGHT_MIN_PX,
+  TABBAR_HEIGHT_PX,
+  resolveTabBarHeight
+} from '@shared/window-chrome-metrics'
+import { NumberField } from '@renderer/ui/NumberField'
 import { SectionReset } from '../SectionReset'
 import { APPEARANCE_RESET_KEYS } from '@renderer/lib/settingsReset'
 
@@ -26,6 +33,10 @@ const ROWS = {
   uiScale: {
     title: 'UI scale',
     keywords: ['ui', 'scale', 'zoom', 'size', 'text', 'bigger', 'larger', '4k', 'hidpi', 'dpi', 'display', 'readability']
+  },
+  tabBarHeight: {
+    title: 'Tab bar height',
+    keywords: ['tab', 'bar', 'height', 'strip', 'top', 'title bar', 'thickness', 'compact', 'dense']
   },
   accent: { title: 'Accent', keywords: ['accent', 'color', 'theme', 'appearance'] },
   windowTitle: {
@@ -150,6 +161,38 @@ function UiScaleRow(): React.JSX.Element {
   )
 }
 
+/** The top project tab bar's height, in px. A number field rather than presets: the requests
+ *  that prompted it were "a bit shorter" and "a bit taller", and a preset list would have to guess
+ *  where those land. The traffic lights follow where they sit inside the bar (main re-centres
+ *  them on the same setting); everything positioned against the bar reads its token, so nothing
+ *  else moves. The copy names no platform: `machineName.guard.test.ts` forbids "Mac" in
+ *  user-visible renderer strings, and a browser viewer's OS says nothing about the server's. */
+function TabBarHeightRow(): React.JSX.Element {
+  const tabBarHeight = useSettings((s) => s.settings.tabBarHeight)
+  const update = useSettings((s) => s.update)
+  const resolved = resolveTabBarHeight(tabBarHeight)
+  return (
+    <FieldRow
+      label="Tab bar height"
+      htmlFor="tab-bar-height"
+      description={`Height of the top project tab bar, in pixels (${TABBAR_HEIGHT_MIN_PX}–${TABBAR_HEIGHT_MAX_PX}; default ${TABBAR_HEIGHT_PX}). The tabs follow it, and so do the window buttons where they sit inside the bar.`}
+      control={
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <NumberField
+            value={resolved}
+            min={TABBAR_HEIGHT_MIN_PX}
+            max={TABBAR_HEIGHT_MAX_PX}
+            step={2}
+            ariaLabel="Tab bar height"
+            onChange={(v) => update({ tabBarHeight: resolveTabBarHeight(v) })}
+          />
+          <span style={{ opacity: 0.6 }}>px</span>
+        </div>
+      }
+    />
+  )
+}
+
 export function AppearanceSection({ isActive }: { isActive: boolean }): React.JSX.Element {
   const appTheme = useSettings((s) => s.settings.appTheme)
   const accent = useSettings((s) => s.settings.accent)
@@ -186,15 +229,23 @@ export function AppearanceSection({ isActive }: { isActive: boolean }): React.JS
       <SearchableRow {...ROWS.uiScale}>
         <UiScaleRow />
       </SearchableRow>
+      <SearchableRow {...ROWS.tabBarHeight}>
+        <TabBarHeightRow />
+      </SearchableRow>
       <SearchableRow {...ROWS.accent}>
         <div className="flex items-center justify-between gap-4 py-2.5">
           <span className="text-[13px] text-text">Accent</span>
           <div className="flex flex-wrap gap-2">
-            {NODE_COLORS.map((c) => (
+            {/* The SYSTEM subset only, never the whole palette: `--accent` is painted as an
+                opaque background under hardcoded #fff (.dock-add, the dictation button, the
+                badge), where white on gemini blue is ~3.6:1 and on grok grey ~4.0:1 - under the
+                4.5:1 floor for the 10.5px badge. See isSystemNodeColor. */}
+            {SYSTEM_NODE_COLOR_SWATCHES.map(({ value: c, label }) => (
               <button
                 key={c}
                 type="button"
-                aria-label={`Accent ${c}`}
+                aria-label={`Accent ${label}`}
+                title={label}
                 onClick={() => update({ accent: c })}
                 style={{ background: c }}
                 className={cn(

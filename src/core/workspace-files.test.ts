@@ -5,6 +5,7 @@ import {
   sameProjectContent, splitWorkspace, serializeProjectFile
 } from './workspace-files'
 import { legacyFileId } from '../shared/project-id'
+import { CANVAS_LAYOUTS_CAP, type CanvasLayout } from '../shared/canvas-layout'
 import type { ProjectFileV1 } from './workspace-files'
 
 const node = (over: Partial<CanvasNodeState> = {}): CanvasNodeState => ({
@@ -114,6 +115,19 @@ describe('per-project capability fields in the shared file', () => {
       fileToProject({ ...baseFile, agentBrowserControl: 'true' } as never, { id: 'x' }).agentBrowserControl
     ).toBeUndefined()
   })
+  it('agentMessaging carries an explicit FALSE through the file (it has a machine default); browser control does not', () => {
+    const f = projectToFile(project({ agentMessaging: false, agentBrowserControl: false }), 1, 'ts')
+    expect(f.agentMessaging).toBe(false)
+    expect('agentBrowserControl' in f).toBe(false)
+    const back = fileToProject(f, { id: 'x' })
+    expect(back.agentMessaging).toBe(false)
+    expect(back.agentBrowserControl).toBeUndefined()
+    // A non-boolean is still dropped at the boundary — it reads as absence, never as an explicit off.
+    const baseFile = projectToFile(project(), 1, 'ts')
+    expect(
+      fileToProject({ ...baseFile, agentMessaging: 'false' } as never, { id: 'x' }).agentMessaging
+    ).toBeUndefined()
+  })
   it('an off capability adds no bytes to the committed file', () => {
     const f = projectToFile(project(), 1, 'ts')
     expect('agentBrowserControl' in f).toBe(false)
@@ -169,6 +183,102 @@ describe('breadcrumbs are MACHINE-LOCAL, like viewport/capabilityAck', () => {
     const f = projectToFile(project(), 1, 'ts')
     expect('breadcrumbs' in f).toBe(false)
     expect(serializeProjectFile(f)).not.toContain('breadcrumbs')
+  })
+})
+
+describe('canvas layouts: shared CONTENT, machine-local CAMERAS', () => {
+  const layout = (over: Partial<CanvasLayout> = {}): CanvasLayout => ({
+    id: 'lay-1', name: 'Ultrawide', createdAt: 1000, updatedAt: 2000,
+    nodes: [{ id: 'term-abc', x: 10, y: 20, width: 400, height: 300 }], ...over
+  })
+
+  it('round-trips the layouts through the shared file and the cameras through the entry', () => {
+    const layouts = [layout()]
+    const layoutViewports = { 'lay-1': { x: 5, y: 6, zoom: 2 } }
+    const { index, files } = splitWorkspace(
+      { version: 2, activeProjectId: 'p1', projects: [project({ cwd: '/a/foo', layouts, layoutViewports })] },
+      () => 1,
+      '2026-09-07T00:00:00.000Z'
+    )
+    const file = files.get('/a/foo')!
+    expect(file.layouts).toEqual(layouts)
+    expect(index.entries[0].layoutViewports).toEqual(layoutViewports)
+
+    const restored = fileToProject(file, { id: 'p1', cwd: '/a/foo', layoutViewports })
+    expect(restored.layouts).toEqual(layouts)
+    expect(restored.layoutViewports).toEqual(layoutViewports)
+  })
+
+  it('never writes layoutViewports into the committed file, and never reads one planted there', () => {
+    const { files } = splitWorkspace(
+      {
+        version: 2, activeProjectId: 'p1',
+        projects: [project({ cwd: '/a/foo', layouts: [layout()], layoutViewports: { 'lay-1': { x: 5, y: 6, zoom: 2 } } })]
+      },
+      () => 1,
+      'ts'
+    )
+    const raw = serializeProjectFile(files.get('/a/foo')!)
+    expect(raw).not.toContain('layoutViewports')
+
+    // A file-borne `layoutViewports` is a forgery (a repo carrying one person's camera).
+    const forged = fileToProject(
+      { ...files.get('/a/foo')!, layoutViewports: { 'lay-1': { x: 9, y: 9, zoom: 9 } } } as never,
+      { id: 'p1', cwd: '/a/foo' }
+    )
+    expect(forged.layoutViewports).toBeUndefined()
+  })
+
+  it('a project with no layouts adds no bytes to the committed file', () => {
+    const f = projectToFile(project(), 1, 'ts')
+    expect('layouts' in f).toBe(false)
+    expect(serializeProjectFile(f)).not.toContain('layouts')
+  })
+
+  // Mutation pin, the shape the node-icon rules use: each seam must refuse a hostile layout on its
+  // own, because validating one direction passes every round-trip test while leaving the other one
+  // open to a peer canvas mutation or a hand edit.
+  it('drops a hostile layout INDEPENDENTLY in each direction', () => {
+    const hostile = layout({ nodes: [{ id: 'term-abc', x: NaN, y: 0, width: 1, height: 1 }] })
+
+    // Way out: a bad layout on live project data never reaches the committed file.
+    const f = projectToFile(project({ layouts: [hostile] }), 1, 'ts')
+    expect(f.layouts).toBeUndefined()
+    expect(serializeProjectFile(f)).not.toContain('Ultrawide')
+
+    // Way in: a bad layout planted in the file never reaches the live project.
+    const planted = fileToProject(
+      { ...projectToFile(project(), 1, 'ts'), layouts: [hostile] },
+      { id: 'p1' }
+    )
+    expect(planted.layouts).toBeUndefined()
+  })
+
+  it('prunes a camera naming no live layout, on save and on load', () => {
+    const layouts = [layout()]
+    const layoutViewports = {
+      'lay-1': { x: 1, y: 2, zoom: 1 },
+      'lay-gone': { x: 3, y: 4, zoom: 2 }
+    }
+    const { index, files } = splitWorkspace(
+      { version: 2, activeProjectId: 'p1', projects: [project({ cwd: '/a/foo', layouts, layoutViewports })] },
+      () => 1,
+      'ts'
+    )
+    expect(index.entries[0].layoutViewports).toEqual({ 'lay-1': { x: 1, y: 2, zoom: 1 } })
+
+    // …and again on the way in, so a layout a teammate deleted cannot leave a permanent orphan.
+    const restored = fileToProject(files.get('/a/foo')!, { id: 'p1', cwd: '/a/foo', layoutViewports })
+    expect(restored.layoutViewports).toEqual({ 'lay-1': { x: 1, y: 2, zoom: 1 } })
+  })
+
+  it('caps an over-long list in both directions', () => {
+    const many = Array.from({ length: CANVAS_LAYOUTS_CAP + 3 }, (_, i) => layout({ id: `lay-${i}` }))
+    const f = projectToFile(project({ layouts: many }), 1, 'ts')
+    expect(f.layouts).toHaveLength(CANVAS_LAYOUTS_CAP)
+
+    const back = fileToProject({ ...f, layouts: many }, { id: 'p1' })
+    expect(back.layouts).toHaveLength(CANVAS_LAYOUTS_CAP)
   })
 })
 

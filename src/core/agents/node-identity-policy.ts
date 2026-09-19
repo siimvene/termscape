@@ -197,7 +197,7 @@ export const TOLERANT_CONTROL_VERBS = new Set(['list'])
  * Control verbs that admit ONLY a `verified` caller — no window, no latch, no override.
  *
  * ⚠ **PRE-POSITIONED, AND INERT TODAY.** `browser` is the whole bucket, and `browser` is **not a
- * verb this app has**: `ControlVerb` (`src/main/canvas-control-core.ts`) lists 24 and the browser
+ * verb this app has**: `ControlVerb` (`src/core/canvas-control-core.ts`) lists 24 and the browser
  * one is `open-browser`, which is deliberately NOT in here (see below). So measured over the real
  * verb list, this set changes nothing for anybody: no request that succeeds today starts failing,
  * and `hookIdentityStrict: false` releases exactly what it released before. What it does is make

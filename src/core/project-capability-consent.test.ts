@@ -62,39 +62,36 @@ describe('projectCapabilityGranted — only an explicit KEPT grants', () => {
 describe('projectCapabilityGrantedFor — the ONE consumer-facing wiring (PR 4 ledger, PR 6 messagingEnabled)', () => {
   const cap = 'agentBrowserControl' as const
   it('derives both halves from the project and refuses every non-granting shape', () => {
-    expect(projectCapabilityGrantedFor(undefined, cap)).toBe(false)
-    expect(projectCapabilityGrantedFor({ ...baseProject }, cap)).toBe(false)
+    expect(projectCapabilityGrantedFor(undefined, cap, {})).toBe(false)
+    expect(projectCapabilityGrantedFor({ ...baseProject }, cap, {})).toBe(false)
     // pending notice (hostile clone window)
-    expect(projectCapabilityGrantedFor({ ...baseProject, agentBrowserControl: true }, cap)).toBe(false)
+    expect(projectCapabilityGrantedFor({ ...baseProject, agentBrowserControl: true }, cap, {})).toBe(false)
     // recorded decline + re-arrived true
     expect(
       projectCapabilityGrantedFor(
         { ...baseProject, agentBrowserControl: true, capabilityAck: { [cap]: 'declined' } },
-        cap
-      )
+        cap, {})
     ).toBe(false)
     // non-literal-true file value never grants, answer or no answer
     expect(
       projectCapabilityGrantedFor(
         { ...baseProject, agentBrowserControl: 'true', capabilityAck: { [cap]: 'kept' } } as never,
-        cap
-      )
+        cap, {})
     ).toBe(false)
   })
   it('grants exactly for literal true + kept', () => {
     expect(
       projectCapabilityGrantedFor(
         { ...baseProject, agentBrowserControl: true, capabilityAck: { [cap]: 'kept' } },
-        cap
-      )
+        cap, {})
     ).toBe(true)
   })
   it('ignores a prototype-inherited flag or answer — own properties only', () => {
     // M-1 (PR #213 review): unreachable from JSON.parse, but in-process objects can inherit.
     const inheritedFlag = Object.create({ agentBrowserControl: true }) as Project
-    expect(projectCapabilityGrantedFor({ ...baseProject, ...inheritedFlag, capabilityAck: { [cap]: 'kept' } }, cap)).toBe(false)
+    expect(projectCapabilityGrantedFor({ ...baseProject, ...inheritedFlag, capabilityAck: { [cap]: 'kept' } }, cap, {})).toBe(false)
     const proto = Object.create({ agentBrowserControl: true, capabilityAck: { [cap]: 'kept' } }) as Project
-    expect(projectCapabilityGrantedFor(proto, cap)).toBe(false)
+    expect(projectCapabilityGrantedFor(proto, cap, {})).toBe(false)
   })
 })
 
@@ -161,6 +158,83 @@ describe('one decider, two consumers', () => {
     expect(needsCapabilityNotice).toBe(shared.needsCapabilityNotice)
     expect(recordCapabilityAck).toBe(shared.recordCapabilityAck)
     expect(projectCapabilityGranted).toBe(shared.projectCapabilityGranted)
+    expect(projectCapabilityGrantedFor).toBe(shared.projectCapabilityGrantedFor)
+  })
+})
+
+describe('the MACHINE DEFAULT answers absence — and only absence (agentMessaging)', () => {
+  const cap = 'agentMessaging' as const
+  const on = { agentMessagingDefault: true }
+  const off = { agentMessagingDefault: false }
+
+  it('a project whose file says NOTHING reads on under the default, off without it', () => {
+    expect(projectCapabilityGrantedFor({}, cap, on)).toBe(true)
+    expect(projectCapabilityGrantedFor({}, cap, off)).toBe(false)
+    expect(projectCapabilityGrantedFor({}, cap, {})).toBe(false)
+    expect(shared.projectCapabilityEffective({}, cap, on)).toEqual({
+      on: true,
+      source: 'default',
+      pendingNotice: false
+    })
+  })
+
+  it('an explicit false in the file stays OFF, whatever the default', () => {
+    expect(projectCapabilityGrantedFor({ agentMessaging: false }, cap, on)).toBe(false)
+    expect(
+      projectCapabilityGrantedFor(
+        { agentMessaging: false, capabilityAck: { agentMessaging: 'kept' } },
+        cap,
+        on
+      )
+    ).toBe(false)
+  })
+
+  it('a CLONED true still needs this machine’s answer — the default is not consent for it', () => {
+    const cloned = { agentMessaging: true }
+    expect(projectCapabilityGrantedFor(cloned, cap, on)).toBe(false)
+    expect(needsCapabilityNotice({ capability: cap, enabledInFile: true, answer: undefined })).toBe(
+      true
+    )
+    expect(shared.projectCapabilityEffective(cloned, cap, on).pendingNotice).toBe(true)
+  })
+
+  it('a recorded DECLINE keeps an absent field off — the pre-default builds wrote "off" that way', () => {
+    expect(
+      projectCapabilityGrantedFor({ capabilityAck: { agentMessaging: 'declined' } }, cap, on)
+    ).toBe(false)
+  })
+
+  it('a project on only by default raises no notice: the decider is keyed on an EXPLICIT true', () => {
+    // CapabilityNotice feeds `enabledInFile` from the strict file flag, which is false for absence.
+    expect(needsCapabilityNotice({ capability: cap, enabledInFile: false, answer: undefined })).toBe(
+      false
+    )
+  })
+
+  it('the default is read strictly: a hand-edited "true" string in settings.json is off', () => {
+    expect(
+      projectCapabilityGrantedFor({}, cap, { agentMessagingDefault: 'true' as unknown as boolean })
+    ).toBe(false)
+  })
+
+  it('a malformed file value is absence, not an explicit off — and not an explicit on', () => {
+    for (const v of ['true', 'false', 0, 1, null, {}]) {
+      expect(projectCapabilityGrantedFor({ agentMessaging: v }, cap, on), String(v)).toBe(true)
+      expect(projectCapabilityGrantedFor({ agentMessaging: v }, cap, off), String(v)).toBe(false)
+    }
+  })
+
+  it('browser control has NO default: absence is off even if a caller passes one', () => {
+    expect(
+      projectCapabilityGrantedFor({}, 'agentBrowserControl', on as Record<string, boolean>)
+    ).toBe(false)
+    expect(
+      projectCapabilityGrantedFor({ agentBrowserControl: false }, 'agentBrowserControl', on)
+    ).toBe(false)
+  })
+
+  it('the core re-export is the same function object', () => {
+    // src/core callers must reach the one rule, not a copy.
     expect(projectCapabilityGrantedFor).toBe(shared.projectCapabilityGrantedFor)
   })
 })

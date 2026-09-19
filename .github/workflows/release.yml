@@ -153,8 +153,9 @@ jobs:
 
   # Linux build: unsigned, so it runs on a plain GitHub runner (fast + free tier), in
   # parallel with the self-hosted mac job — it must never queue behind notarization.
-  # Publishes AppImage + deb to the SAME tag's GitHub Release. Upstream also ships
-  # latest-linux.yml here for its update feed; this fork has no feed (see the header comment).
+  # Publishes AppImage + deb + rpm to the SAME tag's GitHub Release. Upstream also ships
+  # latest-linux.yml here for its update feed; this fork has no feed (see the header comment),
+  # so no *.yml is uploaded on any platform.
   release-linux:
     # Opt-in via the repository variable TERMSCAPE_HOSTED_BUILDS=true, like release-mac above.
     # This fork ships from a local `npm run dist` for now; a hosted Linux/Windows build per tag
@@ -178,6 +179,12 @@ jobs:
           node-version: 22
           cache: npm
 
+      # electron-builder ships its own fpm, but the rpm target shells out to the system
+      # rpmbuild ("Need executable 'rpmbuild' to convert dir to rpm"). Installed explicitly
+      # rather than relying on whatever the runner image happens to carry.
+      - name: Install rpmbuild
+        run: sudo apt-get update && sudo apt-get install -y rpm
+
       - name: Install dependencies
         run: npm ci
 
@@ -200,6 +207,7 @@ jobs:
           files: |
             dist/*.AppImage
             dist/*.deb
+            dist/*.rpm
 
   # Windows build: UNSIGNED BETA (#454), on a plain GitHub runner. Publishes the NSIS
   # installer + zip as assets on the same tag's GitHub Release — and NOTHING to the update

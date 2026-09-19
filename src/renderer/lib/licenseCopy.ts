@@ -1,4 +1,4 @@
-import type { LicenseDetail } from '@shared/types'
+import type { LicenseDetail, LicenseStatus } from '@shared/types'
 import { machineNoun, thisMachine, thisMachineCap } from './machineName'
 
 /**
@@ -76,7 +76,9 @@ export function licenseSentence(detail: LicenseDetail | null): string {
   if (detail.source === 'apple') {
     // No keygen call was made for this license, so `used`/`seats` are zeros meaning "not
     // applicable". Printing them would read as a cap that is somehow both empty and full.
-    return `Pro on ${thisMachine()} comes from the App Store subscription on your paired phone, so there is no license key or device count to show here.`
+    // Say where the term actually lives. We can neither renew, extend nor cancel an App Store
+    // subscription, and a user who wants to know when it renews has only one place to look.
+    return `Pro on ${thisMachine()} comes from the App Store subscription on your paired phone, so there is no license key or device count to show here. That subscription is managed by Apple, not by nodeterm: to see when it renews or to cancel it, open the App Store on that phone and go to Subscriptions in your account.`
   }
   if (detail.source === 'free') {
     // A defensive value. Say only what is certain — where it came from is not.
@@ -101,6 +103,27 @@ export function licenseSentence(detail: LicenseDetail | null): string {
   // A clean read that stated no source (only reachable by merging a release reply over an empty
   // detail). The counts may be real, but with no source there is no sentence they support.
   return ''
+}
+
+/**
+ * The one-line Pro status at the top of Settings → License.
+ *
+ * It prints a date ONLY from `termEndsAt` — the subscription term the server stated — and never from
+ * `expiresAt`. That field is the entitlement token's expiry: a 7-day offline grace window re-minted
+ * every 6 h. Rendered as "active until", it told a customer on a yearly App Store subscription that
+ * Pro ended a week later (issue #800). No other date may stand in for a missing term: not the token's,
+ * not one computed from the tier, not the grace window under another label.
+ *
+ * No term ⇒ no date. That covers null (a lifetime entitlement, a license without an expiry, a server
+ * that predates the field) and a term already in the past (a stored term from before an offline
+ * stretch; the renewal it missed is real, the date it would print is not).
+ */
+export function proStatusLine(status: LicenseStatus, now: number = Date.now()): string {
+  const term = status.termEndsAt
+  if (typeof term !== 'number' || !Number.isFinite(term) || term <= 0 || term * 1000 <= now) {
+    return 'Pro — active.'
+  }
+  return `Pro — active. Current term runs through ${new Date(term * 1000).toLocaleDateString()}.`
 }
 
 /**

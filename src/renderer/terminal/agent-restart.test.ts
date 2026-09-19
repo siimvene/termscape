@@ -6,6 +6,7 @@ import {
   __resetAgentRestartForTests,
   agentHibernateFns,
   agentRestartFn,
+  clearEnvEligibility,
   exitSequence,
   guardConcurrentRestart,
   isShellCommand,
@@ -85,6 +86,33 @@ describe('restartEligibility', () => {
       ok: false,
       reason: 'not-resumable'
     })
+  })
+})
+
+describe('clearEnvEligibility', () => {
+  it('permits a busy session — terminateForeground is PID-safe, and gateway overload lands mid-turn', () => {
+    // The shared `restartEligibility` refuses working/blocked because its `/exit` would answer a
+    // permission prompt. clearEnv SIGTERMs the foreground group by PID instead — no slash command is
+    // typed into the pane — so it may interrupt a stuck turn, which is exactly the scenario the
+    // feature exists for.
+    expect(clearEnvEligibility('claude', 'abc')).toEqual({ ok: true })
+    expect(clearEnvEligibility('codex', 'abc')).toEqual({ ok: true })
+    expect(clearEnvEligibility('copilot', 'abc')).toEqual({ ok: true })
+  })
+
+  it('still requires a resumable harness and provider session id', () => {
+    expect(clearEnvEligibility('claude', undefined)).toEqual({
+      ok: false,
+      reason: 'no-session'
+    })
+    expect(clearEnvEligibility('my-custom', 'abc')).toEqual({
+      ok: false,
+      reason: 'not-resumable'
+    })
+    // An agent with no vanillaEnvPattern (gemini) still passes THIS gate — resumability is a
+    // separate fact from "has a strip set." The menu row is hidden upstream on the pattern, so
+    // the gate is only ever reached for claude/codex/copilot. Tested in vanilla-env.test.ts.
+    expect(clearEnvEligibility('gemini', 'abc')).toEqual({ ok: true })
   })
 })
 
@@ -681,6 +709,29 @@ describe('performResumePhase', () => {
     await vi.advanceTimersByTimeAsync(5000)
     expect(await p).toBe('resumed')
     expect(written.join('')).toContain('claude --resume sid-1 --permission-mode plan')
+  })
+
+  it('forwards custom killLine to deliverCommand on verification retry', async () => {
+    const written: string[] = []
+    const io = {
+      write(d: string) {
+        written.push(d)
+      },
+      onData() {
+        return () => {}
+      }
+    }
+    const p = performResumePhase({
+      agentId: 'claude',
+      sessionId: 'sid-1',
+      io,
+      killLine: '\x1b'
+    })
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(written).toContain('\x1b')
+    expect(written).not.toContain('\x15')
+    await vi.advanceTimersByTimeAsync(10000)
+    await p
   })
 
   it('keeps the bare command as the gate even when the caller overrides it', async () => {

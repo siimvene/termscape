@@ -10,6 +10,7 @@ import {
   deleteColumn, labelsForCard, moveColumn,
   nextColumnColor, pruneAssignments, recolorColumn, renameColumn, unassigned
 } from '../../lib/kanban'
+import { markCanvasCovered } from '../../lib/canvasCovered'
 import { labelSwatch } from '../../lib/kanbanLabelColors'
 import { CardModal } from './CardModal'
 import { KanbanColumn, type KanbanLane } from './KanbanColumn'
@@ -123,10 +124,20 @@ const NO_CARDS: KanbanSession[] = []
  *  memo: Canvas re-renders on plenty the board doesn't care about (agent signatures, camera
  *  banners…); with every prop stable (Canvas useCallbacks + memoized board/sessions) those
  *  renders stop at this boundary. */
+/**
+ * While this board is on screen the canvas underneath is fully covered but still mounted, so its
+ * node glows and status pulses keep the compositor producing frames for something nobody can see.
+ * Mount is the signal (see lib/canvasCovered.ts for the measurements).
+ */
+function useCanvasCovered(): void {
+  useEffect(() => markCanvasCovered(document.documentElement), [])
+}
+
 export const KanbanView = memo(function KanbanView({
   board, sessions, onChange, onOpenNode, onCreateNode, onRenameNode, onEditSticky, onDeleteNode,
   onModalNodeChange, onBrowserNav, onSetIcon
 }: KanbanViewProps) {
+  useCanvasCovered()
   const { api } = useSession()
   const dragRef = useRef<Drag>(null)
   // One card modal at a time; a deleted node closes it via the byId.has render guard.

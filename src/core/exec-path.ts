@@ -61,10 +61,56 @@ export function resolveShellPath(): Promise<string | null> {
   return shellPathPromise
 }
 
+/**
+ * One environment VARIABLE, as the user's login+interactive shell sees it. Same spawn shape as
+ * `resolveShellPath` above and for the same reason: a GUI app launched from Finder/Dock/`.desktop`
+ * never sourced the user's rc, while a CLI started by the shell inside a tmux pane did — so the two
+ * disagree about anything exported there, and nothing errors.
+ *
+ * Cached per NAME, since each answer costs a shell spawn. Any failure (hang, non-POSIX shell,
+ * Windows, unset variable) resolves to null, which every caller must read as "not set" and never as
+ * a reason to refuse work.
+ */
+const cachedShellVars = new Map<string, Promise<string | null>>()
+export function resolveShellEnvVar(name: string): Promise<string | null> {
+  const hit = cachedShellVars.get(name)
+  if (hit) return hit
+  if (os.platform() === 'win32' || !/^[A-Z_][A-Z0-9_]*$/.test(name)) {
+    const no = Promise.resolve(null)
+    cachedShellVars.set(name, no)
+    return no
+  }
+  const shell = process.env.SHELL || '/bin/bash'
+  const START = '__NT_VAR_START__'
+  const END = '__NT_VAR_END__'
+  const p = runAsync(shell, ['-ilc', `command printf '${START}%s${END}' "$${name}"`], {
+    encoding: 'utf-8',
+    timeout: 5000
+  })
+    .then(({ stdout }) => {
+      const m = stdout.match(new RegExp(`${START}([\\s\\S]*?)${END}`))
+      return m?.[1]?.trim() || null
+    })
+    .catch(() => null)
+  cachedShellVars.set(name, p)
+  return p
+}
+
+/** Test seam: forget the cached shell-variable answers. */
+export function _resetShellEnvVarsForTests(): void {
+  cachedShellVars.clear()
+}
+
 /** The cached login-shell PATH: a string once resolved, null if the probe failed, undefined
  *  while the async probe is still in flight (callers should then fall back + re-probe later). */
 export function shellPathNow(): string | null | undefined {
   return cachedShellPath
+}
+
+/** Resolve an executable against the user's real login-shell PATH, returning its absolute path. */
+export async function findInLoginPath(bin: string): Promise<string | null> {
+  const shellPath = (await resolveShellPath()) ?? process.env.PATH ?? ''
+  return findInPathString(bin, shellPath)
 }
 
 /** What Windows itself falls back to when PATHEXT is unset or empty. */
@@ -141,6 +187,74 @@ export function findInPathString(bin: string, pathStr: string | null | undefined
     }
   }
   return null
+}
+
+export interface DirectExecutableInvocation {
+  executable: string
+  args: string[]
+  options?: {
+    windowsHide: true
+    windowsVerbatimArguments: true
+  }
+}
+
+interface DirectExecutableInvocationOptions {
+  platform?: NodeJS.Platform
+  systemRoot?: string
+  exists?: (candidate: string) => boolean
+}
+
+const CMD_LINE_MAX = 8100
+const CMD_META_CHARS = /([()\][%!^"`<>&|;, *?])/g
+
+function escapeCmdCommand(value: string): string {
+  return value.replace(CMD_META_CHARS, '^$1')
+}
+
+// Based on cross-spawn's battle-tested cmd.exe escaping. npm shims forward `%*`, so cmd parses
+// their arguments twice and every metacharacter needs two escape passes.
+function escapeCmdArgument(value: string): string {
+  let escaped = value.replace(/(?=(\\+?)?)\1"/g, '$1$1\\"')
+  escaped = escaped.replace(/(?=(\\+?)?)\1$/, '$1$1')
+  escaped = `"${escaped}"`.replace(CMD_META_CHARS, '^$1')
+  return escaped.replace(CMD_META_CHARS, '^$1')
+}
+
+/**
+ * Builds an argv-safe invocation for a resolved executable. Node cannot execute Windows npm
+ * `.cmd` shims directly, so run them through cmd.exe with every token escaped and delayed
+ * expansion disabled. CR/LF arguments are refused because cmd treats them as command boundaries
+ * even inside quotes. stdin remains the child's inherited byte stream; PowerShell's text pipeline
+ * must not sit between a staged diff and the agent CLI.
+ */
+export function directExecutableInvocation(
+  executable: string,
+  args: string[],
+  options: DirectExecutableInvocationOptions = {}
+): DirectExecutableInvocation | null {
+  const platform = options.platform ?? os.platform()
+  if (platform !== 'win32') return { executable, args }
+
+  const ext = path.win32.extname(executable).toLowerCase()
+  if (ext === '.bat' || ext === '.ps1') return null
+  if (ext !== '.cmd') return { executable, args }
+  if (/\0|\r|\n/u.test(executable) || args.some((arg) => /\0|\r|\n/u.test(arg))) return null
+
+  const systemRoot = options.systemRoot ?? process.env.SystemRoot
+  if (!systemRoot) return null
+  const cmd = path.win32.join(systemRoot, 'System32', 'cmd.exe')
+  const exists = options.exists ?? fs.existsSync
+  if (!exists(cmd)) return null
+
+  const command = [escapeCmdCommand(executable), ...args.map(escapeCmdArgument)].join(' ')
+  const wrapped = `"${command}"`
+  if (wrapped.length > CMD_LINE_MAX) return null
+
+  return {
+    executable: cmd,
+    args: ['/d', '/s', '/v:off', '/c', wrapped],
+    options: { windowsHide: true, windowsVerbatimArguments: true }
+  }
 }
 
 /**

@@ -34,6 +34,14 @@ export interface PairingPayloadInput {
   hostKey?: string
   /** Optional relay reachability block (standing host). Omitted from the payload when absent. */
   relay?: RelayPairingBlock
+  /**
+   * `false` = this host installs NO SSH key and cannot be driven over SSH, so the phone must reach
+   * it through the relay alone. Set on Windows, where every command the phone sends over SSH
+   * assumes a POSIX login shell and tmux (Windows OpenSSH hands out cmd.exe, and sessions live in
+   * the session host, which the phone cannot attach to over SSH). Omitted otherwise, which keeps
+   * every other platform's payload byte-identical.
+   */
+  ssh?: false
 }
 
 /**
@@ -56,7 +64,8 @@ export function buildPairingPayload(input: PairingPayloadInput): string {
     name: input.name
   }
   const withKey = input.hostKey ? { ...base, hostKey: input.hostKey } : base
-  return JSON.stringify(input.relay ? { ...withKey, relay: input.relay } : withKey)
+  const withRelay = input.relay ? { ...withKey, relay: input.relay } : withKey
+  return JSON.stringify(input.ssh === false ? { ...withRelay, ssh: false } : withRelay)
 }
 
 /**
@@ -144,6 +153,12 @@ export interface DeviceEntry {
    * its presence names a row the server MAY hold, not one it certainly does.
    */
   relayDeviceId?: string
+  /**
+   * `false` = no SSH key was installed for this device (a Windows pairing: the phone reaches this
+   * host through the relay only). Absent on every pairing that did install one, including all
+   * pairings made before this field existed. Revoke still sweeps the key files either way.
+   */
+  ssh?: false
 }
 
 /** The device shape safe to expose to the renderer (no `token`). */
@@ -217,3 +232,32 @@ export function pickLanIPv4(
   }
   return null
 }
+
+/**
+ * The pairing host address on Windows, where the first adapter `os.networkInterfaces()` lists is
+ * routinely a virtual one the phone cannot reach (WSL / Hyper-V `vEthernet`, VirtualBox, VMware,
+ * VPN clients). `routeAddress` is the source address the OS picked for a route to the internet —
+ * i.e. the default-route adapter — and wins when it is a real non-internal IPv4 on this machine.
+ * Otherwise the first address on an adapter whose name does not look virtual, then
+ * `pickLanIPv4`'s old answer, so this never returns null where the old pick would not have.
+ */
+export function pickPairingIPv4(
+  interfaces: Record<string, NetInterfaceAddr[] | undefined>,
+  routeAddress: string | null
+): string | null {
+  const usable = (a: NetInterfaceAddr): boolean =>
+    (a.family === 'IPv4' || a.family === 4) && !a.internal && !a.address.startsWith('169.254.')
+  if (routeAddress) {
+    for (const addrs of Object.values(interfaces)) {
+      if (addrs?.some((a) => usable(a) && a.address === routeAddress)) return routeAddress
+    }
+  }
+  for (const [name, addrs] of Object.entries(interfaces)) {
+    if (!addrs || VIRTUAL_ADAPTER.test(name)) continue
+    const hit = addrs.find(usable)
+    if (hit) return hit.address
+  }
+  return pickLanIPv4(interfaces)
+}
+
+const VIRTUAL_ADAPTER = /vEthernet|WSL|Hyper-V|VirtualBox|VMware|Loopback|Tailscale|ZeroTier|Npcap|TAP-|Docker/i

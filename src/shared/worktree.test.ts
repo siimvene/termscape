@@ -342,12 +342,18 @@ describe('displacedByWorktree', () => {
     // Shares the prefix but is a sibling directory, not really inside the worktree.
     { id: 'editor-prefix', type: 'editor', data: { filePath: '/wt/feature/index.ts' } },
     { id: 'diff-in', type: 'diff', data: { cwd: wt, filePath: 'src/index.ts' } },
-    { id: 'diff-out', type: 'diff', data: { cwd: '/repo', filePath: 'src/index.ts' } }
+    { id: 'diff-out', type: 'diff', data: { cwd: '/repo', filePath: 'src/index.ts' } },
+    // File-manager nodes: displaced by PATH wherever they sit (they have no session to disturb),
+    // so one outside the group counts where a terminal outside it does not.
+    { id: 'files-in', type: 'files', parentId: 'g', data: { cwd: `${wt}/src` } },
+    { id: 'files-outside-group', type: 'files', data: { cwd: wt } },
+    { id: 'files-out', type: 'files', data: { cwd: '/repo' } },
+    { id: 'files-prefix', type: 'files', data: { cwd: '/wt/feature' } }
   ]
 
   it('collects every descendant terminal living in the worktree, nested ones included', () => {
     expect([...displacedByWorktree(nodes, 'g', wt)].sort()).toEqual(
-      ['diff-in', 'editor-in', 'nested', 'term'].sort()
+      ['diff-in', 'editor-in', 'files-in', 'files-outside-group', 'nested', 'term'].sort()
     )
   })
 
@@ -363,10 +369,23 @@ describe('displacedByWorktree', () => {
       'inner',
       'editor-out',
       'editor-prefix',
-      'diff-out'
+      'diff-out',
+      'files-out',
+      'files-prefix'
     ]) {
       expect(got.has(id)).toBe(false)
     }
+  })
+
+  // A file manager left pointing into a removed worktree shows "Could not read this folder"
+  // forever AND keeps the dead path in project.json — the same persisted-dead-path failure the
+  // terminal branch exists to prevent. It has no session, so unlike a terminal it is displaced
+  // wherever it sits, and it gets its cwd re-pointed rather than an editor's `fileMissing`.
+  it('collects a file-manager node by path, in the group or not', () => {
+    const got = displacedByWorktree(nodes, 'g', wt)
+    expect(got.has('files-in')).toBe(true)
+    expect(got.has('files-outside-group')).toBe(true)
+    expect(nodes.find((n) => n.id === 'files-outside-group')?.parentId).toBeUndefined()
   })
 
   it('collects an editor/diff node by path even though it has no parentId at all', () => {

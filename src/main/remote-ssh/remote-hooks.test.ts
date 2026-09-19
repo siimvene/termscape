@@ -345,13 +345,19 @@ describe('RemoteHooks.setup — grok', () => {
   // assertion still passes. The `/home/dev/.grok` negative assertions are what make that fail.
   const GROK_EVENTS = [
     'Notification',
+    'PermissionDenied',
+    'PostCompact',
     'PostToolUse',
     'PostToolUseFailure',
+    'PreCompact',
     'PreToolUse',
     'SessionEnd',
     'SessionStart',
     'Stop',
+    'StopCancelled',
     'StopFailure',
+    'SubagentStart',
+    'SubagentStop',
     'UserPromptSubmit'
   ]
 
@@ -882,5 +888,96 @@ describe('RemoteHooks.setup — the host $HOME is data, not truth', () => {
     expect(res?.endpointPath).toBe('/home/gökhan/.nodeterm/hook-endpoint-p1.env')
     const joined = calls.map((c) => c.args.join(' '))
     expect(joined.some((j) => j.includes(`cat > '/home/gökhan/.claude/settings.json'`))).toBe(true)
+  })
+})
+
+// ── The per-agent installs run CONCURRENTLY, and the order that still matters ────────────────
+//
+// Serially these were ~16 remote round trips in a row — 3.54 s on a 50 ms-RTT link, measured
+// against a real sshd — and every terminal of a switched-to project waits through them, because
+// `connectOnce` does not publish the master until this returns. What must NOT be parallelized with
+// them is the tunnel and the endpoint file: that file is what every installed hook POSTs through.
+describe('RemoteHooks.setup — install concurrency', () => {
+  /** A harness whose `run` blocks each matching command until the test releases it, so overlap is
+   *  observable rather than inferred from wall-clock. */
+  function gatedHarness(gateOn: string) {
+    const calls: string[] = []
+    const inFlight = new Set<string>()
+    let peak = 0
+    const gates: (() => void)[] = []
+    const run = vi.fn(async (args: string[]) => {
+      const joined = args.join(' ')
+      calls.push(joined)
+      if (joined.includes(gateOn)) {
+        inFlight.add(joined)
+        peak = Math.max(peak, inFlight.size)
+        await new Promise<void>((resolve) => gates.push(resolve))
+        inFlight.delete(joined)
+      }
+      if (joined.includes('$HOME')) return { code: 0, stdout: '/home/u' }
+      if (joined.includes('%{http_code}')) return { code: 0, stdout: '204' }
+      return { code: 0, stdout: '' }
+    })
+    return {
+      rh: new RemoteHooks({ run }),
+      calls,
+      releaseAll: () => {
+        for (const g of gates.splice(0)) g()
+      },
+      gateCount: () => gates.length,
+      peak: () => peak
+    }
+  }
+
+  it('starts every agent script write together instead of one at a time', async () => {
+    // The script write is the FIRST round trip of each per-agent installer, so several of them in
+    // flight at once is exactly "the installers overlap". Serially this number is 1.
+    const h = gatedHarness('agent-hooks')
+    const done = h.rh.setup('p1', conn, '/s.sock', { port: 1, token: 't', version: '1' })
+    // Let the pre-install steps (HOME, tunnel, endpoint) settle and the fan-out start.
+    for (let i = 0; i < 50 && h.gateCount() < 2; i++) await Promise.resolve()
+    expect(h.peak()).toBeGreaterThan(1)
+    h.releaseAll()
+    // The installers each take a few more gated round trips; release until the setup lands.
+    for (let i = 0; i < 40; i++) {
+      await Promise.resolve()
+      h.releaseAll()
+    }
+    await expect(done).resolves.toEqual({ endpointPath: '/home/u/.nodeterm/hook-endpoint-p1.env' })
+  })
+
+  it('the TUNNEL and the ENDPOINT FILE are both complete before any agent install starts', async () => {
+    // The ordering rule the fan-out must not swallow: every hook this installs POSTs through the
+    // endpoint file, and the endpoint is only written once the tunnel has verified end to end.
+    const { rh, calls } = harness()
+    await rh.setup('p1', conn, '/s.sock', { port: 51234, token: 'tok', version: '1' })
+    const joined = calls.map((c) => c.args.join(' '))
+    const firstInstall = joined.findIndex((j) => j.includes('agent-hooks'))
+    const forward = joined.findIndex((j) => j.includes('-O forward'))
+    const verify = joined.findIndex((j) => j.includes('%{http_code}'))
+    const endpoint = calls.findIndex((c) => (c.stdin ?? '').includes("NODETERM_HOOK_TOKEN='tok'"))
+    expect(firstInstall).toBeGreaterThan(-1)
+    expect(forward).toBeGreaterThan(-1)
+    expect(verify).toBeGreaterThan(forward)
+    expect(endpoint).toBeGreaterThan(verify)
+    expect(firstInstall).toBeGreaterThan(endpoint)
+  })
+
+  it('one agent failing does not discard the endpoint the others are installed against', async () => {
+    // `allSettled`, not `all`: by this point the tunnel is verified and the endpoint written, so a
+    // single installer's failure must cost that agent its hooks and nothing else. (Every installer
+    // catches its own errors today — this is the guard for the next one that forgets.)
+    const { rh } = harness({ failOn: '.grok' })
+    const res = await rh.setup('p1', conn, '/s.sock', { port: 1, token: 't', version: '1' })
+    expect(res?.endpointPath).toBe('/home/u/.nodeterm/hook-endpoint-p1.env')
+  })
+
+  it('still installs every agent — claude, gemini, codex, grok and copilot', async () => {
+    const { rh, calls } = harness()
+    await rh.setup('p1', conn, '/s.sock', { port: 1, token: 't', version: '1' })
+    const joined = calls.map((c) => c.args.join(' '))
+    for (const agent of ['claude', 'gemini', 'codex', 'grok', 'copilot']) {
+      expect(joined.some((j) => j.includes(`agent-hooks/${agent}.sh`))).toBe(true)
+    }
   })
 })

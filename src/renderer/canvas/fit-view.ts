@@ -140,17 +140,18 @@ export function rectToPadding(outer: FitRect, rect: FitRect): FitPadding {
 }
 
 /**
- * Solve the largest chrome-free region for the current chrome layout and content shape.
- * Returns the pane's own rect (`outer`) and the winning free sub-rect (`free`), both in SCREEN
- * pixels, or null when there is nothing sensible to solve. `contentW`/`contentH` are used only for
- * the aspect-ratio comparison inside `largestFreeRect`, so any units consistent between the two
- * work — canvas-space node dimensions are fine when the on-screen size is not yet known.
+ * The chrome-free rectangle for this content, in the pane's OWN coordinates (0,0 = the pane's
+ * top-left) rather than the window's. Null when there is nothing sensible to solve.
+ *
+ * Pane-local because that is the space a viewport transform lives in: a caller that computes the
+ * camera itself needs the frame in the same coordinates as the transform, and converting at each
+ * call site is how the two would drift.
  */
-export function solveFreeRegion(
+export function solveFitFrame(
   wrap: HTMLElement,
   contentW: number,
   contentH: number
-): { outer: FitRect; free: FitRect } | null {
+): FitRect | null {
   if (contentW <= 0 || contentH <= 0) return null
   const v = wrap.getBoundingClientRect()
   const outer: FitRect = { left: v.left, top: v.top, right: v.right, bottom: v.bottom }
@@ -162,7 +163,14 @@ export function solveFreeRegion(
   }
   if (width(viewport) < 1 || height(viewport) < 1) return null
   const rect = largestFreeRect(viewport, chromeObstacles(viewport), contentW, contentH)
-  return rect ? { outer, free: rect } : null
+  return rect
+    ? {
+        left: rect.left - outer.left,
+        top: rect.top - outer.top,
+        right: rect.right - outer.left,
+        bottom: rect.bottom - outer.top
+      }
+    : null
 }
 
 /**
@@ -174,6 +182,9 @@ export function solveFitPadding(
   contentW: number,
   contentH: number
 ): FitPadding | null {
-  const solved = solveFreeRegion(wrap, contentW, contentH)
-  return solved ? rectToPadding(solved.outer, solved.free) : null
+  const frame = solveFitFrame(wrap, contentW, contentH)
+  if (!frame) return null
+  const v = wrap.getBoundingClientRect()
+  // `frame` is pane-local, so the pane's own box IS the outer rect at the origin.
+  return rectToPadding({ left: 0, top: 0, right: v.width, bottom: v.height }, frame)
 }

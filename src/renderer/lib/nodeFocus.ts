@@ -1,26 +1,29 @@
 import { getViewportForBounds, type Padding, type Rect, type Viewport } from '@xyflow/system'
 
+import { NO_INSETS, type ScreenInsets } from './pinnedInsets'
+
 /**
  * "Zoom to this node" geometry, computed OURSELVES — the whole of it, measured or not.
  *
  * Why this exists: `fitView({ nodes: [{ id }] })` is the natural way to frame one node, and it is
- * what `Canvas.goToNode` used to do. Two independent ways it lands on nothing:
+ * what `Canvas.goToNode` used to do — but it frames nothing when you call it. In `@xyflow/react`
+ * 12 `fitView` is DEFERRED: it parks `fitViewQueued`/`fitViewOptions` and resolves on a later
+ * `setNodes` (and only once EVERY node is measured) or on the next `updateNodeInternals`. So the
+ * fit is resolved against whatever `nodeLookup` holds by then, not the canvas the user clicked on;
+ * and its fit set is filtered down to nodes React Flow has already MEASURED (`getFitViewNodes`
+ * keys off `measured.width && measured.height`, with no `width`/`height` fallback), so a set that
+ * comes out EMPTY collapses the bounds to `{0,0,0,0}` and the camera flies to the canvas ORIGIN at
+ * max zoom — an empty stretch of canvas, nowhere near the node.
  *
- * 1. React Flow filters the fit set down to nodes it has already MEASURED (`getFitViewNodes` keys
- *    off `measured.width && measured.height`; there is no `width`/`height` fallback there). A node
- *    handed to React Flow a tick ago has no measurement, so the fit set comes out EMPTY, its bounds
- *    collapse to `{0,0,0,0}` and the camera flies to the canvas ORIGIN at max zoom. That is exactly
- *    the window a cross-project focus lands in: switch project → load its nodes → focus the target,
- *    all before mount-time measuring has run.
- * 2. In `@xyflow/react` 12 `fitView` is DEFERRED — it parks `fitViewQueued`/`fitViewOptions` and
- *    resolves on a later `setNodes`, and only while `nodesInitialized === true`, which this canvas
- *    never is (the webview keep-alive ghosts are unmeasurable and cannot be `hidden`). So even a
- *    fully MEASURED node did not move the camera on the click, and the stale queued fit resolved
- *    later — often after a project switch, i.e. against case 1's empty set.
+ * Both halves fire on the same everyday path. A cross-project focus (sessions sidebar, OS
+ * notification, ⌘K jump, presence travel) switches project → loads its nodes → frames the target,
+ * all before the mount-time measuring has settled: the queued fit then waits for a later node
+ * update, and by the time it runs the canvas may have moved on. The second click always works,
+ * because by then everything is measured — which is what makes it read as "sometimes".
  *
- * So we do the maths ourselves and drive the camera with `setViewport`: from React Flow's own
- * measurement when it has one (`measuredFitRect`), otherwise from the size the node was persisted
- * with (`nodeFitRect`), which needs no layout. Same padding/zoom clamp `fitView` would have used.
+ * So the maths is ours, from React Flow's measurement when it has one and from the size the node
+ * was persisted with when it does not — neither needs layout — and the camera is driven with
+ * `setViewport`, which applies immediately.
  */
 
 /** The subset of a React Flow node this module needs. Loose on purpose: it must accept both a
@@ -35,10 +38,30 @@ export interface FocusableNode {
   style?: { width?: number | string | null; height?: number | string | null }
 }
 
-/** Zoom/padding for framing a single node — the same numbers `fitView` would have applied, kept
- *  beside the maths: the clamp keeps a small node from filling the screen and a huge one from
- *  being fit microscopic. (`maxZoom` 1.38 is the 138% a correct terminal focus lands on, which is
- *  why 138% alone never proved the degenerate empty-fit jump.) */
+/**
+ * Is this node currently MAXIMIZED — i.e. was it placed against the chrome-free rectangle rather
+ * than dropped somewhere by hand?
+ *
+ * `premaxRect` is the maximize MODE flag (`maximizeNodeToRect` writes it, `restoreMaximizedNode`
+ * clears it), which is what makes it the right key here: it is exactly the set of nodes whose
+ * position was chosen by `maximizeTargetRect`, and the fix below is about framing a node against
+ * the rectangle its own placement used.
+ *
+ * It survives things that make the node no longer free-area-sized — a manual resize, a window
+ * resize (maximize deliberately does not re-fit on those) — and that is acceptable in both
+ * directions: with no pinned panel the inset is zero and this decision is a no-op, and with one
+ * the worst case is a node framed clear of a panel it was already meant to clear. Unpinning the
+ * panel needs no special case at all: `fitMaximizedToUsableArea` re-fits every maximized node
+ * whenever the insets change, so the flag and the geometry re-converge on their own.
+ */
+export function isMaximized(node: { data?: { premaxRect?: unknown } } | null | undefined): boolean {
+  return !!node?.data?.premaxRect
+}
+
+/** Zoom/padding for framing a single node, shared by both framing paths here so the whole-pane
+ *  and chrome-free-frame answers cannot drift apart: the clamp keeps a small node from filling the
+ *  screen and a huge one from being fit microscopic. (`maxZoom` 1.38 is the 138% a correct
+ *  terminal focus lands on.) */
 export const FIT_NODE_OPTIONS = { padding: 0.2, minZoom: 0.25, maxZoom: 1.38 } as const
 
 /** A `parentId` chain longer than this is a data bug (or a cycle) — stop walking. */
@@ -96,44 +119,6 @@ export function nodeFitRect(node: FocusableNode, all: readonly FocusableNode[]):
   return { ...at, ...size }
 }
 
-/** The subset of React Flow's OWN internal node this module needs: the store's measurement plus
- *  the absolute position React Flow has already resolved for it (group chains included). Loose on
- *  purpose so a plain object can stand in for one in a test. */
-export interface MeasuredNode {
-  measured?: { width?: number | null; height?: number | null }
-  internals?: { positionAbsolute?: { x?: number | null; y?: number | null } }
-}
-
-/**
- * The rect React Flow's own measurement implies, in ABSOLUTE canvas coordinates — the framing
- * input for a node the store has already sized. Null when there is no usable measurement or no
- * absolute position, in which case the caller falls back to `nodeFitRect` (or stands still).
- *
- * Why the caller computes the rect at all instead of handing the id to `fitView`: in
- * `@xyflow/react` 12 `fitView` is DEFERRED (it parks `fitViewQueued`/`fitViewOptions` and resolves
- * on a later `setNodes`, only while `nodesInitialized === true`), so the camera does not move on
- * the click and the queued fit can later resolve against a node list the target has left — an
- * empty fit set, bounds `{0,0,0,0}`, the world origin at maxZoom. See `Canvas.frameNode`.
- */
-export function measuredFitRect(node: MeasuredNode | null | undefined): Rect | null {
-  const width = numeric(node?.measured?.width)
-  const height = numeric(node?.measured?.height)
-  if (!width || !height) return null
-  const { x, y } = node?.internals?.positionAbsolute ?? {}
-  if (!Number.isFinite(x as number) || !Number.isFinite(y as number)) return null
-  return { x: x as number, y: y as number, width, height }
-}
-
-/** A chrome-free sub-rectangle of the pane to frame within, offset from the pane's top-left (all in
- *  screen px). Lets the focus path reserve the same space around the sidebar/dock/etc. that
- *  `fitAll` gets from `solveFitPadding`, instead of centering the node underneath them. */
-export interface FocusRegion {
-  offsetX: number
-  offsetY: number
-  width: number
-  height: number
-}
-
 /** The zoom clamp a fit is solved under. `FIT_NODE_OPTIONS` supplies the single-node pair; a
  *  fit-ALL passes the canvas's own `<ReactFlow minZoom/maxZoom>` instead, because it must be able
  *  to zoom out far enough to hold the whole content. */
@@ -154,14 +139,14 @@ const finiteViewport = (v: Viewport): Viewport | null =>
 /**
  * The viewport that frames `rect` in a `containerWidth × containerHeight` pane with `padding` —
  * xyflow's own fit maths (`getViewportForBounds`), i.e. exactly what a `fitView` with the same
- * arguments would have computed, minus its deferral.
+ * arguments would have computed, minus its deferral. Used by `fitAll` (whole-canvas bounds) and
+ * anywhere a directional-inset frame is needed.
  *
  * `padding` takes every shape `fitView` accepts, and the shapes are NOT interchangeable: a NUMBER
  * is a proportional ratio applied on top of the bounds, while the DIRECTIONAL pixel insets
  * `solveFitPadding` produces reserve exactly those edges of the full pane (xyflow's own asymmetric
  * path, which also pushes the rect flush against the reserved edge rather than centring it in what
- * is left). Reducing the pane to the free region AND passing a ratio applies both, which frames
- * the node visibly smaller — see `Canvas.frameNode`.
+ * is left).
  *
  * Null when the container has no size, or when the rect or the resulting viewport is not finite:
  * `setViewport({x: NaN, …})` is accepted without complaint, leaves the canvas blank and
@@ -181,33 +166,72 @@ export function viewportForRectPadded(
   )
 }
 
-/** The viewport that frames `rect` in a `containerWidth × containerHeight` pane, with the same
- *  ratio padding / zoom clamp `fitView({...FIT_NODE_OPTIONS})` would have applied. Null when the
- *  container has no size yet, or the geometry is not finite (see `viewportForRectPadded`).
+/**
+ * The viewport that frames `rect` in a `containerWidth × containerHeight` pane, with the same
+ * padding/zoom clamp `fitView` would have applied. Null when the container has no size yet, or
+ * when the rect or the resulting viewport is not finite (see `viewportForRectPadded`).
  *
- *  With a `region`, `rect` is framed inside that sub-rectangle instead of the whole pane: the fit
- *  is solved for the region's size and the resulting translation shifted by the region's offset, so
- *  the node lands centred in the free space — never underneath the chrome the region excludes. */
+ * **Centred in the pane, and nothing else — `insets` default to none.** Framing a focused node
+ * against the chrome-free rectangle instead — centred in it, or centred in the pane and then
+ * nudged clear of it — was tried twice and is wrong both ways: the sessions sidebar is a 300px
+ * OVERLAY, so either rule pushes the node right by most of its width, and "go to node" stops
+ * putting the node where the eye is. The couple of dozen pixels of a node that end up behind the
+ * sidebar cost far less than that. The free-rect solve stays where it earns its keep, in `fitAll`,
+ * which fits EVERY node and would otherwise tuck them under the dock.
+ *
+ * **The MAXIMIZED exception (issue #743), and why it is not a walk-back of that trade-off.** The
+ * trade-off above rests on one number: how much of the node ends up behind the panel. For an
+ * ordinary node that is a couple of dozen pixels (33px, measured by the reporter). For a maximized
+ * one the premise inverts by CONSTRUCTION, not by degree: `maximizeTargetRect` sized the node to
+ * be *exactly* as wide as the free area, so centring it in the wider pane buries half the inset
+ * less the margin — 137px in the reported layout, and it scales with the PANEL, not with the node.
+ * It cannot come out as a few dozen pixels. So a maximized node is framed against the same
+ * rectangle its own placement used, which — since the node is that rectangle minus two margins —
+ * reproduces exactly where maximize put it. Everything else still centres in the whole pane,
+ * because `insets` is `NO_INSETS` unless the caller says otherwise.
+ *
+ * `zoom` keeps the camera at a scale the caller already has (`settings.focusZoomToNode` off): the
+ * node is centred exactly as it would be, at that zoom, so "go to" stays a pan. It is passed
+ * through UNCLAMPED — it is a zoom the canvas is already displaying, and re-clamping it to the
+ * framing range would rescale the view this option exists to leave alone.
+ */
 export function viewportForRect(
   rect: Rect,
   containerWidth: number,
   containerHeight: number,
-  region?: FocusRegion
+  zoom?: number,
+  insets: ScreenInsets = NO_INSETS
 ): Viewport | null {
-  const vp = viewportForRectPadded(
+  if (!(containerWidth > 0) || !(containerHeight > 0)) return null
+  if (!finiteRect(rect)) return null
+  // A pane narrower than the panels covering it is not a rectangle anything can be centred in —
+  // fall back to the whole pane rather than solving against a negative width.
+  const freeWidth = containerWidth - insets.left - insets.right
+  const originX = freeWidth > 0 ? insets.left : 0
+  const width = freeWidth > 0 ? freeWidth : containerWidth
+  if (zoom !== undefined) {
+    if (!(zoom > 0)) return null
+    return finiteViewport({
+      x: originX + width / 2 - (rect.x + rect.width / 2) * zoom,
+      y: containerHeight / 2 - (rect.y + rect.height / 2) * zoom,
+      zoom
+    })
+  }
+  const fitted = getViewportForBounds(
     rect,
-    region ? region.width : containerWidth,
-    region ? region.height : containerHeight,
+    width,
+    containerHeight,
+    FIT_NODE_OPTIONS.minZoom,
+    FIT_NODE_OPTIONS.maxZoom,
     FIT_NODE_OPTIONS.padding
   )
-  if (!vp || !region) return vp
-  return finiteViewport({ x: vp.x + region.offsetX, y: vp.y + region.offsetY, zoom: vp.zoom })
+  return finiteViewport(originX ? { ...fitted, x: fitted.x + originX } : fitted)
 }
 
 /** Whether React Flow already knows this node's on-screen size — i.e. whether its measurement can
- *  be framed from (`measuredFitRect`) or the persisted size has to stand in. Takes the minimal
- *  shape so it reads either a user-land node or React Flow's own internal node (the authoritative
- *  one; see Canvas.frameNode). */
+ *  be framed from directly or the persisted size has to stand in. Takes the minimal shape so it
+ *  reads either a user-land node or React Flow's own internal node (the authoritative one; see
+ *  Canvas.frameNode). */
 export function isMeasured(
   node: { measured?: { width?: number | null; height?: number | null } } | null | undefined
 ): boolean {

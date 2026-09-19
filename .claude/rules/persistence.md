@@ -180,3 +180,62 @@ Persistence has two layers:
   remounts *and* full app restarts, including running processes. See `.claude/rules/terminal.md`.
 
 `settings.json` is a separate store (`core/settings-store.ts`, `state/settings.ts`).
+
+
+---
+
+## Upstream v0.3.7 merge additions (9e76faf84a5f..upstream/main (v0.3.7))
+
+> Appended verbatim during the v0.3.7 upstream merge (2026-09-20). Upstream keeps ONE CLAUDE.md;
+> the fork keeps this subsystem's deep reference in this rule file, so its new material lands
+> here rather than re-inlining the root. New/changed text only; `[~ replaced N base line(s)
+> here]` marks where upstream reworded text this file already carries above — reconcile at leisure.
+
+### From CLAUDE.md § State & persistence model
+
+    [~ replaced 2 base line(s) here]
+`createDiffNode`, `createVideoNode`, `createWebNode`, `createBrowserNode`, `createFilesNode`,
+`createDinoNode`, `createTriggerNode`), the
+    [~ replaced 1 base line(s) here]
+files | subagent | loop | dino | trigger` — `subagent` and `loop` are render-only (ephemeral hook-driven
+    [~ replaced 1 base line(s) here]
+  `core/workspace-watcher.ts` → silent reload, or a Reload/Keep-mine conflict bar when dirty; they
+  ride `workspace:external-change`, and so do the phone's `appendRemoteNode` and the SSH
+  reconcile, which really are "another device".
+  **A write this core made ITSELF rides `workspace:server-change` instead** — today that is Server
+  Edition headless canvas control (`server/canvas-control.ts`) — and the renderer three-way merges
+  it against the store baseline (`renderer/lib/serverChange.ts`: incoming nodes adopted silently,
+  ropes/bridges merged by id with server-added installed, server-removed dropped, local unsaved
+  edits kept, dangling edges pruned), never a bar and never a reload. It used to share the
+  outside-edit channel and that was a data-loss path, not a cosmetic one: `decideExternalChange`
+  compares the project shell, `ropes` included, so the one `ctrl-…` rope an `open-agent` appends
+  read as a conflict whenever the canvas was dirty — which it is throughout a spawn burst (the
+  paired `canvas:mut` marks it, spawns land 60–140 ms apart inside the 800 ms autosave debounce,
+  and **the bar itself suspends autosave**, so once raised it stayed raised). Answering "Keep my
+  version" then wrote the browser's edge state over the file, dropping the ropes the server had
+  just persisted and resurrecting cards it had removed.
+  **A write ACK is not evidence about the server's CONTENT — only a read is** (2026-09-06 field
+  report: 16 terminals deleted on an SSH project came straight back, announced as sessions
+  registered from a phone the reporter does not own). `clearedNodes` is the tombstone set that
+  tells the mirror's re-read "we deleted this, do not rescue it back", and it used to be dropped
+  the moment `remoteIO.write` returned true. That ack is **optimistic for the 5 s throttle's
+  trailing write** (`makeRemoteWorkspaceIO` returns true and schedules the run) — so when the
+  connection died inside the window, `markUnmirrored` re-owed the mirror (`unmirrored.add`) while
+  the tombstones were already gone, and the retry's re-read found every just-deleted node still on
+  the server with nothing left to filter with: `rescueRemoteNodes` merged all 16 back into the
+  cache, bumped the rev and broadcast them as an external change. The asymmetry was in one place —
+  `unmirrored` was restored, `clearedNodes` was not. A tombstone is now retired ONLY by
+  `confirmClearedDeletions`: a read that no longer lists the id (taken from reads the store already
+  makes — the mirror's own re-read and `reconcileSsh` — so it costs no round-trip), or an adopt,
+  which overrules our deletions outright. **Both** read sites must call it; wiring one leaves the
+  other's tombstones alive for the whole run. The cost is that GC lags a landed write by one read,
+  which only prolongs the suppression of a rescue we do not want; the benefit is that the rule no
+  longer depends on a dropped write being REPORTED. Symmetrically restoring the set inside
+  `markUnmirrored` was the smaller diff and was rejected: it needs the same shadow state anyway,
+  and it only closes the one failure path that happens to report back. The set is runtime-only,
+  bounded by the ids deleted this run, and pruned for projects that leave the index.
+  **Neither surface may name a device for an adopted node** (`adoptedClause`,
+  `renderer/lib/externalChange.ts`): nothing at that layer knows the source — a stale own mirror
+  and a phone append are indistinguishable there — so the copy names the project FILE and offers
+  the possibilities without asserting one.
+

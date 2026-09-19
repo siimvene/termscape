@@ -6,7 +6,8 @@
 // simply runs without status). Takes an INJECTED runner so the flow is unit-testable without real
 // ssh/electron.
 import { childArgs, hookForwardArgs, hookForwardCancelArgs, remoteEndpointFileContents } from '../../core/remote-ssh/control-master'
-import { CLAUDE_HOOK_EVENTS, GEMINI_HOOK_EVENTS, GROK_HOOK_EVENTS } from '@shared/agents/hook-events'
+import { CLAUDE_HOOK_EVENTS, GEMINI_HOOK_EVENTS } from '@shared/agents/hook-events'
+import { GROK_EVENTS } from '../../core/agents/hooks/grok'
 import { GROK_HOOK_FILE, isSafeRemoteGrokHome } from '../../core/agents/grok-paths'
 import { isSafeNodeId, isSafeRemoteHome } from '../../core/remote-safety'
 import { hookServer } from '../../core/agents/hook-server'
@@ -41,7 +42,7 @@ import {
   buildCanvasControlInstructions,
   buildCanvasSkillBody,
   mergeCanvasControlBlock
-} from '../canvas-control-core'
+} from '../../core/canvas-control-core'
 import {
   CONTEXT_SHIM_SCRIPT,
   buildContextLinkSkillBody,
@@ -108,6 +109,26 @@ export class RemoteHooks {
   private specs = new Map<string, { sock: string; port: number }>()
 
   constructor(private r: RemoteRunner) {}
+
+  /**
+   * Is THIS project's reverse hook tunnel still answering? (issue #735)
+   *
+   * The connect() reuse branch used to assume a master that answered `-O check` still carried its
+   * `-R` forward. It does not, and the mechanism is our own self-heal: `childArgs` uses
+   * `ControlMaster=auto` + `ControlPersist` precisely so that when a master dies the next child
+   * command rebuilds one on the same ControlPath. That rebuilt master answers `-O check` — but
+   * nothing ever handed it `ssh -O forward -R`, because `setup()` is the only caller of
+   * `hookForwardArgs` and it runs only on the "master just came up" branch.
+   *
+   * A missing spec answers FALSE: it means nothing of ours is bound for this project in this app
+   * run, which is a tunnel that cannot deliver, not an unknown. The caller repairs by re-running
+   * `setup()`, which is idempotent and re-verifies end-to-end.
+   */
+  async tunnelAlive(projectId: string, conn: SshConnection, controlPath: string, token: string): Promise<boolean> {
+    const spec = this.specs.get(projectId)
+    if (!spec || !token) return false
+    return this.verifyTunnel(conn, controlPath, spec.sock, token)
+  }
 
   async setup(
     projectId: string,
@@ -195,42 +216,37 @@ export class RemoteHooks {
         remoteEndpointFileContents(sock, hook.token, hook.version, `${remoteDir}/node-tokens`)
       )
       if (endpointResult.code !== 0) return null
-      // 3. install the managed hook for each JSON agent (script + merged config).
-      for (const t of AGENT_TARGETS) {
-        const script = `${remoteDir}/agent-hooks/${t.agentId}.sh`
-        const config = `${home}/${t.config}`
-        await this.r.run(
-          childArgs(
-            conn,
-            controlPath,
-            `mkdir -p ${posixQuote(`${remoteDir}/agent-hooks`)} && cat > ${posixQuote(script)} && chmod 755 ${posixQuote(script)}`
-          ),
-          buildManagedScript(t.agentId, REMOTE_IDENTITY_ROOT)
-        )
-        const { stdout: cfgRaw } = await this.r.run(
-          childArgs(conn, controlPath, `cat ${posixQuote(config)} 2>/dev/null || echo '{}'`)
-        )
-        let cfg: HookSettings = {}
-        try {
-          cfg = JSON.parse(cfgRaw || '{}') as HookSettings
-        } catch {
-          cfg = {}
+      // 3-6. Per-agent hook installs — CONCURRENT, because they are independent of each other.
+      //
+      // Each one writes its own script under `<remoteDir>/agent-hooks/` and merges its own agent's
+      // config file; no two touch the same remote path, and the only shared statement is an
+      // idempotent `mkdir -p` of that one directory. Run serially they were ~16 remote round trips
+      // in a row — MEASURED at 3.54 s on a 50 ms-RTT link, which is wall-clock every terminal of a
+      // switched-to project used to wait through (the master is not published until `connected`;
+      // see `connectOnce`). The `SshChildGate` (cap 6 per ControlMaster) is what makes the fan-out
+      // safe against a stock host's `MaxSessions`, and is the whole reason it exists.
+      //
+      // ORDER IS STILL LOAD-BEARING ABOVE THIS LINE: the tunnel must be verified and the endpoint
+      // file written first, because that file is what every one of these hooks POSTs through.
+      //
+      // `allSettled`, not `all`: the endpoint is already written and the tunnel already verified by
+      // the time we get here, so ONE agent's installer failing must not discard a working setup for
+      // every other agent. Each installer already catches its own errors, so today nothing rejects —
+      // this is the guard for the next one that forgets to.
+      const installs = await Promise.allSettled([
+        ...AGENT_TARGETS.map((t) => this.installJsonAgentRemote(conn, controlPath, home, remoteDir, t)),
+        // codex: hooks.json merge + config.toml trust (its own shape — not a JSON-settings agent).
+        this.installCodexRemote(conn, controlPath, home, remoteDir),
+        // grok: our own file in its hooks DIRECTORY, under the HOST's $GROK_HOME.
+        this.installGrokRemote(conn, controlPath, home, remoteDir),
+        // copilot: its own file/grammar under the HOST's $COPILOT_HOME hooks directory.
+        this.installCopilotRemote(conn, controlPath, home, remoteDir)
+      ])
+      for (const r of installs) {
+        if (r.status === 'rejected') {
+          console.warn('[remote-hooks] one agent hook install failed; the others are installed', r.reason)
         }
-        const merged = mergeManagedHook(cfg, buildManagedHookCommand(script), t.events)
-        await this.r.run(
-          // `$(dirname …)` is itself QUOTED (same reason as installGrokRemote): a home with a
-          // space would otherwise word-split into two mkdir args, the directory would never be
-          // created, and the correctly-quoted `cat >` would then fail — silently, fail-open.
-          childArgs(conn, controlPath, `mkdir -p "$(dirname ${posixQuote(config)})" && cat > ${posixQuote(config)}`),
-          JSON.stringify(merged, null, 2)
-        )
       }
-      // 4. codex: hooks.json merge + config.toml trust (its own shape — not a JSON-settings agent).
-      await this.installCodexRemote(conn, controlPath, home, remoteDir)
-      // 5. grok: our own file in its hooks DIRECTORY, under the HOST's $GROK_HOME.
-      await this.installGrokRemote(conn, controlPath, home, remoteDir)
-      // 6. copilot: its own file/grammar under the HOST's $COPILOT_HOME hooks directory.
-      await this.installCopilotRemote(conn, controlPath, home, remoteDir)
       return { endpointPath: endpoint }
     } catch {
       return null // fail-open: agent runs without hooks
@@ -366,6 +382,55 @@ export class RemoteHooks {
    *
    * Fail-open at every step; an unparseable remote hooks.json is left untouched (never clobbered).
    */
+  /**
+   * Install the managed hook for ONE json-settings agent (claude, gemini): write its script, read
+   * its settings file, merge our handler in, write it back.
+   *
+   * Extracted from `setup`'s loop so the four per-agent installs can run concurrently, and given
+   * the same fail-open try/catch its three siblings already have — a per-agent failure must cost
+   * that agent its status hooks and nothing else. The three steps INSIDE stay strictly ordered:
+   * the merge reads the file the write then replaces.
+   */
+  private async installJsonAgentRemote(
+    conn: SshConnection,
+    controlPath: string,
+    home: string,
+    remoteDir: string,
+    target: { agentId: string; config: string; events: readonly string[] }
+  ): Promise<void> {
+    try {
+      const script = `${remoteDir}/agent-hooks/${target.agentId}.sh`
+      const config = `${home}/${target.config}`
+      await this.r.run(
+        childArgs(
+          conn,
+          controlPath,
+          `mkdir -p ${posixQuote(`${remoteDir}/agent-hooks`)} && cat > ${posixQuote(script)} && chmod 755 ${posixQuote(script)}`
+        ),
+        buildManagedScript(target.agentId, REMOTE_IDENTITY_ROOT)
+      )
+      const { stdout: cfgRaw } = await this.r.run(
+        childArgs(conn, controlPath, `cat ${posixQuote(config)} 2>/dev/null || echo '{}'`)
+      )
+      let cfg: HookSettings = {}
+      try {
+        cfg = JSON.parse(cfgRaw || '{}') as HookSettings
+      } catch {
+        cfg = {}
+      }
+      const merged = mergeManagedHook(cfg, buildManagedHookCommand(script), target.events)
+      await this.r.run(
+        // `$(dirname …)` is itself QUOTED (same reason as installGrokRemote): a home with a
+        // space would otherwise word-split into two mkdir args, the directory would never be
+        // created, and the correctly-quoted `cat >` would then fail — silently, fail-open.
+        childArgs(conn, controlPath, `mkdir -p "$(dirname ${posixQuote(config)})" && cat > ${posixQuote(config)}`),
+        JSON.stringify(merged, null, 2)
+      )
+    } catch {
+      /* fail-open: this agent's remote sessions run without status hooks */
+    }
+  }
+
   private async installCodexRemote(
     conn: SshConnection,
     controlPath: string,
@@ -495,7 +560,7 @@ export class RemoteHooks {
       } catch {
         cfg = {}
       }
-      const merged = mergeManagedHook(cfg, buildManagedHookCommand(script), GROK_HOOK_EVENTS)
+      const merged = mergeManagedHook(cfg, buildManagedHookCommand(script), GROK_EVENTS)
       // The `$(dirname …)` is QUOTED: a valid $GROK_HOME may contain spaces, which would otherwise
       // word-split into two mkdir args, leave the directory absent, and fail the quoted `cat >`.
       await this.r.run(

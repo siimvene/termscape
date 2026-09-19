@@ -3,19 +3,20 @@
 // /control/* routes; a Claude skill / codex-gemini instruction blocks tell the agent how +
 // when to call it. The CLI no-ops unless NODETERM_CANVAS_CONTROL is set.
 //
-// The SSH counterpart of this file is RemoteHooks.installCanvasControl, which writes the very
-// same shim + skill onto the remote host — the shim carries no machine-specific paths, so one
-// script serves both sides.
+// The SSH counterpart is RemoteHooks.installCanvasControl. Both use the same machine-neutral
+// body, but the LOCAL installer prepends the shared-Codex thread resolver with this machine's
+// ownership-record path; a desktop path must never be baked into the remote copy.
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import { app } from 'electron'
 import {
-  CONTROL_SHIM_SCRIPT,
+  buildControlShimScript,
   buildCanvasControlInstructions,
   buildCanvasSkillBody,
   mergeCanvasControlBlock
-} from './canvas-control-core'
+} from '../core/canvas-control-core'
+import { codexThreadIdentityRoot } from '../core/codex-identity-proxy'
 import { opencodeConfigDir } from '../core/agents/hooks/opencode'
 import { copilotHomeDir } from '../core/agents/hooks/copilot'
 
@@ -35,7 +36,7 @@ function skillBody(): string {
 function writeCliFiles(): void {
   const d = dir()
   fs.mkdirSync(d, { recursive: true })
-  fs.writeFileSync(shimPath(), CONTROL_SHIM_SCRIPT)
+  fs.writeFileSync(shimPath(), buildControlShimScript(codexThreadIdentityRoot()))
   try {
     fs.chmodSync(shimPath(), 0o755)
   } catch {

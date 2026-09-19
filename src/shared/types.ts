@@ -1,10 +1,12 @@
 // Types shared across the main, preload, and renderer processes.
 
+import { TABBAR_HEIGHT_PX } from './window-chrome-metrics'
 import { DEFAULT_WORKTREE_PATH_TEMPLATE } from './worktree'
 import type { CloneProgress } from './clone-url'
 import type { KeybindingOverrides, TerminalShortcutPolicy } from './keybindings'
 import type { NormalizedAgentEvent } from './agents/normalize'
 import type { AgentId, AgentPermissionMode, BuiltinAgentId, PromptInjectionMode } from './agents/config'
+import type { ControlConfirmWaivers } from './control-confirm'
 import type { AgentMessageDeliverRequest, AgentMessageReply } from './agents/agent-messaging'
 import type { BrowserLeasePush } from './browser-indicator'
 import type { GroupWorktree } from './worktree'
@@ -12,12 +14,33 @@ import type { ClientId, DinoSnapshot, PeerDiff, PeerIdentity, PeerState } from '
 import type { WhisperModelInfo } from './speech'
 import type { ProjectKanbanGitHub } from './github-issues'
 import type { CodexAccount } from './codex-account'
+import type { NotchAlign } from './notch-hud'
 import type { ProjectIcon, ProjectIconPickResult } from './project-icon'
+import type { CanvasLayout, LayoutViewports } from './canvas-layout'
 import type {
   ModelDiscoveryResult,
   ModelGatewayCredentialStatus,
   ModelGatewaySettings
 } from './agents/model-gateway'
+
+/**
+ * The default provider behavior for a FRESH agent spawn — the three-way successor to the old
+ * `vanillaLaunchDefault` boolean. Read by `pty-manager`'s spawn-site strip gate and by the
+ * renderer's new-node creation (`addAgentNode`):
+ *  - `'gateway'`        — inject the model gateway env; the agent uses the CLI's OWN default model
+ *                         (no `--model`). Today's behavior for a gateway node with no per-node model.
+ *  - `'gateway-model'`  — inject the gateway env AND launch with the configured default gateway
+ *                         model (`settings.modelGatewayDefaultModel`), so a new canvas session
+ *                         opens on a chosen model without a per-node "Switch model" click.
+ *  - `'subscription'`   — strip the gateway + inherited provider env so the agent runs against its
+ *                         OWN default provider (Claude's subscription, Copilot's GitHub routing).
+ *                         The former `vanillaLaunchDefault: true`. Wins even when a default model is
+ *                         set (vanilla = no gateway at all, so the gateway model is moot).
+ *
+ * `vanillaLaunchDefault` is kept for one release as a migration MIRROR (an older build still honors
+ * the choice); `agentLaunchMode === 'subscription'` ⇒ `vanillaLaunchDefault = true`, else `false`.
+ */
+export type AgentLaunchMode = 'gateway' | 'gateway-model' | 'subscription'
 
 /** Profile-switch replacement intent. The trusted core validates and re-resolves it before teardown. */
 export interface PtyRecycleTarget {
@@ -106,6 +129,14 @@ export interface PtyCreateOptions {
   agentId?: AgentId
   /** Per-node model override. Applied through the node's base harness on launch/cold restore. */
   agentModel?: string
+  /**
+   * One-shot: spawn (or re-spawn after a recycle) with gateway + inherited provider env stripped
+   * so the agent runs against its OWN default provider (Claude's subscription, Copilot's GitHub
+   * routing) instead of the configured gateway/inherited override. The strip set is per-agent
+   * (`vanillaEnvStripPattern`); `CLAUDE_CONFIG_DIR` is deliberately kept (account isolation
+   * survives). Cleared after the spawn resolves so a later ordinary Restart re-applies the gateway.
+   */
+  clearEnv?: boolean
   /** Managed Claude account: inject CLAUDE_CONFIG_DIR for this account into the session env. */
   accountId?: string
   /**
@@ -168,6 +199,24 @@ export interface PaneCursor {
 export interface PtyCreateResult {
   sessionId: string
   fresh: boolean
+  /**
+   * `fresh` is FALSE, but the freshness read never completed — so "a session already exists" was a
+   * fold, not an answer (`RemoteSessionIndex`: only tmux's own exit 1 is evidence of absence, and
+   * every other outcome answers "exists" because typing `claude --resume …` into a live agent pane
+   * is the worse failure). SSH nodes only; a local `has-session` does not have this failure mode.
+   *
+   * Under a mount burst that overruns the host's `MaxSessions`, that fold is wrong often enough to
+   * matter: `tmux new-session -A` then CREATES an empty session, `fresh:false` skips cold restore,
+   * and the node sits at a bare shell with the user's conversation stranded on disk. MEASURED on
+   * the reporting host: of 107 sessions created in one switch, 66 ended at a bare shell — against
+   * 4 of 22 in a smaller burst minutes earlier, i.e. load-dependent, i.e. a race.
+   *
+   * The renderer re-asks ONCE after the attach has landed (tmux's own `#{session_created}` settles
+   * it; see `PtyApi.sessionAge`) and runs the cold-restore relaunch if the session turns out to be
+   * one we just made. Absent = the verdict was read, or this is not a remote node ⇒ nothing to
+   * re-ask.
+   */
+  freshUnverified?: boolean
   /** Set when the node's `accountId` had no config dir at spawn, so the session fell back to the
    *  system account. The renderer flags the account chip (folder-missing warning) when true. On a
    *  warm reattach it is a re-check of the dir at THIS attach (the pane's real identity is not
@@ -290,7 +339,7 @@ export interface RecycledInfo {
 // 'subagent' and 'loop' are render-only (ephemeral hook-driven viz) and never persisted.
 // 'trigger' is a first-class PERSISTED kind (issue #493) — the canvas-owned schedule node; its
 // spec rides `CanvasNodeState.trigger` and is sanitized on every load path (@shared/trigger).
-export type NodeKind = 'terminal' | 'sticky' | 'group' | 'editor' | 'diff' | 'video' | 'web' | 'browser' | 'subagent' | 'loop' | 'dino' | 'trigger'
+export type NodeKind = 'terminal' | 'sticky' | 'group' | 'editor' | 'diff' | 'video' | 'web' | 'browser' | 'files' | 'subagent' | 'loop' | 'dino' | 'trigger'
 
 /** Persisted state of a single canvas node (terminal, sticky note, group frame, or editor). */
 /**
@@ -313,6 +362,20 @@ export interface PendingLaunch {
   after: string[]
   /** Delivered to the node's shell once the wait is over (agent CLI + prompt, or a plain command). */
   command: string
+  /**
+   * Which core process owns delivery. Absent is the historical renderer-owned path. Server
+   * Edition headless opens stamp `server`, so a connected browser can render the armed state and
+   * dependency edges without racing the server to type the command into the same pane.
+   */
+  executor?: 'server'
+  /**
+   * Server-owned dependencies whose first real turn has not been observed yet. A freshly spawned
+   * agent can briefly report `done` while its argv prompt is still booting; that idle blip must not
+   * release a downstream launch. The server removes an id only after a verified `working` event,
+   * then requires the ordinary later `done`. Persisted so a server restart cannot forget the gate.
+   * Desktop-owned launches leave this absent; renderer parity is a separate follow-up.
+   */
+  awaitWorking?: string[]
   /**
    * Also wait for this worktree GROUP's project setup script to finish (`waitForSetup`). Set when
    * the node is opened into a frame whose checkout is still being prepared — running a command in a
@@ -361,6 +424,13 @@ export interface CanvasNodeState {
   agentId?: AgentId
   /** Model selected for this agent node through the shared model gateway. */
   agentModel?: string
+  /**
+   * One-shot "Restart on subscription" flag: when set, the next `transport.create` strips gateway +
+   * inherited provider env (per `vanillaEnvStripPattern`) so the agent resumes against its own
+   * default provider. Set by the clear-env recycle action, cleared after the spawn resolves so an
+   * ordinary Restart re-applies the gateway. See `PtyCreateOptions.clearEnv`.
+   */
+  clearEnv?: boolean
   /** Set while this node is armed but not yet launched — see PendingLaunch. */
   pendingLaunch?: PendingLaunch
   /**
@@ -759,6 +829,19 @@ export interface Project {
    *  one person's wandering camera history). */
   breadcrumbs?: NavStop[]
   /**
+   * Named geometry snapshots for this canvas - see @shared/canvas-layout for what a layout may
+   * carry and why it may carry nothing else.
+   *
+   * CONTENT, git-shared via `.nodeterm/project.json` like `kanban`: node geometry is already
+   * shared content in that file and a restore writes exactly those fields, so the snapshot belongs
+   * beside them. The camera precedent (`viewport`, `breadcrumbs`) deliberately does NOT reach
+   * here - those are camera facts, and nobody else's canvas moves when I pan.
+   */
+  layouts?: CanvasLayout[]
+  /** This machine's camera per layout, keyed by layout id. MACHINE-LOCAL: rides
+   *  `IndexEntryV3.layoutViewports`, never the shared file - same rule as `breadcrumbs`. */
+  layoutViewports?: LayoutViewports
+  /**
    * Closed projects are hidden from the tab bar but kept on disk with all their nodes (and their
    * tmux sessions left running) so they can be reopened from the start screen's "Recently closed"
    * list. Absent/false = an open tab. A closed project never becomes `activeProjectId`.
@@ -896,6 +979,32 @@ export interface PtyApi {
   generateGroupName(memberKeys: string[], cwd: string): Promise<GitResult>
   /** Capture a terminal session's output as text. `full` grabs the entire scrollback. */
   capture(persistKey: string, full?: boolean): Promise<string>
+  /**
+   * Seconds since this node's tmux session was created, measured on the machine that holds it, or
+   * `null` when that cannot be told (no session, no tmux, an unreadable host, a garbled answer).
+   *
+   * The late cold-start check behind `PtyCreateResult.freshUnverified`: `#{session_created}`
+   * survives a `new-session -A` attach, so a session created within seconds of our own attach is
+   * one we just made — i.e. the node was cold after all. `null` is never an age; the caller acts
+   * only on a small number.
+   */
+  sessionAge(persistKey: string): Promise<number | null>
+  /**
+   * Has the host behind `sshRemote.controlPath` POSITIVELY listed this node's remote tmux session?
+   *
+   * The early-attach gate: a remote terminal may run over a ControlMaster whose connect-time setup
+   * has not finished only when its session already exists (`new-session -A` then merely attaches,
+   * and the remote tmux `-f` config and the `-e` hook/account env are read at session CREATION
+   * only). Absent AND unreadable both answer `false` — the node then waits for the full connect,
+   * because creating a session without that env silently costs it its agent-status badges.
+   *
+   * Desktop-only, like SSH projects; the Server Edition bridge answers `false` (never attach
+   * early), which is the pre-feature behavior.
+   */
+  remoteSessionConfirmed(
+    persistKey: string,
+    sshRemote: { controlPath: string; conn: import('./ssh').SshConnection }
+  ): Promise<boolean>
   /** Read the persisted scrollback snapshot for a node (for cold-restart replay). '' if none. */
   readScrollback(persistKey: string): Promise<string>
   /** Send literal text into a session, by default followed by Enter (e.g. a slash command).
@@ -968,6 +1077,9 @@ export interface WorkspaceApi {
   onCorruptRecovered(cb: (backupFile: string) => void): () => void
   /** Fired when a project file changed on disk outside the app (git pull, sync, teammate). */
   onExternalChange(cb: (project: Project) => void): () => void
+  /** Fired when THIS core wrote the project itself (Server Edition headless canvas control: an agent
+   *  opened, renamed, moved, closed…). Not an outside edit — the renderer merges it, never asks. */
+  onServerChange(cb: (project: Project) => void): () => void
 }
 
 export interface ProjectSettingsApi {
@@ -1202,11 +1314,65 @@ export interface ClaudeAccount {
    *  unset = the agent's own brand color. Read through `accountNodeColor`, which re-validates it
    *  as a string — this file is hand-editable and nothing checks it field-by-field on load. */
   color?: string
+  /**
+   * LINKED account: an ABSOLUTE local path to a pre-existing Claude config dir the user already
+   * owns (e.g. `~/.claude-2` driven by their own `CLAUDE_CONFIG_DIR` shell setup). Set only by
+   * `claudeAccounts.link`; never combined with `host`. A linked account has no managed dir under
+   * `{userData}/claude-accounts/` — `claudeConfigDirFor` resolves it to this path — and REMOVING
+   * it only forgets the record: the directory is the user's and is never deleted. Hand-editable
+   * (settings.json), so it is re-validated at every point of use (absolute, normalized).
+   */
+  configDir?: string
+  /**
+   * Share the machine's system skills (`~/.claude/skills`) with this account (issue #643).
+   * OFF/absent = the isolation Claude Code's own `join(CLAUDE_CONFIG_DIR, 'skills')` gives, which
+   * is the default and often the point. ON = each system skill is LINKED into the account's own
+   * `skills/` individually — the account's directory stays real, nodeterm's own skills keep their
+   * names, and turning it off removes only the links (`core/claude-skill-share.ts`).
+   * Reconciled at launch and whenever the switch is flipped; LOCAL accounts only — a remote (SSH)
+   * account's skills live on its host and are out of scope for v1.
+   */
+  shareSystemSkills?: boolean
   createdAt: number
   /** Transient renderer HINT (not persisted by the store's reconcile): true once the USER has
    *  renamed this row by hand, so a stale-pending snapshot whose label happens to equal the mint
    *  placeholder is still taken as an edit rather than discarded. See `reconcileOwnedAccountList`. */
   labelEdited?: boolean
+}
+
+/**
+ * Which Claude account a RUNNING session was observed to use — derived by the hook server from
+ * the `transcript_path` its hooks report (`<configDir>/projects/<slug>/<session>.jsonl`), never
+ * from anything the node was created with. A LABEL, exactly like `NormalizedAgentEvent.verified`:
+ * it tells the UI which identity a pane is on (a hand-launched `claude` in a plain terminal, an
+ * account switched by the user's own shell), it never grants anything.
+ *  - `accountId === null` ⇒ the system default (`<home>/.claude`).
+ *  - `accountId` set + `known` ⇒ a managed or linked `ClaudeAccount` from settings.
+ *  - `known === false` ⇒ a config dir nodeterm has no record of (`accountId` is null); the UI
+ *    labels it by its path and offers to link it. No filesystem read is ever made for such a dir.
+ */
+export interface ObservedClaudeAccount {
+  /** The config dir as the hook reported it (normalized string; may be a REMOTE path for SSH nodes). */
+  configDir: string
+  accountId: string | null
+  known: boolean
+  /**
+   * The observation came from a session whose FILESYSTEM IS ON ANOTHER MACHINE (an SSH-project
+   * pane), so every LOCAL affordance — offering the dir for linking, matching it against a local
+   * account's `configDir` — must refuse it. `~/.claude-2` on a host and `~/.claude-2` here are
+   * different directories that spell the same string, and the same username on both machines is
+   * the common case, not the exotic one.
+   *
+   * It is NOT set by the classifier: `classifyClaudeConfigDir` is deliberately host-agnostic (its
+   * managed-remote and basename-`.claude` rules exist precisely to name a REMOTE dir) and core
+   * holds only the payload, which says nothing about which machine posted it. The RENDERER is the
+   * only layer that knows a node's project and `data.ssh`, so the flag is attached there, once, at
+   * the point the label enters the store.
+   *
+   * Optional and trailing: an observation without it is a local one, which is what every
+   * observation was before the field existed.
+   */
+  remote?: boolean
 }
 
 export interface SpeechSettings {
@@ -1293,6 +1459,12 @@ export interface Settings {
    *  Distinct from `snapToGrid` (drag-time snap) — turning this on arranges once; it does not
    *  constrain future drags. v1: arrange-all-on-enable only. */
   autoAlignGrid: boolean
+  /** Height of the top project tab bar in CSS px (Settings → Appearance). Hand-editable; every
+   *  reader — the renderer's `--tabbar-h` and main's traffic-light `y` — goes through
+   *  `resolveTabBarHeight` (`@shared/window-chrome-metrics`), which clamps to 28–64 and answers
+   *  the default for anything that is not a finite number. Machine-local: it is one person's
+   *  chrome, not a canvas fact. */
+  tabBarHeight: number
   /** Default size (px) for NEW terminal/agent nodes on the canvas. Existing nodes keep
    *  whatever size they were saved with; other node kinds keep their own defaults. */
   defaultNodeWidth: number
@@ -1313,6 +1485,15 @@ export interface Settings {
   /** Fallback view for projects the user hasn't explicitly toggled (canvas or the kanban board).
    *  Personal machine-local preference; per-project explicit choices override it. */
   defaultProjectView: 'canvas' | 'kanban'
+  /** Global swimlane kanban overview (Omni-Kanban): when enabled, the kanban board shows all
+   *  open projects as stacked swimlanes instead of per-project tabs. Toggle in Settings →
+   *  Behavior. Default OFF — no silent behavior change for existing users; `globalKanban`
+   *  (the view flag) is only honored when this is true. */
+  omniKanbanEnabled: boolean
+  /** When enabled, Cmd+Shift+B (view.kanbanToggle) opens the global Omni board instead of the
+   *  per-project board. The dedicated global shortcut (view.globalKanbanToggle) always opens
+   *  Omni regardless of this setting. Opt-in, per user — default OFF. */
+  omniKanbanAsDefault: boolean
   /** New-worktree path template, resolved relative to the repository root. Supports `$repoName`
    *  (`$reponame` and `$defaultFolderName` aliases) plus `$branch`; both `$x` and `${x}` forms.
    *  A missing branch token is appended automatically. */
@@ -1320,6 +1501,21 @@ export interface Settings {
   /** ms to dwell over a terminal before it takes pointer focus (pan-across guard). */
   panHoverDelay: number
   doubleClickFocus: boolean
+  /** "Go to node" (sessions sidebar, notification click, ⌘K jump, breadcrumb steps, presence
+   *  travel) fits the node in view. Off: the camera keeps the CURRENT zoom and only pans, which is
+   *  what a user who has settled on a zoom level wants — a jump that also rescales the whole canvas
+   *  costs them the sense of where they were. Either way the node is centred and kept clear of the
+   *  floating chrome (renderer/lib/nodeFocus). */
+  focusZoomToNode: boolean
+  /** Whether the bottom-left canvas lock survives a restart. OFF by default, and deliberately so:
+   *  the lock was transient by design, because a canvas that will not pan on the next launch reads
+   *  as "the app is frozen" to whoever opens it, and the lit button is a small thing to spot. Users
+   *  who lock on purpose and want it to stay locked opt in here; everyone else opens unlocked
+   *  exactly as before. The lock itself is persisted in localStorage (renderer/lib/canvasLock),
+   *  never in settings.json or the git-shared project.json: this flag says whether to remember,
+   *  the lock is one person's view state. Machine-local on Desktop; in the Server Edition this
+   *  setting is the server's while the lock is per browser profile. */
+  rememberCanvasLock: boolean
   /** Open Markdown files (.md, .markdown, …) in rendered preview instead of the code editor.
    *  Only picks the view an editor node OPENS in — the node's Preview/Edit toggle (and the
    *  markdown-toggle chord) still switches either way. Default ON since the release after
@@ -1466,6 +1662,10 @@ export interface Settings {
   customAgents: CustomAgent[]
   /** One gateway root + non-secret credential reference used by model-switch-capable harnesses. */
   modelGateway: ModelGatewaySettings
+  /** The default gateway model id (from discovery) applied to a fresh canvas agent spawn when
+   *  `agentLaunchMode === 'gateway-model'`. A separate field from `modelGateway` (it is NOT a
+   *  credential). Absent/empty = no default ⇒ `'gateway-model'` behaves like `'gateway'`. */
+  modelGatewayDefaultModel?: string
   /** Per-builtin-agent launch command overrides (Settings → Agents → Launch commands). The value
    *  replaces the bare CLI name everywhere a launch line is built — new sessions, cold-restore
    *  relaunches and in-place restarts, with the usual flags (`--resume`, `--permission-mode`, the
@@ -1512,12 +1712,33 @@ export interface Settings {
    *  driver runs in `default`). Overridable per project via Project.defaultPermissionMode.
    *  `auto` is version-gated: CLIs below 2.1.71 reject the value, so it degrades to no flag. */
   claudePermissionMode: AgentPermissionMode
+  /**
+   *  When on, EVERY fresh agent launch spawns with gateway + inherited provider env stripped, so the
+   *  agent runs against its OWN default provider (Claude's subscription, Copilot's GitHub routing)
+   *  instead of a configured gateway/inherited override. The per-node one-shot `data.clearEnv`
+   *  (cleared after its single recycle) is the per-node action; this is its global counterpart.
+   *  Default OFF — opt-in, because it changes which provider every agent node uses. Does NOT strip
+   *  `CLAUDE_CONFIG_DIR` (account isolation survives). See `vanillaEnvStripPattern`.
+   */
+  vanillaLaunchDefault: boolean
+  /** The default provider behavior for a fresh agent spawn (the three-way successor to
+   *  `vanillaLaunchDefault`). See `AgentLaunchMode`. Default `'gateway'` = today's behavior. */
+  agentLaunchMode: AgentLaunchMode
   /** "Eco": exit the agent CLI of a session that has been idle AND offscreen for
    *  `agentHibernationIdleMinutes`, reclaiming its RAM; the conversation is resumed automatically
    *  when the node is viewed again. Default OFF — opt-in, because it stops a real process.
    *  Scheduled/loop agents and sessions with live subagents are never touched
    *  (renderer/terminal/hibernation-policy.ts explains why). */
   agentHibernationEnabled: boolean
+  /**
+   * Agent messaging for a project whose `.nodeterm/project.json` carries NO `agentMessaging` value
+   * (@shared/project-capabilities, CAPABILITY_MACHINE_DEFAULTS). MACHINE-LOCAL on purpose: it is
+   * this machine's user deciding for their own unconfigured projects, which is why it may answer
+   * without a clone notice — while an explicit `true` in a cloned file still needs one, and an
+   * explicit `false` still wins. Read strictly (`=== true`). Never settable from the canvas CLI
+   * (@shared/settings-verb forbids it): it is a grant over every project at once.
+   */
+  agentMessagingDefault: boolean
   /** How long a session must be idle + offscreen before "Eco" hibernates it (minutes). */
   agentHibernationIdleMinutes: number
   /** When Eco hibernates a session, also mark it PAUSED (see `AgentNodeStatus.paused`) so it does
@@ -1565,6 +1786,11 @@ export interface Settings {
    *  hook holds briefly for a phone/canvas Approve/Deny before falling through to the normal
    *  interactive prompt. Off ⇒ the env var is absent ⇒ exact legacy behavior. Claude-only. */
   hookReplyApprovals: boolean
+  /** Remove a subagent's ephemeral canvas card the moment that subagent REPORTS finished, instead
+   *  of keeping it until the parent agent's next turn clears it. Default off ⇒ exact legacy
+   *  behavior. A card whose subagent is still running is never removed by this, and neither is one
+   *  the stale decay marked done because its end never arrived. Settings → Agents. */
+  autoHideFinishedSubagentCards: boolean
   /** Hold an idle-sleep power assertion while a LOCAL agent node is working, so long runs
    *  survive an unattended laptop. Released when the last one stops (or goes stale). Cannot
    *  hold through a closed lid. Asked in the setup tour; Settings → Behavior. */
@@ -1581,6 +1807,14 @@ export interface Settings {
    *  `auxiliaryTopLeftArea`), so the capsule has to assume one — this is the knob that makes it sit
    *  flush on YOUR Mac. Bigger = the capsule sits further left. */
   notchWidth: number
+  /** Which side of the primary display the capsule sits on. `center` (default) hugs the physical
+   *  notch; `left` / `right` draw a floating pill at that edge. Re-validated at use
+   *  (`sanitizeNotchAlign`, shared/notch-hud.ts): an unknown string means `center`. */
+  notchAlign: NotchAlign
+  /** Vertical offset of the capsule from its resting place, px, positive = DOWN. Up is bounded by
+   *  the display's top edge (the fused notch capsule is already there, so it only moves down —
+   *  and moving it detaches it into a pill). Clamped to NOTCH_OFFSET_MIN/MAX; non-finite → 0. */
+  notchOffsetY: number
   /** Expand the notch panel on hover (after a short dwell). Off = click the capsule to expand. */
   notchHoverExpand: boolean
   /** Dictation (desktop/server). Written as a whole object by the renderer. */
@@ -1608,6 +1842,15 @@ export interface Settings {
    *  strands a live session gets their canvas back without downgrading the app. Neither value ever
    *  admits a forged token. */
   hookIdentityStrict?: boolean
+  /** Machine-local waivers for the canvas-control destructive confirm dialog
+   *  (@shared/control-confirm). Absent — and absent from DEFAULT_SETTINGS — means "always ask",
+   *  which is the pre-feature behavior bit for bit.
+   *
+   *  MACHINE-LOCAL BY CONSTRUCTION, and the reason is the trap this closed: a permission mode
+   *  rides `.nodeterm/project.json` and is git-shared, so anything keyed on the mode alone could
+   *  be turned off for a user by a repository they cloned. A waiver is a statement about this
+   *  machine's trust in its own agents, so it lives here and NEVER in a project file. */
+  controlConfirmWaivers?: ControlConfirmWaivers
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -1637,15 +1880,20 @@ export const DEFAULT_SETTINGS: Settings = {
   gridSize: 24,
   snapToGrid: false,
   autoAlignGrid: false,
+  tabBarHeight: TABBAR_HEIGHT_PX,
   defaultNodeWidth: 640,
   defaultNodeHeight: 440,
   sidebarAutoCollapse: true,
   sidebarCollapsedItems: {},
   sidebarGrouping: 'project',
   defaultProjectView: 'canvas',
+  omniKanbanEnabled: false,
+  omniKanbanAsDefault: false,
   worktreePathTemplate: DEFAULT_WORKTREE_PATH_TEMPLATE,
   panHoverDelay: 600,
   doubleClickFocus: true,
+  focusZoomToNode: true,
+  rememberCanvasLock: false,
   openMarkdownPreview: true,
   openMarkdownPreviewMigrated: true,
   terminalMiddleClickPaste: false,
@@ -1678,6 +1926,9 @@ export const DEFAULT_SETTINGS: Settings = {
   autoCloseSpawnedNodes: true,
   customAgents: [],
   modelGateway: { baseUrl: '', apiKey: '' },
+  // No default gateway model until the user picks one in Settings → Model gateway. Absent ⇒
+  // `'gateway-model'` behaves like `'gateway'` (no --model on a fresh spawn).
+  modelGatewayDefaultModel: undefined,
   agentLaunchCommands: {},
   claudeAccounts: [],
   codexAccounts: [],
@@ -1697,9 +1948,19 @@ export const DEFAULT_SETTINGS: Settings = {
   // Sessions start in auto mode out of the box. Existing users pick this up on hydrate
   // (settings hydrate merges over DEFAULT_SETTINGS) — a deliberate behavior change.
   claudePermissionMode: 'auto',
+  // Opt-in: strips the gateway/inherited provider env on every fresh launch so agents run against
+  // their own default provider. Off by default — changes which provider every agent node uses.
+  vanillaLaunchDefault: false,
+  // The three-way successor to the boolean above. `'gateway'` = inject gateway env, CLI default
+  // model (today's behavior). `vanillaLaunchDefault` is now its migration mirror.
+  agentLaunchMode: 'gateway',
   // Opt-in: hibernation exits a live CLI, so nobody gets it without asking. The 30-minute floor
   // is deliberately long — shorter windows exit sessions the user is between turns on.
   agentHibernationEnabled: false,
+  // OFF until the cross-restart pane-ownership proof lands: messaging refuses every pane that
+  // survived an app restart (core/agents/pane-ownership.ts), so "on by default" would be false
+  // after every restart and every update. Flipping this is a separate, deliberate change.
+  agentMessagingDefault: false,
   agentHibernationIdleMinutes: 30,
   agentHibernationPersistAcrossRestart: false,
   // Opt-out (default on). Existing users pick this up on hydrate ONLY if their settings.json has
@@ -1715,6 +1976,7 @@ export const DEFAULT_SETTINGS: Settings = {
   // Deterministic hook-reply approvals default ON (existing users pick it up on hydrate). Only
   // affects Claude terminal sessions; off reproduces the pre-feature launch bit-for-bit.
   hookReplyApprovals: true,
+  autoHideFinishedSubagentCards: false,
   // Keep-awake-while-agents-work default ON (existing users pick it up on hydrate — deliberate,
   // same note style as hookReplyApprovals). Held only while a local agent is actually working.
   keepAwakeWhileAgentsWork: true,
@@ -1724,6 +1986,8 @@ export const DEFAULT_SETTINGS: Settings = {
   // macOS Notch HUD default ON (guarded to darwin at runtime; a no-op elsewhere).
   notchHud: true,
   notchWidth: 168,
+  notchAlign: 'center',
+  notchOffsetY: 0,
   notchHoverExpand: true,
   // model: '' = the explicit "no dictation" state (SPEECH_MODEL_NONE, issue #143). Dictation is
   // opt-in: nothing is selected — and so nothing downloads and no shortcut records — until the
@@ -1782,6 +2046,25 @@ export interface SshProjectStatusEvent {
   projectId: string
   status: SshProjectStatus
   error?: string
+  /**
+   * The ControlMaster socket path, published the MOMENT `ssh -O check` answers — i.e. while the
+   * status is still `connecting`, before the connect's remote setup chain (hook tunnel + per-agent
+   * hook installs, `$HOME`, the remote tmux.conf write, the Codex runtime staging) has run.
+   *
+   * ADDITIVE, and deliberately not a new status value: `connected` keeps its exact meaning (the
+   * whole chain finished), and everything hanging off it — git routing, the remote claude probe,
+   * the tunnel resync, the connection banner — is untouched. This field only lets a terminal whose
+   * remote tmux session ALREADY EXISTS stop waiting: `new-session -A` then merely attaches, and
+   * the remote `-f` config and the tmux `-e` pairs are read at session CREATION only. A node whose
+   * session does not exist (or could not be read) must still wait for `connected`, or it would
+   * create a session with no hook env and lose its agent-status badges — see
+   * `PtyApi.remoteSessionConfirmed`.
+   *
+   * Never emitted for an ADOPTED live-orphan master: that one can still be torn down and rebuilt
+   * inside the same connect (the stale reverse-forward cure), which would kill a terminal that had
+   * already attached over it.
+   */
+  masterControlPath?: string
   claudeAutoPermissionMode?: boolean
   /** The remote `claude --version` output the probe read, riding the same `connected` event as
    *  `claudeAutoPermissionMode`. `null` = the probe ran but found no claude (distinguishable from
@@ -2439,12 +2722,27 @@ export interface ContextApi {
   /** Fires whenever a session's context fill changes. Returns unsubscribe. */
   onUpdate(listener: (usage: ContextWindowUsage) => void): () => void
   /**
-   * Ask main to start (or refresh) tracking a session's transcript so the meter populates
+   * Ask the core to start (or refresh) tracking a session's transcript so the meter populates
    * without waiting for a live hook event — e.g. on node mount after an app restart, when
    * the continuing session is idle. `cwd` is a transcript-path fallback only.
    * `accountId` scopes resolution to a managed Claude account's transcript root (default `~/.claude`).
+   *
+   * `nodeId` and `agentId` are what make this work for anything but a LOCAL CLAUDE node, and both
+   * are load-bearing rather than informational (see `core/context-ensure.ts`):
+   * - `nodeId` is the only way to learn that this session runs on an SSH project's HOST, whose
+   *   transcript no local resolver can see. Without it a remote node's meter stayed blank until
+   *   its next turn, every app restart.
+   * - `agentId` routes the resolve to THAT agent's own locator and tail. Claude's resolver falls
+   *   back to the newest claude transcript for the cwd, so resolving a codex/gemini session through
+   *   it would meter a stranger's conversation. Both omitted ⇒ the legacy local-claude behaviour.
    */
-  ensure(sessionId: string, cwd?: string, accountId?: string): void
+  ensure(
+    sessionId: string,
+    cwd?: string,
+    accountId?: string,
+    nodeId?: string,
+    agentId?: string
+  ): void
 }
 
 /**
@@ -2502,6 +2800,18 @@ export interface ChatTranscriptResult {
   found: boolean
 }
 
+/**
+ * Three answers to "is there a transcript for this session id?", because two are not enough.
+ *
+ * `absent` is a POSITIVE finding — we read the place it would be and it is not there. `unknown`
+ * is "we could not look": an unreadable root, a downed ControlMaster, a surface with no reader,
+ * an id we would not put on a command line anyway. The only consumer that acts on a negative is
+ * cold restore (it launches the agent bare instead of resuming a dead id), and for it the two
+ * must never collapse: dropping a resume on `unknown` would throw away a live conversation
+ * because an ssh call blipped.
+ */
+export type TranscriptPresence = 'present' | 'absent' | 'unknown'
+
 export interface ChatApi {
   /**
    * Reads an agent session transcript as structured chat messages.
@@ -2521,6 +2831,23 @@ export interface ChatApi {
     nodeId?: string,
     agentId?: string
   ): Promise<ChatTranscriptResult>
+
+  /**
+   * Is the transcript this session id names still on disk?
+   *
+   * Resolved STRICTLY by `sessionId` — no cwd fallback, which would answer `present` from another
+   * session's newest file. `nodeId` lets an SSH-project node be asked on its HOST. Never rejects:
+   * anything it cannot judge is `unknown`.
+   *
+   * Claude-shaped transcripts only (`readsClaudeTranscript` is the caller-side gate) — every other
+   * agent's id misses this resolver by construction, and reporting that as `absent` would drop a
+   * perfectly good resume.
+   */
+  transcriptExists(
+    sessionId: string,
+    accountId?: string,
+    nodeId?: string
+  ): Promise<TranscriptPresence>
 }
 
 /** Optional SSH context for account ops. When `projectId` names a connected SSH project, the
@@ -2553,8 +2880,41 @@ export interface ClaudeAccountsApi {
   /** Cancel an in-flight `waitLogin` for this account. */
   cancelWaitLogin(id: string): Promise<void>
   /** Delete a managed account's config dir (recursive) and then its row. With an SSH `ctx`,
-   *  `rm -rf` on the host; a row pinned to a `host` never has a LOCAL dir deleted for it. */
+   *  `rm -rf` on the host; a row pinned to a `host` never has a LOCAL dir deleted for it. For a
+   *  LINKED account (`configDir` set) this only forgets the record — the dir is untouched. */
   remove(id: string, ctx?: AccountSshCtx): Promise<void>
+  /**
+   * Link a PRE-EXISTING local Claude config dir as an account (see `ClaudeAccount.configDir`).
+   * Validates the path (absolute, exists, is a directory, not the system `~/.claude`, not a managed
+   * dir, not already linked), reads its `.claude.json` for the signed-in email (null when not logged
+   * in yet), and installs the managed status hook into it. Local only — no SSH ctx.
+   */
+  link(configDir: string): Promise<{ id: string; configDir: string; email: string | null }>
+  /**
+   * Turn `~/.claude/skills` sharing on or off for one LOCAL account (issue #643) and reconcile the
+   * filesystem now. Idempotent in both directions; the renderer owns the settings flag and calls
+   * this for the effect. Never throws — the result reports what happened, including `refused`
+   * (the account's `skills/` resolves to the system one) and `failed` (an EPERM, a vanished skill).
+   */
+  setSkillSharing(id: string, enabled: boolean): Promise<ClaudeSkillShareResult>
+}
+
+/** What one `setSkillSharing` / launch reconcile did. Counts, never an exception. */
+export interface ClaudeSkillShareResult {
+  linked: number
+  unlinked: number
+  /** Links of ours present after the call — what the Settings row reports. */
+  shared: number
+  /** System skills not shared because the account has its own entry by that name. */
+  occupied: number
+  failed: number
+  /**
+   * Why nothing was done. `same-directory`: the account's `skills/` resolves to the system one
+   * (a hand-made whole-directory link, or a linked account pointed at `~/.claude`) — linking into
+   * it would plant links in the user's own folder and let the off-switch delete them from there.
+   * `remote-account`: an SSH account, whose skills live on its host (out of scope for v1).
+   */
+  refused?: 'same-directory' | 'remote-account'
 }
 
 /**
@@ -2659,10 +3019,18 @@ export interface GrokCliCaps {
    * and `--resume` accepts a TITLE as well as an id, failing as ambiguous on duplicates.
    */
   sessionIdFlag: boolean
+  /**
+   * Model ids this CLI lists, from `grok models` — the CLI's own catalogue, so there is no allowlist
+   * to maintain and a model shipped tomorrow appears without a code change.
+   *
+   * Empty when the subcommand fails, is unparseable, or grok is not installed: the UI then offers no
+   * model switching, which is the pre-feature behaviour. Never a partial list.
+   */
+  models: string[]
 }
 
-/** Unprobed grok ⇒ omit the flag ⇒ today's command line, byte-identical. */
-export const UNKNOWN_GROK_CLI_CAPS: GrokCliCaps = { sessionIdFlag: false }
+/** Unprobed grok ⇒ omit the flag, offer no models ⇒ today's command line, byte-identical. */
+export const UNKNOWN_GROK_CLI_CAPS: GrokCliCaps = { sessionIdFlag: false, models: [] }
 
 export interface GrokApi {
   /** Capabilities of the local grok CLI (memoized in the shell; safe to call repeatedly).
@@ -2810,8 +3178,14 @@ export interface LicenseStatus {
   /** 'pro' when entitled, else null. */
   tier: string | null
   active: boolean
-  /** Unix seconds when the entitlement expires, or null. */
+  /** Unix seconds when the entitlement TOKEN expires, or null — the offline grace window (the server
+   *  mints 7-day tokens and the app re-mints every 6 h, so this rolls forward forever). It is NOT
+   *  when the subscription ends and must never be shown as that; see `termEndsAt` (issue #800). */
   expiresAt: number | null
+  /** Unix seconds when the current subscription term ends, as the server stated it beside the token,
+   *  or null. Null is a first-class answer — a lifetime entitlement, a license with no expiry, or a
+   *  server that does not send the field yet — and renders as no date at all. Display only. */
+  termEndsAt: number | null
   /** Seat cap for the relay host (Team Access): premium → the token's seats (absent → 1), free/inactive → 0. */
   seats: number
   /** Last activation/refresh error reason code, or null. */
@@ -3048,11 +3422,28 @@ export interface DeviceRevokeResult {
 /** Phone-pairing (nodeterm iOS "scan a QR" flow) bridge. */
 export interface PairingApi {
   /** Start the one-shot LAN listener; resolves with the QR payload + an SSH-reachable hint. */
-  start(): Promise<{ payload: string; sshOpen: boolean; relayPlan?: 'ok' | 'dev' | 'off' }>
+  start(): Promise<{
+    payload: string
+    sshOpen: boolean
+    relayPlan?: 'ok' | 'dev' | 'off'
+    /** false = relay-only host (Windows): no SSH key is installed and the QR waits for the relay,
+     *  not sshd (`pairingGate`). Absent from an older main process ⇒ treat as true. */
+    sshKey?: boolean
+    /** Windows only, explanation only: which authorized_keys file sshd reads for this account. */
+    windowsKeyFile?: 'administrators' | 'profile' | 'unknown'
+  }>
   /** Cancel an in-flight pairing (e.g. when the settings section unmounts). */
   stop(): Promise<void>
-  /** Fires once when pairing finishes (ok=true paired, ok=false timeout). Returns unsubscribe. */
-  onDone(cb: (result: { ok: boolean; relay?: 'ok' | 'off' | 'failed' | 'dev' }) => void): () => void
+  /** Fires once when pairing finishes (ok=true paired, ok=false timeout / relay-only mint failure).
+   *  Returns unsubscribe. */
+  onDone(
+    cb: (result: {
+      ok: boolean
+      relay?: 'ok' | 'off' | 'failed' | 'dev'
+      reason?: 'timeout' | 'relay-failed'
+      reached?: boolean
+    }) => void
+  ): () => void
   /** Live re-probe of 127.0.0.1:22, so the "SSH server is off" warning can clear the moment the
    *  user turns it on (polled by the UI only while the warning is showing). */
   probeSsh(): Promise<boolean>

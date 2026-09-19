@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { applyStickyWrite, parseStickyArgs, resolveStickyRef, STICKY_TEXT_MAX } from './stickyWrite'
+import { applyStickyWrite, parseStickyArgs, resolveStickyRef, STICKY_TEXT_MAX } from '@shared/sticky-write'
 
 const nodes = [
   { id: 'sticky-1', sticky: true, title: 'Linear: my tickets' },
