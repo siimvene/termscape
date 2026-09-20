@@ -171,24 +171,23 @@ export function viewportForRectPadded(
  * padding/zoom clamp `fitView` would have applied. Null when the container has no size yet, or
  * when the rect or the resulting viewport is not finite (see `viewportForRectPadded`).
  *
- * **Centred in the pane, and nothing else — `insets` default to none.** Framing a focused node
- * against the chrome-free rectangle instead — centred in it, or centred in the pane and then
- * nudged clear of it — was tried twice and is wrong both ways: the sessions sidebar is a 300px
- * OVERLAY, so either rule pushes the node right by most of its width, and "go to node" stops
- * putting the node where the eye is. The couple of dozen pixels of a node that end up behind the
- * sidebar cost far less than that. The free-rect solve stays where it earns its keep, in `fitAll`,
- * which fits EVERY node and would otherwise tuck them under the dock.
+ * **Centred in the band the pinned chrome leaves free — `insets` are that chrome's directional
+ * pixel insets.** `insets.left`/`insets.right` are how far the PINNED side panels (the sessions
+ * sidebar, the explorer drawer) reach in over the canvas; this reduces the pane by them, centres
+ * the node in the remaining band, and shifts by `insets.left`. A caller with nothing pinned passes
+ * `NO_INSETS` (zeros) and gets whole-pane centring unchanged — the insets only bite once the user
+ * has pinned a panel that would otherwise sit over the node. Trade-off, stated plainly: with a wide
+ * pinned sidebar this pushes the node right by up to the sidebar's width, which this codebase
+ * prefers over leaving part of the node under the panel (the placement upstream 1c248da7 chose).
  *
- * **The MAXIMIZED exception (issue #743), and why it is not a walk-back of that trade-off.** The
- * trade-off above rests on one number: how much of the node ends up behind the panel. For an
- * ordinary node that is a couple of dozen pixels (33px, measured by the reporter). For a maximized
- * one the premise inverts by CONSTRUCTION, not by degree: `maximizeTargetRect` sized the node to
- * be *exactly* as wide as the free area, so centring it in the wider pane buries half the inset
- * less the margin — 137px in the reported layout, and it scales with the PANEL, not with the node.
- * It cannot come out as a few dozen pixels. So a maximized node is framed against the same
- * rectangle its own placement used, which — since the node is that rectangle minus two margins —
- * reproduces exactly where maximize put it. Everything else still centres in the whole pane,
- * because `insets` is `NO_INSETS` unless the caller says otherwise.
+ * **The MAXIMIZED case (issue #743) reproduces its own placement, it is not a special rule here.**
+ * A maximized node's premise differs by CONSTRUCTION, not by degree: `maximizeTargetRect` sized the
+ * node to be *exactly* as wide as the free area, so centring it in the WHOLE pane would bury half
+ * the inset less the margin (137px in the reported layout, scaling with the PANEL, not the node) —
+ * where an ordinary node loses only a couple of dozen pixels (33px, measured by the reporter). Its
+ * placement already used these same insets, so framing it against the same free band — the node
+ * being that band minus two margins — lands it exactly where maximize put it. No branch on
+ * `isMaximized` is needed: passing the pinned insets is correct for both cases.
  *
  * `zoom` keeps the camera at a scale the caller already has (`settings.focusZoomToNode` off): the
  * node is centred exactly as it would be, at that zoom, so "go to" stays a pan. It is passed
