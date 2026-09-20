@@ -204,10 +204,10 @@ describe('breadcrumb wiring the CLAUDE.md bullet calls load-bearing', () => {
     expect(frame).toContain('setViewport(viewport, { duration: 300 })')
   })
 
-  it('centres the node in the pane and never solves chrome around it', () => {
-    // Framing a single focused node against the chrome-free rectangle was reported wrong twice
-    // ("too far right", "not in the middle"): the sessions sidebar is a 300px overlay and it is
-    // open exactly when this is used. The free-rect solve stays in fitAll, which fits every node.
+  it('frames the node inside the pinned-chrome-free region, keep-zoom preserved', () => {
+    // frameNode reduces the pane by the pinned insets and centres the node in the remainder, via
+    // viewportForRect(..., insets). It never solves the chrome around the node itself; the flat
+    // free-rect solve stays in fitAll (which fits EVERY node and would tuck them under the dock).
     const frame = CANVAS_SRC.slice(
       CANVAS_SRC.indexOf('const frameNode = useCallback'),
       CANVAS_SRC.indexOf('const goToNode = useCallback')
@@ -217,16 +217,20 @@ describe('breadcrumb wiring the CLAUDE.md bullet calls load-bearing', () => {
     expect(frame).toContain('settings.focusZoomToNode ? undefined : getZoom()')
   })
 
-  it('insets that framing ONLY for a maximized node (issue #743)', () => {
-    // The trade-off above is about how much of the node ends up behind the panel, and for a
-    // maximized node that number is set by the PANEL, not the node: it is exactly as wide as the
-    // free area, so centring it in the wider pane buries half the inset less the margin. Keying
-    // on anything looser would walk back the whole-pane rule for ordinary nodes.
+  it('insets EVERY node with the pinned chrome, not only maximized ones (a0c86e92 restored)', () => {
+    // REWRITTEN from "insets that framing ONLY for a maximized node". The v0.3.7 merge (de3007ef,
+    // adopting upstream 1c248da7 "centre in the whole pane") made a non-maximized node centre in
+    // the WHOLE pane (insets = NO_INSETS), landing it half behind the pinned sessions sidebar — the
+    // reported regression. The insets are now measurePinnedInsets(box) unconditionally. That does
+    // NOT walk back the "put the node where the eye is" concern: measurePinnedInsets counts only
+    // PINNED panels, so an unpinned hover-peek sidebar is 0 insets and the node still centres in the
+    // whole pane; a maximized node still lands where its placement (these same insets) put it (#743).
     const frame = CANVAS_SRC.slice(
       CANVAS_SRC.indexOf('const frameNode = useCallback'),
       CANVAS_SRC.indexOf('const goToNode = useCallback')
     )
-    expect(frame).toContain('const insets = isMaximized(node) ? measurePinnedInsets(box) : NO_INSETS')
+    expect(frame).toContain('const insets = measurePinnedInsets(box)')
+    expect(frame).not.toContain('isMaximized(node) ? measurePinnedInsets(box) : NO_INSETS')
   })
 
   it('the resume card slot is spent only on a card that can render, and only when opted in', () => {

@@ -123,21 +123,30 @@ paths:
   - **Geometry (`renderer/lib/nodeFocus.ts`):** the rect is React Flow's own measurement when it has
     one (`getInternalNode`; `measured` reaches OUR node objects one render later via `onNodesChange`,
     `internals.positionAbsolute` resolves the group chain + `extent:'parent'`), else `nodeFitRect`
-    from the PERSISTED size walking the parent chain. Then `viewportForRect`: **centred in the pane,
-    nothing else.** Framing against the chrome-free rectangle was tried twice and is wrong both ways
-    (centred IN it: too far right on an ultrawide, half off on a laptop; centred in pane then nudged
-    clear: still not the middle), because `.sessions-sidebar` is a 300px absolute OVERLAY open exactly
-    when this is used. The couple of dozen px behind the sidebar cost less than the centre. The
-    free-rect solve stays in `fitAll` (below), which fits EVERY node and would tuck them under the dock.
-  - **ONE exception, not a walk-back (issue #743): a MAXIMIZED node** (`isMaximized` —
-    `data.premaxRect`) is framed against the rectangle its own placement used, via
-    `measurePinnedInsets(box)` → `viewportForRect`. The trade-off above rests on one number — how much
-    of the node ends up behind the panel — and for a maximized node that number is set by the PANEL by
-    construction: `maximizeTargetRect` sized it to be *exactly* the free area, so centring it in the
-    wider pane buries half the inset. Measured (signed v0.3.5, sidebar pinned): an ordinary node lost
-    33px, the maximized one 137px, the camera drifting `322 / 2 = 161`px per round trip. With no pinned
-    panel `insets` is zero and it is a no-op; a pane narrower than its panels falls back to the whole
-    pane. `measurePinnedInsets` reads the DOM, so it is asked only for a node that can use the answer.
+    from the PERSISTED size walking the parent chain. Then `viewportForRect(rect, w, h, keepZoom,
+    measurePinnedInsets(box))`: **centred in the region the PINNED chrome leaves over**, so no focus
+    path parks the node half under the pinned sessions sidebar. `viewportForRect` reduces the pane by
+    the horizontal insets, centres the node in the remainder, and shifts by `insets.left` (fit case:
+    `getViewportForBounds` on the reduced width + shift; keep-zoom case: pan into the reduced band).
+    A pane narrower than its panels falls back to the whole pane rather than solving a negative width.
+  - **`insets` is `measurePinnedInsets(box)` for EVERY node, and that is the fix, not the exception.**
+    The upstream v0.3.7 merge (de3007ef, adopting upstream 1c248da7 "centre in the whole pane, full
+    stop") re-broke the sidebar case: it centred a non-maximized node in the WHOLE pane and left it
+    partly behind the pinned sidebar. This restores the fork fix (a0c86e92 / 1d7a7da3, 2026-09-02).
+    The upstream "too far right on an ultrawide" worry is answered by `measurePinnedInsets` counting
+    **only PINNED panels** (`--pinned`): an unpinned sidebar is a hover peek → 0 insets → the node
+    still centres in the whole pane, so the inset only bites when the user has said "this one stays".
+    A MAXIMIZED node (`isMaximized` — `data.premaxRect`) still lands exactly where its own placement
+    put it, because `maximizeTargetRect` used these same insets (issue #743; measured signed v0.3.5,
+    sidebar pinned: ordinary node was losing 33px, maximized 137px). `measurePinnedInsets` reads the
+    DOM, so it is asked once per focus, for the node that will use it.
+    - **Reach (`renderer/lib/pinnedInsets.ts`):** `ScreenInsets` is HORIZONTAL only (`{left,right}`)
+      and `measurePinnedInsets` measures the two side panels that dock over the canvas —
+      `.sessions-sidebar--pinned` and `.drawer--pinned` (explorer), attributed to whichever edge each
+      hugs, so a sidebar pinned on the RIGHT insets `right`. The bottom dock / minimap are NOT inset
+      here (they are bottom-anchored and this model has no top/bottom axis); the fork's old
+      `solveFreeRegion` reserved them on every edge, but that is `fitAll`'s job now — the reported
+      regression was the sidebar, which is horizontal and fully expressible without it.
   - **`settings.focusZoomToNode`** (Behavior, default ON) is the rescale escape hatch: off, the camera
     keeps the zoom `getZoom()` reports and only pans, and that zoom is passed **unclamped** (it is one
     the canvas already shows; re-clamping it to the framing range would rescale the view the option
