@@ -292,7 +292,6 @@ import {
 } from '../lib/projectOpen'
 import {
   absolutePosition,
-  isMaximized,
   isMeasured,
   nodeFitRect,
   viewportForRect,
@@ -300,7 +299,7 @@ import {
   type FocusableNode
 } from '../lib/nodeFocus'
 import { NODE_MAXIMIZE_MARGIN_PX, maximizeTargetRect } from '../lib/nodeMaximize'
-import { NO_INSETS, measurePinnedInsets, type ScreenInsets } from '../lib/pinnedInsets'
+import { measurePinnedInsets, type ScreenInsets } from '../lib/pinnedInsets'
 import { ZONE_GUTTER_PX, ZONES, zoneTargetRect, type ZoneId } from '../lib/nodeZones'
 import {
   recordBreadcrumb,
@@ -7608,10 +7607,14 @@ export function Canvas() {
       // `focusZoomToNode` off: keep the zoom the user settled on and only pan — the node still
       // lands in the middle, only the rescale is dropped.
       const keepZoom = useSettings.getState().settings.focusZoomToNode ? undefined : getZoom()
-      // A MAXIMIZED node is framed against the rectangle its own placement used (issue #743);
-      // everything else is centred in the whole pane, as it always was. `measurePinnedInsets`
-      // reads the DOM, so it is asked only for the node that can use the answer.
-      const insets = isMaximized(node) ? measurePinnedInsets(box) : NO_INSETS
+      // Frame EVERY node inside the region the PINNED chrome leaves over, so no focus path
+      // parks the node half under the pinned sessions sidebar. This restores the fork fix
+      // (a0c86e92 / 1d7a7da3, 2026-09-02) that the upstream v0.3.7 merge (de3007ef, adopting
+      // upstream 1c248da7's "centre in the whole pane") re-broke. `measurePinnedInsets` counts
+      // ONLY pinned panels, so an unpinned hover-peek sidebar is 0 insets and the node still
+      // centres in the whole pane in the common case; a maximized node lands exactly where its
+      // own placement put it, because that placement used these same insets (issue #743).
+      const insets = measurePinnedInsets(box)
       const viewport = viewportForRect(rect, box.width, box.height, keepZoom, insets)
       if (viewport) void setViewport(viewport, { duration: 300 })
     },
