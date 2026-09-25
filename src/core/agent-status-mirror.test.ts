@@ -2404,6 +2404,18 @@ describe('a restored entry is never proof', () => {
     expect(b.state).toBe('working')
   })
 
+  it('publishes restored provenance at boot without waiting for a new hook', async () => {
+    const file = path.join(dir, 'agent-status.json')
+    fs.writeFileSync(file, JSON.stringify({
+      v: 1, updatedAt: Date.now(),
+      nodes: { n1: { state: 'blocked', agentId: 'codex', updatedAt: Date.now() } }
+    }))
+    initAgentStatusMirror(file)
+    await vi.waitFor(() => {
+      expect(JSON.parse(fs.readFileSync(file, 'utf8')).nodes.n1.restored).toBe(true)
+    })
+  })
+
   // THIS ASSERTION USED TO SAY THE OPPOSITE, and it was wrong in the direction that matters.
   // `restored` means "this entry's STATE came off disk at boot" — that is what its docblock says
   // and what gate 2 will read it as. The first version cleared it on ANY event, so a `context`

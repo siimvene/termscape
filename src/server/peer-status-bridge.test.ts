@@ -184,6 +184,34 @@ describe('startPeerStatusBridge', () => {
     vi.advanceTimersByTime(15_000)
     expect(broadcast).toHaveBeenCalledTimes(1)
   })
+
+  it.each(['codex', 'claude'])('replays a coalesced session replacement before %s approval state', (agentId) => {
+    vi.useFakeTimers()
+    const file = tmpMirror({
+      reused: { state: 'working', agentId: 'claude', sessionId: 'old', updatedAt: Date.now() }
+    })
+    const broadcast = vi.fn()
+    stops.push(startPeerStatusBridge(file, { broadcast, ownState: () => undefined, watch: false }))
+    broadcast.mockClear()
+    fs.writeFileSync(file, JSON.stringify({ v: 1, nodes: {
+      reused: { state: 'blocked', agentId, sessionId: 'new', updatedAt: Date.now() }
+    }, inbox: { events: [
+      { nodeId: 'reused', sessionId: 'new', kind: 'approval', pendingId: 'new-ticket' }
+    ] } }))
+    vi.advanceTimersByTime(15_000)
+    expect(broadcast.mock.calls.map((call) => call[1])).toEqual([
+      { nodeId: 'reused', agentId: 'claude', sessionId: 'old', kind: 'session', sessionPhase: 'end' },
+      { nodeId: 'reused', agentId, sessionId: 'new', kind: 'session', sessionPhase: 'start' },
+      expect.objectContaining({
+        nodeId: 'reused', agentId, sessionId: 'new', kind: 'state', state: 'blocked',
+        askKind: 'approval', pendingId: 'new-ticket'
+      })
+    ])
+    broadcast.mockClear()
+    vi.advanceTimersByTime(15_000)
+    expect(broadcast).toHaveBeenCalledTimes(1)
+    expect(broadcast.mock.calls[0][1].kind).toBe('state')
+  })
 })
 
 describe('readPeerUsage', () => {

@@ -205,7 +205,7 @@ export interface PeerBridgeDeps {
  */
 export function startPeerStatusBridge(file: string, deps: PeerBridgeDeps): () => void {
   const own = deps.ownState ?? freshNodeState
-  const last = new Map<string, { key: string; agentId: string }>()
+  const last = new Map<string, { key: string; agentId: string; sessionId?: string }>()
   let lastUsageAt = -1
 
   const sweep = (full = false) => {
@@ -222,14 +222,29 @@ export function startPeerStatusBridge(file: string, deps: PeerBridgeDeps): () =>
       if (own(nodeId) !== undefined) continue
       seen.add(nodeId)
       const key = JSON.stringify(n)
+      const previous = last.get(nodeId)
+      const agentId = n.agentId ?? 'claude'
       // `full` skips the change gate: WS clients that connected after a state was first
       // broadcast would otherwise read UNKNOWN until the peer changes something — the poll
       // tick doubles as the late-joiner replay (consort finding).
-      if (!full && last.get(nodeId)?.key === key) continue
-      last.set(nodeId, { key, agentId: n.agentId ?? 'claude' })
+      if (!full && previous?.key === key) continue
+      last.set(nodeId, { key, agentId, sessionId: n.sessionId })
+      if (previous && (previous.agentId !== agentId ||
+        (previous.sessionId && n.sessionId && previous.sessionId !== n.sessionId))) {
+        // The disk debounce can coalesce both the old idle edge and the new SessionStart.
+        // Retire the old generation first, then open the new one before its current state
+        // (which may already be blocked with an approval ticket).
+        deps.broadcast(IPC.agentStatus, {
+          nodeId, agentId: previous.agentId, sessionId: previous.sessionId,
+          kind: 'session', sessionPhase: 'end'
+        } satisfies NormalizedAgentEvent)
+        deps.broadcast(IPC.agentStatus, {
+          nodeId, agentId, sessionId: n.sessionId, kind: 'session', sessionPhase: 'start'
+        } satisfies NormalizedAgentEvent)
+      }
       const ev: NormalizedAgentEvent = {
         nodeId,
-        agentId: n.agentId ?? 'claude',
+        agentId,
         kind: 'state',
         state: n.state,
         sessionId: n.sessionId,

@@ -1451,6 +1451,8 @@ function loadPersisted(file: string): void {
 export function initAgentStatusMirror(filePath?: string): void {
   targetFile = filePath ?? path.join(platform().userDataDir, 'agent-status.json')
   loadPersisted(targetFile)
+  // Publish negative provenance promptly, even if no new hook arrives after a restart.
+  if ([...state.values()].some((entry) => entry.restored)) scheduleWrite()
   startStaleSweep()
 }
 
