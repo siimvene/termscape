@@ -177,6 +177,8 @@ export interface MirrorFile {
     string,
     {
       state?: AgentState
+      /** Negative provenance: restored state has not been confirmed by a live hook this run. */
+      restored?: true
       agentId?: AgentId
       sessionId?: string
       /** Observed Claude account (see MirrorEntry.account). Additive — absent on old files and
@@ -493,6 +495,8 @@ function reduceEffectiveEntry(
   now: number
 ): MirrorEntry {
   const next: MirrorEntry = prev ? { ...prev } : { updatedAt: now }
+  const sessionStart = ev.sessionPhase === 'start' &&
+    (ev.kind === 'session' || (ev.kind === 'state' && ev.state === 'working'))
   /**
    * Commit a state onto `next` — and everything that must move WITH it. One function rather than
    * the same four lines at each branch, because the alternative was measured: of the three branches
@@ -550,11 +554,10 @@ function reduceEffectiveEntry(
   //     it is spawned by the parent's turn, so its events land while the node is `working`. A
   //     genuine relaunch as a different agent (the user quit claude and started codex in the
   //     same pane) starts while the node is IDLE — no turn is open to spawn anything. So a
-  //     foreign `session`/`start` is honored as a relaunch only when the node is not working;
+  //     explicit session start is honored as a relaunch only when the node is not working;
   //     the same event mid-turn is a child and is dropped like the rest.
   if (ev.agentId && next.agentId && ev.agentId !== next.agentId) {
-    const relaunch =
-      ev.kind === 'session' && ev.sessionPhase === 'start' && prev?.state !== 'working'
+    const relaunch = sessionStart && prev?.state !== 'working'
     if (!relaunch) return next
     next.agentId = ev.agentId
   } else if (ev.agentId) {
@@ -595,6 +598,7 @@ function reduceEffectiveEntry(
     // measuring from the `done`.
     const heldOff =
       ev.state === 'working' &&
+      !sessionStart &&
       !ev.newTurn &&
       prev?.state === 'done' &&
       now - (prev.updatedAt ?? 0) < DONE_HOLDOFF_MS
@@ -678,6 +682,8 @@ export function buildFile(
       ...(e.account ? { account: e.account } : {}),
       ...(e.name ? { name: e.name } : {}),
       ...(e.hibernated ? { hibernated: true as const } : {}),
+      // Peer readers need this negative provenance marker; proof still never goes on disk.
+      ...(e.restored ? { restored: true as const } : {}),
       updatedAt: e.updatedAt
     }
   }
@@ -1394,8 +1400,8 @@ function loadPersisted(file: string): void {
           ...(e.name ? { name: e.name } : {}),
           ...(e.hibernated === true ? { hibernated: true as const } : {}),
           updatedAt,
-          // Marked, and FORCED unverified whatever the file said. `buildFile` writes neither field
-          // — it is an allowlist, which is what keeps `stateVerified` off disk — but a file this
+          // Marked, and FORCED unverified whatever the file said. `buildFile` never writes proof
+          // (only the negative `restored` marker), but a file this
           // process did not write (hand-edited, downgraded, or from a future build) must not be
           // able to hand gate 2 a proof nothing presented this run. See `restored`.
           restored: true,
@@ -1909,6 +1915,14 @@ export function nodeState(nodeId: string): AgentState | undefined {
   return state.get(nodeId)?.state
 }
 
+/** Only current-run, fresh evidence may be replayed or override a peer's live status. */
+export function freshNodeState(nodeId: string, now = Date.now()): AgentState | undefined {
+  const entry = state.get(nodeId)
+  if (!entry?.state || entry.restored || now - entry.updatedAt > EXPIRE_MS) return undefined
+  if (isStaleWorking(entry.state, entry.updatedAt, now, WORKING_STALE_MS)) return undefined
+  return entry.state
+}
+
 /**
  * The full mirror entry for one node — agent messaging's gate 2 reads this (state, `stateVerified`,
  * `restored`, `idleInferred`, `clientRevision`) through `DeliveryDeps.mirrorEntry`. Read-only by
@@ -1926,8 +1940,7 @@ export function statusSnapshotEvents(now = Date.now()): NormalizedAgentEvent[] {
     pending.set(event.nodeId, event)
   }
   return [...state].flatMap(([nodeId, entry]) => {
-    if (!entry.state || entry.restored || now - entry.updatedAt > EXPIRE_MS) return []
-    if (isStaleWorking(entry.state, entry.updatedAt, now, WORKING_STALE_MS)) return []
+    if (freshNodeState(nodeId, now) === undefined) return []
     const candidate = pending.get(nodeId)
     const ask = (entry.state === 'waiting' || entry.state === 'blocked') &&
       candidate?.sessionId === entry.sessionId ? candidate : undefined

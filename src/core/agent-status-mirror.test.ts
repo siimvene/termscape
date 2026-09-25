@@ -2,8 +2,9 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
-import type { NormalizedAgentEvent } from '@shared/agents/normalize'
+import { normalizeCodex, type NormalizedAgentEvent } from '@shared/agents/normalize'
 import { syntheticAnsweredEvent } from './agents/pending-approvals'
+import { WORKING_STALE_MS } from '../shared/agents/stale'
 import {
   reduceEntry,
   buildFile,
@@ -48,7 +49,8 @@ import {
   type NodeNowChange,
   type InboxEvent,
   sweepStaleWorking,
-  statusSnapshotEvents
+  statusSnapshotEvents,
+  freshNodeState
 } from './agent-status-mirror'
 
 // Minimal event factory — only the fields the reducer reads.
@@ -169,6 +171,19 @@ describe('reduceEntry (main-state reduction)', () => {
     expect(e.stateVerified).not.toBe(true)
   })
 
+  it('adopts an explicit Codex SessionStart from an idle provider, but not from an active child', () => {
+    const start = normalizeCodex({
+      nodeId: 'n1', agentId: 'codex',
+      payload: { hook_event_name: 'SessionStart', session_id: 'cx-1' }
+    })!
+    const done = reduceEntry(undefined, ev({ state: 'done', sessionId: 'claude-1' }), 1000)
+    expect(reduceEntry(done, start, 1001)).toMatchObject({
+      agentId: 'codex', sessionId: 'cx-1', state: 'working', updatedAt: 1001
+    })
+    const working = reduceEntry(undefined, ev({ state: 'working', sessionId: 'claude-1' }), 1000)
+    expect(reduceEntry(working, start, 1001)).toEqual(working)
+  })
+
   it('a NON-codex child forging a session-kind event while the parent works is rejected too', () => {
     // Only normalizeCodex folds SessionStart into a `state`; claude/gemini/copilot/opencode/grok all
     // emit `kind:'session'` for it — so "session-kind means the node's own lifecycle" was never a
@@ -274,14 +289,20 @@ describe('recordAgentEvent + atomic write', () => {
   })
 
   it('builds a fresh replay with provider and approval metadata, excluding stale working state', () => {
-    const now = 10_000
+    const now = Date.now()
     recordAgentEvent(ev({ nodeId: 'approval', agentId: 'codex', state: 'blocked',
       lastMessage: 'Approve write', pendingId: 'ticket-1', sessionId: 's1' }))
-    const replay = statusSnapshotEvents(now)
+    recordAgentEvent(ev({ nodeId: 'working', state: 'working' }))
+    const replay = statusSnapshotEvents(now + WORKING_STALE_MS + 1000)
     expect(replay).toContainEqual(expect.objectContaining({
       nodeId: 'approval', agentId: 'codex', state: 'blocked',
       askKind: 'approval', pendingId: 'ticket-1'
     }))
+    expect(replay.some((event) => event.nodeId === 'working')).toBe(false)
+    expect(freshNodeState('working', now)).toBe('working')
+    expect(freshNodeState('working', now + WORKING_STALE_MS + 1000)).toBeUndefined()
+    expect(freshNodeState('approval', now + EXPIRE_MS + 1000)).toBeUndefined()
+    expect(statusSnapshotEvents(now + EXPIRE_MS + 1000)).toEqual([])
   })
 
   it('writes the file with 0600 permissions', async () => {
@@ -2368,6 +2389,8 @@ describe('a restored entry is never proof', () => {
     expect(_snapshot().n1?.state).toBe('done')
     expect(_snapshot().n1?.restored).toBe(true)
     expect(_snapshot().n1?.stateVerified).toBe(false)
+    expect(freshNodeState('n1')).toBeUndefined()
+    expect(statusSnapshotEvents()).toEqual([])
   })
 
   it('the first live event that COMMITS a state clears `restored`', () => {
@@ -2419,7 +2442,7 @@ describe('a restored entry is never proof', () => {
     expect(b.restored).toBeUndefined()
   })
 
-  it('buildFile\'s allowlist keeps neither field on disk (its sibling above covers the restore)', () => {
+  it('buildFile preserves negative restored provenance but never writes proof', () => {
     const file = path.join(dir, 'agent-status.json')
     fs.writeFileSync(
       file,
@@ -2432,7 +2455,9 @@ describe('a restored entry is never proof', () => {
     initAgentStatusMirror(file)
     const doc = buildFile(_snapshot(), Date.now())
     expect('stateVerified' in doc.nodes.n1).toBe(false)
-    expect('restored' in doc.nodes.n1).toBe(false)
+    expect(doc.nodes.n1.restored).toBe(true)
+    recordAgentEvent(ev({ state: 'working', newTurn: true }))
+    expect(buildFile(_snapshot(), Date.now()).nodes.n1.restored).toBeUndefined()
   })
 })
 

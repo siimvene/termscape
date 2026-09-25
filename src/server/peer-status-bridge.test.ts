@@ -5,6 +5,7 @@ import * as path from 'path'
 import { readPeerMirror, readFreshPeerMirror, readPeerUsage, startPeerStatusBridge } from './peer-status-bridge'
 import { IPC } from '../shared/ipc'
 import { WORKING_STALE_MS } from '../shared/agents/stale'
+import { _resetForTest, EXPIRE_MS, initAgentStatusMirror, recordAgentEvent } from '../core/agent-status-mirror'
 
 function tmpMirror(nodes: Record<string, unknown>, usage?: unknown): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'peer-mirror-'))
@@ -16,6 +17,7 @@ function tmpMirror(nodes: Record<string, unknown>, usage?: unknown): string {
 const stops: Array<() => void> = []
 afterEach(() => {
   while (stops.length) stops.pop()!()
+  _resetForTest()
   vi.useRealTimers()
 })
 
@@ -52,6 +54,7 @@ describe('readPeerMirror', () => {
       approval: { state: 'blocked', agentId: 'codex', updatedAt: now },
       question: { state: 'waiting', agentId: 'claude', updatedAt: now },
       reused: { state: 'blocked', agentId: 'claude', sessionId: 'new', updatedAt: now },
+      restored: { state: 'blocked', agentId: 'codex', restored: true, updatedAt: now },
       stale: { state: 'working', agentId: 'claude', updatedAt: now - 30 * 60_000 }
     }, inbox: { events: [
       { nodeId: 'approval', kind: 'approval', pendingId: 'ticket', resolved: false },
@@ -65,10 +68,31 @@ describe('readPeerMirror', () => {
     expect(snapshot.get('reused')).not.toHaveProperty('pendingId')
     expect(snapshot.get('reused')).not.toHaveProperty('askKind')
     expect(snapshot.has('stale')).toBe(false)
+    expect(snapshot.has('restored')).toBe(false)
   })
 })
 
 describe('startPeerStatusBridge', () => {
+  it('fresh peer evidence wins over restored, expired, and stale-working local rows', () => {
+    vi.useFakeTimers()
+    _resetForTest()
+    const now = Date.now()
+    initAgentStatusMirror(tmpMirror({ restored: { state: 'blocked', updatedAt: now } }))
+    vi.setSystemTime(now - EXPIRE_MS - 1)
+    recordAgentEvent({ nodeId: 'expired', agentId: 'claude', kind: 'state', state: 'done' })
+    vi.setSystemTime(now - WORKING_STALE_MS - 1)
+    recordAgentEvent({ nodeId: 'stale', agentId: 'claude', kind: 'state', state: 'working' })
+    vi.setSystemTime(now)
+    recordAgentEvent({ nodeId: 'live', agentId: 'claude', kind: 'state', state: 'working' })
+    const file = tmpMirror(Object.fromEntries(['restored', 'expired', 'stale', 'live'].map((id) =>
+      [id, { state: 'working', agentId: 'codex', updatedAt: now }]
+    )))
+    const broadcast = vi.fn()
+    stops.push(startPeerStatusBridge(file, { broadcast, watch: false }))
+    expect(broadcast.mock.calls.map((call) => call[1].nodeId)).toEqual(['restored', 'expired', 'stale'])
+    expect(broadcast.mock.calls.every((call) => call[1].agentId === 'codex')).toBe(true)
+  })
+
   it('broadcasts each peer node once as a kind:state agent:status event', () => {
     const now = Date.now()
     const file = tmpMirror({

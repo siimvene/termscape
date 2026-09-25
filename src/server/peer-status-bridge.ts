@@ -22,7 +22,7 @@
 import * as fs from 'fs'
 import * as path from 'path'
 import { IPC } from '../shared/ipc'
-import { nodeState, EXPIRE_MS } from '../core/agent-status-mirror'
+import { freshNodeState, EXPIRE_MS } from '../core/agent-status-mirror'
 import { WORKING_STALE_MS, isStaleWorking } from '../shared/agents/stale'
 import type { AgentState, NormalizedAgentEvent } from '../shared/agents/normalize'
 
@@ -36,6 +36,7 @@ interface PeerNode {
   sessionId?: string
   name?: string
   updatedAt?: number
+  restored?: true
   pendingId?: string
   askKind?: 'approval' | 'question'
 }
@@ -170,6 +171,7 @@ export function readPeerMirror(file: string): Map<string, PeerNode> {
       sessionId: str(n.sessionId, 128),
       name: typeof n.name === 'string' ? n.name.slice(0, 200) : undefined,
       updatedAt: finiteNum(n.updatedAt),
+      ...(n.restored === true ? { restored: true as const } : {}),
       ...(ask?.pendingId ? { pendingId: ask.pendingId } : {}),
       ...(ask ? { askKind: ask.askKind } : {})
     })
@@ -181,7 +183,7 @@ export function readPeerMirror(file: string): Map<string, PeerNode> {
 export function readFreshPeerMirror(file: string, now = Date.now()): Map<string, PeerNode> {
   const fresh = new Map<string, PeerNode>()
   for (const [nodeId, entry] of readPeerMirror(file)) {
-    if (entry.updatedAt === undefined || now - entry.updatedAt > EXPIRE_MS) continue
+    if (entry.restored || entry.updatedAt === undefined || now - entry.updatedAt > EXPIRE_MS) continue
     if (isStaleWorking(entry.state, entry.updatedAt, now, WORKING_STALE_MS)) continue
     fresh.set(nodeId, entry)
   }
@@ -202,7 +204,7 @@ export interface PeerBridgeDeps {
  * the `sessionTitle` field on live hook events is declared but never emitted).
  */
 export function startPeerStatusBridge(file: string, deps: PeerBridgeDeps): () => void {
-  const own = deps.ownState ?? nodeState
+  const own = deps.ownState ?? freshNodeState
   const last = new Map<string, { key: string; agentId: string }>()
   let lastUsageAt = -1
 

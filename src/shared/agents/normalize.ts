@@ -409,8 +409,13 @@ export function normalizeCodex(env: RawHookEnvelope): NormalizedAgentEvent | nul
       ...(question ? { lastMessage: question } : {})
     }
   }
-  // SessionStart + tool events keep the node "working".
-  if (ev === 'SessionStart' || ev === 'PreToolUse' || ev === 'PostToolUse') {
+  // Codex historically exposed SessionStart as state:working. Keep that wire shape for
+  // consumers that surface the initial live state, but mark the lifecycle boundary explicitly
+  // so a provider switch cannot be mistaken for a foreign child state event.
+  if (ev === 'SessionStart') {
+    return { ...base, kind: 'state', state: 'working', sessionPhase: 'start' }
+  }
+  if (ev === 'PreToolUse' || ev === 'PostToolUse') {
     return { ...base, kind: 'state', state: 'working' }
   }
   if (ev === 'PermissionRequest') return { ...base, kind: 'state', state: 'waiting' }

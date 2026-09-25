@@ -64,7 +64,7 @@ import { installHooksIntoLocalAccounts } from '../core/claude-accounts-service'
 import {
   initAgentStatusMirror,
   statusSnapshotEvents,
-  nodeState,
+  freshNodeState,
   flush as flushAgentStatusMirror,
   recordAgentEvent,
   ackDone,
@@ -479,12 +479,13 @@ export async function startServer(
   // stream for updates, but expose a read-only replay so Home can hydrate status before any PTY
   // is opened. Both readers exclude expired evidence rather than inventing liveness for idle panes.
   platform.handle(IPC.agentStatusSnapshot, () => {
-    const events = statusSnapshotEvents()
+    const now = Date.now()
+    const events = statusSnapshotEvents(now)
     const peerFile = (process.env.NODETERM_PEER_STATUS_MIRROR || '').trim()
     if (peerFile) {
-      for (const [nodeId, entry] of readFreshPeerMirror(peerFile)) {
-        // Local hook state is authoritative when both mirrors contain a node.
-        if (nodeState(nodeId) !== undefined) continue
+      for (const [nodeId, entry] of readFreshPeerMirror(peerFile, now)) {
+        // Only fresh local hook state is authoritative when both mirrors contain a node.
+        if (freshNodeState(nodeId, now) !== undefined) continue
         events.push({
           nodeId,
           agentId: entry.agentId ?? 'claude',
