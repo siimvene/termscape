@@ -872,6 +872,17 @@ nt_preflight() {
     '') ;;
     [!A-Za-z0-9]*|*[!A-Za-z0-9._-]*) nt_fail codex-account-invalid; return ;;
   esac
+  # Remote resume rejects permission overrides (verified with Codex 0.156). Never convert an
+  # explicitly configured launch into a remote resume: use the existing plain-Codex path with
+  # its exact arguments instead. This also keeps the policy out of the reconnect path, which
+  # deliberately drops the one-shot launch arguments. Stop at -- so a prompt is not a flag.
+  for nt_arg in "$@"; do
+    case "$nt_arg" in
+      --) break ;;
+      --dangerously-bypass-approvals-and-sandbox|--yolo|--full-auto|--approve-for-me|--ask-for-approval|--ask-for-approval=*|-a|-a=*|-auntrusted|-aon-failure|-aon-request|-anever|--sandbox|--sandbox=*|-s|-s=*|-sread-only|-sworkspace-write|-sdanger-full-access)
+        nt_fail permission-policy-requires-local; return ;;
+    esac
+  done
   # The authoritative check runs FIRST and unchanged; the stat below only decides WHICH reason to
   # report. Ordering it the other way would let a codex that no longer needs the standalone runtime
   # fall back on a stat we had no business trusting more than the command itself.

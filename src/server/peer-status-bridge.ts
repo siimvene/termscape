@@ -22,7 +22,8 @@
 import * as fs from 'fs'
 import * as path from 'path'
 import { IPC } from '../shared/ipc'
-import { nodeState } from '../core/agent-status-mirror'
+import { nodeState, EXPIRE_MS } from '../core/agent-status-mirror'
+import { WORKING_STALE_MS, isStaleWorking } from '../shared/agents/stale'
 import type { AgentState, NormalizedAgentEvent } from '../shared/agents/normalize'
 
 const POLL_MS = 15_000
@@ -35,6 +36,8 @@ interface PeerNode {
   sessionId?: string
   name?: string
   updatedAt?: number
+  pendingId?: string
+  askKind?: 'approval' | 'question'
 }
 
 /** Read the mirror's raw JSON once — shared by the node reader and the usage reader. */
@@ -134,6 +137,21 @@ export function readPeerMirror(file: string): Map<string, PeerNode> {
   if (typeof raw !== 'object' || raw === null) return out
   const nodes = (raw as { nodes?: unknown }).nodes
   if (typeof nodes !== 'object' || nodes === null) return out
+  const pending = new Map<string, { pendingId?: string; sessionId?: string; askKind: 'approval' | 'question' }>()
+  const inbox = (raw as { inbox?: { events?: unknown } }).inbox?.events
+  if (Array.isArray(inbox)) {
+    for (const item of inbox) {
+      if (typeof item !== 'object' || item === null) continue
+      const e = item as Record<string, unknown>
+      if (e.resolved === true || (e.kind !== 'approval' && e.kind !== 'question') || typeof e.nodeId !== 'string') continue
+      pending.set(e.nodeId, {
+        askKind: e.kind,
+        sessionId: typeof e.sessionId === 'string' ? e.sessionId : undefined,
+        pendingId: e.kind === 'approval' && typeof e.pendingId === 'string' && e.pendingId.length <= 256
+          ? e.pendingId : undefined
+      })
+    }
+  }
   for (const [nodeId, v] of Object.entries(nodes as Record<string, unknown>)) {
     if (typeof v !== 'object' || v === null) continue
     const n = v as Record<string, unknown>
@@ -143,15 +161,31 @@ export function readPeerMirror(file: string): Map<string, PeerNode> {
     if (nodeId.length > 128) continue
     const str = (v: unknown, max: number): string | undefined =>
       typeof v === 'string' && v.length <= max ? v : undefined
+    const candidate = pending.get(nodeId)
+    const ask = (n.state === 'waiting' || n.state === 'blocked') && candidate?.sessionId === n.sessionId
+      ? candidate : undefined
     out.set(nodeId, {
       state: n.state as AgentState,
       agentId: str(n.agentId, 64),
       sessionId: str(n.sessionId, 128),
       name: typeof n.name === 'string' ? n.name.slice(0, 200) : undefined,
-      updatedAt: typeof n.updatedAt === 'number' ? n.updatedAt : undefined
+      updatedAt: finiteNum(n.updatedAt),
+      ...(ask?.pendingId ? { pendingId: ask.pendingId } : {}),
+      ...(ask ? { askKind: ask.askKind } : {})
     })
   }
   return out
+}
+
+/** Both initial snapshots and live replays must exclude expired evidence. */
+export function readFreshPeerMirror(file: string, now = Date.now()): Map<string, PeerNode> {
+  const fresh = new Map<string, PeerNode>()
+  for (const [nodeId, entry] of readPeerMirror(file)) {
+    if (entry.updatedAt === undefined || now - entry.updatedAt > EXPIRE_MS) continue
+    if (isStaleWorking(entry.state, entry.updatedAt, now, WORKING_STALE_MS)) continue
+    fresh.set(nodeId, entry)
+  }
+  return fresh
 }
 
 export interface PeerBridgeDeps {
@@ -169,7 +203,7 @@ export interface PeerBridgeDeps {
  */
 export function startPeerStatusBridge(file: string, deps: PeerBridgeDeps): () => void {
   const own = deps.ownState ?? nodeState
-  const last = new Map<string, string>()
+  const last = new Map<string, { key: string; agentId: string }>()
   let lastUsageAt = -1
 
   const sweep = (full = false) => {
@@ -182,33 +216,36 @@ export function startPeerStatusBridge(file: string, deps: PeerBridgeDeps): () =>
       deps.broadcast(IPC.accountsUsage, usage)
     }
     const seen = new Set<string>()
-    for (const [nodeId, n] of readPeerMirror(file)) {
+    for (const [nodeId, n] of readFreshPeerMirror(file)) {
       if (own(nodeId) !== undefined) continue
       seen.add(nodeId)
-      const key = `${n.state} ${n.sessionId ?? ''} ${n.name ?? ''} ${n.updatedAt ?? 0}`
+      const key = JSON.stringify(n)
       // `full` skips the change gate: WS clients that connected after a state was first
       // broadcast would otherwise read UNKNOWN until the peer changes something — the poll
       // tick doubles as the late-joiner replay (consort finding).
-      if (!full && last.get(nodeId) === key) continue
-      last.set(nodeId, key)
+      if (!full && last.get(nodeId)?.key === key) continue
+      last.set(nodeId, { key, agentId: n.agentId ?? 'claude' })
       const ev: NormalizedAgentEvent = {
         nodeId,
         agentId: n.agentId ?? 'claude',
         kind: 'state',
         state: n.state,
         sessionId: n.sessionId,
-        sessionTitle: n.name
+        sessionTitle: n.name,
+        pendingId: n.pendingId,
+        askKind: n.askKind
       }
       deps.broadcast(IPC.agentStatus, ev)
     }
     // A node that VANISHED from the mirror (closed on the peer) must not stay frozen on every
     // client — a session-end event resets it to unknown (consort finding).
-    for (const nodeId of [...last.keys()]) {
+    for (const [nodeId, previous] of last) {
       if (seen.has(nodeId)) continue
       last.delete(nodeId)
+      if (own(nodeId) !== undefined) continue
       const ev: NormalizedAgentEvent = {
         nodeId,
-        agentId: 'claude',
+        agentId: previous.agentId,
         kind: 'session',
         sessionPhase: 'end'
       }

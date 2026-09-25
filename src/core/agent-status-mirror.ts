@@ -1918,6 +1918,32 @@ export function mirrorEntry(nodeId: string): MirrorEntry | undefined {
   return state.get(nodeId)
 }
 
+/** Read-only status replay for clients that connected after the live event was emitted. */
+export function statusSnapshotEvents(now = Date.now()): NormalizedAgentEvent[] {
+  const pending = new Map<string, InboxEvent>()
+  for (const event of inboxEvents) {
+    if (event.resolved || (event.kind !== 'approval' && event.kind !== 'question')) continue
+    pending.set(event.nodeId, event)
+  }
+  return [...state].flatMap(([nodeId, entry]) => {
+    if (!entry.state || entry.restored || now - entry.updatedAt > EXPIRE_MS) return []
+    if (isStaleWorking(entry.state, entry.updatedAt, now, WORKING_STALE_MS)) return []
+    const candidate = pending.get(nodeId)
+    const ask = (entry.state === 'waiting' || entry.state === 'blocked') &&
+      candidate?.sessionId === entry.sessionId ? candidate : undefined
+    return [{
+      nodeId,
+      agentId: entry.agentId ?? 'claude',
+      kind: 'state' as const,
+      state: entry.state,
+      sessionId: entry.sessionId,
+      sessionTitle: entry.name,
+      pendingId: ask?.kind === 'approval' ? ask.pendingId : undefined,
+      askKind: ask?.kind === 'approval' || ask?.kind === 'question' ? ask.kind : undefined
+    }]
+  })
+}
+
 /**
  * The nodes the mirror currently believes are `working`, with the identity a synthetic event needs.
  * Read-only peek for the shells — the reconnect resync asks the host about exactly these, because

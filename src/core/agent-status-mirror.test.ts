@@ -47,7 +47,8 @@ import {
   type NodeStateChange,
   type NodeNowChange,
   type InboxEvent,
-  sweepStaleWorking
+  sweepStaleWorking,
+  statusSnapshotEvents
 } from './agent-status-mirror'
 
 // Minimal event factory — only the fields the reducer reads.
@@ -204,7 +205,7 @@ describe('reduceEntry (main-state reduction)', () => {
 
 describe('buildFile (shape + expiry)', () => {
   it('produces the documented JSON shape', () => {
-    const now = 10_000
+    const now = Date.now()
     const doc = buildFile(
       { n1: { state: 'working', agentId: 'claude', sessionId: 's1', updatedAt: now } },
       now
@@ -270,6 +271,17 @@ describe('recordAgentEvent + atomic write', () => {
     expect(doc.nodes.n1.state).toBe('done')
     expect(doc.nodes.n1.sessionId).toBe('s1')
     expect(doc.nodes.n1.agentId).toBe('claude')
+  })
+
+  it('builds a fresh replay with provider and approval metadata, excluding stale working state', () => {
+    const now = 10_000
+    recordAgentEvent(ev({ nodeId: 'approval', agentId: 'codex', state: 'blocked',
+      lastMessage: 'Approve write', pendingId: 'ticket-1', sessionId: 's1' }))
+    const replay = statusSnapshotEvents(now)
+    expect(replay).toContainEqual(expect.objectContaining({
+      nodeId: 'approval', agentId: 'codex', state: 'blocked',
+      askKind: 'approval', pendingId: 'ticket-1'
+    }))
   })
 
   it('writes the file with 0600 permissions', async () => {

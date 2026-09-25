@@ -244,10 +244,40 @@ describe('generated Codex launcher', () => {
   })
 
   it('keeps the caller arguments after the thread it resolved', async () => {
-    await callLauncher(['--ask-for-approval', 'never', 'fix the bug'])
+    await callLauncher(['--model', 'test-model', 'fix the bug'])
     expect(codexArgv()).toEqual([
-      '--remote unix:// resume thread-abc --ask-for-approval never fix the bug'
+      '--remote unix:// resume thread-abc --model test-model fix the bug'
     ])
+  })
+
+  it.each([
+    ['do the work', '--dangerously-bypass-approvals-and-sandbox'],
+    ['--yolo', 'fix the bug'],
+    ['resume', 'thread-xyz', '--yolo'],
+    ['--ask-for-approval', 'never', '--sandbox', 'danger-full-access', 'fix the bug'],
+    ['-a', 'on-request', '-s', 'workspace-write'],
+    ['--ask-for-approval=never', '--sandbox=read-only'],
+    ['-anever', '-sworkspace-write'],
+    ['-a=never', '-s=read-only'],
+    ['--full-auto'],
+    ['--approve-for-me']
+  ].map(args => ({ args })))('honors explicit policy through plain Codex: $args', async ({ args }) => {
+    const daemonMarker = path.join(dir, 'policy-daemon-started')
+    const policyLauncher = path.join(dir, 'nodeterm-codex-policy')
+    fs.rmSync(daemonMarker, { force: true })
+    fs.writeFileSync(policyLauncher, buildCodexLauncherScript(`touch ${JSON.stringify(daemonMarker)}`, 'false'))
+    await callLauncher(args, {}, policyLauncher)
+    expect(codexArgv()).toEqual([args.join(' ')])
+    expect(started).toEqual([])
+    expect(bound).toEqual([])
+    expect(fs.existsSync(daemonMarker)).toBe(false)
+    expect(fallbacks).toEqual([{ nodeId: 'node-1', reason: 'permission-policy-requires-local' }])
+  })
+
+  it('does not interpret the prompt after -- as a permission override', async () => {
+    await callLauncher(['--', '--yolo'])
+    expect(codexArgv()).toEqual(['--remote unix:// resume thread-abc -- --yolo'])
+    expect(fallbacks).toEqual([])
   })
 
   it('binds a caller-supplied thread on resume instead of starting a new one', async () => {
@@ -288,13 +318,13 @@ describe('generated Codex launcher', () => {
     fs.writeFileSync(recovering, buildCodexLauncherScript('true', 'true'), { mode: 0o755 })
 
     const result = await callLauncher(
-      ['--ask-for-approval', 'never', 'fix the bug'],
+      ['--model', 'test-model', 'fix the bug'],
       { CODEX_HOME: codexHome },
       recovering
     )
 
     expect(codexArgv()).toEqual([
-      '--remote unix:// resume thread-abc --ask-for-approval never fix the bug',
+      '--remote unix:// resume thread-abc --model test-model fix the bug',
       '--remote unix:// resume thread-abc'
     ])
     expect(started).toEqual([{ nodeId: 'node-1', cwd: fs.realpathSync(dir) }])
