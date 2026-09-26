@@ -298,6 +298,19 @@ describe('withPermissionMode — codex, per-flag conflict suppression (reporter 
     expect(withPermissionMode('codex --yolo', 'codex', 'manual')).toBe('codex --yolo')
   })
 
+  it('does NOT append a conflicting flag to a `codex --approve-for-me` launch command', () => {
+    // Measured on codex-cli 0.155.1: `--approve-for-me` (automatic review + workspace-write sandbox)
+    // states BOTH axes, and codex refuses it beside either one:
+    // "the argument '--approve-for-me' cannot be used with '--ask-for-approval <APPROVAL_POLICY>'"
+    // (and the same for '--sandbox <SANDBOX_MODE>'). The launcher preflight already recognizes it;
+    // before this, the funnel still appended a mode flag and the node never started.
+    for (const mode of ['auto', 'manual', 'bypassPermissions'] as const) {
+      expect(withPermissionMode('codex --approve-for-me', 'codex', mode), mode).toBe(
+        'codex --approve-for-me'
+      )
+    }
+  })
+
   it('leaves a command that already owns the APPROVAL axis (or a bypass flag) alone', () => {
     for (const cmd of [
       'codex --dangerously-bypass-approvals-and-sandbox',

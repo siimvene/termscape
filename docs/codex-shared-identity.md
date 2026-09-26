@@ -241,6 +241,20 @@ The mode is **transient**, never persisted: it describes one launch of one proce
 | `codex-standalone-missing` | `daemon start` failed and there is no standalone runtime — an npm or snap install (§1), not a version problem |
 | `thread-bind-refused` | the thread is unknown to the server, or a live node already owns it |
 | `thread-start-failed` | the server would not mint a thread |
+| `permission-policy-requires-local` | the launch line states an approval or sandbox policy (`--ask-for-approval`/`-a`, `--sandbox`/`-s`, `--dangerously-bypass-approvals-and-sandbox`/`--yolo`, `--approve-for-me`, …), which codex refuses on a remote resume (below) |
+
+**`permission-policy-requires-local` is the COMMON case, not an edge.** Codex rejects permission
+overrides on `--remote … resume` ("Permission overrides are not supported when resuming a remote
+task": the string is in codex-cli 0.155.1, and 0.156 was measured refusing it), so the launcher
+preflight (`nt_preflight`) sends any launch carrying such a flag (anywhere before the `--` that ends
+options, so a prompt that merely mentions one is not a flag) to plain codex with its exact arguments. The permission-mode funnel (`withPermissionMode`,
+`src/shared/agents/approval-mode.ts`) emits a codex flag for every mode except **Plan** and
+**Accept edits**: the default **Auto** is `--ask-for-approval on-request`, **Ask each time** is
+`--ask-for-approval untrusted`, **Bypass all** is the bypass flag. So with untouched settings a Codex
+node runs **plain**, and only Plan / Accept edits get the shared identity. Before this reason existed
+the flag was forwarded into `codex --remote unix:// resume … "$@"` and the node died after `exec`
+(§8.1). Keeping the launcher for those modes means applying the policy somewhere codex accepts it
+(e.g. when the thread is started rather than on resume), which is unmeasured.
 
 The last two used to be one reason whose copy said *"an older CLI"*, which sent anyone reading it on
 a codex 0.146.0 node hunting for a version problem that did not exist — the
@@ -336,9 +350,10 @@ PR #112, all still to be sliced.
 
 ## 8. Known gaps
 
-1. **Post-`exec` failures are unrecoverable** (§3). The `--remote` case is closed at caps time;
-   what remains is §9.2 (the composed `resume <id> <prompt> --ask-for-approval never` line) and
-   §9.3 (the persisted session id being the app-server's thread id).
+1. **Post-`exec` failures are unrecoverable** (§3). The `--remote` case is closed at caps time, and
+   a permission flag on the remote resume is closed by the preflight (`permission-policy-requires-local`,
+   §3), so no approval/sandbox flag ever reaches `--remote … resume` any more. What remains is §9.3
+   (the persisted session id being the app-server's thread id).
    - **The install-channel gate is a stat, not the command it stands for.**
      `codexManagedRuntimeInstalled` asserts the standalone runtime exists at the path today's CLI
      requires; it does not prove `daemon start` will succeed (a corrupt runtime, a wedged socket, a
@@ -387,12 +402,13 @@ come first. Items 1, 2 and 5 fall out of a single capture run on one fresh node.
    rather than a clap usage error. And confirm the whole gate one level up: on that machine the
    node comes up **shared**, while on an npm install the same build opens a plain codex node with
    **no chip and no banner at all** (not a `plain codex` chip — the launcher must never have run).
-2. **`codex resume <id> <prompt> --ask-for-approval never` accepts a positional prompt AND a global
-   flag after the subcommand.** This is the composed line `createAgentNode` builds, and it is
-   CLAUDE.md rule 5's grok-`--` lesson exactly: a `withPermissionMode` unit test passes while the
-   composed line is wrong. Create a Codex node with an initial prompt while the permission mode is
-   anything but `manual`, and confirm the prompt reaches the model and the flag is honored (not
-   swallowed into the prompt text, not a usage error).
+2. **A flagged launch falls back cleanly and keeps its policy.** The shared remote resume no longer
+   carries a permission flag (the preflight routes it to plain codex, §3), so the line to check is
+   the plain one the launcher execs: `codex <prompt> --ask-for-approval on-request`. Create a Codex
+   node with an initial prompt in the default **Auto** mode and confirm (a) the node shows the
+   `plain codex` chip with the `permission-policy-requires-local` reason, (b) the prompt reaches the
+   model, and (c) the flag is honored, not swallowed into the prompt text and not a usage error. Then
+   repeat in **Plan** mode, which emits no codex flag, and confirm the node comes up **shared**.
 3. **The session id nodeterm persists from hooks is the id the app-server accepts as a thread.**
    Let a Codex node run a turn, note `agentStatus.sessionId`, restart the app, and confirm the cold
    restore resumes the same conversation rather than falling back. If they are different
