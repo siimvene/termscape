@@ -4,6 +4,7 @@ import {
   accountsForProject,
   isAccountLoginNode,
   isCodexAccountLoginNode,
+  isPiAccountLoginNode,
   sshAccountsHint,
   systemAccountDisplay
 } from './workspace'
@@ -138,6 +139,31 @@ describe('isCodexAccountLoginNode', () => {
     expect(isCodexAccountLoginNode({ title: 'My session', initialCommand: 'codex' })).toBe(false)
     expect(isCodexAccountLoginNode({ title: 'Terminal' })).toBe(false)
     expect(isCodexAccountLoginNode({})).toBe(false)
+  })
+})
+
+// The pi twin — but pi has no login FLAG (no `pi login`, only the interactive `/login` slash
+// command), so the command match is EXACT rather than a prefix: there is no flag form to also
+// match, and a looser match would risk claiming an unrelated command that merely starts with the
+// letters `pi` (`pip install`, `ping`).
+describe('isPiAccountLoginNode', () => {
+  it('matches the factory title and the bare `pi` command', () => {
+    expect(isPiAccountLoginNode({ title: 'Pi login' })).toBe(true)
+    expect(isPiAccountLoginNode({ title: 'renamed', initialCommand: 'pi' })).toBe(true)
+    expect(isPiAccountLoginNode({ title: 'renamed', initialCommand: '  pi  ' })).toBe(true)
+  })
+
+  it('does NOT match a command that merely starts with the letters `pi`', () => {
+    expect(isPiAccountLoginNode({ title: 'x', initialCommand: 'pip install foo' })).toBe(false)
+    expect(isPiAccountLoginNode({ title: 'x', initialCommand: 'ping example.com' })).toBe(false)
+  })
+
+  it('does not match ordinary nodes', () => {
+    expect(isPiAccountLoginNode({ title: 'My session', initialCommand: 'pi --model x' })).toBe(
+      false
+    )
+    expect(isPiAccountLoginNode({ title: 'Terminal' })).toBe(false)
+    expect(isPiAccountLoginNode({})).toBe(false)
   })
 })
 

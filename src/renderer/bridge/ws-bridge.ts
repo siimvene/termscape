@@ -7,6 +7,7 @@
 // `buildStubApi()` (Task 7) so the renderer boots without a full Electron preload.
 
 import type { CodexAccount } from '@shared/codex-account'
+import type { PiAccountAddResult, PiLoginCapture } from '@shared/pi-account'
 import {
   parseRpcMessage,
   encodeArgs,
@@ -1057,6 +1058,27 @@ export function buildCodexAccountsApi(
   }
 }
 
+/**
+ * Managed PI accounts over the WS bridge. REAL, all four verbs: the lifecycle is core
+ * (`src/core/pi-accounts-service.ts`) and the server registers it through `registerPiAccountsIpc`,
+ * so a browser-only deployment creates, logs into and removes pi accounts exactly as the desktop
+ * does. `waitLogin` is a straight passthrough of a poll that runs up to 5 minutes, safe for the
+ * same reason `claudeAccounts.waitLogin` is (RpcClient has no request timeout). Deliberately NOT in
+ * `relay-api.ts`: a relay tab drives someone else's machine, and minting there would create the
+ * account on the HOST.
+ */
+export function buildPiAccountsApi(client: RpcClient): Pick<NodeTerminalApi, 'piAccounts'> {
+  return {
+    piAccounts: {
+      add: () => client.request(IPC.piAccountsAdd) as Promise<PiAccountAddResult>,
+      waitLogin: (id) =>
+        client.request(IPC.piAccountsWaitLogin, id) as Promise<PiLoginCapture | null>,
+      cancelWaitLogin: (id) => client.request(IPC.piAccountsCancelWait, id) as Promise<void>,
+      remove: (id) => client.request(IPC.piAccountsRemove, id) as Promise<void>
+    }
+  }
+}
+
 /** WS URL for the current page: same host, `/ws`, ws→http / wss→https. */
 function wsUrl(): string {
   const scheme = location.protocol === 'https:' ? 'wss' : 'ws'
@@ -1178,6 +1200,7 @@ export async function installWsBridge(): Promise<boolean> {
     // Five real verbs over the bridge; the switch + SSH transfer members stay on the refusing stub
     // (see buildCodexAccountsApi).
     codexAccounts: buildCodexAccountsApi(client, stubApi.codexAccounts),
+    ...buildPiAccountsApi(client),
     codex: buildCodexApi(client),
     // `claude` is assembled from two builders: `cliCaps` from the relay-shared one, and the
     // transcript reader from the Server-Edition-only one (which also supplies `chat`).

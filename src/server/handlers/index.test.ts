@@ -198,6 +198,32 @@ describe('registerCoreHandlers (managed Claude accounts, #313)', () => {
   })
 })
 
+/**
+ * Managed pi accounts on the Server Edition: the same four core verbs the desktop binds through
+ * ipcMain are registered here through the platform seam, so a browser deployment can manage them.
+ */
+describe('registerCoreHandlers (managed pi accounts)', () => {
+  it('add() mints <userData>/pi-accounts/<id> with the status extension; remove() deletes it', async () => {
+    const added = (await call(IPC.piAccountsAdd)) as { id: string; agentDir: string }
+    expect(added.agentDir).toBe(path.join(repo, 'pi-accounts', added.id))
+    expect(fs.existsSync(path.join(added.agentDir, 'extensions', 'nodeterm-status.js'))).toBe(true)
+    await call(IPC.piAccountsRemove, added.id)
+    expect(fs.existsSync(added.agentDir)).toBe(false)
+  })
+
+  it('waitLogin and cancelWait are registered (not E_NO_HANDLER)', async () => {
+    const res = await platform.dispatch(ui, {
+      t: 'req',
+      id: 1,
+      method: IPC.piAccountsWaitLogin,
+      args: ['../escape']
+    })
+    expect(res.ok).toBe(false)
+    expect((res as { error: { code: string } }).error.code).toBe('E_HANDLER')
+    await expect(call(IPC.piAccountsCancelWait, 'nobody')).resolves.toBeNull()
+  })
+})
+
 describe('registerCoreHandlers (the grok CLI probe, on BOTH shells)', () => {
   // Invariant 11 for probes. A probe registered in the desktop shell only is session-id minting that
   // silently works on the desktop and not in the browser, with nothing anywhere to say which — and

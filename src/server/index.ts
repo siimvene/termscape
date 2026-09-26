@@ -61,6 +61,7 @@ import {
 } from '../core/agents/pending-approvals'
 import { installManagedAgentHooks } from '../core/agents/hooks'
 import { installHooksIntoLocalAccounts } from '../core/claude-accounts-service'
+import { installPiExtensionIntoLocalAccounts } from '../core/pi-accounts-service'
 import {
   initAgentStatusMirror,
   statusSnapshotEvents,
@@ -658,6 +659,9 @@ export async function startServer(
     // reports no agent status at all. Canvas-control adds its skill in its own opt-in initializer;
     // this baseline hook pass stays unchanged when the feature flag is off.
     installHooksIntoLocalAccounts(settingsStore.get().claudeAccounts ?? [])
+    // Managed pi accounts: each is its own PI_CODING_AGENT_DIR, so the status extension is
+    // re-installed into every account dir as well (same loop as the desktop boot).
+    installPiExtensionIntoLocalAccounts(settingsStore.get().piAccounts ?? [])
   }
   await hookServer.start()
   // Safe default and rollback path. The opt-in runtime replaces this handler only after its

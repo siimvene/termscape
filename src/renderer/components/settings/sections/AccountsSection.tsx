@@ -2,13 +2,14 @@ import { Fragment, useEffect, useState } from 'react'
 import { IconClose } from '../../icons'
 import type { ClaudeAccount, ClaudeSkillShareResult } from '@shared/types'
 import type { CodexAccount } from '@shared/codex-account'
+import { NEW_PI_ACCOUNT_LABEL, type PiAccount } from '@shared/pi-account'
 import { E_UNSUPPORTED } from '@shared/rpc'
 import { sshHostKey } from '@shared/ssh'
 import { useAgentStatus } from '../../../state/agentStatus'
 import { useSettings } from '../../../state/settings'
 import { useSystemAccount } from '../../../state/systemAccount'
 import { useSystemCodexAccount } from '../../../state/systemCodexAccount'
-import { isAccountLoginNode } from '../../../state/workspace'
+import { isAccountLoginNode, isPiAccountLoginNode } from '../../../state/workspace'
 import { NODE_COLOR_SECTIONS } from '@shared/node-colors'
 import { useProjects } from '../../../state/projects'
 import { useSshConn } from '../../../state/sshConn'
@@ -26,6 +27,7 @@ import { configDirLabel, unlinkedConfigDirs } from '../../../lib/accountChip'
 import { presentAccount } from '../../../lib/accountPresentation'
 import {
   healedAccount,
+  healedPiAccount,
   openLoginNodeThenCapture,
   raceLoginCapture
 } from '../../../lib/accountHeal'
@@ -61,6 +63,10 @@ const ROWS = {
   codex: {
     title: 'Codex accounts',
     keywords: ['account', 'codex', 'openai', 'login', 'isolated', 'multi', 'email', 'machine', 'ssh']
+  },
+  pi: {
+    title: 'Pi accounts',
+    keywords: ['account', 'pi', 'login', 'isolated', 'multi', 'provider', 'anthropic', 'openai']
   }
 }
 const ENTRIES = Object.values(ROWS)
@@ -142,7 +148,7 @@ function ProviderHeader({
   name,
   description
 }: {
-  agentId: 'claude' | 'codex'
+  agentId: 'claude' | 'codex' | 'pi'
   name: string
   description: string
 }): React.JSX.Element {
@@ -163,6 +169,12 @@ function ProviderHeader({
 function applyCodexAccounts(fn: (accs: CodexAccount[]) => CodexAccount[]): void {
   const s = useSettings.getState()
   s.update({ codexAccounts: fn(s.settings.codexAccounts) })
+}
+
+/** The same fresh-read/transform for the pi account list. */
+function applyPiAccounts(fn: (accs: PiAccount[]) => PiAccount[]): void {
+  const s = useSettings.getState()
+  s.update({ piAccounts: fn(s.settings.piAccounts) })
 }
 
 /**
@@ -539,6 +551,79 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
     }))
   }
 
+  // ── Pi accounts (local only in v1 — no machine grouping) ─────────────────────────────────────
+  const piAccounts = useSettings((s) => s.settings.piAccounts)
+  const [addingPi, setAddingPi] = useState(false)
+  const [piAddError, setPiAddError] = useState<string | null>(null)
+  const [pendingRemovePi, setPendingRemovePi] = useState<PiAccount | null>(null)
+
+  // See `setLabel`: mark a deliberate user rename so a placeholder-equal label survives the
+  // shell's own capture flip (see `healedPiAccount`).
+  const setPiLabel = (id: string, label: string): void =>
+    applyPiAccounts((accs) => accs.map((a) => (a.id === id ? { ...a, label, labelEdited: true } : a)))
+
+  const setPiColor = (id: string, color?: string): void =>
+    applyPiAccounts((accs) => accs.map((a) => (a.id === id ? { ...a, color } : a)))
+
+  // Add a managed pi account and open its login node (interactive `pi`, the user types /login
+  // themselves — pi has no CLI login flag, unlike claude/codex). The SHELL registers the row
+  // (`add()` appends it inside the store's own chain and resolves once that is on disk, so the id
+  // is already known to pty-manager's PRE-FLIGHT 3 before the login node is asked for) and performs
+  // the capture flip on its own row once `waitLogin` resolves — `SettingsStore.mutate` does not
+  // push to the renderer, so the mirror below (`healedPiAccount`) is what makes THIS tab's row
+  // agree with it. Local only: `piAccounts.add()` mints on this machine, so there is no host leg.
+  const onAddPiAccount = async (): Promise<void> => {
+    if (addingPi) return
+    setAddingPi(true)
+    setPiAddError(null)
+    try {
+      const added = await window.nodeTerminal.piAccounts.add()
+      applyPiAccounts((accs) =>
+        accs.some((a) => a.id === added.account.id) ? accs : [...accs, added.account]
+      )
+      window.dispatchEvent(
+        new CustomEvent('nodeterm:add-pi-account-login', { detail: { accountId: added.id } })
+      )
+      const captured = await window.nodeTerminal.piAccounts.waitLogin(added.id)
+      if (captured) {
+        applyPiAccounts((accs) =>
+          accs.map((a) => (a.id === added.id ? healedPiAccount(a, captured.providers) : a))
+        )
+      }
+    } catch (e) {
+      setPiAddError(
+        isUnsupported(e)
+          ? 'Managed Pi accounts are not available on this surface — manage them from the desktop app or the Server Edition directly.'
+          : 'Could not set up the Pi account.'
+      )
+    } finally {
+      setAddingPi(false)
+    }
+  }
+
+  const confirmRemovePi = async (account: PiAccount): Promise<void> => {
+    setPendingRemovePi(null)
+    if (account.pending) await window.nodeTerminal.piAccounts.cancelWaitLogin(account.id)
+    // The SHELL deletes the dir then the row (pi-accounts-service.ts `remove`); the filter below is
+    // this tab's mirror, matching the Claude/Codex removal shape.
+    await window.nodeTerminal.piAccounts.remove(account.id)
+    applyPiAccounts((accs) => accs.filter((a) => a.id !== account.id))
+    useProjects.setState((s) => ({
+      projects: s.projects.map((p) => ({
+        ...p,
+        nodes: p.nodes
+          // The login node is DROPPED, not left account-less: respawned without its env, its
+          // bare `pi` would start under the SYSTEM agent dir — the same hazard `isAccountLoginNode`
+          // guards for Claude. Other nodes just lose the accountId.
+          .filter((n) => !(n.accountId === account.id && isPiAccountLoginNode(n)))
+          .map((n) => (n.accountId === account.id ? { ...n, accountId: undefined } : n))
+      }))
+    }))
+    window.dispatchEvent(
+      new CustomEvent('nodeterm:account-removed', { detail: { accountId: account.id } })
+    )
+  }
+
   /** The presented Claude account for a row. Mirrors `presentCodex` — one contract, so a linked
    *  account reads the same here as it would anywhere else it is shown. */
   const presentClaude = (account: ClaudeAccount): ReturnType<typeof presentAccount> =>
@@ -873,7 +958,7 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
     <SettingsSection
       id="accounts"
       title="Accounts"
-      description="Isolated Claude and Codex logins. Each account keeps its own config dir, credentials, and transcripts; a node keeps the account it was created with for life."
+      description="Isolated Claude, Codex and Pi logins. Each account keeps its own config dir, credentials, and transcripts; a node keeps the account it was created with for life."
       isActive={isActive}
       searchEntries={ENTRIES}
     >
@@ -1271,6 +1356,96 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
         </div>
       </SearchableRow>
 
+      {/* Pi accounts. Local only in v1 (no host grouping — pi credentials never leave the
+          machine that logged them in): a fresh account is a pending row plus a canvas login node
+          running interactive `pi` under the account's PI_CODING_AGENT_DIR. pi's OAuth credential
+          carries no email, so the row is identified by its logged-in provider list instead. */}
+      <SearchableRow {...ROWS.pi}>
+        <div className="space-y-4">
+          <ProviderHeader
+            agentId="pi"
+            name="Pi"
+            description="Isolated pi logins — each has its own agent dir, credentials, sessions and skills."
+          />
+          {piAddError ? (
+            <div className="flex items-start justify-between gap-3 rounded-md border border-[color:var(--danger)]/40 bg-[color:var(--danger)]/10 px-3 py-2 text-[13px] leading-relaxed text-[color:var(--danger)]">
+              <span>{piAddError}</span>
+              <button
+                className="shrink-0 cursor-pointer text-muted hover:text-text"
+                onClick={() => setPiAddError(null)}
+              >
+                Dismiss
+              </button>
+            </div>
+          ) : null}
+
+          {piAccounts.length === 0
+            ? null
+            : piAccounts.map((account) => (
+                <div
+                  key={account.id}
+                  className="flex items-center justify-between gap-3 rounded-md border border-border p-3"
+                >
+                  <div className="min-w-0 flex-1 space-y-1">
+                    <div className="flex items-center gap-2">
+                      <Input
+                        className="w-56"
+                        placeholder="Pi account label"
+                        value={account.label}
+                        onChange={(e) => setPiLabel(account.id, e.target.value)}
+                      />
+                      {account.pending ? (
+                        <span className="rounded-full bg-[color:var(--warn)]/15 px-2 py-0.5 text-[11px] font-medium text-[color:var(--warn)]">
+                          pending
+                        </span>
+                      ) : null}
+                    </div>
+                    {account.email && !account.pending ? (
+                      <p className="text-[12px] text-muted">{account.email}</p>
+                    ) : null}
+                    <AccountColorSwatches
+                      label={account.label}
+                      color={account.color}
+                      onPick={(c) => setPiColor(account.id, c)}
+                    />
+                  </div>
+                  <Button
+                    variant="ghost"
+                    aria-label="Remove Pi account"
+                    onClick={() => setPendingRemovePi(account)}
+                  >
+                    <IconClose />
+                  </Button>
+                </div>
+              ))}
+
+          <div className="space-y-2">
+            <Button variant="primary" disabled={addingPi} onClick={() => void onAddPiAccount()}>
+              {addingPi ? (
+                <span className="inline-flex items-center gap-2">
+                  <span className="ui-spinner" aria-hidden />
+                  Setting up on {thisMachine()}…
+                </span>
+              ) : (
+                'Add Pi account'
+              )}
+            </Button>
+            {addingPi ? (
+              <p className="text-[12px] leading-relaxed text-muted">
+                Creating the agent dir and installing the status extension. A login terminal
+                opens next — type <code>/login</code> once pi starts and pick a provider.
+              </p>
+            ) : null}
+          </div>
+
+          <p className="text-[12px] leading-relaxed text-muted">
+            Pi accounts are isolated logins, local to this machine. New Pi nodes pick an account
+            from the add menus; each node keeps its account for life. A node color applies to
+            nodes opened under that account from then on — existing ones keep the color they have.
+          </p>
+        </div>
+      </SearchableRow>
+
       {pendingRemove ? (
         <ConfirmDialog
           message={removeMessage(pendingRemove)}
@@ -1289,6 +1464,14 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
           confirmLabel="Remove"
           onConfirm={() => void confirmRemoveCodex(pendingRemoveCodex)}
           onCancel={() => setPendingRemoveCodex(null)}
+        />
+      ) : null}
+      {pendingRemovePi ? (
+        <ConfirmDialog
+          message={`Remove Pi account "${pendingRemovePi.label}"? Its logged-in credentials, sessions and agent dir will be deleted.`}
+          confirmLabel="Remove"
+          onConfirm={() => void confirmRemovePi(pendingRemovePi)}
+          onCancel={() => setPendingRemovePi(null)}
         />
       ) : null}
     </SettingsSection>

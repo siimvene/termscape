@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { boundAccountId } from './account-binding'
+import { ACCOUNT_CAPABLE_AGENT_IDS, boundAccountId } from './account-binding'
 
 describe('boundAccountId', () => {
   it('binds a managed account to a Claude node', () => {
@@ -8,6 +8,11 @@ describe('boundAccountId', () => {
 
   it('binds a managed account to a Codex node — accounts are not Claude-only since S6', () => {
     expect(boundAccountId('c1', 'codex')).toBe('c1')
+  })
+
+  it('binds a managed account to a Pi node — pi accounts are PI_CODING_AGENT_DIR-isolated', () => {
+    expect(boundAccountId('p1', 'pi')).toBe('p1')
+    expect(ACCOUNT_CAPABLE_AGENT_IDS).toEqual(['claude', 'codex', 'pi'])
   })
 
   it('never binds one to a builtin that takes no managed account', () => {
@@ -21,6 +26,7 @@ describe('boundAccountId', () => {
     // had it.
     expect(boundAccountId('a1', 'my-claude')).toBeUndefined()
     expect(boundAccountId('c1', 'my-codex')).toBeUndefined()
+    expect(boundAccountId('p1', 'my-pi')).toBeUndefined()
   })
 
   it('keeps the binding when the agent is not stated at all', () => {

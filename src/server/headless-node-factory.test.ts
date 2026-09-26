@@ -95,11 +95,13 @@ describe('HeadlessNodeFactory', () => {
   let factory: HeadlessNodeFactory
   let ownership: HeadlessNodeOwnership
   let codexSharedIdentity: boolean
+  let settingsOverride: Partial<Settings> = {}
 
   const settings = (): Settings => ({
     ...DEFAULT_SETTINGS,
     // Makes command expectations independent of the local Claude version probe.
-    claudePermissionMode: 'manual'
+    claudePermissionMode: 'manual',
+    ...settingsOverride
   })
 
   beforeEach(async () => {
@@ -115,6 +117,7 @@ describe('HeadlessNodeFactory', () => {
     removed = []
     publishedProjects = []
     codexSharedIdentity = false
+    settingsOverride = {}
     ownership = createHeadlessNodeOwnership()
     ownership.record('term-upstream', {
       sourceNodeId: 'term-source',
@@ -927,6 +930,33 @@ describe('HeadlessNodeFactory', () => {
       nodeId: id,
       text: "codex 'do work' --dangerously-bypass-approvals-and-sandbox"
     })
+  })
+
+  // The opener's managed account reaches a spawned agent only through the SHARED rules
+  // (`inheritableAccountId` + `boundAccountId`), not a hard-coded `claude || codex` that forwarded
+  // any id unchecked: a Claude conductor's id must not reach a codex node, where it names no account.
+  it('forwards the opener account only within the same provider', async () => {
+    settingsOverride = {
+      claudeAccounts: [{ id: 'acct-claude', label: 'work', createdAt: 1 }]
+    }
+    const workspace = await store.load({ sideline: false })
+    workspace.projects[0].nodes = workspace.projects[0].nodes.map((node) =>
+      node.id === 'term-source' ? { ...node, accountId: 'acct-claude' } : node
+    )
+    await store.save(workspace)
+
+    const claude = await factory.openAgent('term-source', { agent: 'claude' }, true)
+    const codex = await factory.openAgent('term-source', { agent: 'codex' }, true)
+    expect(claude.ok && codex.ok).toBe(true)
+    const byId = (reply: typeof claude): PtyCreateOptions | undefined =>
+      pty.creates.find((c) => c.persistKey === (reply.result as { id: string }).id)
+    expect(byId(claude)?.accountId).toBe('acct-claude')
+    expect(byId(codex)?.accountId).toBeUndefined()
+    const persisted = await new WorkspaceStore().load({ sideline: false })
+    const node = (reply: typeof claude): CanvasNodeState | undefined =>
+      persisted.projects[0].nodes.find((n) => n.id === (reply.result as { id: string }).id)
+    expect(node(claude)?.accountId).toBe('acct-claude')
+    expect(node(codex)?.accountId).toBeUndefined()
   })
 
   it('never cold-spawns a persisted arm during boot reconciliation', async () => {

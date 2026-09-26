@@ -76,6 +76,13 @@ export const IPC = {
   codexAccountsFinishSwitch: 'codex-accounts:finish-switch',
   codexAccountsRollbackSwitch: 'codex-accounts:rollback-switch',
   codexAccountsTransferThreadToSsh: 'codex-accounts:transfer-thread-to-ssh',
+  // Managed pi accounts (local-only in v1): add / wait-login / cancel-wait / remove. The lifecycle is
+  // core (src/core/pi-accounts-service.ts), bound through ipcMain on desktop (never the
+  // peer-reachable platform table) and platform().handle on the Server Edition.
+  piAccountsAdd: 'pi-accounts:add',
+  piAccountsWaitLogin: 'pi-accounts:wait-login',
+  piAccountsCancelWait: 'pi-accounts:cancel-wait',
+  piAccountsRemove: 'pi-accounts:remove',
   claudeCliCaps: 'claude-cli:caps',
   grokCliCaps: 'grok-cli:caps',
   grokTakenSessionIds: 'grok-cli:taken-session-ids',

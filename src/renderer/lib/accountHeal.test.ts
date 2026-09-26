@@ -1,7 +1,9 @@
 import { describe, it, expect, vi } from 'vitest'
 import type { ClaudeAccount } from '@shared/types'
+import type { PiAccount } from '@shared/pi-account'
 import {
   healedAccount,
+  healedPiAccount,
   healPendingAccounts,
   openLoginNodeThenCapture,
   raceLoginCapture,
@@ -40,6 +42,45 @@ describe('healedAccount (label adoption)', () => {
     expect(healedAccount(acc({ label: 'New account', labelEdited: true }), 'me@x.io')).toMatchObject({
       email: 'me@x.io',
       label: 'New account',
+      pending: false
+    })
+  })
+})
+
+const piAcc = (over: Partial<PiAccount> = {}): PiAccount => ({
+  id: 'p1',
+  label: 'New Pi account',
+  pending: true,
+  createdAt: 0,
+  ...over
+})
+
+describe('healedPiAccount (provider-list label adoption)', () => {
+  it('adopts the provider list when the label is the placeholder', () => {
+    expect(healedPiAccount(piAcc({ label: 'New Pi account' }), ['openai-codex'])).toMatchObject({
+      label: 'openai-codex',
+      pending: false
+    })
+  })
+  it('adopts the provider list when the label is empty', () => {
+    expect(healedPiAccount(piAcc({ label: '' }), ['openai-codex']).label).toBe('openai-codex')
+  })
+  it('joins multiple providers', () => {
+    expect(
+      healedPiAccount(piAcc(), ['anthropic', 'openai-codex']).label
+    ).toBe('anthropic, openai-codex')
+  })
+  it('keeps a user-chosen label', () => {
+    expect(healedPiAccount(piAcc({ label: 'work pi' }), ['openai-codex'])).toMatchObject({
+      label: 'work pi',
+      pending: false
+    })
+  })
+  it('honors labelEdited: a user who typed the placeholder keeps it through capture', () => {
+    expect(
+      healedPiAccount(piAcc({ label: 'New Pi account', labelEdited: true }), ['openai-codex'])
+    ).toMatchObject({
+      label: 'New Pi account',
       pending: false
     })
   })
