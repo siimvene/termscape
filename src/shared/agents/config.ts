@@ -661,10 +661,18 @@ export function resumeCommandWith(
       return `${launchCmd} --session ${sid}`
     case 'copilot':
       return `${launchCmd} --resume=${sid}`
-    // pi: `--session <path|id>` opens a specific session (measured on 0.84.1). Its bare `--resume`
-    // is an interactive PICKER, not a resume-by-id, so it must never be used here.
+    // pi: `--session-id <id>` is CREATE-OR-RESUME, and that is the property a cold restore needs.
+    // MEASURED on pi 0.84.1 in a fresh, logged-out PI_CODING_AGENT_DIR:
+    //   `pi --session <new-uuid> -p x`    → "No session found matching '<uuid>'", exit 1
+    //   `pi --session-id <new-uuid> -p x` → "Warning: No project session found with id ...;
+    //                                        creating a new session with that id."
+    // pi persists a session file only once an assistant message exists, so a node that was opened
+    // and never answered (not logged in, provider error, an in-pi `/new`) resumes with a minted id
+    // that has no file behind it; `--session` would exit 1 and leave a bare shell under the agent
+    // badge (claude guards that case with the `transcript:exists` probe; pi has no equivalent, and
+    // needs none with this grammar). Its bare `--resume` is an interactive PICKER, never used here.
     case 'pi':
-      return `${launchCmd} --session ${sid}`
+      return `${launchCmd} --session-id ${sid}`
     case 'claude':
     case 'gemini':
     case 'grok':

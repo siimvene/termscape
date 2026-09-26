@@ -96,12 +96,26 @@ host's system Pi.
 
 ## 5. Launch, resume, restart
 
-- Initial prompt is typed after the TUI starts (`stdin-after-start`). MEASURED: the prompt is a
-  positional sharing its slot with subcommands (`install/remove/update/list/config/auth`), and pi has
-  no `--` separator (`pi -- list` → "Unknown option: --"), so a one-word prompt would run a command.
+- Initial prompt: the prompt is a positional sharing its slot with subcommands
+  (`install/remove/update/list/config/auth`), and pi has no `--` separator (`pi -- list` → "Unknown
+  option: --"). MEASURED: the subcommand match is argv[0] ONLY — `pi update --session-id <u>` runs the
+  package command, `pi --session-id <u> update` starts a session with "update" as the prompt — so the
+  shared launch assembler puts pi's prompt AFTER its flags (`launch.ts`). The config still says
+  `stdin-after-start` for the core `prepareAgentLaunch` path (session host), which types it.
 - Session ids are minted at first launch with `--session-id <id>`. MEASURED: create-OR-resume (a
   second launch with the same id continued the conversation), so no probe is needed.
-- Resume is `pi --session <id>`; the bare `--resume` is an interactive picker and is never used.
+- Resume is ALSO `pi --session-id <id>`, for the same reason. MEASURED in a fresh, logged-out
+  `PI_CODING_AGENT_DIR`: `pi --session <new-uuid> -p x` → "No session found matching '<uuid>'" and
+  exit 1, while `--session-id` warns and creates. pi writes a session file only once an assistant
+  message exists, so a node opened and never answered has nothing for `--session` to open, and a cold
+  restore or Restart with it left a bare shell. The bare `--resume` is an interactive picker and is
+  never used.
+- `PI_CODING_AGENT_DIR` is a RESERVED project-env key (`isReservedSpawnEnvKey`, beside
+  `CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `XDG_CONFIG_HOME`): pi auto-loads `<agentDir>/extensions/*.js`
+  from the user scope with no trust gate (only `<cwd>/.pi/extensions` is gated on
+  `isProjectTrusted()`, checked in 0.84.1's `package-manager.js`), and `auth.json` lives in the same
+  dir — a git-shared `.nodeterm/settings.json` naming it would run repo JavaScript inside the agent
+  and write the OAuth login into the checkout.
 - In-place restart types `/quit` (no argument form, unlike gemini's `/quit --delete`).
 - The pane-owner predicate names `pi`: the running process rewrites its title (comm and argv `pi`).
 - Out on purpose: permission modes (pi has none; joining `PERMISSION_MODE_CAPABLE` would make
@@ -145,6 +159,6 @@ host's system Pi.
 3. Kill the pi process (`kill -9`) → the dropped-CLI chip; `/quit` → no chip.
 4. Add a Pi account, `/login` to ChatGPT in the login node, open a Pi node on it, confirm
    `PI_CODING_AGENT_DIR` in its env and that a second account's node does not see the first's login.
-5. Restart the app with Pi nodes running: cold restore resumes the same conversation (`--session`).
+5. Restart the app with Pi nodes running: cold restore resumes the same conversation (`--session-id`).
 6. An SSH-project Pi node: status + meter arrive over the tunnel.
 7. Server Edition in the browser: same as 1.

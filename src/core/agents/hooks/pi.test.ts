@@ -167,4 +167,24 @@ describe('generated pi extension (executed)', () => {
     expect(() => h.get('agent_start')!({}, bad)).not.toThrow()
     await expect(h.get('session_shutdown')!({}, bad)).resolves.toBeUndefined()
   })
+
+  it('a handler never throws into pi, even with a hostile EVENT (the on() wrapper itself)', async () => {
+    // Every ctx read goes through `call()` inside `envelope`, so the case above cannot tell whether
+    // the try/catch in the `on()` wrapper exists. Event payload reads (`ev.message`, `.content`,
+    // `.toolName`, `.name`) are NOT wrapped individually — the wrapper is their only guard.
+    vi.stubEnv('NODETERM_NODE_ID', 'node-pi')
+    vi.stubEnv('NODETERM_HOOK_PORT', '')
+    vi.stubEnv('NODETERM_HOOK_TOKEN', '')
+    const h = await loadExtension()
+    const boom = (): never => {
+      throw new Error('boom')
+    }
+    expect(() => h.get('message_end')!({ get message() { return boom() } }, ctx)).not.toThrow()
+    expect(() =>
+      h.get('message_end')!({ message: { role: 'assistant', get content() { return boom() } } }, ctx)
+    ).not.toThrow()
+    expect(() => h.get('tool_execution_start')!({ get toolName() { return boom() } }, ctx)).not.toThrow()
+    expect(() => h.get('session_info_changed')!({ get name() { return boom() } }, ctx)).not.toThrow()
+    expect(() => h.get('session_start')!({ get reason() { return boom() } }, ctx)).not.toThrow()
+  })
 })

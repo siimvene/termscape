@@ -555,6 +555,7 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
   const piAccounts = useSettings((s) => s.settings.piAccounts)
   const [addingPi, setAddingPi] = useState(false)
   const [piAddError, setPiAddError] = useState<string | null>(null)
+  const [piRemoveError, setPiRemoveError] = useState<string | null>(null)
   const [pendingRemovePi, setPendingRemovePi] = useState<PiAccount | null>(null)
 
   // See `setLabel`: mark a deliberate user rename so a placeholder-equal label survives the
@@ -603,10 +604,24 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
 
   const confirmRemovePi = async (account: PiAccount): Promise<void> => {
     setPendingRemovePi(null)
-    if (account.pending) await window.nodeTerminal.piAccounts.cancelWaitLogin(account.id)
+    setPiRemoveError(null)
     // The SHELL deletes the dir then the row (pi-accounts-service.ts `remove`); the filter below is
     // this tab's mirror, matching the Claude/Codex removal shape.
-    await window.nodeTerminal.piAccounts.remove(account.id)
+    try {
+      if (account.pending) await window.nodeTerminal.piAccounts.cancelWaitLogin(account.id)
+      await window.nodeTerminal.piAccounts.remove(account.id)
+    } catch (e) {
+      // The shell refused (settings lock timeout, a dir teardown failure, or the surface has no
+      // pi-accounts channel at all). The dialog is already closed, so this line is the only thing
+      // telling the user why the row is still there — and it IS still there: the credential dir
+      // survives, so the mirrors below must not pretend the account is gone.
+      setPiRemoveError(
+        isUnsupported(e)
+          ? 'Managed Pi accounts are not available on this surface — remove it from the desktop app or the Server Edition directly.'
+          : `Couldn't remove "${account.label}".`
+      )
+      return
+    }
     applyPiAccounts((accs) => accs.filter((a) => a.id !== account.id))
     useProjects.setState((s) => ({
       projects: s.projects.map((p) => ({
@@ -1367,6 +1382,17 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
             name="Pi"
             description="Isolated pi logins — each has its own agent dir, credentials, sessions and skills."
           />
+          {piRemoveError ? (
+            <div className="flex items-start justify-between gap-3 rounded-md border border-[color:var(--danger)]/40 bg-[color:var(--danger)]/10 px-3 py-2 text-[13px] leading-relaxed text-[color:var(--danger)]">
+              <span>{piRemoveError}</span>
+              <button
+                className="shrink-0 cursor-pointer text-muted hover:text-text"
+                onClick={() => setPiRemoveError(null)}
+              >
+                Dismiss
+              </button>
+            </div>
+          ) : null}
           {piAddError ? (
             <div className="flex items-start justify-between gap-3 rounded-md border border-[color:var(--danger)]/40 bg-[color:var(--danger)]/10 px-3 py-2 text-[13px] leading-relaxed text-[color:var(--danger)]">
               <span>{piAddError}</span>

@@ -309,6 +309,10 @@ describe('isReservedSpawnEnvKey — the keys a project may never set', () => {
   it('reserves the OTHER agents config dirs too', () => {
     expect(isReservedSpawnEnvKey('CODEX_HOME')).toBe(true)
     expect(isReservedSpawnEnvKey('XDG_CONFIG_HOME')).toBe(true)
+    // pi: `<agentDir>/extensions/*.js` is auto-loaded from the USER scope with no trust gate
+    // (only `<cwd>/.pi/extensions` is trust-gated), and `auth.json` sits in the same dir — a
+    // git-shared value here is repo-controlled code inside the agent AND a relocated credential.
+    expect(isReservedSpawnEnvKey('PI_CODING_AGENT_DIR')).toBe(true)
   })
 
   // `NODE_OPTIONS=--require /repo/x.js` loads arbitrary JS into every node-based CLI — claude

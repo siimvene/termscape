@@ -8,6 +8,7 @@ import os from 'os'
 import path from 'path'
 import { resolveTranscriptPath } from '../transcript-reader'
 import { piAgentDir } from '../agents/hooks/pi'
+import { piAccountDirFor } from '../pi-config-dir'
 import { platform } from '../platform'
 
 // claude: ~/.claude/projects/<proj>/<sessionId>.jsonl — already implemented (searches all
@@ -85,9 +86,19 @@ export async function locateGrok(sessionId: string): Promise<string | undefined>
  */
 export async function locatePi(sessionId: string, accountId?: string): Promise<string | undefined> {
   if (!sessionId) return undefined
-  const root = accountId
-    ? path.join(platform().userDataDir, 'pi-accounts', accountId, 'sessions')
-    : path.join(piAgentDir(), 'sessions')
+  let root: string
+  if (accountId) {
+    // The id is asserted (`isSafeAccountId`) exactly as claude's `accountConfigDir` asserts its
+    // own: it reaches here from a relay-reachable handler (handoff:build) and from context-link
+    // node data, and a traversing value would walk any directory literally named `sessions`.
+    try {
+      root = path.join(piAccountDirFor(platform().userDataDir, accountId), 'sessions')
+    } catch {
+      return undefined
+    }
+  } else {
+    root = path.join(piAgentDir(), 'sessions')
+  }
   const suffix = `_${sessionId}.jsonl`
   const stack = [root]
   while (stack.length) {

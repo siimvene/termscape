@@ -217,6 +217,12 @@ describe('pi-accounts — the shell owns row membership', () => {
       readAccountsFromDisk: async () => settings.get(),
       mutate: async (fn: (s: Settings) => Settings) => {
         minted = fn(settings.get()).piAccounts[0]?.id
+        // The header's "register the row before minting the dir" mutation is caught HERE: at the
+        // moment the row is registered, the dir and its status extension must already exist
+        // (a row pointing at a not-yet-minted dir is a spawn-fallback window).
+        const dir = piAccountDirFor(userDataDir, minted as string)
+        if (!existsSync(dir)) throw new Error('row registered before its agent dir was minted')
+        if (!existsSync(piExtensionPath(dir))) throw new Error('row registered before its extension was installed')
         throw new Error('disk full')
       }
     }

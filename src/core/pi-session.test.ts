@@ -54,12 +54,22 @@ describe('createPiSessionTracker', () => {
 
   it('records only a jailed transcript path, and only when path tracking is allowed', () => {
     const { t } = setup()
-    t.observe({ sessionId: 'a', sessionFile: '/ok/a.jsonl' }, { trackPath: true })
+    t.observe({ sessionId: 'a', sessionFile: '/ok/2026_a.jsonl' }, { trackPath: true })
     t.observe({ sessionId: 'b', sessionFile: '/etc/passwd' }, { trackPath: true })
-    t.observe({ sessionId: 'c', sessionFile: '/ok/c.jsonl' }, { trackPath: false })
-    expect(t.pathFor('a')).toBe('/ok/a.jsonl')
+    t.observe({ sessionId: 'c', sessionFile: '/ok/2026_c.jsonl' }, { trackPath: false })
+    expect(t.pathFor('a')).toBe('/ok/2026_a.jsonl')
     expect(t.pathFor('b')).toBeUndefined()
     expect(t.pathFor('c')).toBeUndefined()
+  })
+
+  it('records a path only when its filename belongs to THAT session id (the locatePi rule)', () => {
+    // A hook POST naming session A but pointing at session B's file (a legacy/unverified token,
+    // or a buggy extension) must not make the title reader and context-link read B as A.
+    const { t } = setup()
+    t.observe({ sessionId: 'sid-a', sessionFile: '/ok/2026_sid-b.jsonl' }, { trackPath: true })
+    t.observe({ sessionId: 'sid-b', sessionFile: '/ok/2026_sid-b.jsonl' }, { trackPath: true })
+    expect(t.pathFor('sid-a')).toBeUndefined()
+    expect(t.pathFor('sid-b')).toBe('/ok/2026_sid-b.jsonl')
   })
 
   it('a remote node (no path tracking) still gets its meter: the numbers are in the payload', () => {

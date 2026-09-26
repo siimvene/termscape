@@ -3,6 +3,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import path from 'path'
 import { locatePi } from './locate'
+import { initPlatform, resetPlatformForTests } from '../platform'
+import { fakePlatform } from '../platform-fake'
 
 const root = mkdtempSync(path.join(tmpdir(), 'locate-pi-'))
 afterAll(() => rmSync(root, { recursive: true, force: true }))
@@ -42,5 +44,27 @@ describe('locatePi', () => {
 
   it('is undefined for an empty session id without touching the filesystem', async () => {
     expect(await locatePi('')).toBeUndefined()
+  })
+
+  it('scopes a managed account to <userData>/pi-accounts/<id>/sessions and refuses a traversing id', async () => {
+    const fake = fakePlatform()
+    initPlatform(fake)
+    try {
+      const sid = '01a0dd76-66d4-7dde-b8ee-3fd4dd0a917e'
+      const inside = path.join(fake.userDataDir, 'pi-accounts', 'acct1', 'sessions', '--p--')
+      mkdirSync(inside, { recursive: true })
+      const target = path.join(inside, `2026_${sid}.jsonl`)
+      writeFileSync(target, '{}')
+      expect(await locatePi(sid, 'acct1')).toBe(target)
+      // A traversing "account id" would otherwise resolve to any directory literally named
+      // `sessions` (the Claude locator asserts its id; this one must too).
+      const outside = path.join(fake.userDataDir, 'elsewhere', 'sessions')
+      mkdirSync(outside, { recursive: true })
+      writeFileSync(path.join(outside, `2026_${sid}.jsonl`), '{}')
+      expect(await locatePi(sid, '../elsewhere')).toBeUndefined()
+    } finally {
+      resetPlatformForTests()
+      rmSync(fake.userDataDir, { recursive: true, force: true })
+    }
   })
 })

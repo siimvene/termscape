@@ -23,6 +23,7 @@
 //   {"type":"message",…,"message":{"role":"assistant","content":[{"type":"text","text":"done",…}],…}}
 // `arguments` is already a parsed object (unlike codex's stringified JSON) and `content` is always
 // an array of `{type:"text",text}` / `{type:"toolCall",…}` parts — never a bare string.
+import path from 'path'
 import type { ContextWindowUsage } from '../shared/types'
 import { latestJsonLineWhere } from './gemini-session'
 
@@ -188,7 +189,11 @@ export function createPiSessionTracker(deps: {
       }
       if (opts.trackPath) {
         const safe = deps.safePath(typeof p.sessionFile === 'string' ? p.sessionFile : undefined)
-        if (safe) paths.set(sessionId, safe)
+        // The jail says "under a sessions root"; this says "THIS session's file": pi names every
+        // session file `<timestamp>_<sessionId>.jsonl`, the same suffix rule `locatePi` walks by.
+        // A POST that names session A but points at B's file (a legacy/unverified token, or a
+        // buggy extension) must not make the title reader and context-link read B as A.
+        if (safe && path.basename(safe).endsWith(`_${sessionId}.jsonl`)) paths.set(sessionId, safe)
       }
       const usage = piContextUsage(payload)
       if (usage) {

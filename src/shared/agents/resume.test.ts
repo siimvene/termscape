@@ -73,6 +73,19 @@ describe('resumeCommand', () => {
     expect(resumeCommand('claude', 'a b')).toBeNull()
   })
 
+  it('resumes pi via --session-id (create-or-resume), never --session', () => {
+    // MEASURED on pi 0.84.1 against a fresh, logged-out PI_CODING_AGENT_DIR:
+    //   `pi --session <new-uuid> -p x`    → "No session found matching '<uuid>'", exit 1
+    //   `pi --session-id <new-uuid> -p x` → "Warning: No project session found with id ...;
+    //                                        creating a new session with that id."
+    // pi persists a session file only once an assistant message exists, so a node that was opened
+    // and never answered (not logged in, provider error, in-pi `/new`) has NO file to `--session`
+    // into; cold restore and Restart would leave a bare shell under the agent badge.
+    expect(resumeCommand('pi', '01a0dd76-66d4-7dde-b8ee-3fd4dd0a917e')).toBe(
+      'pi --session-id 01a0dd76-66d4-7dde-b8ee-3fd4dd0a917e'
+    )
+  })
+
   it('resumes opencode via --session', () => {
     expect(resumeCommand('opencode', 'ses_a1b2c3')).toBe('opencode --session ses_a1b2c3')
   })

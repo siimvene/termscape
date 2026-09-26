@@ -13,6 +13,8 @@ import type { PiAccount } from '@shared/pi-account'
 const account: PiAccount = { id: 'p1', label: 'work pi', pending: false, createdAt: 0 }
 
 let removedIds: string[]
+/** When set, the fake `piAccounts.remove` rejects with this message instead of recording the id. */
+let removeRejectsWith: string | null = null
 
 function renderSection(accounts: PiAccount[]): { host: HTMLElement; root: Root } {
   useSettings.setState({ settings: { ...DEFAULT_SETTINGS, piAccounts: accounts } })
@@ -50,6 +52,7 @@ const until = async (pred: () => boolean, ms = 1500): Promise<void> => {
 beforeEach(() => {
   document.body.innerHTML = ''
   removedIds = []
+  removeRejectsWith = null
   useProjects.setState({
     projects: [
       {
@@ -70,6 +73,7 @@ beforeEach(() => {
     codexAccounts: { systemIdentity: async () => null, identity: async () => null },
     piAccounts: {
       remove: async (id: string) => {
+        if (removeRejectsWith) throw new Error(removeRejectsWith)
         removedIds.push(id)
       },
       cancelWaitLogin: async () => {}
@@ -135,5 +139,43 @@ describe('AccountsSection — removing a Pi account', () => {
     const plain = nodes.find((n) => n.id === 'plain-node') as { accountId?: string } | undefined
     expect(plain?.accountId).toBeUndefined()
     root.unmount()
+  })
+
+  it('a refused remove keeps the row and its nodes, and says why (no unhandled rejection)', async () => {
+    removeRejectsWith = 'lock timeout'
+    const unhandled: unknown[] = []
+    const onUnhandled = (e: PromiseRejectionEvent): void => {
+      unhandled.push(e.reason)
+      e.preventDefault()
+    }
+    window.addEventListener('unhandledrejection', onUnhandled)
+    const { host, root } = renderSection([account])
+    try {
+      const removeBtn = host.querySelector('[aria-label="Remove Pi account"]') as HTMLButtonElement
+      await act(async () => {
+        removeBtn.click()
+      })
+      const confirmBtn = Array.from(document.querySelectorAll('button')).find((b) =>
+        /^remove$/i.test((b.textContent ?? '').trim())
+      ) as HTMLButtonElement
+      await act(async () => {
+        confirmBtn.click()
+      })
+      await until(() => /couldn.t remove/i.test(host.textContent ?? ''))
+      expect(host.textContent).toMatch(/couldn.t remove "work pi"/i)
+      // The shell refused: the row is still there, the login node is still there, nothing was
+      // unbound — the account's credential dir survives, so the UI must not pretend it is gone.
+      expect(piOf('p1')).toBeTruthy()
+      const nodes = useProjects.getState().projects[0].nodes
+      expect(nodes.find((n) => n.id === 'login-node')).toBeTruthy()
+      expect((nodes.find((n) => n.id === 'plain-node') as { accountId?: string }).accountId).toBe('p1')
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 20))
+      })
+      expect(unhandled).toEqual([])
+    } finally {
+      window.removeEventListener('unhandledrejection', onUnhandled)
+      root.unmount()
+    }
   })
 })
