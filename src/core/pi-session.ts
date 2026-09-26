@@ -7,7 +7,123 @@
 // every event. So the meter needs no transcript tail and no inferred window: the numbers are pi's
 // own (agents.md rule 6). What the listener still has to learn from the payload is the session's
 // transcript PATH, which the title reader and the context-link / transfer readers resolve through.
+//
+// The two readers below (`pickPiTitle`, `linesFromPi`) are pure parsers over pi's session JSONL —
+// `<agentDir>/sessions/<encoded cwd>/<ISO-timestamp>_<sessionId>.jsonl` (handoff/locate.ts's
+// `locatePi` finds the file; these two turn its bytes into a title and a conversation). Measured
+// shape (pi 0.84.1, a REAL transcript from a `--name`-flagged `-p` run, pinned verbatim as
+// `__fixtures__/pi/session.jsonl`):
+//   {"type":"session","version":3,"id":…,"timestamp":…,"cwd":…}
+//   {"type":"session_info","id":…,"parentId":…,"timestamp":…,"name":"Fixture title"}
+//   {"type":"model_change","id":…,"parentId":…,"timestamp":…,"provider":"openai-codex","modelId":…}
+//   {"type":"thinking_level_change","id":…,"parentId":…,"timestamp":…,"thinkingLevel":"off"}
+//   {"type":"message","id":…,"parentId":…,"timestamp":…,"message":{"role":"user","content":[{"type":"text","text":…}],…}}
+//   {"type":"message",…,"message":{"role":"assistant","content":[{"type":"toolCall","id":…,"name":"bash","arguments":{"command":"ls"}}],…}}
+//   {"type":"message",…,"message":{"role":"toolResult","toolCallId":…,"toolName":"bash","content":[{"type":"text","text":"sessions\n"}],"isError":false,…}}
+//   {"type":"message",…,"message":{"role":"assistant","content":[{"type":"text","text":"done",…}],…}}
+// `arguments` is already a parsed object (unlike codex's stringified JSON) and `content` is always
+// an array of `{type:"text",text}` / `{type:"toolCall",…}` parts — never a bare string.
 import type { ContextWindowUsage } from '../shared/types'
+import { latestJsonLineWhere } from './gemini-session'
+
+const PI_TOOL_ARG_MAX = 200
+const PI_TOOL_RESULT_MAX = 500
+
+/** `arguments`/`input`-shaped tool call payload -> the one field worth showing, same field
+ *  priority every other renderer in this codebase uses (context-link-render.ts's `toolArg`),
+ *  kept as its own copy here because pi's `arguments` arrives as an object, never a JSON string. */
+function piToolArg(args: unknown): string {
+  const i = args as Record<string, unknown> | undefined
+  if (!i || typeof i !== 'object') return ''
+  const a = i.command ?? i.file_path ?? i.path ?? i.pattern ?? i.description ?? i.prompt
+  return typeof a === 'string' ? ` ${a.slice(0, PI_TOOL_ARG_MAX)}` : ''
+}
+
+/** pi message content: always an array of `{type:'text',text}` / `{type:'toolCall',…}` parts. */
+function piFlatText(content: unknown): string {
+  if (!Array.isArray(content)) return typeof content === 'string' ? content : ''
+  return content
+    .map((c) => {
+      const part = c as { type?: string; text?: string }
+      return part && part.type === 'text' && typeof part.text === 'string' ? part.text : ''
+    })
+    .filter(Boolean)
+    .join('\n')
+}
+
+interface PiToolCallPart {
+  type?: string
+  text?: string
+  id?: string
+  name?: string
+  arguments?: unknown
+}
+
+/**
+ * The latest session name pi has given the conversation (`/name`, or `--name` at launch) —
+ * routed through `core/agent-session-name.ts` (`TITLE_READ_CAPABLE`). Read-only: pi has no
+ * transcript field a node title writes back to.
+ *
+ * `session_info` can appear more than once (a mid-session `/name` writes a fresh one with the
+ * same `type`), so the backward scan's "newest line wins" is exactly the rule: the latest record
+ * is the name pi currently shows. Null when no line carries one — a session never named, or every
+ * line before the tail this was read from.
+ */
+export function pickPiTitle(text: string | string[]): string | null {
+  return latestJsonLineWhere(text, '"session_info"', (o) => {
+    if (o.type !== 'session_info') return null
+    const name = (o as { name?: unknown }).name
+    return typeof name === 'string' && name.trim() ? name.trim() : null
+  })
+}
+
+/**
+ * One pi session record -> 0..n display strings, in the exact shape
+ * `linesFromClaude`/`linesFromCodex` produce (`role: text`, `  $ tool arg`, `  = result`) so
+ * `context-link-render.ts`'s callers need no per-agent branching on the string shape. Only
+ * `{type:'message'}` records render anything — `session`/`session_info`/`model_change`/
+ * `thinking_level_change` and any future record type are conversation-free by construction and
+ * fall through to nothing, which is also what a torn/unparseable line renders: costing only
+ * itself, never the lines around it.
+ */
+function linesFromPiLine(raw: string): string[] {
+  let o: { type?: string; message?: Record<string, unknown> } | undefined
+  try {
+    o = JSON.parse(raw)
+  } catch {
+    return []
+  }
+  if (!o || typeof o !== 'object' || o.type !== 'message' || !o.message) return []
+  const m = o.message as { role?: string; content?: unknown; toolName?: string }
+  const res: string[] = []
+  if (m.role === 'user') {
+    const t = piFlatText(m.content)
+    if (t) res.push(`user: ${t}`)
+  } else if (m.role === 'assistant') {
+    const content = Array.isArray(m.content) ? (m.content as PiToolCallPart[]) : []
+    for (const c of content) {
+      if (c.type === 'text' && typeof c.text === 'string' && c.text) res.push(`assistant: ${c.text}`)
+      else if (c.type === 'toolCall') res.push(`  $ ${c.name || 'tool'}${piToolArg(c.arguments)}`)
+    }
+  } else if (m.role === 'toolResult') {
+    const s = piFlatText(m.content).split('\n').slice(0, 3).join(' ').slice(0, PI_TOOL_RESULT_MAX)
+    if (s) res.push(`  = ${s}`)
+  }
+  return res
+}
+
+/** A whole pi session JSONL -> display strings, one call per line so a torn last line (the file
+ *  can be read mid-write) costs only that line. Accepts an array of already-split lines too, the
+ *  same convenience `latestJsonLineWhere` offers. */
+export function linesFromPi(text: string | string[]): string[] {
+  const lines = Array.isArray(text) ? text : text.split('\n')
+  const res: string[] = []
+  for (const raw of lines) {
+    const t = raw.trim()
+    if (t) res.push(...linesFromPiLine(t))
+  }
+  return res
+}
 
 interface PiContextField {
   tokens?: unknown

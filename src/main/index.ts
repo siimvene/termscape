@@ -1480,8 +1480,11 @@ app.whenReady().then(async () => {
   // been seen for and for a remote (SSH) gemini node, which the tails deliberately never track —
   // all of which mean "no name", never a throw.
   let geminiTranscriptPathFor: ((sessionId: string) => string | undefined) | undefined
+  // Same reason, same shape, for pi: assigned once `piSessions` exists (near its creation below).
+  let piTranscriptPathFor: ((sessionId: string) => string | undefined) | undefined
   const agentSessionNameDeps: AgentSessionNameDeps = {
-    geminiPathFor: (sessionId) => geminiTranscriptPathFor?.(sessionId)
+    geminiPathFor: (sessionId) => geminiTranscriptPathFor?.(sessionId),
+    piPathFor: (sessionId) => piTranscriptPathFor?.(sessionId)
   }
 
   // The reader is selected by the NODE's agent (core/agent-session-name.ts — the one copy of that
@@ -2401,6 +2404,9 @@ app.whenReady().then(async () => {
     send: pushContextUpdate,
     safePath: (p) => safeTranscriptPath(p)
   })
+  // Hand the pi session-name reader (and context-link's pi locator) its path authority, exactly
+  // like `geminiTranscriptPathFor` just above.
+  piTranscriptPathFor = (sessionId) => piSessions.pathFor(sessionId)
   // Remote (SSH-project) counterparts: a node whose pty runs on a remote host has its Claude
   // transcript on that host, so its meter / subagent transcript / search must read over the
   // project's ControlMaster. One RemoteFile bound to the SSH-project manager's own ssh runner
@@ -3776,7 +3782,11 @@ app.whenReady().then(async () => {
       } catch {
         return null
       }
-    }
+    },
+    // The tracker's hook-fed path, so a linked pi node's read skips the directory walk
+    // `locatePi` would otherwise do — same shortcut gemini's leg does not need (its locator is
+    // already a plain scan with no tracker).
+    piPathFor: (sessionId) => piSessions.pathFor(sessionId)
   }, {
     // The desktop app is the surface Context Link's discovery was designed for, so it installs
     // the skill + instruction blocks. Stated rather than defaulted: the flag is required so no

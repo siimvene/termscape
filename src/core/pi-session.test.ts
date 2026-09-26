@@ -1,6 +1,15 @@
 import { describe, expect, it } from 'vitest'
+import { readFileSync } from 'fs'
+import path from 'path'
 import type { ContextWindowUsage } from '../shared/types'
-import { createPiSessionTracker, piContextUsage } from './pi-session'
+import { createPiSessionTracker, linesFromPi, pickPiTitle, piContextUsage } from './pi-session'
+
+// FIXTURE PROVENANCE — `__fixtures__/pi/session.jsonl` is REAL. Generated 2026-09-26 against the
+// installed pi 0.84.1 binary (`--provider openai-codex --model gpt-5.6-sol --thinking off -p
+// --session-dir <temp> --name "Fixture title" "List the files in the current directory using
+// your bash tool, then reply with just the word done."`), copied in verbatim. Checked for
+// secrets: none (cost/token numbers and a scratch cwd, no credentials).
+const fixture = readFileSync(path.join(__dirname, '__fixtures__/pi/session.jsonl'), 'utf8')
 
 const ctx = (tokens: unknown, contextWindow: unknown, percent: unknown) => ({ tokens, contextWindow, percent })
 
@@ -66,5 +75,79 @@ describe('createPiSessionTracker', () => {
     expect(t.pathFor('s')).toBeUndefined()
     t.observe({ sessionId: 's', context: ctx(10, 100, 10) }, { trackPath: true })
     expect(sent).toHaveLength(2)
+  })
+})
+
+describe('pickPiTitle', () => {
+  it('reads the --name/`/name` session_info record from a real transcript', () => {
+    expect(pickPiTitle(fixture)).toBe('Fixture title')
+  })
+
+  it('takes the LATEST session_info when a mid-session /name overwrites an earlier one', () => {
+    const lines = [
+      '{"type":"session_info","id":"a","parentId":null,"timestamp":"t","name":"First"}',
+      '{"type":"message","id":"b","parentId":"a","timestamp":"t","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}',
+      '{"type":"session_info","id":"c","parentId":"b","timestamp":"t","name":"Renamed"}'
+    ]
+    expect(pickPiTitle(lines)).toBe('Renamed')
+  })
+
+  it('is null for a session that was never named', () => {
+    expect(
+      pickPiTitle(['{"type":"session","version":3,"id":"x","timestamp":"t","cwd":"/tmp"}'])
+    ).toBeNull()
+  })
+
+  it('tolerates a torn last line and an unknown record type', () => {
+    const lines = [
+      '{"type":"session_info","id":"a","parentId":null,"timestamp":"t","name":"Kept"}',
+      '{"type":"a_future_record_type","stuff":123}',
+      '{"type":"session_info","id":"b","parentId":"a","timestamp":"t","na' // torn
+    ]
+    expect(pickPiTitle(lines)).toBe('Kept')
+  })
+})
+
+describe('linesFromPi', () => {
+  it('renders a real session (user turn, tool call, tool result, final assistant text)', () => {
+    expect(linesFromPi(fixture)).toEqual([
+      'user: List the files in the current directory using your bash tool, then reply with just the word done.',
+      '  $ bash ls',
+      '  = sessions ', // tool output ends `sessions\n`; the trailing empty line survives the join, matching claude/codex's renderer
+      'assistant: done'
+    ])
+  })
+
+  it('renders in the same `role: text` / `  $ tool arg` / `  = result` shape the other agents use', () => {
+    const lines = [
+      '{"type":"message","id":"1","parentId":null,"timestamp":"t","message":{"role":"user","content":[{"type":"text","text":"hello"}]}}',
+      '{"type":"message","id":"2","parentId":"1","timestamp":"t","message":{"role":"assistant","content":[{"type":"toolCall","id":"c1","name":"edit","arguments":{"file_path":"/a/b.ts"}}]}}',
+      '{"type":"message","id":"3","parentId":"2","timestamp":"t","message":{"role":"toolResult","toolCallId":"c1","toolName":"edit","content":[{"type":"text","text":"ok"}],"isError":false}}',
+      '{"type":"message","id":"4","parentId":"3","timestamp":"t","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}'
+    ]
+    expect(linesFromPi(lines)).toEqual(['user: hello', '  $ edit /a/b.ts', '  = ok', 'assistant: done'])
+  })
+
+  it('renders nothing for session/model_change/thinking_level_change/session_info records', () => {
+    const lines = [
+      '{"type":"session","version":3,"id":"x","timestamp":"t","cwd":"/tmp"}',
+      '{"type":"session_info","id":"a","parentId":null,"timestamp":"t","name":"Fixture title"}',
+      '{"type":"model_change","id":"b","parentId":"a","timestamp":"t","provider":"openai-codex","modelId":"gpt-5.6-sol"}',
+      '{"type":"thinking_level_change","id":"c","parentId":"b","timestamp":"t","thinkingLevel":"off"}'
+    ]
+    expect(linesFromPi(lines)).toEqual([])
+  })
+
+  it('tolerates a torn last line and an unknown record type: costs only that line', () => {
+    const lines = [
+      '{"type":"message","id":"1","parentId":null,"timestamp":"t","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}',
+      '{"type":"a_future_record_type","stuff":123}',
+      '{"type":"message","id":"2","parentId":"1","timestamp":"t","message":{"role":"ass' // torn
+    ]
+    expect(linesFromPi(lines)).toEqual(['user: hi'])
+  })
+
+  it('accepts a whole buffer (string) exactly like an array of lines', () => {
+    expect(linesFromPi(fixture)).toEqual(linesFromPi(fixture.split('\n')))
   })
 })

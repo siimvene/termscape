@@ -411,12 +411,13 @@ export async function startServer(
     // The per-agent router (core/agent-session-name.ts), same as the desktop's sweep and its
     // ptyReadSessionName handler: a grok node's name is in its session metadata, and resolving it
     // through claude's reader would scan ~/.claude/projects once a minute for a guaranteed miss.
-    // Gemini's leg needs the transcript path its context tail tracks; that tail is created by
-    // `wireAgentStatus` below, so it is dereferenced lazily — the sweep's first pass is 5s after
-    // boot, long after wiring.
+    // Gemini's leg needs the transcript path its context tail tracks; pi's leg needs the path its
+    // session tracker learned from a hook. Both are created by `wireAgentStatus` below, so they are
+    // dereferenced lazily — the sweep's first pass is 5s after boot, long after wiring.
     resolve: (sessionId, accountId, agentId) =>
       readAgentSessionName(sessionId, accountId, agentId, {
-        geminiPathFor: (id) => geminiContextTail.pathFor(id)
+        geminiPathFor: (id) => geminiContextTail.pathFor(id),
+        piPathFor: (id) => piSessions.pathFor(id)
       }),
     publish: setNodeSessionName
     // No `supports`: core's `supportsTitleRead` (TITLE_READ_CAPABLE) is the rule, and duplicating
@@ -468,7 +469,7 @@ export async function startServer(
   // Set after the initial workspace load when the opt-in flag is on. The status listener is wired
   // now so the runtime, once present, consumes the exact same normalized stream as the UI/mirror.
   let canvasControl: ServerCanvasControl | null = null
-  const { contextTail, geminiContextTail, codexContextTail } = wireAgentStatus(platform, {
+  const { contextTail, geminiContextTail, codexContextTail, piSessions } = wireAgentStatus(platform, {
     onEvent: (event) => canvasControl?.onAgentEvent(event)
   })
   // Self-host fork: surface a peer instance's (the desktop app's) agent states — see
