@@ -1929,12 +1929,12 @@ body,
   animation-play-state: var(--nt-anim-state);
 }
 
-/* Grok, gemini and opencode have no critter: their RUNNING indicator is the brand mark itself,
+/* Grok, gemini, opencode and pi have no critter: their RUNNING indicator is the brand mark itself,
    breathing. Deliberately NOT a sprite. For grok the glyph is an inline SVG painted in
    `currentColor`, so the bloom is a drop-shadow of that same colour and needs no ink of its own —
    that is what makes it correct in both themes: the halo is light-on-dark and dark-on-light, exactly
    like the mark. A fixed glow colour would have vanished into one of the two backgrounds. The other
-   two are multi-colour ASSETS wrapped in a span, so their bloom is the badge's label colour rather
+   three are multi-colour ASSETS wrapped in a span, so their bloom is the badge's label colour rather
    than their own ink — approximate, accepted, and cheaper than an ink table (see lib/brandPulse.ts).
    Agent-neutral by design: no rule below names an agent. */
 .term-node__mascot--pulse {
