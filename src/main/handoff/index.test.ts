@@ -42,3 +42,19 @@ describe('buildHandoff — grok as a transfer source', () => {
     expect(res).toEqual({ error: 'Transfer is not supported from opencode.' })
   })
 })
+
+describe('buildHandoff — pi as a transfer source', () => {
+  const SESSION = '01a0dd76-66d4-7dde-b8ee-3fd4dd0a917e'
+
+  it('is not refused as an unsupported source', async () => {
+    const res = await buildHandoff({
+      sessionId: SESSION,
+      agentId: 'pi',
+      sourceNodeId: 'term-1'
+    })
+    // It may still fail to find a transcript on THIS machine (no $PI_CODING_AGENT_DIR here holds
+    // this id) — that is a different, honest error. What must never come back is the capability
+    // refusal that means RENDERERS/LOCATORS never learned about pi.
+    expect(res).not.toEqual({ error: 'Transfer is not supported from pi.' })
+  })
+})

@@ -142,4 +142,48 @@ describe('readAgentSessionName', () => {
     await readAgentSessionName('shared-id', undefined, undefined, { geminiPathFor })
     expect(asked).toEqual([])
   })
+
+  // The pi leg. Same shape as gemini's: the tracker (piSessions, built in both shells) hands us the
+  // path a hook already told us about, this reader tails it and picks the latest session_info name.
+  it("routes a pi session to its own transcript, via the tracker's path", async () => {
+    const p = path.join(root, 'session-pi.jsonl')
+    writeFileSync(
+      p,
+      [
+        JSON.stringify({ type: 'session', version: 3, id: 'pi1', timestamp: 't', cwd: '/tmp' }),
+        JSON.stringify({ type: 'session_info', id: 'a', parentId: null, timestamp: 't', name: 'Fixture title' })
+      ].join('\n') + '\n'
+    )
+    const asked: string[] = []
+    const name = await readAgentSessionName('pi1', undefined, 'pi', {
+      piPathFor: (id) => (asked.push(id), id === 'pi1' ? p : undefined)
+    })
+    expect(name).toBe('Fixture title')
+    expect(asked).toEqual(['pi1'])
+  })
+
+  it('answers null for a pi session no hook has been seen for', async () => {
+    expect(await readAgentSessionName('pi-unknown', undefined, 'pi', { piPathFor: () => undefined })).toBeNull()
+    // No deps at all (the Server Edition before its tracker exists, or any pre-pi caller).
+    expect(await readAgentSessionName('pi-unknown', undefined, 'pi')).toBeNull()
+  })
+
+  it('answers null when the pi transcript cannot be read, without throwing', async () => {
+    expect(
+      await readAgentSessionName('pi2', undefined, 'pi', { piPathFor: () => path.join(root, 'does-not-exist-pi.jsonl') })
+    ).toBeNull()
+  })
+
+  it("never asks pi's path resolver for another agent's session", async () => {
+    const asked: string[] = []
+    const piPathFor = (id: string): undefined => {
+      asked.push(id)
+      return undefined
+    }
+    await readAgentSessionName('shared-id', undefined, 'claude', { piPathFor })
+    await readAgentSessionName('shared-id', undefined, 'grok', { piPathFor })
+    await readAgentSessionName('shared-id', undefined, 'gemini', { piPathFor })
+    await readAgentSessionName('shared-id', undefined, undefined, { piPathFor })
+    expect(asked).toEqual([])
+  })
 })

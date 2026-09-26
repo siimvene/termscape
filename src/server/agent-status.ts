@@ -68,11 +68,18 @@ export interface WireAgentStatusOptions {
  * Returns its context tails so the boot step can give the readers the same hook-fed path authority
  * the desktop gives them: claude's for the transcript read channels (`registerTranscriptIpc`), and
  * gemini's for the session-name router, whose gemini leg reads the transcript at that path.
+ * `piSessions` joins them for the same reason — its `pathFor` is pi's session-name (and
+ * context-link) path authority, exactly like `geminiContextTail.pathFor`.
  */
 export function wireAgentStatus(
   platform: ServerPlatform,
   opts: WireAgentStatusOptions = {}
-): { contextTail: ContextTail; geminiContextTail: ContextTail; codexContextTail: ContextTail } {
+): {
+  contextTail: ContextTail
+  geminiContextTail: ContextTail
+  codexContextTail: ContextTail
+  piSessions: ReturnType<typeof createPiSessionTracker>
+} {
   const hooks = opts.hooks ?? hookServer
   // nodeId → the agent session id of whichever hook-capable CLI runs in that node (claude's, and
   // since the grok branch below, grok's)
@@ -494,6 +501,7 @@ export function wireAgentStatus(
 
   // `codexContextTail` joins the two already returned so `src/server/index.ts` can register the
   // context-meter rehydration over all three. Keeping a tail private here would mean a second
-  // instance somewhere else metering the same sessions twice.
-  return { contextTail, geminiContextTail, codexContextTail }
+  // instance somewhere else metering the same sessions twice. `piSessions` joins them so its
+  // `pathFor` can be handed to the session-name sweep, the same way `geminiContextTail.pathFor` is.
+  return { contextTail, geminiContextTail, codexContextTail, piSessions }
 }
