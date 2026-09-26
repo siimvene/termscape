@@ -1248,7 +1248,7 @@ Golden rule: the wire has **no `undefined`**. Inside objects, an absent field is
 | `title` | String | no | display name |
 | `color` | String | no | dot color |
 | `cwd` | String | yes | terminal working dir |
-| `agentId` | String | yes | `claude \| codex \| gemini \| opencode \| grok \| copilot \|` custom — an "agent node" is a terminal with this set |
+| `agentId` | String | yes | `claude \| codex \| gemini \| opencode \| grok \| copilot \| pi \|` custom — an "agent node" is a terminal with this set |
 | `accountId` | String | yes | managed Claude account (pass to transcript reads) |
 | `agentSessionId` | String | yes | minted session id for resume (owner concern) |
 | `tags` | [String] | yes | labels |
