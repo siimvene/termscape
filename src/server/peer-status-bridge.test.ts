@@ -2,8 +2,10 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
-import { readPeerMirror, readPeerUsage, startPeerStatusBridge } from './peer-status-bridge'
+import { readPeerMirror, readFreshPeerMirror, readPeerUsage, startPeerStatusBridge } from './peer-status-bridge'
 import { IPC } from '../shared/ipc'
+import { WORKING_STALE_MS } from '../shared/agents/stale'
+import { _resetForTest, EXPIRE_MS, initAgentStatusMirror, recordAgentEvent } from '../core/agent-status-mirror'
 
 function tmpMirror(nodes: Record<string, unknown>, usage?: unknown): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'peer-mirror-'))
@@ -15,6 +17,8 @@ function tmpMirror(nodes: Record<string, unknown>, usage?: unknown): string {
 const stops: Array<() => void> = []
 afterEach(() => {
   while (stops.length) stops.pop()!()
+  _resetForTest()
+  vi.useRealTimers()
 })
 
 describe('readPeerMirror', () => {
@@ -41,13 +45,59 @@ describe('readPeerMirror', () => {
     fs.writeFileSync(file, '{not json')
     expect(readPeerMirror(file).size).toBe(0)
   })
+
+  it('fresh snapshot carries approvals, strips question tickets, and drops stale working evidence', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'peer-fresh-'))
+    const file = path.join(dir, 'agent-status.json')
+    const now = Date.now()
+    fs.writeFileSync(file, JSON.stringify({ v: 1, nodes: {
+      approval: { state: 'blocked', agentId: 'codex', updatedAt: now },
+      question: { state: 'waiting', agentId: 'claude', updatedAt: now },
+      reused: { state: 'blocked', agentId: 'claude', sessionId: 'new', updatedAt: now },
+      restored: { state: 'blocked', agentId: 'codex', restored: true, updatedAt: now },
+      stale: { state: 'working', agentId: 'claude', updatedAt: now - 30 * 60_000 }
+    }, inbox: { events: [
+      { nodeId: 'approval', kind: 'approval', pendingId: 'ticket', resolved: false },
+      { nodeId: 'question', kind: 'question', pendingId: 'must-not-forward', resolved: false },
+      { nodeId: 'reused', sessionId: 'old', kind: 'approval', pendingId: 'old-ticket', resolved: false }
+    ] } }))
+    const snapshot = readFreshPeerMirror(file, now)
+    expect(snapshot.get('approval')).toMatchObject({ askKind: 'approval', pendingId: 'ticket' })
+    expect(snapshot.get('question')).toMatchObject({ askKind: 'question' })
+    expect(snapshot.get('question')).not.toHaveProperty('pendingId')
+    expect(snapshot.get('reused')).not.toHaveProperty('pendingId')
+    expect(snapshot.get('reused')).not.toHaveProperty('askKind')
+    expect(snapshot.has('stale')).toBe(false)
+    expect(snapshot.has('restored')).toBe(false)
+  })
 })
 
 describe('startPeerStatusBridge', () => {
+  it('fresh peer evidence wins over restored, expired, and stale-working local rows', () => {
+    vi.useFakeTimers()
+    _resetForTest()
+    const now = Date.now()
+    initAgentStatusMirror(tmpMirror({ restored: { state: 'blocked', updatedAt: now } }))
+    vi.setSystemTime(now - EXPIRE_MS - 1)
+    recordAgentEvent({ nodeId: 'expired', agentId: 'claude', kind: 'state', state: 'done' })
+    vi.setSystemTime(now - WORKING_STALE_MS - 1)
+    recordAgentEvent({ nodeId: 'stale', agentId: 'claude', kind: 'state', state: 'working' })
+    vi.setSystemTime(now)
+    recordAgentEvent({ nodeId: 'live', agentId: 'claude', kind: 'state', state: 'working' })
+    const file = tmpMirror(Object.fromEntries(['restored', 'expired', 'stale', 'live'].map((id) =>
+      [id, { state: 'working', agentId: 'codex', updatedAt: now }]
+    )))
+    const broadcast = vi.fn()
+    stops.push(startPeerStatusBridge(file, { broadcast, watch: false }))
+    expect(broadcast.mock.calls.map((call) => call[1].nodeId)).toEqual(['restored', 'expired', 'stale'])
+    expect(broadcast.mock.calls.every((call) => call[1].agentId === 'codex')).toBe(true)
+  })
+
   it('broadcasts each peer node once as a kind:state agent:status event', () => {
+    const now = Date.now()
     const file = tmpMirror({
-      a: { state: 'working', agentId: 'claude', sessionId: 's1', updatedAt: 1 },
-      b: { state: 'done', agentId: 'claude', sessionId: 's2', name: 'Named', updatedAt: 2 }
+      a: { state: 'working', agentId: 'claude', sessionId: 's1', updatedAt: now },
+      b: { state: 'done', agentId: 'claude', sessionId: 's2', name: 'Named', updatedAt: now }
     })
     const broadcast = vi.fn()
     stops.push(startPeerStatusBridge(file, { broadcast, ownState: () => undefined, watch: false }))
@@ -65,8 +115,8 @@ describe('startPeerStatusBridge', () => {
 
   it("this instance's own live state wins: owned nodes are never re-broadcast", () => {
     const file = tmpMirror({
-      mine: { state: 'done', updatedAt: 1 },
-      theirs: { state: 'working', updatedAt: 1 }
+      mine: { state: 'done', updatedAt: Date.now() },
+      theirs: { state: 'working', updatedAt: Date.now() }
     })
     const broadcast = vi.fn()
     stops.push(
@@ -80,7 +130,8 @@ describe('startPeerStatusBridge', () => {
   })
 
   it('change-gated: an unchanged tuple is not re-broadcast, a changed one is', async () => {
-    const file = tmpMirror({ a: { state: 'working', updatedAt: 1 } })
+    const now = Date.now()
+    const file = tmpMirror({ a: { state: 'working', updatedAt: now } })
     const broadcast = vi.fn()
     // watch:true — exercise the real directory watcher (mirror files land via atomic rename).
     stops.push(startPeerStatusBridge(file, { broadcast, ownState: () => undefined }))
@@ -88,17 +139,78 @@ describe('startPeerStatusBridge', () => {
 
     // Atomic-rename replace with the SAME tuple → watcher may fire, but nothing re-broadcasts.
     const tmp = file + '.tmp'
-    fs.writeFileSync(tmp, JSON.stringify({ v: 1, nodes: { a: { state: 'working', updatedAt: 1 } } }))
+    fs.writeFileSync(tmp, JSON.stringify({ v: 1, nodes: { a: { state: 'working', updatedAt: now } } }))
     fs.renameSync(tmp, file)
     await vi.waitFor(() => expect(fs.existsSync(file)).toBe(true))
     await new Promise((r) => setTimeout(r, 150))
     expect(broadcast).toHaveBeenCalledTimes(1)
 
     // Changed state → exactly one more event.
-    fs.writeFileSync(tmp, JSON.stringify({ v: 1, nodes: { a: { state: 'done', updatedAt: 2 } } }))
+    fs.writeFileSync(tmp, JSON.stringify({ v: 1, nodes: { a: { state: 'done', updatedAt: now + 1 } } }))
     fs.renameSync(tmp, file)
     await vi.waitFor(() => expect(broadcast).toHaveBeenCalledTimes(2), { timeout: 3000 })
     expect(broadcast.mock.calls[1][1]).toMatchObject({ nodeId: 'a', state: 'done' })
+  })
+
+  it('never replays stale working evidence and expires a live Codex row with its own identity', () => {
+    vi.useFakeTimers()
+    const now = Date.now()
+    const file = tmpMirror({
+      stale: { state: 'working', updatedAt: now - WORKING_STALE_MS - 1 },
+      live: { state: 'working', agentId: 'codex', updatedAt: now }
+    })
+    const broadcast = vi.fn()
+    stops.push(startPeerStatusBridge(file, { broadcast, ownState: () => undefined, watch: false }))
+    expect(broadcast.mock.calls.map((c) => c[1].nodeId)).toEqual(['live'])
+    vi.advanceTimersByTime(WORKING_STALE_MS + 15_000)
+    expect(broadcast.mock.calls.every((c) => c[1].nodeId === 'live')).toBe(true)
+    expect(broadcast.mock.lastCall?.[1]).toMatchObject({
+      nodeId: 'live', agentId: 'codex', kind: 'session', sessionPhase: 'end'
+    })
+    const count = broadcast.mock.calls.length
+    vi.advanceTimersByTime(30_000)
+    expect(broadcast).toHaveBeenCalledTimes(count)
+  })
+
+  it('does not clear a row when local hook state takes over from the peer', () => {
+    vi.useFakeTimers()
+    const file = tmpMirror({ a: { state: 'working', updatedAt: Date.now() } })
+    const broadcast = vi.fn()
+    let owned = false
+    stops.push(startPeerStatusBridge(file, {
+      broadcast, ownState: () => owned ? 'working' : undefined, watch: false
+    }))
+    owned = true
+    vi.advanceTimersByTime(15_000)
+    expect(broadcast).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['codex', 'claude'])('replays a coalesced session replacement before %s approval state', (agentId) => {
+    vi.useFakeTimers()
+    const file = tmpMirror({
+      reused: { state: 'working', agentId: 'claude', sessionId: 'old', updatedAt: Date.now() }
+    })
+    const broadcast = vi.fn()
+    stops.push(startPeerStatusBridge(file, { broadcast, ownState: () => undefined, watch: false }))
+    broadcast.mockClear()
+    fs.writeFileSync(file, JSON.stringify({ v: 1, nodes: {
+      reused: { state: 'blocked', agentId, sessionId: 'new', updatedAt: Date.now() }
+    }, inbox: { events: [
+      { nodeId: 'reused', sessionId: 'new', kind: 'approval', pendingId: 'new-ticket' }
+    ] } }))
+    vi.advanceTimersByTime(15_000)
+    expect(broadcast.mock.calls.map((call) => call[1])).toEqual([
+      { nodeId: 'reused', agentId: 'claude', sessionId: 'old', kind: 'session', sessionPhase: 'end' },
+      { nodeId: 'reused', agentId, sessionId: 'new', kind: 'session', sessionPhase: 'start' },
+      expect.objectContaining({
+        nodeId: 'reused', agentId, sessionId: 'new', kind: 'state', state: 'blocked',
+        askKind: 'approval', pendingId: 'new-ticket'
+      })
+    ])
+    broadcast.mockClear()
+    vi.advanceTimersByTime(15_000)
+    expect(broadcast).toHaveBeenCalledTimes(1)
+    expect(broadcast.mock.calls[0][1].kind).toBe('state')
   })
 })
 

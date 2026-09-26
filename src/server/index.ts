@@ -63,6 +63,8 @@ import { installManagedAgentHooks } from '../core/agents/hooks'
 import { installHooksIntoLocalAccounts } from '../core/claude-accounts-service'
 import {
   initAgentStatusMirror,
+  statusSnapshotEvents,
+  freshNodeState,
   flush as flushAgentStatusMirror,
   recordAgentEvent,
   ackDone,
@@ -90,7 +92,7 @@ import { claudeConfigDirFor, registerClaudeAccountsSource } from '../core/claude
 import { presenceHub } from '../core/presence/hub'
 import { initCanvasSync } from '../core/canvas-sync'
 import { wireAgentStatus } from './agent-status'
-import { maybeStartPeerStatusBridge } from './peer-status-bridge'
+import { maybeStartPeerStatusBridge, readFreshPeerMirror } from './peer-status-bridge'
 import { initServerContextLink } from './context-link'
 import { createServerWorkspaceWatcher } from './workspace-external-watch'
 import { registerTranscriptIpc } from '../core/transcript-ipc'
@@ -473,6 +475,31 @@ export async function startServer(
   const stopPeerBridge = maybeStartPeerStatusBridge((channel, payload) =>
     platform.broadcast(channel, payload)
   )
+  // A fresh phone connection can miss the peer bridge's initial broadcast. Keep the live event
+  // stream for updates, but expose a read-only replay so Home can hydrate status before any PTY
+  // is opened. Both readers exclude expired evidence rather than inventing liveness for idle panes.
+  platform.handle(IPC.agentStatusSnapshot, () => {
+    const now = Date.now()
+    const events = statusSnapshotEvents(now)
+    const peerFile = (process.env.NODETERM_PEER_STATUS_MIRROR || '').trim()
+    if (peerFile) {
+      for (const [nodeId, entry] of readFreshPeerMirror(peerFile, now)) {
+        // Only fresh local hook state is authoritative when both mirrors contain a node.
+        if (freshNodeState(nodeId, now) !== undefined) continue
+        events.push({
+          nodeId,
+          agentId: entry.agentId ?? 'claude',
+          kind: 'state',
+          state: entry.state,
+          sessionId: entry.sessionId,
+          sessionTitle: entry.name,
+          pendingId: entry.pendingId,
+          askKind: entry.askKind
+        })
+      }
+    }
+    return events
+  })
   // The ⌘M chat view + the find-bar's transcript index. Registered HERE rather than with the rest
   // of the handlers because the hook-fed path authority is the tail created just above. No remote
   // leg: the Server Edition runs ON the host whose transcripts it reads, so local resolution is

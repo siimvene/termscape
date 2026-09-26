@@ -910,6 +910,25 @@ describe('HeadlessNodeFactory', () => {
     expect(pty.sends.at(-1)).toEqual({ nodeId: id, text: command })
   })
 
+  it('launches a Codex node in full yolo when the project selects Bypass all', async () => {
+    const workspace = await store.load({ sideline: false })
+    workspace.projects[0].defaultPermissionMode = 'bypassPermissions'
+    await store.save(workspace)
+
+    const reply = await factory.openAgent(
+      'term-source',
+      { agent: 'codex', prompt: 'do work' },
+      true
+    )
+
+    expect(reply.ok).toBe(true)
+    const id = (reply.result as { id: string }).id
+    expect(pty.sends.at(-1)).toEqual({
+      nodeId: id,
+      text: "codex 'do work' --dangerously-bypass-approvals-and-sandbox"
+    })
+  })
+
   it('never cold-spawns a persisted arm during boot reconciliation', async () => {
     const workspace = await store.load({ sideline: false })
     workspace.projects[0].nodes.push({

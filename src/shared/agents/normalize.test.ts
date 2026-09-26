@@ -406,6 +406,33 @@ describe('normalizeCodex — request_user_input (ask-the-user)', () => {
   })
 })
 
+describe('normalizeCodex — session lifecycle', () => {
+  function cenv(payload: Record<string, unknown>): RawHookEnvelope {
+    return { nodeId: 'n1', agentId: 'codex', payload }
+  }
+
+  it('marks SessionStart while preserving the initial working state', () => {
+    expect(
+      normalizeCodex(cenv({ hook_event_name: 'SessionStart', session_id: 'cx-1' }))
+    ).toEqual({
+      nodeId: 'n1',
+      agentId: 'codex',
+      sessionId: 'cx-1',
+      kind: 'state',
+      state: 'working',
+      sessionPhase: 'start'
+    })
+  })
+
+  it('does not mark ordinary Codex tool activity as a session boundary', () => {
+    const event = normalizeCodex(
+      cenv({ hook_event_name: 'PreToolUse', session_id: 'cx-1', tool_name: 'shell' })
+    )
+    expect(event).toMatchObject({ kind: 'state', state: 'working', sessionId: 'cx-1' })
+    expect(event?.sessionPhase).toBeUndefined()
+  })
+})
+
 // Payload shapes below are the LIVE capture from codex-cli 0.146.0 (spawn_agent measurement run,
 // 2026-08-24): parent session_id + the child's agent_id/agent_type; SubagentStart's
 // transcript_path is the CHILD's rollout; a child's own tool events carry agent_id too.
