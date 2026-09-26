@@ -49,7 +49,11 @@ import { registerLogHandlers } from '../core/log-handlers'
 import os from 'os'
 import { hookServer } from '../core/agents/hook-server'
 import { serverEditionControlHandler } from './control-unsupported'
-import { initServerCanvasControl, type ServerCanvasControl } from './canvas-control'
+import {
+  initServerCanvasControl,
+  installServerPiCanvasSkillInto,
+  type ServerCanvasControl
+} from './canvas-control'
 import { refreshNodeTokens } from '../core/agents/node-token-service'
 import { armServerNodeIdentity } from './node-identity-arm'
 import { wireServerCodexSharedIdentity } from './codex-shared-identity'
@@ -61,6 +65,8 @@ import {
 } from '../core/agents/pending-approvals'
 import { installManagedAgentHooks } from '../core/agents/hooks'
 import { installHooksIntoLocalAccounts } from '../core/claude-accounts-service'
+import { installPiExtensionIntoLocalAccounts } from '../core/pi-accounts-service'
+import { installPiLinkSkillInto } from '../core/context-link'
 import {
   initAgentStatusMirror,
   statusSnapshotEvents,
@@ -316,9 +322,20 @@ export async function startServer(
   // between the RPC side (which mints) and the HTTP side (which redeems) — one instance, so a
   // ticket minted over the socket is redeemable by the GET that follows it.
   const downloadTickets = new DownloadTickets()
+  // A managed pi account is its own agent dir, and pi reads skills per agent dir: each account
+  // gets BOTH skills the system dir gets (get-linked-context, and canvas control when that surface
+  // is enabled on this edition), from the same builders — the desktop's `installPiAccountSkills`.
+  // Used by the add verb (`installPiSkill`) and the boot loop below. `installHooks: false`
+  // (tests) skips it like every other integration write.
+  const installPiAccountSkills = (agentDir: string): void => {
+    if (config.installHooks === false) return
+    installPiLinkSkillInto(agentDir)
+    if (config.canvasControl === true) installServerPiCanvasSkillInto(agentDir)
+  }
   const { gitService } = registerCoreHandlers(platform, {
     getSettings: () => settingsStore.get(),
     settingsStore,
+    installPiSkill: installPiAccountSkills,
     downloadTickets,
     localProjectCwd: (projectId: string) => workspaceStore.localCwdForProject(projectId)
   })
@@ -410,12 +427,13 @@ export async function startServer(
     // The per-agent router (core/agent-session-name.ts), same as the desktop's sweep and its
     // ptyReadSessionName handler: a grok node's name is in its session metadata, and resolving it
     // through claude's reader would scan ~/.claude/projects once a minute for a guaranteed miss.
-    // Gemini's leg needs the transcript path its context tail tracks; that tail is created by
-    // `wireAgentStatus` below, so it is dereferenced lazily — the sweep's first pass is 5s after
-    // boot, long after wiring.
+    // Gemini's leg needs the transcript path its context tail tracks; pi's leg needs the path its
+    // session tracker learned from a hook. Both are created by `wireAgentStatus` below, so they are
+    // dereferenced lazily — the sweep's first pass is 5s after boot, long after wiring.
     resolve: (sessionId, accountId, agentId) =>
       readAgentSessionName(sessionId, accountId, agentId, {
-        geminiPathFor: (id) => geminiContextTail.pathFor(id)
+        geminiPathFor: (id) => geminiContextTail.pathFor(id),
+        piPathFor: (id) => piSessions.pathFor(id)
       }),
     publish: setNodeSessionName
     // No `supports`: core's `supportsTitleRead` (TITLE_READ_CAPABLE) is the rule, and duplicating
@@ -467,7 +485,7 @@ export async function startServer(
   // Set after the initial workspace load when the opt-in flag is on. The status listener is wired
   // now so the runtime, once present, consumes the exact same normalized stream as the UI/mirror.
   let canvasControl: ServerCanvasControl | null = null
-  const { contextTail, geminiContextTail, codexContextTail } = wireAgentStatus(platform, {
+  const { contextTail, geminiContextTail, codexContextTail, piSessions } = wireAgentStatus(platform, {
     onEvent: (event) => canvasControl?.onAgentEvent(event)
   })
   // Self-host fork: surface a peer instance's (the desktop app's) agent states — see
@@ -658,6 +676,10 @@ export async function startServer(
     // reports no agent status at all. Canvas-control adds its skill in its own opt-in initializer;
     // this baseline hook pass stays unchanged when the feature flag is off.
     installHooksIntoLocalAccounts(settingsStore.get().claudeAccounts ?? [])
+    // Managed pi accounts: each is its own PI_CODING_AGENT_DIR, so the status extension AND the
+    // per-account skills are re-installed into every account dir as well (same loop as the
+    // desktop boot, same installer the add verb uses).
+    installPiExtensionIntoLocalAccounts(settingsStore.get().piAccounts ?? [], installPiAccountSkills)
   }
   await hookServer.start()
   // Safe default and rollback path. The opt-in runtime replaces this handler only after its
@@ -700,6 +722,7 @@ export async function startServer(
   // src/server/context-link.ts.
   const contextLink = initServerContextLink({
     ptyManager,
+    piPathFor: (sessionId) => piSessions.pathFor(sessionId),
     canvases: () => workspaceStore.persistedCanvases(),
     installAgentIntegrations: config.installHooks !== false
   })

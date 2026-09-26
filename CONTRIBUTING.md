@@ -655,6 +655,13 @@ passed with the code they were meant to pin removed, including one mutation that
 Watch for fixtures that cannot discriminate: if every row in your fixture happens to make the
 mutant's output identical to the real one, the test proves nothing while looking thorough.
 
+**Agents that load a JS plugin instead of running a hook command** (opencode, Pi) post through
+ONE client, `src/core/agents/hooks/plugin-hook-client.ts`; do not inline a second copy. Pi only
+auto-discovers `*.js` / `*.ts` in its extensions dir, so an `.mjs` there is silently never loaded
+(`-e` accepts `.mjs`, which hides it). `hooks/pi.e2e.test.ts` runs the real `pi` binary when it is on
+your PATH and skips otherwise; it drives a pty with `script`, which needs a real pipe on stdin, not
+node's `stdio: 'pipe'` (a socketpair on macOS).
+
 **Run the suite BEFORE you package, never after.** `npm run dist` (electron-builder) rebuilds
 `node-pty` for the packaged app, and afterwards every test that spawns a real pty fails with
 `Failed to spawn terminal (posix_spawn…)` — `sessionRename.realtty`, `pty-spawn-diagnosis` and

@@ -47,9 +47,20 @@ export function useAccountChip(
   /** The node's creation-time account (`data.accountId`) — absent for a plain terminal. */
   dataAccountId: string | undefined,
   /** What this node's session was observed running as (agent-status `account`). */
-  observed: ObservedClaudeAccount | undefined
+  observed: ObservedClaudeAccount | undefined,
+  /** The node's agent: it decides which provider's list may name `dataAccountId`. */
+  agentId?: string
 ): AccountChipInfo | null {
   const accounts = useSettings((s) => s.settings.claudeAccounts)
+  // The other providers' managed rows, so a pi- or codex-bound node is named by its own list
+  // instead of reading "Unknown account" off the Claude one (settings arrays are stable references,
+  // so these subscriptions re-render only on an account edit).
+  const piAccounts = useSettings((s) => s.settings.piAccounts)
+  const codexAccounts = useSettings((s) => s.settings.codexAccounts)
+  const providerAccounts = useMemo(
+    () => ({ pi: piAccounts, codex: codexAccounts }),
+    [piAccounts, codexAccounts]
+  )
   const systemLabel = useSettings((s) => s.settings.systemAccountLabel)
   const systemEmail = useSystemAccount((s) => s.email)
   // A PRIMITIVE selector (the `usageScopeKey` rule): this subscription lives on every node header
@@ -65,7 +76,17 @@ export function useAccountChip(
     if (known) useSystemAccount.getState().ensure()
   }, [known])
   return useMemo(
-    () => accountChipFor({ dataAccountId, observed, accounts, systemLabel, systemEmail, multiple }),
-    [dataAccountId, observed, accounts, systemLabel, systemEmail, multiple]
+    () =>
+      accountChipFor({
+        dataAccountId,
+        observed,
+        accounts,
+        agentId,
+        providerAccounts,
+        systemLabel,
+        systemEmail,
+        multiple
+      }),
+    [dataAccountId, observed, accounts, agentId, providerAccounts, systemLabel, systemEmail, multiple]
   )
 }

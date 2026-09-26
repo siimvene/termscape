@@ -21,12 +21,15 @@ import {
   buildCanvasSkillBody,
   mergeCanvasControlBlock
 } from '../core/canvas-control-core'
+import { piAgentDir } from '../core/agents/hooks/pi'
+import { installPiCanvasSkillsInto } from '../core/agents/hooks/pi-skills'
 import { codexIdentityCaps } from '../core/codex-identity-caps'
 import { codexThreadIdentityRoot } from '../core/codex-identity-proxy'
 import { claudeCliCaps, type ClaudeCliCaps } from '../core/claude-cli'
 import { grokCliCaps } from '../core/grok-cli'
 import type { GrokCliCaps } from '../shared/types'
 import { installHooksIntoLocalAccounts } from '../core/claude-accounts-service'
+import { installPiExtensionIntoLocalAccounts } from '../core/pi-accounts-service'
 import { platform } from '../core/platform'
 import type { PtyManager } from '../core/pty-manager'
 import type { WorkspaceStore } from '../core/workspace-store'
@@ -91,6 +94,16 @@ function shimPath(): string {
 
 function skillPathIn(configDir: string): string {
   return path.join(configDir, 'skills', 'manage-nodeterm-canvas', 'SKILL.md')
+}
+
+/**
+ * The per-account pi leg for THIS shell — the twin of `installPiCanvasSkillInto` in
+ * main/canvas-control.ts: a managed pi account is its own agent dir and pi discovers skills from
+ * `<agentDir>/skills`, so each account needs its own copy. Same builder and the same shim path as
+ * the system dir's install below, so an account can never carry different verbs. Best-effort.
+ */
+export function installServerPiCanvasSkillInto(agentDir: string): void {
+  installPiCanvasSkillsInto(agentDir, buildCanvasSkillBody(shimPath()))
 }
 
 function writeShim(): void {
@@ -159,10 +172,17 @@ export async function initServerCanvasControl(
   // be spellable here.
   if (deps.installAgentIntegrations) {
     installSkillInto(path.join(os.homedir(), '.claude'))
+    // pi reads its own agent dir's skills/, not ~/.claude/skills — same builder, same body.
+    installPiCanvasSkillsInto(piAgentDir(), skillBody)
     installInstructions(path.join(os.homedir(), '.codex', 'AGENTS.md'), instructions)
     installInstructions(path.join(os.homedir(), '.gemini', 'GEMINI.md'), instructions)
     // Managed accounts resolve skills relative to their own CLAUDE_CONFIG_DIR.
     installHooksIntoLocalAccounts(deps.settings().claudeAccounts ?? [], installSkillInto)
+    // Managed pi accounts likewise read skills from their own PI_CODING_AGENT_DIR — the same loop
+    // the desktop's boot runs for them (existing dirs only; a removed account is never resurrected).
+    installPiExtensionIntoLocalAccounts(deps.settings().piAccounts ?? [], (agentDir) =>
+      installPiCanvasSkillsInto(agentDir, skillBody)
+    )
   }
 
   const factory = new HeadlessNodeFactory({

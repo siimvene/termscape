@@ -19,6 +19,8 @@ import {
 import { codexThreadIdentityRoot } from '../core/codex-identity-proxy'
 import { opencodeConfigDir } from '../core/agents/hooks/opencode'
 import { copilotHomeDir } from '../core/agents/hooks/copilot'
+import { piAgentDir } from '../core/agents/hooks/pi'
+import { installPiCanvasSkillsInto } from '../core/agents/hooks/pi-skills'
 
 function dir(): string {
   return path.join(app.getPath('userData'), 'canvas-control')
@@ -95,10 +97,23 @@ function installAgentInstructions(): void {
   }
 }
 
+/**
+ * The per-account pi leg: a managed pi account is its own agent dir (`PI_CODING_AGENT_DIR`), and pi
+ * discovers skills from `<agentDir>/skills`, so each account needs its own copy — exactly why
+ * `installCanvasSkillInto` exists for managed Claude accounts. Same body as every other install
+ * site, so an account can never carry different verbs from the system dir.
+ */
+export function installPiCanvasSkillInto(agentDir: string): void {
+  installPiCanvasSkillsInto(agentDir, skillBody())
+}
+
 export function initCanvasControl(): void {
   try {
     writeCliFiles()
     installCanvasSkillInto(path.join(os.homedir(), '.claude'))
+    // pi discovers skills from its own agent dir (not ~/.claude/skills), same envelope — the
+    // SAME builder as the Claude skill above, so the two can never carry different verbs.
+    installPiCanvasSkillsInto(piAgentDir(), skillBody())
     installAgentInstructions()
   } catch (e) {
     console.error('[canvas-control] setup failed', e)

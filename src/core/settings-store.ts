@@ -11,6 +11,7 @@ import {
   type Settings,
 } from "../shared/types";
 import { NEW_CODEX_ACCOUNT_LABEL, type CodexAccount } from "../shared/codex-account";
+import { NEW_PI_ACCOUNT_LABEL, type PiAccount } from "../shared/pi-account";
 
 /**
  * Merge a possibly-partial/legacy `Settings` object over `DEFAULT_SETTINGS`. A plain
@@ -255,9 +256,10 @@ const RMW_MAX_RETRIES = 3;
  *    shell-owned account lists, which are reconciled against the store's own membership
  *    (`reconcileOwnedAccountList`).
  *  - `mutate(fn)` — the shell's own read-modify-write: `fn` runs against the LATEST settings, on
- *    the chain, and its result is persisted as-is. Membership of `codexAccounts` and
- *    `claudeAccounts` is written only here (`codex-accounts-service.ts` /
- *    `claude-accounts-service.ts` add/remove), so two concurrent adds compose instead of racing.
+ *    the chain, and its result is persisted as-is. Membership of `codexAccounts`,
+ *    `claudeAccounts` and `piAccounts` is written only here (`codex-accounts-service.ts` /
+ *    `claude-accounts-service.ts` / `pi-accounts-service.ts` add/remove), so two concurrent adds
+ *    compose instead of racing.
  *
  * "Latest" means the FILE, not this process's cache (`readModifyWrite`). The chain serializes
  * writers inside ONE process; a second process on the same directory (two Server Edition
@@ -362,6 +364,11 @@ export class SettingsStore {
         base.claudeAccounts,
         settings?.claudeAccounts,
         NEW_CLAUDE_ACCOUNT_LABEL,
+      );
+      next.piAccounts = reconcileOwnedAccountList<PiAccount>(
+        base.piAccounts,
+        settings?.piAccounts,
+        NEW_PI_ACCOUNT_LABEL,
       );
       return next;
     });

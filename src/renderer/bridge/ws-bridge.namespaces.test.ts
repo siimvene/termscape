@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   buildClaudeAccountsApi,
+  buildPiAccountsApi,
   buildFilesApi,
   buildRealApi,
   buildSessionMemoryApi
@@ -209,5 +210,40 @@ describe('buildClaudeAccountsApi', () => {
     })
     await expect(s.codexAccounts.add()).rejects.toMatchObject({ code: E_UNSUPPORTED })
     await expect(s.codexAccounts.remove('a1')).rejects.toMatchObject({ code: E_UNSUPPORTED })
+  })
+})
+
+/**
+ * Managed pi accounts: the lifecycle is core (src/core/pi-accounts-service.ts) and the server
+ * registers all four channels, so the browser namespace is REAL, not the refusing stub.
+ */
+describe('buildPiAccountsApi', () => {
+  it('all four members request the real channels', async () => {
+    const c = fakeClient()
+    const { piAccounts } = buildPiAccountsApi(c as never)
+    await piAccounts.add()
+    await piAccounts.waitLogin('p1')
+    await piAccounts.cancelWaitLogin('p1')
+    await piAccounts.remove('p1')
+    expect(c.calls).toEqual([
+      { kind: 'request', method: IPC.piAccountsAdd, args: [] },
+      { kind: 'request', method: IPC.piAccountsWaitLogin, args: ['p1'] },
+      { kind: 'request', method: IPC.piAccountsCancelWait, args: ['p1'] },
+      { kind: 'request', method: IPC.piAccountsRemove, args: ['p1'] }
+    ])
+  })
+
+  // A dropped spread compiles (the stub already satisfies `piAccounts`) and the stub would then
+  // silently win in every browser session.
+  it('is spread into the assembled window.nodeTerminal', () => {
+    const src = readFileSync(join(__dirname, 'ws-bridge.ts'), 'utf8')
+    const install = src.slice(src.indexOf('export async function installWsBridge'))
+    expect(install).toContain('...buildPiAccountsApi(client)')
+  })
+
+  it('the piAccounts stub (a relay tab / stub-only assembly) refuses with E_UNSUPPORTED', async () => {
+    const s = buildStubApi()
+    await expect(s.piAccounts.add()).rejects.toMatchObject({ code: E_UNSUPPORTED })
+    await expect(s.piAccounts.remove('p1')).rejects.toMatchObject({ code: E_UNSUPPORTED })
   })
 })

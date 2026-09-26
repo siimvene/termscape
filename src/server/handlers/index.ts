@@ -13,6 +13,7 @@ import { registerCodexIdentityIpc } from '../../core/codex-identity-caps'
 import { startUsageService } from '../../core/usage/usage-service'
 import { registerClaudeAccountsIpc } from '../../core/claude-accounts-service'
 import { registerCodexAccountsIpc } from '../../core/codex-accounts-service'
+import { registerPiAccountsIpc } from '../../core/pi-accounts-service'
 import type { AccountRowStore } from '../../core/settings-store'
 import { codexUsageAccounts } from '../../core/codex-accounts-core'
 import { codexHomeFor } from '../../core/codex-config-dir'
@@ -34,6 +35,11 @@ export function registerCoreHandlers(
      *  through its `mutate` (claude-accounts-service.ts / codex-accounts-service.ts), not through
      *  a renderer snapshot. */
     settingsStore: AccountRowStore
+    /** Per-dir addition for a NEW managed pi account (the get-linked-context skill, plus the
+     *  canvas-control skill when that surface is enabled) — pi discovers skills only from
+     *  `<agentDir>/skills`, so without it a fresh account's node cannot find either CLI. The
+     *  desktop passes the same shape to `initPiAccounts`. */
+    installPiSkill?: (agentDir: string) => void
     downloadTickets?: DownloadTickets
     /** See fs-handlers' dep of the same name — the canvas-image write directory. */
     localProjectCwd?: (projectId: string) => string | undefined
@@ -116,6 +122,13 @@ export function registerCoreHandlers(
   // that renderer's `destroyed` event, neither of which the server seam can express), so nothing
   // here can ever hold a reservation and removal has nothing to refuse for.
   registerCodexAccountsIpc({ settings: deps.settingsStore })
+
+  // Managed PI accounts, the same four verbs the desktop serves (add / wait-login / cancel-wait /
+  // remove, src/core/pi-accounts-service.ts). Local-only in v1 — there is no SSH leg to omit. The
+  // store is where the account ROW (and the login-capture flip) is written. `installSkill` is the
+  // per-account skill leg the desktop's `initPiAccounts` gets too (a pi account dir reads its
+  // skills from ITSELF, unlike Claude's canvas skill, which this shell leaves to its boot loop).
+  registerPiAccountsIpc({ settings: deps.settingsStore, installSkill: deps.installPiSkill })
 
   // Claude subscription usage. Previously desktop-only — the browser bridge answered `null`, so
   // the pill never rendered in the Server Edition. The poll runs UNGATED here (the default), not

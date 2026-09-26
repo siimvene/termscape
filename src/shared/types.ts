@@ -14,6 +14,7 @@ import type { ClientId, DinoSnapshot, PeerDiff, PeerIdentity, PeerState } from '
 import type { WhisperModelInfo } from './speech'
 import type { ProjectKanbanGitHub } from './github-issues'
 import type { CodexAccount } from './codex-account'
+import type { PiAccount, PiAccountAddResult, PiLoginCapture } from './pi-account'
 import type { NotchAlign } from './notch-hud'
 import type { ProjectIcon, ProjectIconPickResult } from './project-icon'
 import type { CanvasLayout, LayoutViewports } from './canvas-layout'
@@ -154,6 +155,15 @@ export interface PtyCreateOptions {
    * an unscoped `codex login`. A visible refusal is the safe failure; a silent wrong login is not.
    */
   codexLogin?: boolean
+  /**
+   * This session is the LOGIN node of a managed pi account (`pi` then its `/login` command, under
+   * the account's PI_CODING_AGENT_DIR). The pi twin of `codexLogin`: the login node is agent-less
+   * (no `agentId`), so this flag is the explicit intent that scopes it. When set, pi account scope
+   * is REQUIRED — a missing/unresolvable account dir (or an SSH project: managed pi accounts are
+   * local-only in v1) makes the spawn REFUSE (a rejected create, surfaced as the node's
+   * `spawnError`) rather than run an unscoped `/login` that would write the SYSTEM `~/.pi/agent`.
+   */
+  piLogin?: boolean
   /**
    * Which VIEW of the session this is, WITHIN one connection. A second view in the same renderer
    * (the kanban card modal) passes its own id so it co-attaches as an independently-detachable
@@ -439,6 +449,12 @@ export interface CanvasNodeState {
    * and immutable for the node's lifetime. Undefined = system default (~/.claude).
    */
   accountId?: string
+  /**
+   * Pi only: this terminal was created by `createPiAccountLoginNode` to `/login` the managed pi
+   * account in `accountId`. Persisted so a cold restart of an unfinished login still spawns scoped
+   * (or refuses) — see `isPiAccountLoginNode` (renderer/state/workspace.ts).
+   */
+  piLogin?: boolean
   /**
    * Agents in `SESSION_ID_CAPABLE` (claude): the session id nodeterm minted and launched this
    * node's CLI with (`--session-id`). Persisted so a cold restore can resume even when no hook
@@ -1681,6 +1697,10 @@ export interface Settings {
   /** Managed Codex accounts (CODEX_HOME isolated, machine-scoped by `host`). See CodexAccount.
    *  Same ownership as `claudeAccounts`: the shell writes membership, the renderer edits display. */
   codexAccounts: CodexAccount[]
+  /** Managed pi accounts (PI_CODING_AGENT_DIR isolated, local-only in v1). See PiAccount. Same
+   *  ownership as `claudeAccounts`: the shell writes membership (and the login-capture flip, see
+   *  `pi-accounts:wait-login`), the renderer edits display. */
+  piAccounts: PiAccount[]
   /** Custom display label for the SYSTEM Claude account (~/.claude) in pickers/settings.
    *  Empty = unset → fall back to the detected login email, else "System account". */
   systemAccountLabel: string
@@ -1932,6 +1952,7 @@ export const DEFAULT_SETTINGS: Settings = {
   agentLaunchCommands: {},
   claudeAccounts: [],
   codexAccounts: [],
+  piAccounts: [],
   systemAccountLabel: '',
   // All three builtin agents (Claude/Codex/Gemini) show in the Add menus out of the box.
   // Existing users keep whatever they've saved (their persisted disabledAgents overrides this).
@@ -2969,6 +2990,28 @@ export interface CodexAccountsApi {
   ): Promise<{ threadId: string; imported: boolean }>
 }
 
+/**
+ * Managed pi accounts (LOCAL only in v1 — no SSH ctx anywhere). The list lives in `settings.json`
+ * (`piAccounts`); its MEMBERSHIP is written by the shell inside `add` / `remove`, and the login
+ * capture's `pending → resolved` flip (with the provider-list label) is written by the shell inside
+ * `waitLogin`. A renderer snapshot save carries only display edits (label, color) and can neither
+ * add nor drop a row.
+ */
+export interface PiAccountsApi {
+  /** Mint a new managed account: create its PI_CODING_AGENT_DIR under
+   *  `{userData}/pi-accounts/<id>`, install the nodeterm status extension into it, and register its
+   *  (pending) row. Resolves once the row is persisted; a failed persist rolls the dir back. */
+  add(): Promise<PiAccountAddResult>
+  /** Poll the account's `auth.json` (2 s, up to 5 min) until it holds at least one provider; on
+   *  capture the row flips out of `pending` (labelled with the provider list unless the user
+   *  renamed it). Null on timeout/cancel. */
+  waitLogin(id: string): Promise<PiLoginCapture | null>
+  /** Cancel every in-flight `waitLogin` for this account. */
+  cancelWaitLogin(id: string): Promise<void>
+  /** Delete the account's dir (recursive, confined to `{userData}/pi-accounts/<id>`), then its row. */
+  remove(id: string): Promise<void>
+}
+
 /** One ranked search hit across all on-disk Claude session transcripts. */
 export interface TranscriptHit {
   sessionId: string
@@ -3567,6 +3610,7 @@ export interface NodeTerminalApi {
   chat: ChatApi
   claudeAccounts: ClaudeAccountsApi
   codexAccounts: CodexAccountsApi
+  piAccounts: PiAccountsApi
   transcripts: TranscriptsApi
   remoteHost: RemoteHostApi
   relayHost: RelayHostApi

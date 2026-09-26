@@ -40,7 +40,11 @@ const EXIT_SEQUENCES: Record<string, string> = {
   grok: '/quit',
   gemini: '/quit',
   copilot: '/exit',
-  opencode: '/exit'
+  opencode: '/exit',
+  // pi 0.84.1 `core/slash-commands.js`: `{ name: "quit", description: "Quit pi" }`, no argument
+  // form (unlike gemini's `/quit --delete`). MEASURED in a live TUI: it fires session_shutdown and
+  // exits, and the conversation stays on disk for `--session <id>` to resume.
+  pi: '/quit'
 }
 
 export function exitSequence(agentId: string): string | null {

@@ -597,8 +597,10 @@ import {
   fitGroupToChildren,
   createAccountLoginNode,
   createCodexAccountLoginNode,
+  createPiAccountLoginNode,
   createSystemLoginNode,
   isAccountLoginNode,
+  isPiAccountLoginNode,
   systemAccountDisplay,
   createAgentNode,
   createBrowserNode,
@@ -4996,6 +4998,33 @@ export function Canvas() {
       window.removeEventListener('nodeterm:add-codex-account-login', onAddCodexAccountLogin)
   }, [setNodes, markDirty, viewCenter])
 
+  // The pi sibling of the Codex block above: Settings → Accounts "Add Pi account" dispatches
+  // 'nodeterm:add-pi-account-login' and then polls `piAccounts.waitLogin` for the account dir's
+  // `auth.json`. Runs INTERACTIVE `pi` (no login flag exists — see `createPiAccountLoginNode`), so
+  // the user types `/login` themselves; a one-line hint is printed into the terminal once it opens
+  // (below), same spirit as the CLI's own onboarding. Local only, like the Codex leg: managed pi
+  // accounts are local-only in v1, so there is no host to resolve.
+  useEffect(() => {
+    const onAddPiAccountLogin = (ev: Event): void => {
+      const accountId = (ev as CustomEvent<{ accountId?: string }>).detail?.accountId
+      if (!accountId) return
+      // Same cwd reasoning as the Claude/Codex branches above (issue #553), and required here:
+      // pty-manager's PRE-FLIGHT 3 refuses an SSH pi login outright, so this node must always be
+      // local — an SSH project has no local `cwd` to pass anyway.
+      const { getProject, activeProjectId: pid } = useProjects.getState()
+      const cwd = getProject(pid)?.cwd
+      setNodes((ns) => [
+        ...ns.map((n) => ({ ...n, selected: false })),
+        { ...createPiAccountLoginNode(accountId, ns.length, viewCenter(), cwd), selected: true }
+      ])
+      markDirty()
+      // Same reason as the other login events: fired from the full-screen Settings overlay.
+      setSettingsOpen(false)
+    }
+    window.addEventListener('nodeterm:add-pi-account-login', onAddPiAccountLogin)
+    return () => window.removeEventListener('nodeterm:add-pi-account-login', onAddPiAccountLogin)
+  }, [setNodes, markDirty, viewCenter])
+
   // Issue #420 — the usage popover's "Switch account" dispatches 'nodeterm:switch-system-account'
   // to open a terminal running `claude /login` under the SYSTEM env (no accountId — see
   // createSystemLoginNode for why that is its own factory, not a reuse of the managed one).
@@ -5097,6 +5126,15 @@ export function Canvas() {
           return
         }
         account = decision.accountId
+      } else if (agentId === 'pi') {
+        // Pi accounts are local-only (v1) and have no project-default concept (no
+        // `defaultPiAccountId` field, matching Codex, which has none either — only Claude does).
+        // An explicit pick is honored as-is on a LOCAL project; on an SSH project it is dropped
+        // (`boundAccountId` refuses it at the funnel as well): the remote spawn cannot scope to a
+        // dir that exists only on this machine. A missing/deleted account dir is a SOFT fallback in
+        // pty-manager (system pi + `accountFallback`), not a hard refusal, so there is no
+        // connectivity-style gate to run here the way Codex's SSH leg needs.
+        account = project?.ssh ? undefined : accountId ?? undefined
       } else {
         // Funnel through resolveNewNodeAccount so the project default applies even without an
         // explicit pick. The factory drops the account for non-claude agents.
@@ -5868,7 +5906,11 @@ export function Canvas() {
       const accountId = (ev as CustomEvent<{ accountId: string }>).detail?.accountId
       if (!accountId) return
       const loginIds = nodesRef.current
-        .filter((n) => n.data.accountId === accountId && isAccountLoginNode(n.data))
+        .filter(
+          (n) =>
+            n.data.accountId === accountId &&
+            (isAccountLoginNode(n.data) || isPiAccountLoginNode(n.data))
+        )
         .map((n) => n.id)
       if (loginIds.length) deleteNodes(loginIds, { record: false })
       setNodes((ns) =>
@@ -8268,6 +8310,7 @@ export function Canvas() {
       'node.newAgent.opencode': () => { addAgentNode('opencode'); return true },
       'node.newAgent.grok': () => { addAgentNode('grok'); return true },
       'node.newAgent.copilot': () => { addAgentNode('copilot'); return true },
+      'node.newAgent.pi': () => { addAgentNode('pi'); return true },
       'node.newSticky': () => { addSticky(); return true },
       'node.newBrowser': () => { addBrowser(); return true },
       // Opening the URL prompt IS claiming the chord — a cancelled prompt creates nothing, but the
@@ -9050,6 +9093,15 @@ export function Canvas() {
         undefined,
         useSystemCodexAccount.getState().email
       )
+      // Pi accounts (local only in v1): offered for a LOCAL project only. An SSH project's nodes
+      // run on the host, where `<userData>/pi-accounts/<id>` does not exist and the remote spawn
+      // skips the pi scope — a pick there would stamp the account's color on a node running the
+      // host's system pi (`boundAccountId` drops it at the funnel too; this keeps the row out of the
+      // menu, the way Codex's list is host-filtered above). A pending row (no captured login yet)
+      // is not offered — the same reason a pending Codex row is filtered above.
+      const piAccountsHere = project?.ssh
+        ? []
+        : useSettings.getState().settings.piAccounts.filter((a) => !a.pending)
       const itemForBuiltin = (aid: (typeof BUILTIN_AGENT_IDS)[number]): MenuItem => {
         // Claude gets an account picker submenu when ≥1 account exists. The System row is an
         // EXPLICIT pick (`null`), never "no pick": before that distinction, clicking the row
@@ -9119,6 +9171,30 @@ export function Canvas() {
                   onClick: () => addAgentNode('codex', at, groupId, a.id)
                 }
               })
+            ]
+          }
+        }
+        // Pi gets its own account picker submenu when ≥1 managed account exists (local only in
+        // v1, so no host filter and no selectability gate — every row here is always reachable
+        // from THIS machine). The system row runs unscoped pi (`~/.pi/agent`), mirroring Codex's.
+        if (aid === 'pi' && piAccountsHere.length > 0) {
+          return {
+            type: 'submenu',
+            label: `New ${AGENT_CONFIG[aid].label}`,
+            icon: <AgentIcon agentId={aid} />,
+            children: [
+              {
+                label: 'System pi',
+                icon: <AgentIcon agentId="pi" />,
+                onClick: () => addAgentNode('pi', at, groupId)
+              },
+              ...piAccountsHere.map(
+                (a): MenuItem => ({
+                  label: a.label,
+                  icon: <AgentIcon agentId="pi" />,
+                  onClick: () => addAgentNode('pi', at, groupId, a.id)
+                })
+              )
             ]
           }
         }
@@ -10817,7 +10893,8 @@ export function Canvas() {
           targetAgentId,
           srcAccountId,
           (id) => settings.claudeAccounts.some((a) => a.id === id),
-          (id) => settings.codexAccounts.some((a) => a.id === id)
+          (id) => settings.codexAccounts.some((a) => a.id === id),
+          (id) => settings.piAccounts.some((a) => a.id === id)
         )
         if (capabilityAgentId(targetAgentId) !== 'claude') return inherited
         return resolveNewNodeAccount(inherited, surface.project(), settings.claudeAccounts)

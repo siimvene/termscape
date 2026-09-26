@@ -476,6 +476,65 @@ describe('RemoteHooks.setup — copilot', () => {
   })
 })
 
+describe('RemoteHooks.setup — pi', () => {
+  // pi has no hook FILE (docs/pi-agent.md "Why Pi is different"): unlike grok/copilot there is no
+  // shell-wrapper script under agent-hooks/ and no JSON config to merge — just one whole owned JS
+  // extension module under the host's $PI_CODING_AGENT_DIR/extensions/.
+  it('writes the managed extension under the HOST\'s $PI_CODING_AGENT_DIR', async () => {
+    const { rh, conn, runs } = harness({
+      responses: { '$HOME': '/home/dev', PI_CODING_AGENT_DIR: '/opt/pi-home' }
+    })
+    await rh.setup('p1', conn, '/s.sock', { port: 1234, token: 't', version: '1' })
+    const write = runs.find((r) => r.cmd.includes('/opt/pi-home/extensions/nodeterm-status.js') && r.stdin)
+    expect(write).toBeTruthy()
+    expect(write!.stdin).toContain('nodeterm managed pi extension')
+    expect(write!.stdin).toContain('/hook/pi')
+    // The HOST's answer wins outright: nothing may touch the $HOME/.pi/agent default.
+    expect(runs.some((r) => r.cmd.includes('/home/dev/.pi'))).toBe(false)
+  })
+
+  it('falls back to $HOME/.pi/agent when the host reports an unsafe $PI_CODING_AGENT_DIR', async () => {
+    const { rh, conn, runs } = harness({
+      responses: { '$HOME': '/home/dev', PI_CODING_AGENT_DIR: 'relative/oops' }
+    })
+    await rh.setup('p1', conn, '/s.sock', { port: 1234, token: 't', version: '1' })
+    expect(runs.some((r) => r.cmd.includes('/home/dev/.pi/agent/extensions/nodeterm-status.js'))).toBe(true)
+    expect(runs.some((r) => r.cmd.includes('relative/oops'))).toBe(false)
+  })
+
+  it('HEALS a present-but-stale file that already carries OUR marker', async () => {
+    const { rh, conn, runs } = harness({
+      responses: {
+        '$HOME': '/home/dev',
+        PI_CODING_AGENT_DIR: '/opt/pi-home',
+        'extensions/nodeterm-status.js':
+          '// nodeterm managed pi extension — do not edit (reinstalled at app launch)\n// a stale prior version\n'
+      }
+    })
+    await rh.setup('p1', conn, '/s.sock', { port: 1234, token: 't', version: '1' })
+    const write = runs.find((r) => r.cmd.includes('cat > ') && r.cmd.includes('extensions/nodeterm-status.js'))
+    expect(write).toBeTruthy()
+    expect(write!.stdin).toContain('/hook/pi')
+  })
+
+  it('never touches a foreign extension of the same name (no marker on its first line)', async () => {
+    const { rh, conn, runs } = harness({
+      responses: {
+        '$HOME': '/home/dev',
+        PI_CODING_AGENT_DIR: '/opt/pi-home',
+        'extensions/nodeterm-status.js': '// my own extension\nexport default () => {}\n'
+      }
+    })
+    await rh.setup('p1', conn, '/s.sock', { port: 1234, token: 't', version: '1' })
+    expect(runs.some((r) => r.cmd.includes('cat > ') && r.cmd.includes('extensions/nodeterm-status.js'))).toBe(false)
+  })
+
+  it('a pi failure never breaks the connect (fail open)', async () => {
+    const { rh, conn } = harness({ failOn: 'extensions/nodeterm-status.js' })
+    await expect(rh.setup('p1', conn, '/s.sock', { port: 1234, token: 't', version: '1' })).resolves.toBeTruthy()
+  })
+})
+
 describe('RemoteHooks.ensureFullscreenTui', () => {
   // Paths are posixQuote'd (single-quoted) in the remote commands; a read is `cat '<path>' …`
   // and a write is `… cat > '<path>'`, so we distinguish them by the presence of `cat >`.
@@ -560,6 +619,10 @@ describe('RemoteHooks.installCanvasControl', () => {
     const skill = calls.find((c) => isWriteTo(c.args, '/home/u/.claude/skills/manage-nodeterm-canvas/SKILL.md'))?.stdin ?? ''
     expect(skill).toContain('name: manage-nodeterm-canvas')
     expect(skill).toContain('sh "/home/u/.nodeterm/nodeterm.sh"')
+    // pi reads its own agent dir's skills/, not ~/.claude/skills (no $PI_CODING_AGENT_DIR
+    // reported by this harness, so it resolves to the $HOME-relative default) — same body.
+    const piSkill = calls.find((c) => isWriteTo(c.args, '/home/u/.pi/agent/skills/manage-nodeterm-canvas/SKILL.md'))?.stdin ?? ''
+    expect(piSkill).toBe(skill)
     // codex/gemini get the marker block; opencode's path is expanded by the REMOTE shell, since
     // the desktop's XDG_CONFIG_HOME says nothing about the host's.
     expect(joined.some((j) => j.includes('/home/u/.codex/AGENTS.md'))).toBe(true)
@@ -979,5 +1042,7 @@ describe('RemoteHooks.setup — install concurrency', () => {
     for (const agent of ['claude', 'gemini', 'codex', 'grok', 'copilot']) {
       expect(joined.some((j) => j.includes(`agent-hooks/${agent}.sh`))).toBe(true)
     }
+    // pi has no agent-hooks/*.sh script (no hook FILE at all) — its own owned extension module.
+    expect(joined.some((j) => j.includes('extensions/nodeterm-status.js'))).toBe(true)
   })
 })

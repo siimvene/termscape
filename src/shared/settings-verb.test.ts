@@ -69,6 +69,7 @@ describe('the allowlist is the gate, and the forbidden set outranks it', () => {
       'modelGateway',
       'modelGatewayDefaultModel',
       'phoneAccessEnabled',
+      'piAccounts',
       'telemetryEnabled',
       'terminalShortcutPolicy',
       'vanillaLaunchDefault'

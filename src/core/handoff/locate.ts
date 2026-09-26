@@ -7,6 +7,9 @@ import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import { resolveTranscriptPath } from '../transcript-reader'
+import { piAgentDir } from '../agents/hooks/pi'
+import { piAccountDirFor } from '../pi-config-dir'
+import { platform } from '../platform'
 
 // claude: ~/.claude/projects/<proj>/<sessionId>.jsonl — already implemented (searches all
 // project dirs for the exact <sessionId>.jsonl). `accountId` scopes to a managed account's
@@ -66,6 +69,53 @@ export async function locateGrok(sessionId: string): Promise<string | undefined>
   } catch {
     return undefined
   }
+}
+
+/**
+ * pi: `<agentDir>/sessions/<encoded cwd>/<ISO-timestamp>_<sessionId>.jsonl` — walk the tree and
+ * match a `.jsonl` filename ENDING WITH `_<sessionId>.jsonl`. Strict by construction: a session id
+ * is a UUIDv7, so no other filename can end with `_` + one, and this never widens into a `.includes`
+ * scan the way codex's locator does (that one is safe only because codex's ids are never a suffix
+ * of one another either, but there is no reason to take the looser rule twice).
+ *
+ * `accountId` scopes the walk to a managed pi account's own agent dir
+ * (`<userData>/pi-accounts/<id>/sessions`, mirroring claude's managed-account root) instead of the
+ * system one (`piAgentDir()/sessions`, honoring `$PI_CODING_AGENT_DIR`) — never both, and never a
+ * home-wide scan (the same tree also holds `auth.json`, which is exactly why
+ * `isSafeLocalTranscriptPath` only ever admits the `sessions` leaf).
+ */
+export async function locatePi(sessionId: string, accountId?: string): Promise<string | undefined> {
+  if (!sessionId) return undefined
+  let root: string
+  if (accountId) {
+    // The id is asserted (`isSafeAccountId`) exactly as claude's `accountConfigDir` asserts its
+    // own: it reaches here from a relay-reachable handler (handoff:build) and from context-link
+    // node data, and a traversing value would walk any directory literally named `sessions`.
+    try {
+      root = path.join(piAccountDirFor(platform().userDataDir, accountId), 'sessions')
+    } catch {
+      return undefined
+    }
+  } else {
+    root = path.join(piAgentDir(), 'sessions')
+  }
+  const suffix = `_${sessionId}.jsonl`
+  const stack = [root]
+  while (stack.length) {
+    const dir = stack.pop() as string
+    let entries: fs.Dirent[]
+    try {
+      entries = await fs.promises.readdir(dir, { withFileTypes: true })
+    } catch {
+      continue
+    }
+    for (const e of entries) {
+      const p = path.join(dir, e.name)
+      if (e.isDirectory()) stack.push(p)
+      else if (e.isFile() && e.name.endsWith(suffix)) return p
+    }
+  }
+  return undefined
 }
 
 export async function locateGemini(sessionId: string): Promise<string | undefined> {

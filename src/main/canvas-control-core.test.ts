@@ -248,6 +248,21 @@ describe('parseControlRequest', () => {
     expect(body.toLowerCase()).toContain('confirm')
   })
 
+  it('the skill mentions Pi as an open-agent choice, and its frontmatter still validates', () => {
+    // "Open a Codex/Gemini/Copilot/Pi session" example — Pi joined CANVAS_CONTROL_CAPABLE, so the
+    // skill's own worked examples should say so.
+    const body = buildCanvasSkillBody('/tmp/nodeterm.sh')
+    expect(body).toMatch(/Open a Codex\/Gemini\/Copilot\/Pi session.*open-agent --agent codex\|gemini\|copilot\|pi/)
+    // Pi renders this SAME body verbatim into its own skills/ dir (no envelope fork — see
+    // core/agents/hooks/pi-skills.ts). MEASURED on pi 0.84.1 (2026-09-26): the generated
+    // `description:` line runs past pi's documented 1024-char soft limit (docs/skills.md
+    // "Validation"), which pi's own docs say only WARNS and still loads the skill — confirmed by
+    // asking a real `-p` run "list every skill you have loaded", which named it correctly. This
+    // pins the frontmatter shape so a future rewrite cannot silently break the `name:`/`description:`
+    // fields pi (and Claude) both parse.
+    expect(body).toMatch(/^---\nname: manage-nodeterm-canvas\ndescription: .+\n---\n/)
+  })
+
   // The parser change in this commit's sibling is only half a fix: an agent that never learns the
   // `=` form simply cannot express a value beginning with `--`, and the failure stays silent for it.
   // So both agent-facing texts must carry the rule, not just one of them.

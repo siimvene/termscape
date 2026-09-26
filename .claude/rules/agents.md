@@ -40,7 +40,7 @@ paths:
 > when the root routing table points here, read this file before touching the subsystem.
 <!-- moved-verbatim-from: CLAUDE.md -->
 
-## Agent support (Claude / Codex / Gemini / Copilot / opencode / Grok / custom)
+## Agent support (Claude / Codex / Gemini / Copilot / opencode / Grok / Pi / custom)
 
 The app is a pluggable multi-agent system: Claude Code is one builtin of
 several. Extra terminal-node behavior is driven per agent by a registry + capability lists, a
@@ -52,7 +52,7 @@ key. `agentId` is durable because a hand-launched `claude` in a plain terminal i
 else, and its context links must keep classifying across restarts).
 
 - **Agent registry + capabilities** — `src/shared/agents/config.ts` holds `AGENT_CONFIG`
-  (claude/codex/gemini/copilot/opencode/grok: id, label, spawn command, color, `promptInjectionMode`, …) keyed
+  (claude/codex/gemini/copilot/opencode/grok/pi: id, label, spawn command, color, `promptInjectionMode`, …) keyed
   by an **open** `AgentId`
   type (so custom ids fit). Capabilities are membership lists, not flags:
   `AGENT_HOOK_TARGETS`, `RESUMABLE_AGENTS`, `SUBAGENT_CAPABLE`, `RECURRING_CAPABLE`,
@@ -109,6 +109,11 @@ else, and its context links must keep classifying across restarts).
   the shared mapping. Desktop and Server Edition use the same core handler; relay tabs deliberately
   do not apply this machine's gateway to another core. Mobile needs a settings/model-picker surface
   before it can expose the feature.
+- **Pi** (`@earendil-works/pi-coding-agent` 0.84.1, builtin since 2026-09) — the first agent whose
+  status comes from an EXTENSION nodeterm owns (`<agentDir>/extensions/nodeterm-status.js`, `.js` because
+  pi's discovery ignores `.mjs`) rather than a hook file, and whose hook payload STATES its context
+  usage (no transcript tail). Managed Pi accounts are config-dir isolation like Claude's. Full per-CLI
+  reference: **`.claude/rules/agents-pi.md`** and **`docs/pi-agent.md`**.
 - **Grok** (`@xai-official/grok` 1.0.0, builtin since 2026-08) — full per-CLI reference (capability
   memberships incl. `SUBAGENT_CAPABLE` since 2026-09, the hook-DIRECTORY dialect, `cwd`+`sessionId`
   session-path derivation, the inert claude-hook cross-fire, and native `SubagentStart`/`SubagentStop`

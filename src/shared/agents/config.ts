@@ -2,7 +2,7 @@
 // Design: an open AgentId string, a declarative config record, and
 // capabilities expressed as const membership lists (not a capability object).
 
-export type BuiltinAgentId = 'claude' | 'codex' | 'gemini' | 'opencode' | 'grok' | 'copilot'
+export type BuiltinAgentId = 'claude' | 'codex' | 'gemini' | 'opencode' | 'grok' | 'copilot' | 'pi'
 // Open type — custom agents are any string ('custom:<uuid>'). Never restrict the set.
 export type AgentId = BuiltinAgentId | (string & {})
 
@@ -57,7 +57,8 @@ export const BUILTIN_AGENT_IDS: readonly BuiltinAgentId[] = [
   'gemini',
   'opencode',
   'grok',
-  'copilot'
+  'copilot',
+  'pi'
 ]
 
 export const AGENT_CONFIG: Record<BuiltinAgentId, AgentConfig> = {
@@ -126,14 +127,28 @@ export const AGENT_CONFIG: Record<BuiltinAgentId, AgentConfig> = {
     // All `COPILOT_PROVIDER_*` gateway vars. Excludes `COPILOT_HOME` (config dir) and
     // `COPILOT_HOOK_*` (nodeterm constants).
     vanillaEnvPattern: '^COPILOT_PROVIDER_'
+  },
+  pi: {
+    label: 'Pi',
+    color: '#d4009a',
+    launchCmd: 'pi',
+    // Measured on pi 0.84.1: the prompt is a positional (`pi [options] [@files...] [messages...]`),
+    // but it shares its slot with subcommands (install/remove/uninstall/update/list/config/auth),
+    // so a one-word prompt such as `list` or `config` runs the command instead of reaching the
+    // model — the grok trap. Unlike grok there is no escape: `pi -- list` answers
+    // "Unknown option: --". So the prompt is typed into the TUI after it starts, like gemini.
+    promptInjectionMode: 'stdin-after-start',
+    expectedProcess: 'pi'
+    // No vanillaEnvPattern yet: pi reads a dozen provider env vars and none has been measured as
+    // an override worth stripping. `PI_CODING_AGENT_DIR` is the managed-account home and must stay.
   }
 }
 
 // Capabilities = const builtin membership lists. A custom agent resolves through its declared
 // base harness (capabilityAgentId); one with no base automatically gets only spawn + terminal-title
 // + process status.
-export const AGENT_HOOK_TARGETS = ['claude', 'codex', 'gemini', 'opencode', 'grok', 'copilot'] as const
-export const RESUMABLE_AGENTS = ['claude', 'codex', 'gemini', 'opencode', 'grok', 'copilot'] as const
+export const AGENT_HOOK_TARGETS = ['claude', 'codex', 'gemini', 'opencode', 'grok', 'copilot', 'pi'] as const
+export const RESUMABLE_AGENTS = ['claude', 'codex', 'gemini', 'opencode', 'grok', 'copilot', 'pi'] as const
 // Agents whose session id we MINT at launch (`--session-id <uuid>`) instead of learning it only
 // from hook events. Each member must have a measured caller-chosen-id grammar below.
 //
@@ -150,7 +165,7 @@ export const RESUMABLE_AGENTS = ['claude', 'codex', 'gemini', 'opencode', 'grok'
 // clear/fork/compact), so hooks remain the only way to TRACK an id after launch. What minting
 // guarantees is that a node always has SOME resumable id, so the worst case degrades from "the
 // conversation is gone" to "continuity since the last /clear is gone".
-export const SESSION_ID_CAPABLE = ['claude', 'copilot', 'grok'] as const
+export const SESSION_ID_CAPABLE = ['claude', 'copilot', 'grok', 'pi'] as const
 // Claude's flag is version-gated and comes from the Claude CLI probe. Copilot's installed 1.0.80
 // binary and current official reference accept `--session-id=<uuid>`, so it does not borrow an
 // unrelated Claude probe result. Custom agents resolve through their declared base harness.
@@ -163,7 +178,12 @@ export const SESSION_ID_CAPABLE = ['claude', 'copilot', 'grok'] as const
 // LAUNCH ERROR and never a resume; `--session-id` combines with `--resume`/`--continue` only
 // alongside `--fork-session`; and `--resume` accepts a TITLE as well as an id, failing as ambiguous
 // on duplicates — which is why nothing in this codebase resumes grok by title.
-export const UNCONDITIONAL_SESSION_ID_CAPABLE = ['copilot'] as const
+//
+// pi needs no probe: `--session-id <id>` is "use exact project session ID, creating it if missing"
+// and MEASURED on 0.84.1 it is create-OR-resume — a second launch with the same id continued the
+// same conversation (it recalled a word the first run was told), where claude and grok refuse a
+// duplicate. So a mint that lands twice degrades to a resume, never to a launch error.
+export const UNCONDITIONAL_SESSION_ID_CAPABLE = ['copilot', 'pi'] as const
 // claude: Task/Agent tool via hooks (tool_use_id-keyed) + the Workflow journal tail. codex:
 // spawn_agent collaboration via its native SubagentStart/SubagentStop hooks (agent_id-keyed),
 // measured on codex-cli 0.146.0.
@@ -185,7 +205,7 @@ export const BRANCH_CAPABLE = ['claude'] as const
 // `~/.grok/config.toml`, and `GROK_CLAUDE_SKILLS_ENABLED=false`. Then the skill is undiscoverable
 // however this list reads, and the same `inspect` cell is what says so (`enabled:false`, a
 // non-default `source`) rather than leaving support to guess.
-export const CONTEXT_LINK_CAPABLE = ['claude', 'codex', 'gemini', 'opencode', 'grok'] as const
+export const CONTEXT_LINK_CAPABLE = ['claude', 'codex', 'gemini', 'opencode', 'grok', 'pi'] as const
 // Agents whose per-node context meter we can fill. Each needs BOTH numbers: a used count and a
 // TRUSTWORTHY window.
 //  - claude: used from its transcript's assistant usage, window INFERRED from the model family
@@ -213,7 +233,7 @@ export const CONTEXT_LINK_CAPABLE = ['claude', 'codex', 'gemini', 'opencode', 'g
 // `core/grok-signals.ts` reads exactly three of them and nothing else. If a future grok drops
 // `contextWindowTokens`, that reader returns null and the meter disappears — no inferred
 // denominator, because a percentage over a guessed window is a wrong number presented as a fact.
-export const USAGE_CAPABLE = ['claude', 'codex', 'gemini', 'grok'] as const
+export const USAGE_CAPABLE = ['claude', 'codex', 'gemini', 'grok', 'pi'] as const
 // Agents whose structured transcript we can render as a chat panel (Cmd+M chat mode).
 //
 // SPLIT from CLAUDE_TRANSCRIPT_READABLE below on 2026-09-02, when grok joined. Until then this one
@@ -237,7 +257,7 @@ export const CHAT_CAPABLE = ['claude', 'grok'] as const
 // shows data rather than hiding it. `config.capabilities.test.ts` pins that grok is absent.
 export const CLAUDE_TRANSCRIPT_READABLE = ['claude'] as const
 // Agents whose native transcript we can read + render for cross-agent transfer.
-export const TRANSFER_SOURCE_CAPABLE = ['claude', 'codex', 'gemini', 'grok'] as const
+export const TRANSFER_SOURCE_CAPABLE = ['claude', 'codex', 'gemini', 'grok', 'pi'] as const
 // Agents whose hooks announce that a session ENDED — i.e. whose orderly `/exit` we will hear about.
 //
 // Derived by reading `normalize.ts`, not by intent: exactly four normalizers map an event to
@@ -252,7 +272,11 @@ export const TRANSFER_SOURCE_CAPABLE = ['claude', 'codex', 'gemini', 'grok'] as 
 //
 // Before adding an id: find its normalizer's `sessionPhase: 'end'` branch. If there isn't one, the
 // branch is the change — this list is a consequence of it, never a substitute for it.
-export const SESSION_END_CAPABLE = ['claude', 'gemini', 'copilot', 'grok'] as const
+//
+// pi: `normalizePi` maps its extension event `session_shutdown` to the end. MEASURED on pi 0.84.1
+// in a live TUI under a pty: typing `/quit` fires `session_shutdown` and the process exits, so an
+// orderly quit announces itself and a kill does not — exactly the distinction this list encodes.
+export const SESSION_END_CAPABLE = ['claude', 'gemini', 'copilot', 'grok', 'pi'] as const
 // Agents that accept a node title being PUSHED back into the session — the write leg only. The
 // write is the same literal `/rename <name>` for both, which grok also accepts as `/title`.
 // The READ leg is TITLE_READ_CAPABLE below, which is a superset: an agent can name its own session
@@ -276,7 +300,7 @@ export const RENAME_CAPABLE = ['claude', 'grok'] as const
 // (SHARED_IDENTITY_CAPABLE below) a node owns a THREAD, and that thread carries a `Thread.name` we
 // can read over the server's own socket (core/codex-session-name.ts). There is still no measured
 // rename command, so it stays out of RENAME_CAPABLE — the read⊇write invariant holds either way.
-export const TITLE_READ_CAPABLE = ['claude', 'codex', 'grok', 'gemini'] as const
+export const TITLE_READ_CAPABLE = ['claude', 'codex', 'grok', 'gemini', 'pi'] as const
 // Agents whose canvas nodes share ONE managed CLI server per machine and keep a stable per-node
 // identity inside it, instead of each node owning a whole process tree.
 //
@@ -300,7 +324,7 @@ export const SHARED_IDENTITY_CAPABLE = ['codex'] as const
 // RemoteHooks.installCanvasControl. Membership here is what sets NODETERM_CANVAS_CONTROL in the
 // session env (hook-server's buildPtyEnv, remoteHookEnvArgs), i.e. what makes the shim anything
 // other than a no-op.
-export const CANVAS_CONTROL_CAPABLE = ['claude', 'codex', 'gemini', 'opencode', 'grok', 'copilot'] as const
+export const CANVAS_CONTROL_CAPABLE = ['claude', 'codex', 'gemini', 'opencode', 'grok', 'copilot', 'pi'] as const
 // Agents whose session start-up permission mode we can set (see AgentPermissionMode below).
 // claude and grok share the flag SPELLING and the value vocabulary
 // (`--permission-mode auto|plan|acceptEdits|bypassPermissions`; our `manual` = no flag = grok's own
@@ -403,12 +427,16 @@ export function inheritableAccountId(
   targetAgentId: AgentId,
   srcAccountId: string | undefined,
   isClaudeAccount: (id: string) => boolean,
-  isCodexAccount: (id: string) => boolean
+  isCodexAccount: (id: string) => boolean,
+  /** Managed pi account membership. Optional so a caller that predates pi accounts compiles; absent
+   *  ⇒ no id is a pi account, so a pi target inherits nothing (the system pi), never a stranger's. */
+  isPiAccount?: (id: string) => boolean
 ): string | undefined {
   if (!srcAccountId) return undefined
   const base = capabilityAgentId(targetAgentId)
   if (base === 'claude') return isClaudeAccount(srcAccountId) ? srcAccountId : undefined
   if (base === 'codex') return isCodexAccount(srcAccountId) ? srcAccountId : undefined
+  if (base === 'pi') return isPiAccount?.(srcAccountId) ? srcAccountId : undefined
   return undefined
 }
 
@@ -633,6 +661,18 @@ export function resumeCommandWith(
       return `${launchCmd} --session ${sid}`
     case 'copilot':
       return `${launchCmd} --resume=${sid}`
+    // pi: `--session-id <id>` is CREATE-OR-RESUME, and that is the property a cold restore needs.
+    // MEASURED on pi 0.84.1 in a fresh, logged-out PI_CODING_AGENT_DIR:
+    //   `pi --session <new-uuid> -p x`    → "No session found matching '<uuid>'", exit 1
+    //   `pi --session-id <new-uuid> -p x` → "Warning: No project session found with id ...;
+    //                                        creating a new session with that id."
+    // pi persists a session file only once an assistant message exists, so a node that was opened
+    // and never answered (not logged in, provider error, an in-pi `/new`) resumes with a minted id
+    // that has no file behind it; `--session` would exit 1 and leave a bare shell under the agent
+    // badge (claude guards that case with the `transcript:exists` probe; pi has no equivalent, and
+    // needs none with this grammar). Its bare `--resume` is an interactive PICKER, never used here.
+    case 'pi':
+      return `${launchCmd} --session-id ${sid}`
     case 'claude':
     case 'gemini':
     case 'grok':

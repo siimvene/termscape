@@ -83,7 +83,7 @@ export function CardModal({ session, columnTitle, board, onChangeBoard, onClose,
   // Same chip as the card and the canvas node header — the modal is where a user checks WHICH
   // session this is, so the account belongs in its header chips, not only two views away.
   const observedAccount = useAgentStatus((st) => st.byId[session.id]?.account)
-  const accountChip = useAccountChip(session.spawn.accountId, observedAccount)
+  const accountChip = useAccountChip(session.spawn.accountId, observedAccount, session.spawn.agentId)
   const [naming, setNaming] = useState(false)
   // Comments & activity panel: OPEN by default in the modal; the header 💬 collapses it. The
   // choice is remembered (localStorage) — once collapsed, later cards open collapsed too.

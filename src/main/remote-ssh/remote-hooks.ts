@@ -19,6 +19,12 @@ import {
   COPILOT_HOOK_FILE,
   isSafeRemoteCopilotHome
 } from '../../core/agents/hooks/copilot'
+import {
+  buildPiExtension,
+  PI_EXTENSION_FILE,
+  PI_EXTENSION_MARKER,
+  isSafeRemotePiHome
+} from '../../core/agents/hooks/pi'
 
 /**
  * Remote hook scripts get NO Codex thread-identity root.
@@ -240,7 +246,11 @@ export class RemoteHooks {
         // grok: our own file in its hooks DIRECTORY, under the HOST's $GROK_HOME.
         this.installGrokRemote(conn, controlPath, home, remoteDir),
         // copilot: its own file/grammar under the HOST's $COPILOT_HOME hooks directory.
-        this.installCopilotRemote(conn, controlPath, home, remoteDir)
+        this.installCopilotRemote(conn, controlPath, home, remoteDir),
+        // pi: no hook FILE at all — a whole owned JS extension module under the HOST's
+        // $PI_CODING_AGENT_DIR/extensions, posting through the same tunnel directly (no shell
+        // wrapper script, unlike grok/copilot).
+        this.installPiRemote(conn, controlPath, home)
       ])
       for (const r of installs) {
         if (r.status === 'rejected') {
@@ -617,6 +627,58 @@ export class RemoteHooks {
     return isSafeRemoteCopilotHome(reported) ? stripped : `${home}/.copilot`
   }
 
+  /** pi's agent dir, resolved the same way pi itself resolves it (`piAgentDir` in
+   *  hooks/pi.ts): `$PI_CODING_AGENT_DIR` when the HOST reports an absolute, safe value, else
+   *  `<remoteHome>/.pi/agent`. A host-reported string is data, not truth — see `isSafeRemotePiHome`. */
+  private async resolvePiHome(
+    conn: SshConnection,
+    controlPath: string,
+    home: string
+  ): Promise<string> {
+    const { stdout } = await this.r.run(
+      childArgs(conn, controlPath, 'printf %s "${PI_CODING_AGENT_DIR:-}"')
+    )
+    const reported = stdout.trim()
+    const stripped = reported.replace(/\/+$/, '') || '/'
+    return isSafeRemotePiHome(reported) ? stripped : `${home}/.pi/agent`
+  }
+
+  /**
+   * Install pi's managed status extension on the REMOTE host. pi has no hook FILE (`docs/pi-agent.md`
+   * "Why Pi is different"): its seam is a whole JS module it auto-discovers from
+   * `<agentDir>/extensions/*.js`, so there is no shell-wrapper script to write and no JSON config to
+   * merge — unlike grok/copilot this never touches `<remoteDir>/agent-hooks/`.
+   *
+   * Marker-gated exactly like the LOCAL installer (`installPiExtensionInto`): the file is ours to
+   * heal (rewrite unconditionally) only when it is either absent or already carries our marker on
+   * its first line; a foreign file of the same name (a user's own extension) is left untouched. Two
+   * round trips: read (missing → empty, tolerated), then write only when ours-to-write.
+   */
+  private async installPiRemote(
+    conn: SshConnection,
+    controlPath: string,
+    home: string
+  ): Promise<void> {
+    try {
+      const piHome = await this.resolvePiHome(conn, controlPath, home)
+      const file = `${piHome}/extensions/${PI_EXTENSION_FILE}`
+      const { stdout: existing } = await this.r.run(
+        childArgs(conn, controlPath, `cat ${posixQuote(file)} 2>/dev/null || true`)
+      )
+      if (existing && !existing.startsWith(PI_EXTENSION_MARKER)) return // a user's own file
+      await this.r.run(
+        childArgs(
+          conn,
+          controlPath,
+          `mkdir -p "$(dirname ${posixQuote(file)})" && cat > ${posixQuote(file)}`
+        ),
+        buildPiExtension()
+      )
+    } catch {
+      /* fail-open: the remote pi session simply runs without status */
+    }
+  }
+
   /**
    * Merge the managed claude hook into a REMOTE managed-account config dir's `settings.json`, so an
    * agent that runs under `CLAUDE_CONFIG_DIR=<accountDir>` reports status like the default
@@ -686,6 +748,14 @@ export class RemoteHooks {
         conn,
         controlPath,
         `${remoteHome}/.claude`,
+        'manage-nodeterm-canvas',
+        buildCanvasSkillBody(shim)
+      )
+      // pi reads its own agent dir's skills/, not ~/.claude/skills — same SKILL.md body.
+      await this.writeRemoteSkill(
+        conn,
+        controlPath,
+        await this.resolvePiHome(conn, controlPath, remoteHome),
         'manage-nodeterm-canvas',
         buildCanvasSkillBody(shim)
       )
