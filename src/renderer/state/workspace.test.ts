@@ -6,6 +6,7 @@ import {
   commonParentId,
   createAccountLoginNode,
   createCodexAccountLoginNode,
+  createPiAccountLoginNode,
   createAgentNode,
   createDinoNode,
   createSystemLoginNode,
@@ -936,6 +937,29 @@ describe('createCodexAccountLoginNode', () => {
       '/work/repo'
     )
     expect(createCodexAccountLoginNode('acct-2', 0).data.cwd).toBeUndefined()
+  })
+})
+
+describe('createPiAccountLoginNode', () => {
+  it('produces a terminal node that logs the given Pi account in (bare interactive `pi`)', () => {
+    const node = createPiAccountLoginNode('acct-3', 0)
+    expect(node.type).toBe('terminal')
+    expect(node.data.title).toBe('Pi login')
+    expect(node.data.accountId).toBe('acct-3')
+    // Unlike claude/codex, pi has no CLI login flag — the node just drops the user into a running
+    // `pi` session and they type `/login` themselves.
+    expect(node.data.initialCommand).toBe('pi')
+  })
+
+  it('carries NO agentId — the agent-less shape is what the pi scope gate (PRE-FLIGHT 3) keys on', () => {
+    expect(createPiAccountLoginNode('acct-3', 0).data.agentId).toBeUndefined()
+  })
+
+  it('roots the login shell in the cwd it is given (issue #553), local only', () => {
+    expect(createPiAccountLoginNode('acct-3', 0, undefined, '/work/repo').data.cwd).toBe(
+      '/work/repo'
+    )
+    expect(createPiAccountLoginNode('acct-3', 0).data.cwd).toBeUndefined()
   })
 })
 

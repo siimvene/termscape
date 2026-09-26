@@ -646,7 +646,8 @@ export function createAgentNode(
   const color =
     agentAccountColor(agentId, bound, {
       claude: settings.claudeAccounts ?? [],
-      codex: settings.codexAccounts ?? []
+      codex: settings.codexAccounts ?? [],
+      pi: settings.piAccounts ?? []
     }) ?? agentColor
   // The launch-command override (this project's `.nodeterm/settings.json` first, then Settings →
   // Agents → Launch commands — see `agentLaunchOverride`) replaces the bare CLI in the assembled
@@ -876,6 +877,40 @@ export function createCodexAccountLoginNode(
 }
 
 /**
+ * Terminal node used to log a new managed PI account in — the pi twin of
+ * `createCodexAccountLoginNode`. The session runs INTERACTIVE `pi` (not `pi /login` — pi's login
+ * is a slash command typed inside a running session, not a CLI flag) under the account's
+ * `PI_CODING_AGENT_DIR`, so the user types `/login`, picks a provider, and pi writes `auth.json`
+ * into the managed dir where `piAccounts.waitLogin` polls for it.
+ *
+ * Scope is not left to a settings guess: the create path recognizes this node
+ * (`isPiAccountLoginNode`, keyed on the 'Pi login' title / bare `pi` initialCommand) and carries
+ * `PtyCreateOptions.piLogin`, which forces the managed scope and REFUSES (pty-manager PRE-FLIGHT 3)
+ * when the account dir cannot be resolved or the project is SSH — managed pi accounts are
+ * local-only in v1, so an unscoped login that would write the SYSTEM `~/.pi/agent` never runs.
+ *
+ * A plain terminal (agent-less), like its Claude and Codex siblings: no session-name tracking, and
+ * the agent-less shape is what keeps this node out of the pi AGENT paths while still being scoped.
+ * Local only — `piAccounts.add()` mints on THIS machine. `cwd` carries the same #553 weight as the
+ * other login nodes: the caller passes the active project's (local) directory, never `ssh.remoteCwd`.
+ */
+export function createPiAccountLoginNode(
+  accountId: string,
+  index: number,
+  center?: { x: number; y: number },
+  cwd?: string
+): CanvasNode {
+  const node = createTerminalNode(index, cwd, center)
+  node.data = {
+    ...node.data,
+    title: 'Pi login',
+    accountId,
+    initialCommand: 'pi'
+  }
+  return node
+}
+
+/**
  * Terminal node that SWITCHES the system (~/.claude) Claude identity — the usage popover's
  * "Switch account" action (issue #420). Runs `claude /login` with NO `accountId`, so the spawn
  * env is bit-for-bit the plain-terminal one and the OAuth writes the system `~/.claude` —
@@ -946,6 +981,23 @@ export function isAccountLoginNode(data: { title?: string; initialCommand?: stri
 const CODEX_LOGIN_COMMAND_RE = /^codex login(?:\s|$)/
 export function isCodexAccountLoginNode(data: { title?: string; initialCommand?: string }): boolean {
   return data.title === 'Codex login' || CODEX_LOGIN_COMMAND_RE.test(data.initialCommand ?? '')
+}
+
+/**
+ * True when node data is (or started as) a managed-PI login terminal — the pi twin of
+ * `isCodexAccountLoginNode`. The signal the create path carries into `PtyCreateOptions.piLogin` so
+ * the spawn scopes to the managed agent dir fail-closed (PRE-FLIGHT 3 in pty-manager) instead of
+ * an unscoped interactive `pi` writing the user's system `~/.pi/agent`.
+ *
+ * Keyed on the DURABLE title (persisted) plus the one-shot `initialCommand`, mirroring the Claude
+ * and Codex predicates: a cold restart of a login node that never finished still declares the
+ * intent. The command match is EXACT (`pi` with nothing else, ignoring surrounding whitespace) —
+ * unlike `codex login`'s prefix match, pi's login is a slash command typed inside the running
+ * session, not a CLI argument, so there is no flag form to also match, and a looser match would
+ * risk claiming an unrelated command a user typed that happens to start with `pi` (`pip`, `ping`).
+ */
+export function isPiAccountLoginNode(data: { title?: string; initialCommand?: string }): boolean {
+  return data.title === 'Pi login' || (data.initialCommand ?? '').trim() === 'pi'
 }
 
 /**
