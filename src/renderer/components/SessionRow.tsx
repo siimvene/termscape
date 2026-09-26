@@ -48,7 +48,7 @@ export function SessionRow({
   const percentMode = useSettings((s) => s.settings.usagePercentMode)
   // The sidebar is one more view of the same nodes, so it gets the canvas header's account chip
   // under the same visibility rule — two rows on two Claude logins are otherwise indistinguishable.
-  const accountChip = useAccountChip(row.accountId, row.account)
+  const accountChip = useAccountChip(row.accountId, row.account, row.agentId)
 
   const commit = (): void => {
     const t = draft.trim()

@@ -913,6 +913,16 @@ describe('HeadlessNodeFactory', () => {
     expect(pty.sends.at(-1)).toEqual({ nodeId: id, text: command })
   })
 
+  // Pi joined the Server Edition set (consort 2026-09-26): its prompt is a positional AFTER the
+  // flags (pi's subcommand match is argv[0] only) and it always mints its own session id.
+  it('assembles the pi launch through the shared command builder, session id before the prompt', async () => {
+    const reply = await factory.openAgent('term-source', { agent: 'pi', prompt: 'do   work' }, true)
+    expect(reply.ok).toBe(true)
+    const id = (reply.result as { id: string }).id
+    expect(pty.creates.at(-1)).toMatchObject({ persistKey: id, ownerProjectId: 'project-1', agentId: 'pi' })
+    expect(pty.sends.at(-1)?.text).toMatch(/^pi --session-id [0-9a-f-]{36} 'do work'$/)
+  })
+
   it('launches a Codex node in full yolo when the project selects Bypass all', async () => {
     const workspace = await store.load({ sideline: false })
     workspace.projects[0].defaultPermissionMode = 'bypassPermissions'
@@ -1172,7 +1182,7 @@ describe('HeadlessNodeFactory', () => {
 
   it('refuses a non-v1 agent before a node or PTY is created', async () => {
     const reply = await factory.openAgent('term-source', { agent: 'grok' }, true)
-    expect(reply).toMatchObject({ ok: false, error: expect.stringContaining('claude|codex|gemini') })
+    expect(reply).toMatchObject({ ok: false, error: expect.stringContaining('claude|codex|gemini|pi') })
     expect(pty.creates).toEqual([])
   })
 })

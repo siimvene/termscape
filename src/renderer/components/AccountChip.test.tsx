@@ -20,15 +20,17 @@ const CLAUDE_2: ObservedClaudeAccount = {
  *  chip that never appears (or never updates) actually comes from. */
 function Probe({
   accountId,
-  observed
+  observed,
+  agentId
 }: {
   accountId?: string
   observed?: ObservedClaudeAccount
+  agentId?: string
 }): React.JSX.Element | null {
-  return <AccountChip chip={useAccountChip(accountId, observed)} />
+  return <AccountChip chip={useAccountChip(accountId, observed, agentId)} />
 }
 
-function render(props: { accountId?: string; observed?: ObservedClaudeAccount }): {
+function render(props: { accountId?: string; observed?: ObservedClaudeAccount; agentId?: string }): {
   host: HTMLElement
   root: Root
 } {
@@ -58,17 +60,51 @@ describe('useAccountChip — managed accounts of the other providers', () => {
         codexAccounts: [{ id: 'c1', label: 'work codex' }]
       }
     })
-    const pi = render({ accountId: 'p1' })
+    const pi = render({ accountId: 'p1', agentId: 'pi' })
     expect(chipEl(pi.host)?.textContent).toBe('work pi')
     expect(chipEl(pi.host)?.getAttribute('title')).not.toMatch(/unknown/i)
     pi.root.unmount()
-    const codex = render({ accountId: 'c1' })
+    const codex = render({ accountId: 'c1', agentId: 'codex' })
     expect(chipEl(codex.host)?.textContent).toBe('work codex')
     codex.root.unmount()
+    // An agent-less login terminal carries the id with no agent; it is still named.
+    const login = render({ accountId: 'p1' })
+    expect(chipEl(login.host)?.textContent).toBe('work pi')
+    login.root.unmount()
     // A binding that resolves NOWHERE is still dangling, and still says so.
-    const gone = render({ accountId: 'zz' })
+    const gone = render({ accountId: 'zz', agentId: 'pi' })
     expect(chipEl(gone.host)?.textContent).toBe('Unknown account')
     gone.root.unmount()
+  })
+
+  // The lists are keyed independently (hand-editable settings.json): one id can sit in two of
+  // them, and a node must be named by its OWN agent's list, never by whichever list is read first.
+  it('names a node by its own agent\'s list when the same id sits in two lists', () => {
+    useSettings.setState({
+      settings: {
+        ...DEFAULT_SETTINGS,
+        claudeAccounts: [{ id: 'dup', label: 'claude row', createdAt: 0 }],
+        piAccounts: [{ id: 'dup', label: 'pi row', pending: false, createdAt: 0 }],
+        codexAccounts: [{ id: 'dup', label: 'codex row' }]
+      }
+    })
+    const cases: [string, string][] = [
+      ['claude', 'claude row'],
+      ['pi', 'pi row'],
+      ['codex', 'codex row']
+    ]
+    for (const [agentId, label] of cases) {
+      const r = render({ accountId: 'dup', agentId })
+      expect(chipEl(r.host)?.textContent).toBe(label)
+      r.root.unmount()
+    }
+    // A pi node whose id only the Claude list knows is dangling, not the Claude account.
+    useSettings.setState({
+      settings: { ...DEFAULT_SETTINGS, claudeAccounts: [{ id: 'c-only', label: 'claude row', createdAt: 0 }] }
+    })
+    const stray = render({ accountId: 'c-only', agentId: 'pi' })
+    expect(chipEl(stray.host)?.textContent).toBe('Unknown account')
+    stray.root.unmount()
   })
 })
 

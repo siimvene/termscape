@@ -186,7 +186,11 @@ export function appendProjectNode(
   // has always treated it — a garbage value must not be mistaken for a known OTHER agent and cost
   // a real Claude node its binding.
   const agentId = typeof input.agentId === 'string' ? input.agentId : undefined
-  const bound = boundAccountId(input.accountId, agentId)
+  // The node's SSH-ness is decided by its donor (below), and the binding must know it: a managed pi
+  // account is local-only, so stamping one on a node that will run on the host would paint the
+  // account while the host's system pi runs (consort, 2026-09-26). Found here, used twice.
+  const sshDonor = nodes.find((n) => isTerminal(n) && n.sshRemoteTmux === true && isSshSpec(n.ssh))
+  const bound = boundAccountId(input.accountId, agentId, { ssh: sshDonor !== undefined })
   const agent = agentId !== undefined ? agentConfig(agentId) : undefined
   const node: Record<string, unknown> = {
     id: input.id,
@@ -218,7 +222,6 @@ export function appendProjectNode(
   // dialled the host and `tmux new-session -A` obligingly created a brand-new EMPTY session there,
   // while the phone's real session sat unreachable on this machine. Only a node that is ITSELF a
   // remote tmux session, with a spec complete enough to dial, describes the same context.
-  const sshDonor = nodes.find((n) => isTerminal(n) && n.sshRemoteTmux === true && isSshSpec(n.ssh))
   if (sshDonor) {
     node.ssh = sshDonor.ssh
     node.sshRemoteTmux = true

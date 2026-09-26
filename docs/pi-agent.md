@@ -137,8 +137,6 @@ host's system Pi.
 - **SSH hosts get the status extension and the canvas-control skill, not the get-linked-context
   skill**: `RemoteHooks.installContextLink` writes Claude's copy only. A Pi node on a host can be
   READ through a link but cannot discover how to read one.
-- **Server Edition `open-agent` does not offer Pi**: `SERVER_AGENTS` in
-  `server/headless-node-factory.ts` is claude/codex/gemini. Account forwarding is ready for it.
 - **The phone's mirror carries no Pi account block**, so the iOS New Session sheet cannot pick a
   Pi account (a mobile protocol decision).
 - **No cross-endpoint failover** in the shared JS hook client (#445), same as opencode.

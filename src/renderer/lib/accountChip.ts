@@ -425,6 +425,7 @@ export function accountChipFor({
   dataAccountId,
   observed,
   accounts,
+  agentId,
   providerAccounts,
   systemLabel,
   systemEmail,
@@ -433,11 +434,17 @@ export function accountChipFor({
   dataAccountId?: string
   observed?: ObservedClaudeAccount
   accounts: ClaudeAccount[]
-  /** The managed accounts of the OTHER providers (pi, codex): rows with an id and a label. A
-   *  node bound to one of them carries that id in `data.accountId` just like a Claude node, and
-   *  without this list every such node read "Unknown account" off the Claude list. The three lists
-   *  share one minted-uuid alphabet, so an id resolves in at most one of them. */
-  providerAccounts?: readonly { id: string; label: string }[]
+  /** The node's agent. It picks the ONE list an id may resolve in (`agentAccountColor`'s rule):
+   *  the lists are keyed independently, so nothing stops one id sitting in two of them, and a node
+   *  must never wear a stranger's row. */
+  agentId?: string
+  /** The managed accounts of the OTHER providers (pi, codex), rows with an id and a label. A node
+   *  bound to one of them carries that id in `data.accountId` just like a Claude node, and without
+   *  these every such node read "Unknown account" off the Claude list. */
+  providerAccounts?: {
+    pi?: readonly { id: string; label: string }[]
+    codex?: readonly { id: string; label: string }[]
+  }
   /** `settings.systemAccountLabel` — the user's own name for the `~/.claude` login. */
   systemLabel?: string
   /** The detected `~/.claude` login email (`state/systemAccount`), when known. */
@@ -491,11 +498,22 @@ export function accountChipFor({
       kind: 'unlinked'
     }
   }
-  // A pi or codex account: named by ITS list. Checked before the Claude lookup, whose miss is
-  // "Unknown account" — a binding that resolves nowhere really is dangling and still says so.
-  const other = providerAccounts?.find((a) => a.id === key)
-  if (other) {
-    return { short: shortAccountLabel(other.label), tooltip: other.label, kind: 'managed' }
+  // A pi or codex node is named by ITS list and only that one: a miss there is a dangling binding
+  // and says so, never a fall-through to a Claude row that happens to share the id.
+  if (agentId === 'pi' || agentId === 'codex') {
+    const own = providerAccounts?.[agentId]?.find((a) => a.id === key)
+    return own
+      ? { short: shortAccountLabel(own.label), tooltip: own.label, kind: 'managed' }
+      : { short: 'Unknown account', tooltip: 'Unknown account', kind: 'managed' }
+  }
+  // An AGENT-LESS node with an id is a login terminal (Claude, Codex or pi). The Claude list keeps
+  // the precedence the id always had on a plain terminal; the other two only name a login node
+  // whose id the Claude list does not know. Any other agent takes no managed account of theirs.
+  if (!agentId && !accounts.some((a) => a.id === key)) {
+    const other = [...(providerAccounts?.pi ?? []), ...(providerAccounts?.codex ?? [])].find(
+      (a) => a.id === key
+    )
+    if (other) return { short: shortAccountLabel(other.label), tooltip: other.label, kind: 'managed' }
   }
   const label = accountChipLabel(key, accounts)
   if (!label) return null // unreachable: `key` is a non-empty id here

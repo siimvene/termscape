@@ -417,7 +417,10 @@ const AGENT_CONFIG_DIR_ENV: readonly string[] = [
   'CLAUDE_CONFIG_DIR',
   'CODEX_HOME',
   'XDG_CONFIG_HOME',
-  'PI_CODING_AGENT_DIR'
+  'PI_CODING_AGENT_DIR',
+  // pi's session store alone (0.84.1 `ENV_SESSION_DIR`): not code, but a repo-chosen value would put
+  // every transcript (tool output, pasted secrets) inside the checkout, or resume seeded sessions.
+  'PI_CODING_AGENT_SESSION_DIR'
 ]
 
 /**

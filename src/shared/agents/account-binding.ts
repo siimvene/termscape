@@ -43,8 +43,9 @@ export function boundAccountId(
    *  the host's system `~/.pi/agent` identity — the "pinned to another machine, never stamped onto
    *  a node it cannot run on" rule. Claude has a host-pinned remote leg and Codex rows are
    *  host-filtered by the pickers, so the node's SSH-ness is not their gate here. Optional so a
-   *  caller that cannot know (the phone-registration path) keeps its binding, matching the
-   *  "unstated keeps its binding" stance above. */
+   *  caller that genuinely cannot know keeps its binding, matching the "unstated keeps its
+   *  binding" stance above. Both minting surfaces DO know: `createAgentNode` from the project,
+   *  `appendProjectNode` from its SSH donor. */
   where?: { ssh?: boolean }
 ): string | undefined {
   if (!accountId) return undefined

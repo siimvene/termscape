@@ -24,6 +24,7 @@
 #        ~/.grok/hooks/nodeterm-status.json    (owned file)
 #        ~/.config/opencode/plugins/nodeterm-status.js (owned, marker-checked) + AGENTS.md blocks
 #        ~/.pi/agent/extensions/nodeterm-status.js (owned, marker-checked) + skills/manage-nodeterm-canvas/
+#                                     + skills/get-linked-context/
 #      Your agents' credentials, sessions and own settings are never touched.
 #   4. Deletes nodeterm's own state: ~/.nodeterm, the Electron user-data dir, caches, prefs,
 #      logs, the Keychain entry, /Applications/nodeterm.app (or the brew cask), and the Server
@@ -340,7 +341,7 @@ if [ -f "$HOME/.codex/hooks.json" ] && grep -Eq "$HOOK_MARKERS" "$HOME/.codex/ho
   plan "Remove nodeterm hook entries from ~/.codex/hooks.json + matching trust entries in ~/.codex/config.toml"
   FOUND_ANY=1
 fi
-for d in "$HOME/.claude/skills/manage-nodeterm-canvas" "$HOME/.claude/skills/get-linked-context" "$PI_HOME/skills/manage-nodeterm-canvas"; do
+for d in "$HOME/.claude/skills/manage-nodeterm-canvas" "$HOME/.claude/skills/get-linked-context" "$PI_HOME/skills/manage-nodeterm-canvas" "$PI_HOME/skills/get-linked-context"; do
   [ -d "$d" ] && { plan "Delete skill dir $d"; FOUND_ANY=1; }
 done
 for f in "$GROK_HOME/hooks/nodeterm-status.json" "$COPILOT_HOME/hooks/nodeterm-status.json"; do
@@ -492,7 +493,7 @@ if [ -f "$HOME/.codex/hooks.json" ] && grep -Eq "$HOOK_MARKERS" "$HOME/.codex/ho
     warn "Could not clean ~/.codex — left as is (entries are inert without the hook script)"
   fi
 fi
-rm -rf "$HOME/.claude/skills/manage-nodeterm-canvas" "$HOME/.claude/skills/get-linked-context" "$PI_HOME/skills/manage-nodeterm-canvas" 2>/dev/null || true
+rm -rf "$HOME/.claude/skills/manage-nodeterm-canvas" "$HOME/.claude/skills/get-linked-context" "$PI_HOME/skills/manage-nodeterm-canvas" "$PI_HOME/skills/get-linked-context" 2>/dev/null || true
 rm -f "$GROK_HOME/hooks/nodeterm-status.json" "$COPILOT_HOME/hooks/nodeterm-status.json" 2>/dev/null || true
 if [ -f "$OPENCODE_PLUGIN" ] && head -1 "$OPENCODE_PLUGIN" | grep -qF "$OPENCODE_PLUGIN_MARKER"; then
   rm -f "$OPENCODE_PLUGIN"

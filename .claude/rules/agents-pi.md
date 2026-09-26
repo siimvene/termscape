@@ -45,6 +45,8 @@ agent-registry rules stay in `agents.md`; the full write-up and device checklist
   `<agentDir>/extensions/*.js` load with NO trust gate (only `<cwd>/.pi/extensions` is gated) and
   `auth.json` sits beside them, so a git-shared value is repo code in the agent process plus a
   relocated credential. It is also the managed-account env, which the project merge would override.
+  `PI_CODING_AGENT_SESSION_DIR` (pi's session store alone) is reserved beside it: a repo-chosen
+  value would write every transcript into the checkout.
 - **Managed Pi accounts are config-dir isolation** (`<userData>/pi-accounts/<id>` as
   `PI_CODING_AGENT_DIR`), which rides `ACCOUNT_SCOPE_UPDATE_ENV` (#419). Pi does NOT reuse Claude or
   Codex logins: importing another CLI's refresh token would rotate it out from under that CLI. An

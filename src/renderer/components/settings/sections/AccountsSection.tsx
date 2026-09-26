@@ -1506,6 +1506,14 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
             ) : null}
           </div>
 
+          {/* Shown BEFORE anyone picks a provider in /login (agents-pi rule): the Anthropic case is
+              billed differently from what a Claude Pro/Max subscriber would assume. */}
+          <p className="text-[12px] leading-relaxed text-muted" data-testid="pi-billing-note">
+            Billing: a Claude Pro/Max login in Pi is billed by Anthropic as third-party extra usage,
+            per token, not against your plan limits. A ChatGPT Plus/Pro login (openai-codex) uses
+            your plan.
+          </p>
+
           <p className="text-[12px] leading-relaxed text-muted">
             Pi accounts are isolated logins, local to this machine. New Pi nodes pick an account
             from the add menus; each node keeps its account for life. A node color applies to

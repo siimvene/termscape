@@ -132,7 +132,7 @@ const GROUP_PAD = 28
 const GROUP_HEADER = 34
 const AFTER_RETRY_MS = 500
 const AFTER_RETRY_LIMIT = 5
-const SERVER_AGENTS: ReadonlySet<string> = new Set(['claude', 'codex', 'gemini'])
+const SERVER_AGENTS: ReadonlySet<string> = new Set(['claude', 'codex', 'gemini', 'pi'])
 
 function token(): string {
   return randomBytes(4).toString('hex')
@@ -1092,7 +1092,7 @@ export class HeadlessNodeFactory {
       if (verb === 'open-agent' && (!agentId || !SERVER_AGENTS.has(agentId))) {
         return {
           ok: false,
-          error: 'open-agent: Server Edition v1 supports --agent claude|codex|gemini'
+          error: 'open-agent: Server Edition v1 supports --agent claude|codex|gemini|pi'
         }
       }
       // The Server shell owns the same shared Codex app-server spine as desktop. Ask its boot-time

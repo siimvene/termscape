@@ -108,6 +108,16 @@ afterEach(() => {
 })
 
 describe('AccountsSection — adding a Pi account', () => {
+  // agents-pi rule: an Anthropic Pro/Max login through a third-party harness is billed as extra
+  // usage, not plan limits, and the user must be told BEFORE picking a provider in /login.
+  it('states the Anthropic billing difference before any login starts', () => {
+    const { host, root } = render()
+    const note = host.querySelector('[data-testid="pi-billing-note"]')
+    expect(note?.textContent).toMatch(/Claude Pro\/Max login in Pi is billed by Anthropic as third-party extra usage/)
+    expect(note?.textContent).toMatch(/not against your plan limits/)
+    root.unmount()
+  })
+
   it('opens the login terminal only after the shell has registered the row inside add()', async () => {
     const { host, root } = render()
     const add = addPiButton(host)
