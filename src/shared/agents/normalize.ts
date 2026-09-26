@@ -846,6 +846,52 @@ export function normalizeGrok(env: RawHookEnvelope): NormalizedAgentEvent | null
   return null
 }
 
+// pi (`@earendil-works/pi-coding-agent`) has no hook-file mechanism. Its status reaches us through
+// nodeterm's OWN extension (core/agents/hooks/pi.ts), so the payload is the envelope that extension
+// builds from pi's extension-API events — names measured on pi 0.84.1 (docs/pi-agent.md):
+//   { event, sessionId, sessionFile, cwd, toolName?, stopReason?, lastMessage?, name?, context? }
+// `agent_start` (not `input`) opens the turn: `input` also fires for a slash command like `/name`,
+// which runs no agent, so treating it as a turn start would strand the node on RUNNING.
+// `agent_settled` is pi's single, final end-of-turn signal (`agent_end` can be followed by a retry).
+// stopReason is pi's closed StopReason union (pi-ai types.d.ts: pending|stop|length|toolUse|error|
+// aborted|deferred); only `error` and `aborted` change the verdict, anything else is a clean done.
+interface PiPayload {
+  event?: string
+  sessionId?: unknown
+  stopReason?: unknown
+  lastMessage?: unknown
+  name?: unknown
+}
+
+export function normalizePi(env: RawHookEnvelope): NormalizedAgentEvent | null {
+  const p = env.payload as PiPayload
+  const sessionId = typeof p.sessionId === 'string' && p.sessionId ? p.sessionId : undefined
+  const base = { nodeId: env.nodeId, agentId: env.agentId, sessionId }
+  switch (p.event) {
+    case 'session_start':
+      return { ...base, kind: 'session', sessionPhase: 'start' }
+    case 'session_shutdown':
+      return { ...base, kind: 'session', sessionPhase: 'end' }
+    case 'session_info_changed': {
+      const name = typeof p.name === 'string' ? p.name.trim() : ''
+      return name ? { ...base, kind: 'session', sessionTitle: name } : null
+    }
+    case 'agent_start':
+      return { ...base, kind: 'state', state: 'working', newTurn: true }
+    case 'tool_execution_start':
+      return { ...base, kind: 'state', state: 'working' }
+    case 'agent_settled': {
+      const lastMessage = typeof p.lastMessage === 'string' && p.lastMessage ? p.lastMessage : undefined
+      const done = { ...base, kind: 'state' as const, state: 'done' as const, ...(lastMessage ? { lastMessage } : {}) }
+      if (p.stopReason === 'error') return { ...done, errored: true }
+      if (p.stopReason === 'aborted') return { ...done, interrupted: true }
+      return done
+    }
+    default:
+      return null
+  }
+}
+
 export function normalizeFor(agentId: AgentId, env: RawHookEnvelope): NormalizedAgentEvent | null {
   if (agentId === 'claude') return normalizeClaude(env)
   if (agentId === 'codex') return normalizeCodex(env)
@@ -853,5 +899,6 @@ export function normalizeFor(agentId: AgentId, env: RawHookEnvelope): Normalized
   if (agentId === 'opencode') return normalizeOpencode(env)
   if (agentId === 'grok') return normalizeGrok(env)
   if (agentId === 'copilot') return normalizeCopilot(env)
+  if (agentId === 'pi') return normalizePi(env)
   return null
 }
