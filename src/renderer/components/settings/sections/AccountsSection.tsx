@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState } from 'react'
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import { IconClose } from '../../icons'
 import type { ClaudeAccount, ClaudeSkillShareResult } from '@shared/types'
 import type { CodexAccount } from '@shared/codex-account'
@@ -566,6 +566,48 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
   const setPiColor = (id: string, color?: string): void =>
     applyPiAccounts((accs) => accs.map((a) => (a.id === id ? { ...a, color } : a)))
 
+  // ONE wait per pending row at a time (ids in flight), mirroring this tab's `healedPiAccount`
+  // capture flip when it resolves. Shared by the add path, the reconcile effect below and the
+  // Retry button, so none of them can start a second poll for a row that already has one. The
+  // shell keeps a SET of waits per id anyway (a stray duplicate is harmless), this just keeps the
+  // renderer from being the source of them.
+  const piWaitsRef = useRef(new Set<string>())
+  const waitPiLogin = useCallback(async (id: string): Promise<void> => {
+    if (piWaitsRef.current.has(id)) return
+    piWaitsRef.current.add(id)
+    try {
+      const captured = await window.nodeTerminal.piAccounts.waitLogin(id)
+      if (captured) {
+        applyPiAccounts((accs) =>
+          accs.map((a) => (a.id === id ? healedPiAccount(a, captured.providers) : a))
+        )
+      }
+    } catch {
+      // Unsupported surface (relay tab) or a cancelled wait: the row simply stays pending.
+    } finally {
+      piWaitsRef.current.delete(id)
+    }
+  }, [])
+
+  // Reconcile pending pi rows while the section is active — the pi twin of the Codex reconcile
+  // effect above. A row is left `pending` when the 5-minute `waitLogin` timed out mid-OAuth or the
+  // app restarted before the capture; `auth.json` may hold the login by now, but nothing else ever
+  // calls `waitLogin` again, the add menu filters pending rows out, and the row's only action was
+  // Remove. Re-arming the wait here resolves it the moment the file names a provider.
+  useEffect(() => {
+    if (!isActive) return
+    for (const account of piAccounts) {
+      if (account.pending) void waitPiLogin(account.id)
+    }
+  }, [isActive, piAccounts, waitPiLogin])
+
+  // Retry login on a pending row: reopen the login terminal (the same event `onAddPiAccount`
+  // fires) and make sure a wait is armed for the capture.
+  const retryPiLogin = (id: string): void => {
+    window.dispatchEvent(new CustomEvent('nodeterm:add-pi-account-login', { detail: { accountId: id } }))
+    void waitPiLogin(id)
+  }
+
   // Add a managed pi account and open its login node (interactive `pi`, the user types /login
   // themselves — pi has no CLI login flag, unlike claude/codex). The SHELL registers the row
   // (`add()` appends it inside the store's own chain and resolves once that is on disk, so the id
@@ -585,12 +627,7 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
       window.dispatchEvent(
         new CustomEvent('nodeterm:add-pi-account-login', { detail: { accountId: added.id } })
       )
-      const captured = await window.nodeTerminal.piAccounts.waitLogin(added.id)
-      if (captured) {
-        applyPiAccounts((accs) =>
-          accs.map((a) => (a.id === added.id ? healedPiAccount(a, captured.providers) : a))
-        )
-      }
+      await waitPiLogin(added.id)
     } catch (e) {
       setPiAddError(
         isUnsupported(e)
@@ -1424,6 +1461,11 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
                         <span className="rounded-full bg-[color:var(--warn)]/15 px-2 py-0.5 text-[11px] font-medium text-[color:var(--warn)]">
                           pending
                         </span>
+                      ) : null}
+                      {account.pending ? (
+                        <Button variant="ghost" onClick={() => retryPiLogin(account.id)}>
+                          Retry login
+                        </Button>
                       ) : null}
                     </div>
                     {account.email && !account.pending ? (

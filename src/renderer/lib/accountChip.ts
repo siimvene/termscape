@@ -425,6 +425,7 @@ export function accountChipFor({
   dataAccountId,
   observed,
   accounts,
+  providerAccounts,
   systemLabel,
   systemEmail,
   multiple
@@ -432,6 +433,11 @@ export function accountChipFor({
   dataAccountId?: string
   observed?: ObservedClaudeAccount
   accounts: ClaudeAccount[]
+  /** The managed accounts of the OTHER providers (pi, codex): rows with an id and a label. A
+   *  node bound to one of them carries that id in `data.accountId` just like a Claude node, and
+   *  without this list every such node read "Unknown account" off the Claude list. The three lists
+   *  share one minted-uuid alphabet, so an id resolves in at most one of them. */
+  providerAccounts?: readonly { id: string; label: string }[]
   /** `settings.systemAccountLabel` — the user's own name for the `~/.claude` login. */
   systemLabel?: string
   /** The detected `~/.claude` login email (`state/systemAccount`), when known. */
@@ -484,6 +490,12 @@ export function accountChipFor({
         : `Unlinked Claude config dir ${dir} — link it in Settings → Accounts`,
       kind: 'unlinked'
     }
+  }
+  // A pi or codex account: named by ITS list. Checked before the Claude lookup, whose miss is
+  // "Unknown account" — a binding that resolves nowhere really is dangling and still says so.
+  const other = providerAccounts?.find((a) => a.id === key)
+  if (other) {
+    return { short: shortAccountLabel(other.label), tooltip: other.label, kind: 'managed' }
   }
   const label = accountChipLabel(key, accounts)
   if (!label) return null // unreachable: `key` is a non-empty id here

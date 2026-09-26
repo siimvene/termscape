@@ -36,9 +36,19 @@ export const ACCOUNT_CAPABLE_AGENT_IDS: readonly string[] = ['claude', 'codex', 
  */
 export function boundAccountId(
   accountId: string | undefined,
-  agentId: string | undefined
+  agentId: string | undefined,
+  /** Where the node RUNS. Managed pi accounts are local-only (v1): `<userData>/pi-accounts/<id>`
+   *  exists on this machine, the remote spawn skips the pi scope (`piScoped && !options.sshRemote`),
+   *  so a pi account stamped on an SSH node would wear the account's color and chip while running
+   *  the host's system `~/.pi/agent` identity — the "pinned to another machine, never stamped onto
+   *  a node it cannot run on" rule. Claude has a host-pinned remote leg and Codex rows are
+   *  host-filtered by the pickers, so the node's SSH-ness is not their gate here. Optional so a
+   *  caller that cannot know (the phone-registration path) keeps its binding, matching the
+   *  "unstated keeps its binding" stance above. */
+  where?: { ssh?: boolean }
 ): string | undefined {
   if (!accountId) return undefined
   if (agentId !== undefined && !ACCOUNT_CAPABLE_AGENT_IDS.includes(agentId)) return undefined
+  if (agentId === 'pi' && where?.ssh) return undefined
   return accountId
 }

@@ -92,6 +92,14 @@ export interface NodeData {
   /** One-shot command run once when the terminal first opens (not persisted). */
   initialCommand?: string
   /**
+   * Set ONLY by `createPiAccountLoginNode`: this terminal exists to `/login` a managed pi account,
+   * so its spawn must scope to that account's PI_CODING_AGENT_DIR or refuse (pty-manager
+   * PRE-FLIGHT 3). Persisted (see CanvasNodeState.piLogin) so a cold restart of an unfinished
+   * login still declares the intent. An explicit flag rather than the command shape, because the
+   * login node runs bare `pi` — exactly what `open-terminal --cmd pi` runs too.
+   */
+  piLogin?: boolean
+  /**
    * Terminal nodes armed with canvas-control's `--after`: the launch is held until every node
    * in `after` reports idle. Unlike `initialCommand` this IS persisted — the wait is durable
    * state, not a one-shot open event. Cleared the moment it fires.
@@ -634,7 +642,9 @@ export function createAgentNode(
   // "which agents bind a managed account" has a single definition instead of a ternary the canvas
   // enforces and the registrar does not. It feeds both `data.accountId` below and the color here,
   // which is what keeps the two from drifting apart.
-  const bound = boundAccountId(accountId, agentId)
+  // `ssh` is passed so a managed PI account (local-only) is never stamped on an SSH node — the
+  // remote spawn cannot scope to it and would run the host's system pi under the account's color.
+  const bound = boundAccountId(accountId, agentId, { ssh: !!ssh })
   // A managed account's default node color (Settings → Accounts) replaces the agent's brand color,
   // so a second login of either builtin is recognizable on the canvas at a glance.
   // `agentAccountColor` asks the list that OWNS this agent's accounts — the two are keyed
@@ -884,7 +894,7 @@ export function createCodexAccountLoginNode(
  * into the managed dir where `piAccounts.waitLogin` polls for it.
  *
  * Scope is not left to a settings guess: the create path recognizes this node
- * (`isPiAccountLoginNode`, keyed on the 'Pi login' title / bare `pi` initialCommand) and carries
+ * (`isPiAccountLoginNode`, keyed on the explicit, persisted `data.piLogin` flag set here) and carries
  * `PtyCreateOptions.piLogin`, which forces the managed scope and REFUSES (pty-manager PRE-FLIGHT 3)
  * when the account dir cannot be resolved or the project is SSH — managed pi accounts are
  * local-only in v1, so an unscoped login that would write the SYSTEM `~/.pi/agent` never runs.
@@ -905,7 +915,8 @@ export function createPiAccountLoginNode(
     ...node.data,
     title: 'Pi login',
     accountId,
-    initialCommand: 'pi'
+    initialCommand: 'pi',
+    piLogin: true
   }
   return node
 }
@@ -989,15 +1000,22 @@ export function isCodexAccountLoginNode(data: { title?: string; initialCommand?:
  * the spawn scopes to the managed agent dir fail-closed (PRE-FLIGHT 3 in pty-manager) instead of
  * an unscoped interactive `pi` writing the user's system `~/.pi/agent`.
  *
- * Keyed on the DURABLE title (persisted) plus the one-shot `initialCommand`, mirroring the Claude
- * and Codex predicates: a cold restart of a login node that never finished still declares the
- * intent. The command match is EXACT (`pi` with nothing else, ignoring surrounding whitespace) —
- * unlike `codex login`'s prefix match, pi's login is a slash command typed inside the running
- * session, not a CLI argument, so there is no flag form to also match, and a looser match would
- * risk claiming an unrelated command a user typed that happens to start with `pi` (`pip`, `ping`).
+ * Keyed on the EXPLICIT, persisted `piLogin` flag `createPiAccountLoginNode` sets — NOT on the
+ * title or the command, unlike the Claude and Codex predicates. Those two match `claude /login` and
+ * `codex login`, commands nothing else runs; pi's login is the `/login` slash command typed INSIDE
+ * a bare `pi` session, so the login node's command is just `pi` — which is also exactly what
+ * `nodeterm.sh open-terminal --cmd pi` runs, and a shape match sent `piLogin` for that plain
+ * terminal and PRE-FLIGHT 3 refused its spawn ("no agent dir given"). A user renaming any
+ * terminal to 'Pi login' had the same effect. The flag rides `CanvasNodeState.piLogin`, so a cold
+ * restart of a login node that never finished still declares the intent.
  */
-export function isPiAccountLoginNode(data: { title?: string; initialCommand?: string }): boolean {
-  return data.title === 'Pi login' || (data.initialCommand ?? '').trim() === 'pi'
+export function isPiAccountLoginNode(data: {
+  piLogin?: boolean
+  // Accepted (and ignored) so the three login predicates keep one call shape.
+  title?: string
+  initialCommand?: string
+}): boolean {
+  return data.piLogin === true
 }
 
 /**
@@ -2037,6 +2055,7 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
         agentId,
         agentModel: n.agentModel,
         accountId: n.accountId,
+        piLogin: n.piLogin,
         agentSessionId: n.agentSessionId,
         // Hostile input (git-shared file): shape-checked here; and never auto-fired — see
         // `wasArmedThisSession` in renderer/lib/pendingLaunch.
@@ -2119,6 +2138,7 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
         agentId: n.data.agentId,
         agentModel: n.data.agentModel,
         accountId: n.data.accountId,
+        piLogin: n.data.piLogin,
         agentSessionId: n.data.agentSessionId,
         pendingLaunch: n.data.pendingLaunch,
         ssh: n.data.ssh,

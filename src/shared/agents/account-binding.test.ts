@@ -15,6 +15,17 @@ describe('boundAccountId', () => {
     expect(ACCOUNT_CAPABLE_AGENT_IDS).toEqual(['claude', 'codex', 'pi'])
   })
 
+  it('never binds a pi account to an SSH node: managed pi accounts are local to this machine', () => {
+    // The remote spawn skips the pi scope (`piScoped && !options.sshRemote`), so a pi account
+    // stamped on an SSH node would wear that account's color while running the host's system pi.
+    expect(boundAccountId('p1', 'pi', { ssh: true })).toBeUndefined()
+    expect(boundAccountId('p1', 'pi', { ssh: false })).toBe('p1')
+    // Claude accounts have a host-pinned remote leg and Codex rows are host-filtered by the
+    // pickers; the node's SSH-ness is not their gate here.
+    expect(boundAccountId('a1', 'claude', { ssh: true })).toBe('a1')
+    expect(boundAccountId('c1', 'codex', { ssh: true })).toBe('c1')
+  })
+
   it('never binds one to a builtin that takes no managed account', () => {
     expect(boundAccountId('a1', 'gemini')).toBeUndefined()
     expect(boundAccountId('a1', 'grok')).toBeUndefined()

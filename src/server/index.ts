@@ -49,7 +49,11 @@ import { registerLogHandlers } from '../core/log-handlers'
 import os from 'os'
 import { hookServer } from '../core/agents/hook-server'
 import { serverEditionControlHandler } from './control-unsupported'
-import { initServerCanvasControl, type ServerCanvasControl } from './canvas-control'
+import {
+  initServerCanvasControl,
+  installServerPiCanvasSkillInto,
+  type ServerCanvasControl
+} from './canvas-control'
 import { refreshNodeTokens } from '../core/agents/node-token-service'
 import { armServerNodeIdentity } from './node-identity-arm'
 import { wireServerCodexSharedIdentity } from './codex-shared-identity'
@@ -62,6 +66,7 @@ import {
 import { installManagedAgentHooks } from '../core/agents/hooks'
 import { installHooksIntoLocalAccounts } from '../core/claude-accounts-service'
 import { installPiExtensionIntoLocalAccounts } from '../core/pi-accounts-service'
+import { installPiLinkSkillInto } from '../core/context-link'
 import {
   initAgentStatusMirror,
   statusSnapshotEvents,
@@ -317,9 +322,20 @@ export async function startServer(
   // between the RPC side (which mints) and the HTTP side (which redeems) — one instance, so a
   // ticket minted over the socket is redeemable by the GET that follows it.
   const downloadTickets = new DownloadTickets()
+  // A managed pi account is its own agent dir, and pi reads skills per agent dir: each account
+  // gets BOTH skills the system dir gets (get-linked-context, and canvas control when that surface
+  // is enabled on this edition), from the same builders — the desktop's `installPiAccountSkills`.
+  // Used by the add verb (`installPiSkill`) and the boot loop below. `installHooks: false`
+  // (tests) skips it like every other integration write.
+  const installPiAccountSkills = (agentDir: string): void => {
+    if (config.installHooks === false) return
+    installPiLinkSkillInto(agentDir)
+    if (config.canvasControl === true) installServerPiCanvasSkillInto(agentDir)
+  }
   const { gitService } = registerCoreHandlers(platform, {
     getSettings: () => settingsStore.get(),
     settingsStore,
+    installPiSkill: installPiAccountSkills,
     downloadTickets,
     localProjectCwd: (projectId: string) => workspaceStore.localCwdForProject(projectId)
   })
@@ -660,9 +676,10 @@ export async function startServer(
     // reports no agent status at all. Canvas-control adds its skill in its own opt-in initializer;
     // this baseline hook pass stays unchanged when the feature flag is off.
     installHooksIntoLocalAccounts(settingsStore.get().claudeAccounts ?? [])
-    // Managed pi accounts: each is its own PI_CODING_AGENT_DIR, so the status extension is
-    // re-installed into every account dir as well (same loop as the desktop boot).
-    installPiExtensionIntoLocalAccounts(settingsStore.get().piAccounts ?? [])
+    // Managed pi accounts: each is its own PI_CODING_AGENT_DIR, so the status extension AND the
+    // per-account skills are re-installed into every account dir as well (same loop as the
+    // desktop boot, same installer the add verb uses).
+    installPiExtensionIntoLocalAccounts(settingsStore.get().piAccounts ?? [], installPiAccountSkills)
   }
   await hookServer.start()
   // Safe default and rollback path. The opt-in runtime replaces this handler only after its

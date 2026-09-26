@@ -60,7 +60,7 @@ beforeEach(() => {
         name: 'p',
         cwd: '/tmp',
         nodes: [
-          { id: 'login-node', accountId: 'p1', title: 'Pi login', initialCommand: undefined },
+          { id: 'login-node', accountId: 'p1', title: 'Pi login', piLogin: true },
           { id: 'plain-node', accountId: 'p1', title: 'shell' }
         ]
       } as unknown as Project

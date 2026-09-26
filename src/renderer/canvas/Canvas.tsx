@@ -5129,10 +5129,12 @@ export function Canvas() {
       } else if (agentId === 'pi') {
         // Pi accounts are local-only (v1) and have no project-default concept (no
         // `defaultPiAccountId` field, matching Codex, which has none either — only Claude does).
-        // An explicit pick is honored as-is; a missing/deleted account dir is a SOFT fallback in
+        // An explicit pick is honored as-is on a LOCAL project; on an SSH project it is dropped
+        // (`boundAccountId` refuses it at the funnel as well): the remote spawn cannot scope to a
+        // dir that exists only on this machine. A missing/deleted account dir is a SOFT fallback in
         // pty-manager (system pi + `accountFallback`), not a hard refusal, so there is no
         // connectivity-style gate to run here the way Codex's SSH leg needs.
-        account = accountId ?? undefined
+        account = project?.ssh ? undefined : accountId ?? undefined
       } else {
         // Funnel through resolveNewNodeAccount so the project default applies even without an
         // explicit pick. The factory drops the account for non-claude agents.
@@ -9091,10 +9093,15 @@ export function Canvas() {
         undefined,
         useSystemCodexAccount.getState().email
       )
-      // Pi accounts (local only in v1 — no host filtering, unlike Codex's remote leg): the
-      // account-capable rows this project's OWN machine can see. A pending row (no captured
-      // login yet) is not offered — the same reason a pending Codex row is filtered above.
-      const piAccountsHere = useSettings.getState().settings.piAccounts.filter((a) => !a.pending)
+      // Pi accounts (local only in v1): offered for a LOCAL project only. An SSH project's nodes
+      // run on the host, where `<userData>/pi-accounts/<id>` does not exist and the remote spawn
+      // skips the pi scope — a pick there would stamp the account's color on a node running the
+      // host's system pi (`boundAccountId` drops it at the funnel too; this keeps the row out of the
+      // menu, the way Codex's list is host-filtered above). A pending row (no captured login yet)
+      // is not offered — the same reason a pending Codex row is filtered above.
+      const piAccountsHere = project?.ssh
+        ? []
+        : useSettings.getState().settings.piAccounts.filter((a) => !a.pending)
       const itemForBuiltin = (aid: (typeof BUILTIN_AGENT_IDS)[number]): MenuItem => {
         // Claude gets an account picker submenu when ≥1 account exists. The System row is an
         // EXPLICIT pick (`null`), never "no pick": before that distinction, clicking the row

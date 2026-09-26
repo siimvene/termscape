@@ -33,8 +33,8 @@ const onPiLogin = (e: Event): void => {
   dispatches.push({ accountId, registered: registered.includes(accountId) })
 }
 
-function render(): { host: HTMLElement; root: Root } {
-  useSettings.setState({ settings: { ...DEFAULT_SETTINGS, piAccounts: [] }, hydrated: true })
+function render(rows: PiAccount[] = []): { host: HTMLElement; root: Root } {
+  useSettings.setState({ settings: { ...DEFAULT_SETTINGS, piAccounts: rows }, hydrated: true })
   const host = document.createElement('div')
   document.body.appendChild(host)
   const root = createRoot(host)
@@ -157,6 +157,39 @@ describe('AccountsSection — adding a Pi account', () => {
     expect(useSettings.getState().settings.piAccounts).toEqual([
       { id: NEW_ID, label: 'openai-codex', pending: false, createdAt: 0 }
     ])
+    root.unmount()
+  })
+})
+
+// A row left `pending` — the 5-minute waitLogin timed out, or the app restarted before the
+// capture — used to be stuck: nothing ever called waitLogin again, the add menu filters pending
+// rows out, and the only action on the row was Remove. Same shape as the Codex reconcile effect.
+describe('AccountsSection — a pending Pi row left behind', () => {
+  it('is reconciled while the section is active: waitLogin runs again and the row resolves', async () => {
+    const { root } = render([NEW_ROW])
+    await until(() => waitLoginResolvers.length > 0)
+    expect(dispatches).toEqual([]) // reconcile does not reopen a login terminal by itself
+    await act(async () => {
+      waitLoginResolvers[0]({ providers: ['anthropic'] })
+    })
+    await until(() => useSettings.getState().settings.piAccounts[0]?.pending === false)
+    expect(useSettings.getState().settings.piAccounts).toEqual([
+      { id: NEW_ID, label: 'anthropic', pending: false, createdAt: 0 }
+    ])
+    root.unmount()
+  })
+
+  it('offers Retry login, which reopens the login terminal for that row', async () => {
+    const { host, root } = render([NEW_ROW])
+    const retry = Array.from(host.querySelectorAll('button')).find((b) =>
+      /retry login/i.test((b.textContent ?? '').trim())
+    )
+    expect(retry).toBeTruthy()
+    await act(async () => {
+      retry!.click()
+    })
+    await until(() => dispatches.length > 0)
+    expect(dispatches[0].accountId).toBe(NEW_ID)
     root.unmount()
   })
 })

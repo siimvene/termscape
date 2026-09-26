@@ -48,6 +48,30 @@ const accounts: ClaudeAccount[] = [
   { id: 'a2', label: 'second', configDir: '/home/me/.claude-2', createdAt: 0 }
 ]
 
+describe('useAccountChip — managed accounts of the other providers', () => {
+  it('names a pi (or codex) account by ITS list instead of "Unknown account" from the Claude list', () => {
+    useSettings.setState({
+      settings: {
+        ...DEFAULT_SETTINGS,
+        claudeAccounts: accounts,
+        piAccounts: [{ id: 'p1', label: 'work pi', pending: false, createdAt: 0 }],
+        codexAccounts: [{ id: 'c1', label: 'work codex' }]
+      }
+    })
+    const pi = render({ accountId: 'p1' })
+    expect(chipEl(pi.host)?.textContent).toBe('work pi')
+    expect(chipEl(pi.host)?.getAttribute('title')).not.toMatch(/unknown/i)
+    pi.root.unmount()
+    const codex = render({ accountId: 'c1' })
+    expect(chipEl(codex.host)?.textContent).toBe('work codex')
+    codex.root.unmount()
+    // A binding that resolves NOWHERE is still dangling, and still says so.
+    const gone = render({ accountId: 'zz' })
+    expect(chipEl(gone.host)?.textContent).toBe('Unknown account')
+    gone.root.unmount()
+  })
+})
+
 beforeEach(() => {
   document.body.innerHTML = ''
   useAgentStatus.setState({ byId: {} })

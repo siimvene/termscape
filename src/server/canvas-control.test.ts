@@ -25,7 +25,98 @@ import type { PtyManager } from '../core/pty-manager'
 import type { WorkspaceStore } from '../core/workspace-store'
 import { IPC } from '../shared/ipc'
 import { DEFAULT_SETTINGS, type Project, type Settings, type Workspace } from '../shared/types'
-import { initServerCanvasControl, type ServerCanvasControl } from './canvas-control'
+import {
+  initServerCanvasControl,
+  installServerPiCanvasSkillInto,
+  type ServerCanvasControl
+} from './canvas-control'
+
+/** The minimal workspace/pty deps `initServerCanvasControl` needs to boot (no node is opened). */
+function bootDeps(): { workspaceStore: WorkspaceStore; ptyManager: PtyManager } {
+  const workspace: Workspace = { version: 2, activeProjectId: 'p1', projects: [] }
+  const workspaceStore = {
+    load: vi.fn(async () => workspace),
+    save: vi.fn(async () => undefined),
+    persistedCanvases: () => [],
+    capabilityProjectFor: () => ({})
+  } as unknown as WorkspaceStore
+  const ptyManager = {
+    createHeadless: vi.fn(async () => ({ sessionId: 'unused', fresh: true })),
+    sendText: vi.fn(async () => true),
+    destroySession: vi.fn(async () => undefined),
+    paneOwner: vi.fn(async () => null),
+    sendEnvelope: vi.fn(async () => true),
+    hasLiveSession: () => true
+  } as unknown as PtyManager
+  return { workspaceStore, ptyManager }
+}
+
+describe('initServerCanvasControl — managed pi account dirs', () => {
+  let dataDir = ''
+  let home = ''
+  let runtime: ServerCanvasControl | null = null
+  const prevHome = process.env.HOME
+
+  beforeEach(() => {
+    dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nodeterm-server-control-pi-'))
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'nodeterm-server-home-'))
+    // `installAgentIntegrations: true` writes the system agents' skill/instruction files under
+    // `os.homedir()`, which honors $HOME on POSIX — so they land in a temp home, never the real one.
+    process.env.HOME = home
+    resetPlatformForTests()
+    initPlatform(fakePlatform({ userDataDir: dataDir }))
+  })
+
+  afterEach(() => {
+    runtime?.stop()
+    runtime = null
+    resetPlatformForTests()
+    if (prevHome === undefined) delete process.env.HOME
+    else process.env.HOME = prevHome
+    fs.rmSync(dataDir, { recursive: true, force: true })
+    fs.rmSync(home, { recursive: true, force: true })
+  })
+
+  it.skipIf(process.platform === 'win32')(
+    'installs the pi canvas skill into every existing managed pi account dir (desktop parity)',
+    async () => {
+      const acctDir = path.join(dataDir, 'pi-accounts', 'p1')
+      fs.mkdirSync(acctDir, { recursive: true })
+      const settings = (): Settings => ({
+        ...DEFAULT_SETTINGS,
+        piAccounts: [
+          { id: 'p1', label: 'work pi', pending: false, createdAt: 0 },
+          // A row whose dir is gone is skipped, never resurrected as an empty logged-out dir.
+          { id: 'p2', label: 'gone', pending: false, createdAt: 0 }
+        ]
+      })
+      runtime = await initServerCanvasControl({
+        ...bootDeps(),
+        settings,
+        boardLog: { append: async () => false },
+        cliCaps: async () => ({
+          version: null,
+          autoPermissionMode: false,
+          fullscreenTui: false,
+          sessionIdFlag: false
+        }),
+        codexSharedIdentity: async () => true,
+        installAgentIntegrations: true
+      })
+      const shim = path.join(dataDir, 'canvas-control', 'nodeterm.sh')
+      const skill = path.join(acctDir, 'skills', 'manage-nodeterm-canvas', 'SKILL.md')
+      expect(fs.readFileSync(skill, 'utf8')).toContain(shim)
+      expect(fs.existsSync(path.join(dataDir, 'pi-accounts', 'p2'))).toBe(false)
+      // The per-dir installer the add verb uses writes the SAME body (one builder, one shim path).
+      const fresh = path.join(dataDir, 'pi-accounts', 'p3')
+      fs.mkdirSync(fresh, { recursive: true })
+      installServerPiCanvasSkillInto(fresh)
+      expect(fs.readFileSync(path.join(fresh, 'skills', 'manage-nodeterm-canvas', 'SKILL.md'), 'utf8')).toBe(
+        fs.readFileSync(skill, 'utf8')
+      )
+    }
+  )
+})
 
 describe('initServerCanvasControl', () => {
   let dataDir = ''

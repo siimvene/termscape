@@ -49,7 +49,20 @@ agent-registry rules stay in `agents.md`; the full write-up and device checklist
   `PI_CODING_AGENT_DIR`), which rides `ACCOUNT_SCOPE_UPDATE_ENV` (#419). Pi does NOT reuse Claude or
   Codex logins: importing another CLI's refresh token would rotate it out from under that CLI. An
   Anthropic Pro/Max login in Pi is billed as third-party extra usage, not plan limits — say so in UI
-  copy, never imply otherwise.
+  copy, never imply otherwise. Three rules that fell out of review:
+  - **Local-only means never on an SSH node.** `boundAccountId(id, 'pi', { ssh })` drops the id and
+    the New Pi submenu offers no accounts on an SSH project; the remote spawn skips the pi scope, so
+    a stamped id would paint the account's color on a node running the host's system pi.
+  - **The login node is an explicit `piLogin` flag** (`CanvasNodeState.piLogin`, set only by
+    `createPiAccountLoginNode`), never the title or the bare `pi` command: `open-terminal --cmd pi`
+    runs the same command, and a shape match made PRE-FLIGHT 3 refuse that plain terminal.
+  - **Both shells give every account dir both skills** (get-linked-context + canvas control when
+    enabled), at boot and on add: the desktop's `installPiAccountSkills`, the server's
+    `installPiAccountSkills` + `installServerPiCanvasSkillInto`, pinned by
+    `server/pi-account-skills-parity.test.ts`. pi reads skills from `<agentDir>/skills` only.
+  - **A pending row is reconciled**, not abandoned: `AccountsSection` re-arms `waitLogin` for every
+    pending pi row while active (the 5-min wait times out mid-OAuth, or the app restarts before the
+    capture) and offers Retry login; the chip resolves pi/codex ids against THEIR lists.
 - **Out on purpose**: `PERMISSION_MODE_CAPABLE` (pi has no approval modes; joining would make
   `approval-mode.ts` fall back to claude's `--permission-mode`), `RENAME_CAPABLE`, `MODEL_SWITCH_CAPABLE`
   (pi's own `/model`), `SUBAGENT_CAPABLE`, `CHAT_CAPABLE`.

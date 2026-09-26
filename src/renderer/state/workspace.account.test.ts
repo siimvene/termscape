@@ -2,13 +2,17 @@ import { describe, it, expect } from 'vitest'
 import {
   accountChipLabel,
   accountsForProject,
+  createAgentNode,
+  createPiAccountLoginNode,
+  flowToNodeStates,
   isAccountLoginNode,
   isCodexAccountLoginNode,
   isPiAccountLoginNode,
+  nodeStatesToFlow,
   sshAccountsHint,
   systemAccountDisplay
 } from './workspace'
-import type { ClaudeAccount } from '@shared/types'
+import type { ClaudeAccount, Project } from '@shared/types'
 
 const acct = (over: Partial<ClaudeAccount>): ClaudeAccount => ({
   id: 'a1',
@@ -142,28 +146,39 @@ describe('isCodexAccountLoginNode', () => {
   })
 })
 
-// The pi twin — but pi has no login FLAG (no `pi login`, only the interactive `/login` slash
-// command), so the command match is EXACT rather than a prefix: there is no flag form to also
-// match, and a looser match would risk claiming an unrelated command that merely starts with the
-// letters `pi` (`pip install`, `ping`).
+// The pi twin — keyed on an EXPLICIT flag the factory sets, not on the command shape: pi's login
+// node runs bare `pi` (the login is the `/login` slash command inside the session), and bare `pi`
+// is also exactly what `nodeterm.sh open-terminal --cmd pi` runs. A shape match sent `piLogin` for
+// that plain terminal, and PRE-FLIGHT 3 refused its spawn ("no agent dir") for a node that never
+// asked to be scoped.
 describe('isPiAccountLoginNode', () => {
-  it('matches the factory title and the bare `pi` command', () => {
-    expect(isPiAccountLoginNode({ title: 'Pi login' })).toBe(true)
-    expect(isPiAccountLoginNode({ title: 'renamed', initialCommand: 'pi' })).toBe(true)
-    expect(isPiAccountLoginNode({ title: 'renamed', initialCommand: '  pi  ' })).toBe(true)
-  })
-
-  it('does NOT match a command that merely starts with the letters `pi`', () => {
+  it('is the explicit factory flag, never the title or the bare `pi` command', () => {
+    const login = createPiAccountLoginNode('p1', 0)
+    expect(login.data.piLogin).toBe(true)
+    expect(login.data.accountId).toBe('p1')
+    expect(isPiAccountLoginNode(login.data)).toBe(true)
+    expect(isPiAccountLoginNode({ title: 'renamed', initialCommand: 'pi' })).toBe(false)
+    expect(isPiAccountLoginNode({ title: 'Pi login' })).toBe(false)
     expect(isPiAccountLoginNode({ title: 'x', initialCommand: 'pip install foo' })).toBe(false)
-    expect(isPiAccountLoginNode({ title: 'x', initialCommand: 'ping example.com' })).toBe(false)
-  })
-
-  it('does not match ordinary nodes', () => {
-    expect(isPiAccountLoginNode({ title: 'My session', initialCommand: 'pi --model x' })).toBe(
-      false
-    )
     expect(isPiAccountLoginNode({ title: 'Terminal' })).toBe(false)
     expect(isPiAccountLoginNode({})).toBe(false)
+  })
+
+  it('survives the save/load round trip, so a cold restart of an unfinished login still scopes', () => {
+    const login = createPiAccountLoginNode('p1', 0)
+    const [back] = nodeStatesToFlow(flowToNodeStates([login]))
+    expect(isPiAccountLoginNode(back.data)).toBe(true)
+  })
+})
+
+describe('createAgentNode — pi accounts on an SSH project', () => {
+  const ssh = { server: { host: 'box', user: 'me' }, remoteCwd: '/srv' } as unknown as Project['ssh']
+
+  it('never stamps a managed pi account on an SSH node (the remote spawn cannot scope to it)', () => {
+    const remote = createAgentNode('pi', 0, '/local', undefined, undefined, ssh, 'p1')
+    expect(remote.data.accountId).toBeUndefined()
+    const local = createAgentNode('pi', 0, '/local', undefined, undefined, undefined, 'p1')
+    expect(local.data.accountId).toBe('p1')
   })
 })
 
