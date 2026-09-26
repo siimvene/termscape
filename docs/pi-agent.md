@@ -6,7 +6,7 @@ integration works, and what still needs a device. The distilled per-CLI rules li
 `.claude/rules/agents-pi.md`; the general rules in `.claude/rules/agents.md` ("Adding a new agent").
 
 Every claim marked **MEASURED** was checked against pi **0.84.1** on macOS (2026-09-22/26), with a
-probe extension and the real binary under a pty. Items marked **[DEVICE]** are in the checklist (§8).
+probe extension and the real binary under a pty. Items marked **[DEVICE]** are in the checklist (§9).
 
 ## 1. Why Pi, and what "all subscriptions" means
 
@@ -118,14 +118,26 @@ host's system Pi.
 - **Mobile**: the phone sees Pi nodes through the status mirror (`agentId: 'pi'`); launching Pi from
   the phone needs the iOS client to know the id (docs/mobile-client-spec.md).
 
-## 7. Files
+## 7. Known gaps (v1)
+
+- **SSH hosts get the status extension and the canvas-control skill, not the get-linked-context
+  skill**: `RemoteHooks.installContextLink` writes Claude's copy only. A Pi node on a host can be
+  READ through a link but cannot discover how to read one.
+- **Server Edition `open-agent` does not offer Pi**: `SERVER_AGENTS` in
+  `server/headless-node-factory.ts` is claude/codex/gemini. Account forwarding is ready for it.
+- **The phone's mirror carries no Pi account block**, so the iOS New Session sheet cannot pick a
+  Pi account (a mobile protocol decision).
+- **No cross-endpoint failover** in the shared JS hook client (#445), same as opencode.
+- **No usage/limits reader**: pi exposes no plan-limit numbers.
+
+## 8. Files
 
 `shared/agents/config.ts` (registry), `shared/agents/normalize.ts` (`normalizePi`),
 `core/agents/hooks/pi.ts` + `plugin-hook-client.ts` (extension + installer), `core/pi-session.ts`
 (meter, tracker, readers), `core/claude-accounts-core.ts` (jail), `src/main/index.ts` +
 `src/server/agent-status.ts` (raw listeners), `core/pi-accounts-*.ts` (accounts).
 
-## 8. Device checklist
+## 9. Device checklist
 
 1. A Pi node on the canvas: RUNNING while a turn works, back to waiting at the end, the meter
    filling from pi's own numbers, `/name x` renaming the node.

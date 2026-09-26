@@ -232,7 +232,7 @@ import { posixQuote, sshHostKey, type SshConnection } from '../shared/ssh'
 import { buildHandoff, type HandoffRemote } from './handoff'
 import { initContextLink, onLinkedRead, setNodeTranscript } from '../core/context-link'
 import { transcriptPathOf } from '../core/context-link-core'
-import { initCanvasControl, installCanvasSkillInto } from './canvas-control'
+import { initCanvasControl, installCanvasSkillInto, installPiCanvasSkillInto } from './canvas-control'
 import { DRY_RUN_VERBS, dryRunRequested, dryRunRefusal } from '../shared/control-verbs'
 import { CONTROL_REQUEST_TIMEOUT_MS } from '../shared/control-confirm'
 import { initTranscriptIndex, searchTranscripts } from '../core/transcript-index'
@@ -277,6 +277,7 @@ import {
 } from '../core/claude-accounts-core'
 import { installHooksIntoLocalAccounts } from '../core/claude-accounts-service'
 import { installPiExtensionIntoLocalAccounts } from '../core/pi-accounts-service'
+import { installPiLinkSkillInto } from '../core/context-link'
 import { createPairingService } from './pairing-service'
 import {
   initRemoteHost,
@@ -2747,10 +2748,18 @@ app.whenReady().then(async () => {
   // Edition's boot (src/core/claude-accounts-service.ts); each shell supplies its own canvas-skill
   // installer when that control surface is enabled.
   installHooksIntoLocalAccounts(settingsStore.get().claudeAccounts ?? [], installCanvasSkillInto)
+  // A managed pi account is its own agent dir, and pi reads skills per agent dir: each account gets
+  // BOTH skills the system dir gets (canvas control + get-linked-context), from the same builders.
+  const installPiAccountSkills = (agentDir: string): void => {
+    installPiCanvasSkillInto(agentDir)
+    installPiLinkSkillInto(agentDir)
+  }
   // Managed pi accounts are each their own PI_CODING_AGENT_DIR, and pi loads extensions per agent
   // dir — so the status extension has to reach every account dir too (the system ~/.pi/agent is
-  // installManagedAgentHooks'). Same loop the Server Edition's boot runs.
-  installPiExtensionIntoLocalAccounts(settingsStore.get().piAccounts ?? [])
+  // installManagedAgentHooks'). Same loop the Server Edition's boot runs. The desktop also hands
+  // each account dir the canvas-control skill (pi reads skills per agent dir), as it does for
+  // managed Claude accounts above.
+  installPiExtensionIntoLocalAccounts(settingsStore.get().piAccounts ?? [], installPiAccountSkills)
   // Fan a normalized agent event to BOTH consumers: the renderer's agentStatus store (canvas badge)
   // and the mobile-facing mirror. Named so the deterministic-approval answer handler below can reuse
   // it for the optimistic flip.
@@ -3878,7 +3887,7 @@ app.whenReady().then(async () => {
   initCodexAccounts(settingsStore, () => sshProjectManager)
   // Managed pi accounts (local-only in v1): core's handler table bound through ipcMain, never the
   // peer-reachable platform table (INVARIANT 4c) — see src/main/pi-accounts.ts.
-  initPiAccounts(settingsStore)
+  initPiAccounts(settingsStore, installPiAccountSkills)
   // The jailed core bridge both phone hosts serve: typed git verbs against the real GitService
   // (cwd-jailed to the shared canvas roots inside the handlers) and phone node registration
   // through the workspace store (written as an outside edit, so the watcher broadcasts it and

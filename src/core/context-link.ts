@@ -44,6 +44,8 @@ import {
 import { hookServer } from './agents/hook-server'
 import { locateClaude, locateCodex, locateGemini, locateGrok, locatePi } from './handoff/locate'
 import { opencodeConfigDir } from './agents/hooks/opencode'
+import { piAgentDir } from './agents/hooks/pi'
+import { piSkillPathIn } from './agents/hooks/pi-skills'
 
 export { setNodeTranscript } from './context-link-core'
 
@@ -83,6 +85,24 @@ function installSkill(): void {
     fs.writeFileSync(skillPath(), buildContextLinkSkillBody(cliShimPath()), 'utf8')
   } catch (e) {
     console.warn('[context-link] skill install failed', e)
+  }
+  installPiLinkSkillInto(piAgentDir())
+}
+
+/**
+ * The get-linked-context skill for a pi agent dir. pi is CONTEXT_LINK_CAPABLE, but it discovers
+ * skills only from `<agentDir>/skills` and `~/.agents/skills` — never `~/.claude/skills` (MEASURED
+ * on 0.84.1) — so without this a linked pi node has no way to learn the CLI exists. Same body as
+ * the claude skill (pi's SKILL.md envelope is the same), so the two can never describe different
+ * verbs. Exported for the per-account loop: a managed pi account is its own agent dir. Best-effort.
+ */
+export function installPiLinkSkillInto(agentDir: string): void {
+  const p = piSkillPathIn(agentDir, 'get-linked-context')
+  try {
+    fs.mkdirSync(path.dirname(p), { recursive: true })
+    fs.writeFileSync(p, buildContextLinkSkillBody(cliShimPath()), 'utf8')
+  } catch (e) {
+    console.warn('[context-link] pi skill install failed', p, e)
   }
 }
 

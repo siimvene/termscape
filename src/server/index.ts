@@ -705,6 +705,7 @@ export async function startServer(
   // src/server/context-link.ts.
   const contextLink = initServerContextLink({
     ptyManager,
+    piPathFor: (sessionId) => piSessions.pathFor(sessionId),
     canvases: () => workspaceStore.persistedCanvases(),
     installAgentIntegrations: config.installHooks !== false
   })
