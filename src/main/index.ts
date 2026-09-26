@@ -191,6 +191,8 @@ import { createWorkflowAgentsTail } from '../core/workflow-agents-tail'
 import { createContextTail, type TaskNotification } from '../core/context-tail'
 import { registerContextEnsureIpc } from '../core/context-ensure'
 import { grokContextParse, GROK_SIGNALS_FILE } from '../core/grok-signals'
+import { createPiSessionTracker } from '../core/pi-session'
+import { piAgentDir } from '../core/agents/hooks/pi'
 import { GROK_CHAT_HISTORY_FILE } from '../core/agents/grok-paths'
 import { createGrokSubagentFormatter } from '../core/grok-subagent-format'
 import { geminiContextParse } from '../core/gemini-session'
@@ -2389,6 +2391,14 @@ app.whenReady().then(async () => {
     parse: grokContextParse,
     wholeFile: true
   })
+  // pi needs no tail: its hook payload STATES the context usage (core/pi-session.ts). The tracker
+  // also holds the jailed transcript path its readers resolve through. `safeTranscriptPath` is
+  // declared further down; the arrow defers the lookup to the first hook event, long after init.
+  // Invariant 11 — the Server Edition builds the same tracker in src/server/agent-status.ts.
+  const piSessions = createPiSessionTracker({
+    send: pushContextUpdate,
+    safePath: (p) => safeTranscriptPath(p)
+  })
   // Remote (SSH-project) counterparts: a node whose pty runs on a remote host has its Claude
   // transcript on that host, so its meter / subagent transcript / search must read over the
   // project's ControlMaster. One RemoteFile bound to the SSH-project manager's own ssh runner
@@ -2957,7 +2967,9 @@ app.whenReady().then(async () => {
       app.getPath('userData'),
       codexHome(),
       grokHomeDir(),
-      linkedClaudeConfigDirs()
+      linkedClaudeConfigDirs(),
+      undefined, // no co-located peer on the desktop
+      piAgentDir()
     )
       ? abs
       : undefined
@@ -3086,6 +3098,18 @@ app.whenReady().then(async () => {
     // meter needs no path DERIVATION the way grok's does — only its own token reader. The path is
     // jailed by the same `safeTranscriptPath` claude uses (widened to those two agents' transcript
     // roots), because a forged POST could otherwise aim a file read at an arbitrary local path.
+    // pi: the meter's numbers ride the payload itself (nodeterm's own extension forwards
+    // `ctx.getContextUsage()`), so they are machine-agnostic and a REMOTE node gets its meter too.
+    // Only the transcript PATH is local-disk knowledge, so it is tracked for local nodes alone — a
+    // host path clearing the local jail would point the readers at a same-named file on THIS
+    // machine. The association is set BEFORE the tracker pushes, so the very first meter update
+    // already maps back to its node for the mirror (pushContextUpdate reads nodeContextSession).
+    if (agentId === 'pi') {
+      const sid = typeof payload.sessionId === 'string' && payload.sessionId ? payload.sessionId : undefined
+      if (nodeId && sid) nodeContextSession.set(nodeId, sid)
+      piSessions.observe(payload, { trackPath: !(nodeId && ptyManager.sshRemoteForNode(nodeId)) })
+      return
+    }
     if (agentId === 'gemini' || agentId === 'codex') {
       const p = payload as {
         session_id?: string
@@ -3279,6 +3303,7 @@ app.whenReady().then(async () => {
       geminiContextTail.untrack(sessionId)
       codexContextTail.untrack(sessionId)
       grokContextTail.untrack(sessionId)
+      piSessions.untrack(sessionId)
       remoteContextTail.untrack(sessionId)
       remoteTranscriptBySession.delete(sessionId)
       locatedTranscriptSessions.delete(sessionId)

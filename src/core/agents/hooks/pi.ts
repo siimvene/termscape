@@ -65,6 +65,8 @@ export default function nodetermStatus(pi) {
   if (!nodeId) return
 ${buildPluginHookClient('/hook/pi')}
   const call = (fn) => { try { return fn() } catch { return undefined } }
+  // The model id of the latest assistant message (message_end carries provider + model).
+  let lastModel
   const envelope = (ctx, extra) => {
     const sm = call(() => ctx && ctx.sessionManager)
     const usage = call(() => ctx && ctx.getContextUsage && ctx.getContextUsage())
@@ -72,6 +74,7 @@ ${buildPluginHookClient('/hook/pi')}
       sessionId: call(() => sm && sm.getSessionId && sm.getSessionId()),
       sessionFile: call(() => sm && sm.getSessionFile && sm.getSessionFile()),
       cwd: call(() => ctx && ctx.cwd),
+      ...(lastModel ? { model: lastModel } : {}),
       ...(usage && typeof usage.contextWindow === 'number'
         ? { context: { tokens: usage.tokens, contextWindow: usage.contextWindow, percent: usage.percent } }
         : {}),
@@ -111,6 +114,7 @@ ${buildPluginHookClient('/hook/pi')}
     if (!m || m.role !== 'assistant') return
     lastStopReason = typeof m.stopReason === 'string' ? m.stopReason : undefined
     lastText = textOf(m) || lastText
+    if (typeof m.model === 'string' && m.model) lastModel = m.model
   })
   on('turn_end', (ev, ctx) => post('turn_end', envelope(ctx)))
   on('agent_settled', (ev, ctx) => postAndWait('agent_settled', envelope(ctx, { stopReason: lastStopReason, lastMessage: lastText })))

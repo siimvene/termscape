@@ -20,6 +20,8 @@ import { createContextTail, type ContextTail, type TaskNotification } from '../c
 import { geminiContextParse } from '../core/gemini-session'
 import { codexContextParse } from '../core/codex-session'
 import { grokContextParse, GROK_SIGNALS_FILE } from '../core/grok-signals'
+import { createPiSessionTracker } from '../core/pi-session'
+import { piAgentDir } from '../core/agents/hooks/pi'
 import { GROK_CHAT_HISTORY_FILE } from '../core/agents/grok-paths'
 import { createGrokSubagentFormatter } from '../core/grok-subagent-format'
 import { createCodexSubagentFormatter } from '../core/codex-subagent-format'
@@ -182,6 +184,12 @@ export function wireAgentStatus(
     parse: grokContextParse,
     wholeFile: true
   })
+  // pi needs no tail: its hook payload STATES the context usage (core/pi-session.ts). Same tracker
+  // the desktop builds in src/main/index.ts (invariant 11).
+  const piSessions = createPiSessionTracker({
+    send: pushContextUpdate,
+    safePath: (p) => safeTranscriptPath(p)
+  })
 
   hooks.setListener((e) => {
     // Record FIRST: recordAgentEvent computes the stash-priority classification and returns the
@@ -220,7 +228,8 @@ export function wireAgentStatus(
       codexHome(),
       grokHomeDir(),
       linkedClaudeConfigDirs(),
-      platform.peerUserDataDir
+      platform.peerUserDataDir,
+      piAgentDir()
     )
       ? abs
       : undefined
@@ -342,6 +351,16 @@ export function wireAgentStatus(
     // The desktop's copy of this branch additionally skips REMOTE (SSH) nodes, whose transcript is
     // on the host; the server has no SSH-project manager (see the module header), so every node it
     // serves is local and there is nothing to skip.
+    //
+    // pi: the meter's numbers ride the payload (core/pi-session.ts); the association is set BEFORE
+    // the tracker pushes so the first update already maps to its node. Every node here is local, so
+    // the transcript path is always tracked — the desktop's copy skips remote nodes' paths.
+    if (agentId === 'pi') {
+      const sid = typeof payload.sessionId === 'string' && payload.sessionId ? payload.sessionId : undefined
+      if (nodeId && sid) nodeContextSession.set(nodeId, sid)
+      piSessions.observe(payload, { trackPath: true })
+      return
+    }
     if (agentId === 'gemini' || agentId === 'codex') {
       const p = payload as {
         session_id?: string
@@ -460,6 +479,7 @@ export function wireAgentStatus(
       geminiContextTail.untrack(sessionId)
       codexContextTail.untrack(sessionId)
       grokContextTail.untrack(sessionId)
+      piSessions.untrack(sessionId)
       nodeContextSession.delete(nodeId)
     }
     const subs = nodeSubagents.get(nodeId)

@@ -284,7 +284,8 @@ export function isSafeLocalTranscriptPath(
   codexHomeDir?: string,
   grokHomeDir?: string,
   linkedDirs?: readonly string[],
-  peerUserDataPath?: string
+  peerUserDataPath?: string,
+  piAgentDir?: string
 ): boolean {
   const legacyRoot = path.join(homeDir, '.claude', 'projects')
   if (abs === legacyRoot || abs.startsWith(legacyRoot + path.sep)) return true
@@ -305,6 +306,11 @@ export function isSafeLocalTranscriptPath(
   // means the context link silently never resolves, never a widened read.
   const grokRoot = path.join(grokHomeDir || path.join(homeDir, '.grok'), 'sessions')
   if (abs === grokRoot || abs.startsWith(grokRoot + path.sep)) return true
+  // pi: `<agentDir>/sessions/<encoded cwd>/<timestamp>_<id>.jsonl` (measured, 0.84.1). `sessions`
+  // and not the agent dir, because the same tree holds `auth.json` — pi's OAuth tokens. The shells
+  // resolve `$PI_CODING_AGENT_DIR` (`piAgentDir()`), same parameter discipline as codex and grok.
+  const piRoot = path.join(piAgentDir || path.join(homeDir, '.pi', 'agent'), 'sessions')
+  if (abs === piRoot || abs.startsWith(piRoot + path.sep)) return true
   // Linked accounts: a config dir the USER already drives (`CLAUDE_CONFIG_DIR=~/.claude-2 claude`)
   // that they adopted in Settings. `<dir>/projects` and below only — the `+ path.sep` is what keeps
   // a sibling-prefix root (`…/projects-evil`) out, exactly as for the roots above. The dirs come
@@ -320,15 +326,19 @@ export function isSafeLocalTranscriptPath(
   // because a session `claudeConfigDirForSpawn` resolved into the peer's account dir writes its
   // transcript there and POSTs that path to THIS instance's hook server. The peer root gets the
   // identical `<id>/projects` shape, nothing wider (the same tree holds `.credentials.json`).
-  const roots = [userDataPath, ...(peerUserDataPath ? [peerUserDataPath] : [])].map((ud) =>
-    path.join(ud, 'claude-accounts')
-  )
-  for (const accountsRoot of roots) {
+  const userDatas = [userDataPath, ...(peerUserDataPath ? [peerUserDataPath] : [])]
+  // Managed pi accounts mirror the claude shape one level over: `<userData>/pi-accounts/<id>` is the
+  // account's PI_CODING_AGENT_DIR, and only its `sessions/` is readable (`auth.json` sits beside it).
+  const accountTrees: ReadonlyArray<readonly [string, string]> = [
+    ...userDatas.map((ud) => [path.join(ud, 'claude-accounts'), 'projects'] as const),
+    ...userDatas.map((ud) => [path.join(ud, 'pi-accounts'), 'sessions'] as const)
+  ]
+  for (const [accountsRoot, leaf] of accountTrees) {
     if (abs !== accountsRoot && !abs.startsWith(accountsRoot + path.sep)) continue
-    // Relative to the accounts root: expect `<accountId>/projects[/…]`. Because `abs` is normalized
+    // Relative to the accounts root: expect `<accountId>/<leaf>[/…]`. Because `abs` is normalized
     // and confirmed under `accountsRoot`, `path.relative` yields no leading `..`.
     const segs = path.relative(accountsRoot, abs).split(path.sep)
-    return segs.length >= 2 && ACCOUNT_ID_RE.test(segs[0]) && segs[1] === 'projects'
+    return segs.length >= 2 && ACCOUNT_ID_RE.test(segs[0]) && segs[1] === leaf
   }
   return false
 }
