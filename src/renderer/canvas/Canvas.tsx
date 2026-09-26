@@ -13317,8 +13317,33 @@ export function Canvas() {
         })
       }
       const an = useAgentNodes.getState()
+      // A CLI just LAUNCHED in that pane. ONE definition for both shapes that report it: a
+      // `session` event, and codex's SessionStart, which arrives as `kind:'state'` +
+      // `state:'working'` + `sessionPhase:'start'` (normalizeCodex).
+      const applySessionStart = (): void => {
+        cs.setState(e.nodeId, undefined, e.agentId)
+        // A SessionStart is proof a CLI just LAUNCHED in that pane, so a hibernated flag on
+        // this node is now false — our own `/exit` produces a SessionEnd, never a
+        // SessionStart. This is the residual `setState`'s live-state self-heal cannot reach:
+        // a user who relaunches the agent by hand and then takes no turn would keep a SLEEPING
+        // chip on a running CLI (and the sweep, which skips hibernated nodes, would leave that
+        // session exempt from Eco for good). Deliberately NOT the same as clearing on `done`,
+        // which would let a late Stop POST undo a hibernation we just performed. The setter
+        // bails when the flag is already unset, so this is free for every other session start.
+        cs.setHibernated(e.nodeId, false)
+        // Same self-heal, same reason, for the deep "pause & end session" case: that depth
+        // recycles the tmux session instead of leaving `hibernated` set, so this SessionStart
+        // (the cold-restore's own resume, or a hand-launched relaunch) is the only live proof
+        // that node was watching for.
+        cs.setPaused(e.nodeId, false)
+      }
       switch (e.kind) {
         case 'state': {
+          // Codex's start-phase `working` gets the same reset a `session` start gets. Besides the
+          // hibernated/paused self-heal, the reset is what carries it past setState's done-holdoff:
+          // a relaunch within DONE_HOLDOFF_MS of `done` was dropped here while the agent-status
+          // mirror, which honours the marker, reported it working.
+          if (e.sessionPhase === 'start') applySessionStart()
           // An `idle` done (the CLI went quiet at its prompt — see normalize) is a RESCUE for a
           // node stuck on `working` after an Esc that ran no turn-end hook. It may ONLY move a
           // working node: blocked/waiting is also "idle at the prompt", and clearing it there
@@ -13427,23 +13452,7 @@ export function Canvas() {
           break
         case 'session':
           if (e.sessionTitle) cs.setSession(e.nodeId, e.sessionTitle)
-          if (e.sessionPhase === 'start') {
-            cs.setState(e.nodeId, undefined, e.agentId)
-            // A SessionStart is proof a CLI just LAUNCHED in that pane, so a hibernated flag on
-            // this node is now false — our own `/exit` produces a SessionEnd, never a
-            // SessionStart. This is the residual `setState`'s live-state self-heal cannot reach:
-            // a user who relaunches the agent by hand and then takes no turn would keep a SLEEPING
-            // chip on a running CLI (and the sweep, which skips hibernated nodes, would leave that
-            // session exempt from Eco for good). Deliberately NOT the same as clearing on `done`,
-            // which would let a late Stop POST undo a hibernation we just performed. The setter
-            // bails when the flag is already unset, so this is free for every other session start.
-            cs.setHibernated(e.nodeId, false)
-            // Same self-heal, same reason, for the deep "pause & end session" case: that depth
-            // recycles the tmux session instead of leaving `hibernated` set, so this SessionStart
-            // (the cold-restore's own resume, or a hand-launched relaunch) is the only live proof
-            // that node was watching for.
-            cs.setPaused(e.nodeId, false)
-          }
+          if (e.sessionPhase === 'start') applySessionStart()
           if (e.sessionPhase === 'end') {
             cs.setState(e.nodeId, undefined, e.agentId)
             // In-session /loop dies with its session; cron (and scheduled cloud routines)

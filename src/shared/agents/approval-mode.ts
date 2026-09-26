@@ -139,9 +139,25 @@ export function approvalFlags(agentId: AgentId, mode: AgentPermissionMode): stri
 // codex's three flag groups. Its APPROVAL axis and its SANDBOX axis are independent (codex accepts
 // `--sandbox X --ask-for-approval Y` together), but the combined BYPASS flag sets both at once and is
 // MUTUALLY EXCLUSIVE with each — codex refuses to launch if a bypass flag appears beside either axis.
+// `--approve-for-me` (automatic review + workspace-write sandbox) is in the same class: measured on
+// codex-cli 0.155.1, it is refused beside `--ask-for-approval` and beside `--sandbox`.
 const CODEX_APPROVAL_FLAGS = ['--ask-for-approval', '-a'] as const
 const CODEX_SANDBOX_FLAGS = ['--sandbox', '-s'] as const
-const CODEX_BYPASS_FLAGS = ['--dangerously-bypass-approvals-and-sandbox', '--yolo', '--full-auto'] as const
+const CODEX_BYPASS_FLAGS = [
+  '--dangerously-bypass-approvals-and-sandbox',
+  '--yolo',
+  '--full-auto',
+  '--approve-for-me'
+] as const
+/** Every codex permission-axis flag the funnel knows. The shared-identity launcher's preflight
+ *  (`nt_preflight`, core/codex-identity-proxy.ts) must recognize the same set: a flag in one list
+ *  and not the other either appends a pair codex refuses or skips the plain-codex fallback.
+ *  `codex-permission-flags.guard.test.ts` pins the two together. */
+export const CODEX_PERMISSION_FLAGS: readonly string[] = [
+  ...CODEX_APPROVAL_FLAGS,
+  ...CODEX_SANDBOX_FLAGS,
+  ...CODEX_BYPASS_FLAGS
+]
 
 /**
  * For codex, the flags already in a launch command that make appending `appendedFlag` (the first

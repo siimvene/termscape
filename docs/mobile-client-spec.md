@@ -620,8 +620,14 @@ Transition rules (all MUST):
    src/renderer/state/agentStatus.ts:328-337]. Without this the badge flips back to RUNNING
    forever. Hygiene (SHOULD): decay a `working` node that has emitted nothing for several
    minutes back to unknown (the desktop's sweepStaleWorking, agentStatus.ts:421-431).
+   The holdoff does NOT apply to a `working` that carries `sessionPhase:'start'` (rule 6).
 6. `kind:'session'`, `sessionPhase:'start'` → reset to idle/unknown; `'end'` → reset and clear
-   any recurring/fan-out UI.
+   any recurring/fan-out UI. A `kind:'state'` event carrying `sessionPhase:'start'` is the same
+   lifecycle boundary: Codex reports its SessionStart as `kind:'state'`, `state:'working'`,
+   `sessionPhase:'start'` [src: normalize.ts `normalizeCodex`]. Apply the start reset FIRST, then
+   adopt `working`; the reset is what takes it past rule 5, so a relaunch within the holdoff
+   reads as running on every surface [src: src/core/agent-status-mirror.ts `reduceEffectiveEntry`
+   (`sessionStart`); src/renderer/canvas/Canvas.tsx `applySessionStart`].
 7. `newTurn:true` is the only thing that clears per-turn fan-out (subagent cards)
    [src: normalize.ts:26-27].
 8. **Unread** is set on a working→(done|waiting|blocked) edge while the session is not on

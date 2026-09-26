@@ -53,6 +53,15 @@ is `docs/shared-codex-node-identity.md`.
   tried in turn**, and a pre-agent record's implied `codex` + grant is keyed on the LINE being
   absent, never the value empty. The env vars were never a security boundary (anyone who can run the
   shim can `export` them); the per-node token is (`docs/shared-codex-node-identity.md`).
+- **A permission flag on the launch line means plain codex, and the DEFAULT mode emits one.** Codex
+  refuses approval/sandbox overrides on `--remote … resume`, so the launcher preflight falls back
+  (`permission-policy-requires-local`) whenever the line states `--ask-for-approval`/`-a`,
+  `--sandbox`/`-s`, a bypass flag or `--approve-for-me`. `withPermissionMode` emits a codex flag for
+  every mode but Plan and Accept edits (Auto = `--ask-for-approval on-request`), so with untouched
+  settings a Codex node is NOT shared. Two lists must agree on what counts as a codex permission
+  flag: the preflight's `case` and `approval-mode.ts`'s `CODEX_*_FLAGS` (the funnel's suppressors).
+  A flag in one and not the other either appends a pair codex refuses or skips the fallback. Full
+  write-up: `docs/codex-shared-identity.md` §3.
 - **A shell that forwards this identity cannot be type-checked into correctness.** A handler that
   destructures the request without `agent`, and a record write that omits its optional trailing
   argument, are BOTH well-typed — so the whole dimension can be plumbed through core, the route, the
