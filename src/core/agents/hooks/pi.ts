@@ -39,6 +39,24 @@ export function piExtensionPath(agentDir: string = piAgentDir()): string {
   return path.join(agentDir, 'extensions', PI_EXTENSION_FILE)
 }
 
+const REMOTE_HOME_MAX = 4096
+
+/** Same shape as `isSafeRemoteCopilotHome` (hooks/copilot.ts) / `isSafeRemoteGrokHome`
+ *  (grok-paths.ts): validates a HOST-REPORTED `$PI_CODING_AGENT_DIR` before it is interpolated
+ *  into a remote command line. A host-reported string is data, not truth — refuse anything
+ *  untrimmed, relative, carrying a backslash, control characters, or over length, and the caller
+ *  falls back to `<remoteHome>/.pi/agent`. */
+export function isSafeRemotePiHome(value: string | undefined): boolean {
+  const v = value?.trim()
+  if (!v || v !== value || !v.startsWith('/') || v.includes('\\') || v.length > REMOTE_HOME_MAX) {
+    return false
+  }
+  return !Array.from(v).some((ch) => {
+    const code = ch.charCodeAt(0)
+    return code <= 0x1f || code === 0x7f
+  })
+}
+
 /** The managed extension body. Events forwarded (and why):
  *  - session_start / session_shutdown — session lifecycle (shutdown is AWAITED: `/quit` exits the
  *    process right after it, and a lost end is a node that never learns its CLI is gone);

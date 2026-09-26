@@ -21,6 +21,8 @@ import {
   buildCanvasSkillBody,
   mergeCanvasControlBlock
 } from '../core/canvas-control-core'
+import { piAgentDir } from '../core/agents/hooks/pi'
+import { installPiCanvasSkillsInto } from '../core/agents/hooks/pi-skills'
 import { codexIdentityCaps } from '../core/codex-identity-caps'
 import { codexThreadIdentityRoot } from '../core/codex-identity-proxy'
 import { claudeCliCaps, type ClaudeCliCaps } from '../core/claude-cli'
@@ -159,6 +161,8 @@ export async function initServerCanvasControl(
   // be spellable here.
   if (deps.installAgentIntegrations) {
     installSkillInto(path.join(os.homedir(), '.claude'))
+    // pi reads its own agent dir's skills/, not ~/.claude/skills — same builder, same body.
+    installPiCanvasSkillsInto(piAgentDir(), skillBody)
     installInstructions(path.join(os.homedir(), '.codex', 'AGENTS.md'), instructions)
     installInstructions(path.join(os.homedir(), '.gemini', 'GEMINI.md'), instructions)
     // Managed accounts resolve skills relative to their own CLAUDE_CONFIG_DIR.
