@@ -19,6 +19,8 @@ import {
 import { codexThreadIdentityRoot } from '../core/codex-identity-proxy'
 import { opencodeConfigDir } from '../core/agents/hooks/opencode'
 import { copilotHomeDir } from '../core/agents/hooks/copilot'
+import { piAgentDir } from '../core/agents/hooks/pi'
+import { installPiCanvasSkillsInto } from '../core/agents/hooks/pi-skills'
 
 function dir(): string {
   return path.join(app.getPath('userData'), 'canvas-control')
@@ -99,6 +101,9 @@ export function initCanvasControl(): void {
   try {
     writeCliFiles()
     installCanvasSkillInto(path.join(os.homedir(), '.claude'))
+    // pi discovers skills from its own agent dir (not ~/.claude/skills), same envelope — the
+    // SAME builder as the Claude skill above, so the two can never carry different verbs.
+    installPiCanvasSkillsInto(piAgentDir(), skillBody())
     installAgentInstructions()
   } catch (e) {
     console.error('[canvas-control] setup failed', e)

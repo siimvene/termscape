@@ -1132,7 +1132,7 @@ Typical requests this skill covers:
   workstreams, then either one \`spawn-team\` per subject (each team is already a labeled
   group), or \`open-claude\`/\`open-agent\` per node followed by \`group --nodes ... --label\`
   per subject and \`arrange\` inside each.
-- "Open a Codex/Gemini/Copilot session" → \`open-agent --agent codex|gemini|copilot\`.
+- "Open a Codex/Gemini/Copilot/Pi session" → \`open-agent --agent codex|gemini|copilot|pi\`.
 - "Tidy up / group my terminals" → \`list\`, then \`group --nodes …\`, then \`arrange --nodes <those same ids>\`
   to tidy the new frame's contents (grouping keeps each node's scattered spot, so arrange after grouping).
 - "Move this node into that group" → \`move --nodes <id> --group <targetGroupId>\` (not \`group\`, which only

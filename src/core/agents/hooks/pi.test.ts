@@ -7,6 +7,7 @@ import {
   PI_EXTENSION_MARKER,
   buildPiExtension,
   installPiExtensionInto,
+  isSafeRemotePiHome,
   piAgentDir,
   piExtensionPath,
   removePiExtensionFrom
@@ -29,6 +30,21 @@ describe('pi agent dir + extension path', () => {
     expect(piAgentDir({})).toBe(path.join(os.homedir(), '.pi', 'agent'))
     // `.js` on purpose: pi's auto-discovery ignores `.mjs` (measured; see PI_EXTENSION_FILE).
     expect(piExtensionPath('/x/acct')).toBe('/x/acct/extensions/nodeterm-status.js')
+  })
+})
+
+describe('isSafeRemotePiHome', () => {
+  it('accepts only absolute, shell-safe remote $PI_CODING_AGENT_DIR values', () => {
+    expect(isSafeRemotePiHome('/opt/pi home')).toBe(true)
+    for (const value of [
+      'relative/path',
+      ' /opt/pi',
+      '/bad\\path',
+      '/bad\npath',
+      ''
+    ]) {
+      expect(isSafeRemotePiHome(value), JSON.stringify(value)).toBe(false)
+    }
   })
 })
 

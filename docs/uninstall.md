@@ -38,9 +38,10 @@ settings:
 | --- | --- | --- |
 | `~/.claude/settings.json`, `~/.gemini/settings.json` | Status-hook entries whose command references `~/.nodeterm/agent-hooks/` (legacy marker: `claude-signals`) | JSON filter keyed on those markers; other hooks and keys preserved |
 | `~/.codex/hooks.json` + `~/.codex/config.toml` | Hook entries + the matching `[hooks.state."…"]` trust blocks | Our entries removed; trust blocks for surviving user hooks re-keyed to their shifted indexes (the hash covers content, not position) |
-| `~/.claude/skills/manage-nodeterm-canvas/`, `~/.claude/skills/get-linked-context/` | nodeterm-owned skill dirs | Deleted |
+| `~/.claude/skills/manage-nodeterm-canvas/`, `~/.claude/skills/get-linked-context/`, `~/.pi/agent/skills/manage-nodeterm-canvas/` | nodeterm-owned skill dirs | Deleted |
 | `~/.grok/hooks/nodeterm-status.json`, `~/.copilot/hooks/nodeterm-status.json` | nodeterm-owned hook files (those CLIs merge whole directories) | Deleted |
 | `~/.config/opencode/plugins/nodeterm-status.js` | nodeterm-owned plugin (first-line marker checked before deletion) | Deleted |
+| `~/.pi/agent/extensions/nodeterm-status.js` (or `$PI_CODING_AGENT_DIR/extensions/…` when set) | nodeterm-owned pi extension — pi has no hook FILE, only this JS extension module (first-line marker checked before deletion, same as the opencode plugin) | Deleted |
 | `~/.codex/AGENTS.md`, `~/.gemini/GEMINI.md`, `~/.copilot/copilot-instructions.md`, `~/.config/opencode/AGENTS.md` | `<!-- nodeterm:manage-canvas -->` / `<!-- nodeterm:get-linked-context -->` marker blocks | Block stripped; file deleted only if nothing but our blocks remains |
 
 Two deliberate exceptions:
