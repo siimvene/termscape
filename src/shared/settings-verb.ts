@@ -132,6 +132,7 @@ export const SETTINGS_VERB_FORBIDDEN = new Set<keyof Settings | keyof Project>([
   // Accounts, credentials, model gateway, and anything that decides WHAT COMMAND runs.
   'claudeAccounts',
   'codexAccounts',
+  'piAccounts',
   'defaultAccountId',
   'modelGateway',
   'modelGatewayDefaultModel',

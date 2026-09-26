@@ -134,6 +134,21 @@ describe('appendProjectNode', () => {
     expect(out.nodes[0].color).toBe('#0a84ff')
   })
 
+  // Pi joined ACCOUNT_CAPABLE_AGENT_IDS with its PI_CODING_AGENT_DIR accounts: a phone-registered
+  // pi node binds exactly like a Codex one, through the same shared rule.
+  it('binds a managed account to a Pi registration, color and all', () => {
+    const out = JSON.parse(
+      appendProjectNode(
+        baseFile([]),
+        { id: 'term-c-1', agentId: 'pi', accountId: 'acct1' },
+        NOW,
+        '#0a84ff'
+      )!
+    )
+    expect(out.nodes[0].accountId).toBe('acct1')
+    expect(out.nodes[0].color).toBe('#0a84ff')
+  })
+
   it('never binds one to a custom agent either, even one based on claude', () => {
     const out = JSON.parse(
       appendProjectNode(

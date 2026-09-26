@@ -251,6 +251,7 @@ import { SpeechService } from '../core/speech/speech-service'
 import { registerSpeechIpc } from '../core/speech/register-ipc'
 import { initClaudeAccounts } from './claude-accounts'
 import { initCodexAccounts } from './codex-accounts'
+import { initPiAccounts } from './pi-accounts'
 import { claudeCliCaps, registerClaudeCliIpc, type ClaudeCliCaps } from '../core/claude-cli'
 import { registerGrokCliIpc } from '../core/grok-cli'
 import { refreshCodexIdentityCaps, registerCodexIdentityIpc } from '../core/codex-identity-caps'
@@ -275,6 +276,7 @@ import {
   remoteAccountConfigDirAbs
 } from '../core/claude-accounts-core'
 import { installHooksIntoLocalAccounts } from '../core/claude-accounts-service'
+import { installPiExtensionIntoLocalAccounts } from '../core/pi-accounts-service'
 import { createPairingService } from './pairing-service'
 import {
   initRemoteHost,
@@ -2739,6 +2741,10 @@ app.whenReady().then(async () => {
   // Edition's boot (src/core/claude-accounts-service.ts); each shell supplies its own canvas-skill
   // installer when that control surface is enabled.
   installHooksIntoLocalAccounts(settingsStore.get().claudeAccounts ?? [], installCanvasSkillInto)
+  // Managed pi accounts are each their own PI_CODING_AGENT_DIR, and pi loads extensions per agent
+  // dir — so the status extension has to reach every account dir too (the system ~/.pi/agent is
+  // installManagedAgentHooks'). Same loop the Server Edition's boot runs.
+  installPiExtensionIntoLocalAccounts(settingsStore.get().piAccounts ?? [])
   // Fan a normalized agent event to BOTH consumers: the renderer's agentStatus store (canvas badge)
   // and the mobile-facing mirror. Named so the deterministic-approval answer handler below can reuse
   // it for the optimistic flip.
@@ -3860,6 +3866,9 @@ app.whenReady().then(async () => {
   // Codex node must see its migrated (SUN_LEN-safe) home on its very first spawn. Same lazy SSH
   // getter for the local→SSH transfer source leg.
   initCodexAccounts(settingsStore, () => sshProjectManager)
+  // Managed pi accounts (local-only in v1): core's handler table bound through ipcMain, never the
+  // peer-reachable platform table (INVARIANT 4c) — see src/main/pi-accounts.ts.
+  initPiAccounts(settingsStore)
   // The jailed core bridge both phone hosts serve: typed git verbs against the real GitService
   // (cwd-jailed to the shared canvas roots inside the handlers) and phone node registration
   // through the workspace store (written as an outside edit, so the watcher broadcasts it and
@@ -3885,7 +3894,8 @@ app.whenReady().then(async () => {
         // here would be the second copy that drifts.
         agentAccountColor(node.agentId, node.accountId, {
           claude: settingsStore.get().claudeAccounts ?? [],
-          codex: settingsStore.get().codexAccounts ?? []
+          codex: settingsStore.get().codexAccounts ?? [],
+          pi: settingsStore.get().piAccounts ?? []
         })
       ),
     // The phone's Board sheet. Two verbs, both landing in the store's own read-modify-write (which

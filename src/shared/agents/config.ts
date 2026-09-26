@@ -427,12 +427,16 @@ export function inheritableAccountId(
   targetAgentId: AgentId,
   srcAccountId: string | undefined,
   isClaudeAccount: (id: string) => boolean,
-  isCodexAccount: (id: string) => boolean
+  isCodexAccount: (id: string) => boolean,
+  /** Managed pi account membership. Optional so a caller that predates pi accounts compiles; absent
+   *  ⇒ no id is a pi account, so a pi target inherits nothing (the system pi), never a stranger's. */
+  isPiAccount?: (id: string) => boolean
 ): string | undefined {
   if (!srcAccountId) return undefined
   const base = capabilityAgentId(targetAgentId)
   if (base === 'claude') return isClaudeAccount(srcAccountId) ? srcAccountId : undefined
   if (base === 'codex') return isCodexAccount(srcAccountId) ? srcAccountId : undefined
+  if (base === 'pi') return isPiAccount?.(srcAccountId) ? srcAccountId : undefined
   return undefined
 }
 

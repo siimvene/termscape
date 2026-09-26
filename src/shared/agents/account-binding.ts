@@ -7,14 +7,15 @@
  * for exactly the users who have accounts. Written once here so a third agent gaining managed
  * accounts cannot light up one of the two and not the other.
  */
-export const ACCOUNT_CAPABLE_AGENT_IDS: readonly string[] = ['claude', 'codex']
+export const ACCOUNT_CAPABLE_AGENT_IDS: readonly string[] = ['claude', 'codex', 'pi']
 
 /**
  * Which managed account a node is actually BOUND to — the one rule behind both `data.accountId`
  * and the account's default node color.
  *
- * Managed accounts belong to the builtin **Claude and Codex** agents (S6). The id becomes a config
- * home path segment (`CLAUDE_CONFIG_DIR` / `CODEX_HOME`) and scopes every account-aware reader
+ * Managed accounts belong to the builtin **Claude, Codex and Pi** agents (S6; pi joined with its
+ * PI_CODING_AGENT_DIR-isolated accounts). The id becomes a config home path segment
+ * (`CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `PI_CODING_AGENT_DIR`) and scopes every account-aware reader
  * (transcript, context meter, find-bar index, usage), none of which mean anything for another
  * agent. A custom agent inheriting one of those harnesses is still its own agent, so it does not
  * bind either — account binding stays with the builtin the account picker offered it for.

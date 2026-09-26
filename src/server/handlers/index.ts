@@ -13,6 +13,7 @@ import { registerCodexIdentityIpc } from '../../core/codex-identity-caps'
 import { startUsageService } from '../../core/usage/usage-service'
 import { registerClaudeAccountsIpc } from '../../core/claude-accounts-service'
 import { registerCodexAccountsIpc } from '../../core/codex-accounts-service'
+import { registerPiAccountsIpc } from '../../core/pi-accounts-service'
 import type { AccountRowStore } from '../../core/settings-store'
 import { codexUsageAccounts } from '../../core/codex-accounts-core'
 import { codexHomeFor } from '../../core/codex-config-dir'
@@ -116,6 +117,11 @@ export function registerCoreHandlers(
   // that renderer's `destroyed` event, neither of which the server seam can express), so nothing
   // here can ever hold a reservation and removal has nothing to refuse for.
   registerCodexAccountsIpc({ settings: deps.settingsStore })
+
+  // Managed PI accounts, the same four verbs the desktop serves (add / wait-login / cancel-wait /
+  // remove, src/core/pi-accounts-service.ts). Local-only in v1 — there is no SSH leg to omit. The
+  // store is where the account ROW (and the login-capture flip) is written.
+  registerPiAccountsIpc({ settings: deps.settingsStore })
 
   // Claude subscription usage. Previously desktop-only — the browser bridge answered `null`, so
   // the pill never rendered in the Server Edition. The poll runs UNGATED here (the default), not

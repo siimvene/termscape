@@ -83,6 +83,8 @@ import { effectiveSize, type PtySize } from './pty-size'
 import { machOArch, archMismatch } from './macho-arch'
 import { writeScrollback, readScrollback, deleteScrollback } from './scrollback-store'
 import { claudeConfigDirForSpawn } from './claude-config-dir'
+import { piAccountDir, piAccountDirForSpawn } from './pi-config-dir'
+import { PI_ACCOUNT_ENV, piAccountTmuxEnvArgs } from './pi-accounts-core'
 import { findExecutableSync, findInPathString, resolveShellPath, shellPathNow } from './exec-path'
 import {
   AUTH_ENV_STRIP,
@@ -330,6 +332,11 @@ export const ACCOUNT_SCOPE_UPDATE_ENV: readonly string[] = [
   'CODEX_HOME',
   'NODETERM_CODEX_ACCOUNT_ID',
   ...CODEX_AUTH_ENV_STRIP,
+  // A managed pi account's agent dir. Same #419 reason as CLAUDE_CONFIG_DIR: without it, a tmux
+  // server STARTED by a pi-account node's client holds that account's dir in its global env, and
+  // every later session created without a `-e` override (system pi nodes, plain terminals, the
+  // missing-dir fallback) silently runs pi as that account.
+  PI_ACCOUNT_ENV,
   // Listed for update-environment's REMOVAL half, exactly like the account-scope names above:
   // deleting these from the client env alone never touches the GLOBAL env of a tmux server that a
   // polluted client already started, so every later session would keep inheriting them from the
@@ -991,6 +998,28 @@ export class PtyManager {
    */
   private isCodexAccount(accountId: string): boolean {
     return this.getSettings().codexAccounts.some((a) => a.id === accountId)
+  }
+
+  /**
+   * Does this session's `accountId` name a managed PI account? The builtin pi agent (account
+   * binding is builtins-only, `boundAccountId`) or an explicit pi login node. Decided by the
+   * AGENT/intent, not by list membership: a pi node's account is resolved as a pi account or not at
+   * all, so it can never fall into the Claude resolver.
+   */
+  private isPiScoped(options: PtyCreateOptions): boolean {
+    return !!options.accountId && (options.agentId === 'pi' || options.piLogin === true)
+  }
+
+  /** The pi agent dir for an account id, or null for a missing / invalid id (a hand-edited or
+   *  relay-supplied id with a traversing shape is refused by `piAccountDir`, never resolved).
+   *  `forSpawn` also accepts a co-located desktop peer's dir (`piAccountDirForSpawn`). */
+  private resolvePiAccountDir(accountId: string | undefined, forSpawn = false): string | null {
+    if (!accountId) return null
+    try {
+      return forSpawn ? piAccountDirForSpawn(accountId) : piAccountDir(accountId)
+    } catch {
+      return null
+    }
   }
   /** Literal model-gateway key loaded by the shell's secret service during startup. */
   private getModelGatewaySecret: () => string | null = () => null
@@ -3069,6 +3098,26 @@ export class PtyManager {
       }
     }
 
+    // PRE-FLIGHT 3 — the pi twin of PRE-FLIGHT 2. A pi LOGIN node (`piLogin`, agent-less) must run
+    // under its managed account's PI_CODING_AGENT_DIR or not at all: the scope site below would
+    // otherwise leave pi on the SYSTEM `~/.pi/agent`, and the user's `/login` there writes the
+    // system credential under an account row that never receives it. Managed pi accounts are
+    // local-only in v1, so an SSH login is refused too. A throw for the same reasons as PRE-FLIGHT 2
+    // (bare-id return; before the irreversible swap-out); `spawnNew` turns it into a rejected create
+    // the renderer shows as the node's `spawnError`.
+    if (options.piLogin === true) {
+      const dir = options.sshRemote ? null : this.resolvePiAccountDir(options.accountId)
+      if (!dir || !fs.existsSync(dir)) {
+        throw new Error(
+          options.sshRemote
+            ? 'Refusing to start a pi login on an SSH host: managed pi accounts are local to this machine.'
+            : `Refusing to start a pi login: the managed pi account ${
+                options.accountId ? JSON.stringify(options.accountId) : '(none given)'
+              } has no agent dir, and an unscoped login would write the system ~/.pi/agent credential.`
+        )
+      }
+    }
+
     // SWAP-OUT, before anything at all is spawned: a painter pty client is arriving for this node,
     // and a session never has both. The painter attaches with `-D` and would kick the shadow off by
     // itself — but only once tmux has processed both attaches, leaving a window where two clients
@@ -3187,8 +3236,14 @@ export class PtyManager {
     // Remote (ssh) sessions get their account env via the remote tmux `-e` list instead
     // (the local ssh client process doesn't need it).
     let accountFallback = false
+    // A pi node's (or pi login node's) account is a PI account — resolved in its own block below,
+    // never through the Claude resolver (the two lists share an id alphabet; a pi id looked up as a
+    // Claude account finds no dir and would raise a spurious fallback).
+    const piScoped = this.isPiScoped(options)
     let accountDir =
-      options.accountId && !options.sshRemote ? claudeConfigDirForSpawn(options.accountId) : null
+      options.accountId && !options.sshRemote && !piScoped
+        ? claudeConfigDirForSpawn(options.accountId)
+        : null
     // Missing/deleted account dir (spec: error handling) → fall back to system default
     // instead of pointing claude at a dead dir; the node then behaves like an unbound one.
     // `accountFallback` is surfaced to the renderer (warning chip) via the create() result.
@@ -3200,6 +3255,30 @@ export class PtyManager {
     if (accountDir) {
       env.CLAUDE_CONFIG_DIR = accountDir
       for (const k of AUTH_ENV_STRIP) delete env[k]
+    }
+
+    // Managed pi account: the whole session runs pi under the account's own agent dir
+    // (PI_CODING_AGENT_DIR relocates auth.json, settings, sessions and extensions — MEASURED on pi
+    // 0.84.1). Set in the client env AND as a local tmux `-e` below; unbound pi nodes set nothing
+    // here, and PI_CODING_AGENT_DIR riding ACCOUNT_SCOPE_UPDATE_ENV is what strips a leaked value
+    // from their session on a shared server (#419) — while a value the USER exported for their own
+    // system pi still reaches it, because update-environment copies it from this client's env.
+    // A missing dir (deleted account) → warn + system fallback, flagged like the Claude fallback so
+    // the renderer can mark the chip (a `piLogin` never gets here: PRE-FLIGHT 3 refused it). No
+    // provider-key strip: which of pi's env keys would shadow an auth.json login is not measured,
+    // and stripping ANTHROPIC_API_KEY et al. could break a user's API-key provider setup.
+    // SSH (remote) pi nodes are out of scope for v1: they get NO PI_CODING_AGENT_DIR and run the
+    // host's system pi (`~/.pi/agent` there) — see the remote `-e` list, which skips pi scope.
+    let piAgentDirForSession: string | null = null
+    if (piScoped && !options.sshRemote) {
+      const dir = this.resolvePiAccountDir(options.accountId, true)
+      if (dir && fs.existsSync(dir)) {
+        piAgentDirForSession = dir
+        env[PI_ACCOUNT_ENV] = dir
+      } else {
+        console.warn(`[accounts] pi agent dir missing for ${options.accountId}, using system default`)
+        accountFallback = true
+      }
     }
 
     // Managed/system Codex account scope (S6 §2.1). A LOCAL Codex session runs under an EXPLICIT
@@ -3407,8 +3486,10 @@ export class PtyManager {
       // ABSOLUTE — tmux copies `-e` values verbatim (no `$HOME`/`~` expansion) — so we build it from
       // the connection's resolved remote $HOME. Fail-open: an unknown remoteHome (home resolution
       // failed on connect) skips the account env and the session runs under the remote `~/.claude`.
+      // A pi account id names no Claude dir on the host (and managed pi accounts are local-only in
+      // v1), so a pi-scoped remote node gets no account env at all: the host's system pi.
       const remoteAccountEnv =
-        options.accountId && options.sshRemote.remoteHome
+        options.accountId && options.sshRemote.remoteHome && !this.isPiScoped(options)
           ? accountTmuxEnvArgs(remoteAccountConfigDirAbs(options.sshRemote.remoteHome, options.accountId))
           : []
       // Custom-agent env for a REMOTE node: expand ${env:VAR} against the LOCAL process env (the
@@ -3530,7 +3611,11 @@ export class PtyManager {
       const colortermEnvArgs = ['-e', 'COLORTERM=truecolor']
       // The account config dir must ride `-e` like the hook env: the tmux server is shared
       // and long-lived, so session env comes from creation args, not client inheritance.
-      const accountEnvArgs = accountDir ? accountTmuxEnvArgs(accountDir) : []
+      const accountEnvArgs = accountDir
+        ? accountTmuxEnvArgs(accountDir)
+        : piAgentDirForSession
+          ? piAccountTmuxEnvArgs(piAgentDirForSession)
+          : []
       // Gateway env deliberately has NO `-e` pairs: the values are in this tmux CLIENT's process
       // environment (merged above) and the conf's `update-environment` list copies them into the
       // session at create/attach — measured on tmux 3.4, including the removal case (a plain
