@@ -210,11 +210,19 @@ export function assembleLaunchCommand(
         : null
   const isFlagPrompt = !!promptFlag
   const usesSep = !!promptArg && !!sep && !isFlagPrompt
-  const withPrompt = promptArg
-    ? isFlagPrompt
-      ? `${baseCmd} ${promptFlag} ${promptArg}`
-      : `${baseCmd} ${promptArg}`
-    : baseCmd
+  // pi: the positional prompt goes AFTER the flags. MEASURED on pi 0.84.1: the subcommand match
+  // (install/remove/uninstall/update/list/config/auth) is on argv[0] ONLY — `pi update
+  // --session-id <u>` runs the package command ("Unknown option --session-id for update"), while
+  // `pi --session-id <u> update` starts a session with "update" as the prompt. pi has no `--`
+  // separator (`pi -- x` is "Unknown option"), so ordering is the only way a one-word prompt
+  // equal to a subcommand reaches the model instead of running the command.
+  const promptAfterFlags = !!promptArg && !isFlagPrompt && capId === 'pi'
+  const withPrompt =
+    promptArg && !promptAfterFlags
+      ? isFlagPrompt
+        ? `${baseCmd} ${promptFlag} ${promptArg}`
+        : `${baseCmd} ${promptArg}`
+      : baseCmd
 
   const flagged = (cmd: string): string => {
     const withMode = inputs.permissionMode
@@ -228,7 +236,11 @@ export function assembleLaunchCommand(
     return withAgentModel(withMode, capId, inputs.model)
   }
 
-  const command = usesSep ? `${flagged(baseCmd)} ${sep} ${promptArg}` : flagged(withPrompt)
+  const command = usesSep
+    ? `${flagged(baseCmd)} ${sep} ${promptArg}`
+    : promptAfterFlags
+      ? `${flagged(baseCmd)} ${promptArg}`
+      : flagged(withPrompt)
   return { command, missingEnv: [...m1, ...m2] }
 }
 

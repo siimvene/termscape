@@ -9,6 +9,7 @@
 //  (3) Retry spawned a junk login node: it opened `claude /login` BEFORE checking whether the dir
 //      was already logged in, when capture then lands in <=2 s and the node is pure noise.
 import { NEW_CLAUDE_ACCOUNT_LABEL, type ClaudeAccount } from '@shared/types'
+import { NEW_PI_ACCOUNT_LABEL, type PiAccount } from '@shared/pi-account'
 import { useSettings } from '../state/settings'
 
 /** How long the Retry race waits for a fast capture before opening a login node (defect 3). */
@@ -62,6 +63,24 @@ export async function healPendingAccounts(
       }
     })
   )
+}
+
+/**
+ * Adopt a captured provider list into a pi account record: clear `pending` and label the row with
+ * the providers pi's `auth.json` now holds (e.g. `openai-codex`, or `anthropic, openai-codex` for
+ * two) — ONLY when the user has not named the row (empty, or the mint placeholder). Mirrors
+ * `healedAccount`, with a provider LIST standing in for the Claude email: pi's OAuth credential
+ * carries no email (MEASURED on 0.84.1 — see `PiAccount`'s own doc comment), so the provider ids
+ * are the only identity there is to show. `labelEdited` survives the flip for the same reason as
+ * the Claude sibling: a hand-typed label equal to the placeholder still counts as named.
+ *
+ * The shell (`pi-accounts-service.ts` `waitLogin`) performs this SAME flip on its own row the
+ * instant it captures a login — `SettingsStore.mutate` does not push to the renderer, so this is
+ * the renderer's mirror of that write, not a second source of truth for it.
+ */
+export function healedPiAccount(account: PiAccount, providers: string[]): PiAccount {
+  const named = !!account.labelEdited || (!!account.label && account.label !== NEW_PI_ACCOUNT_LABEL)
+  return { ...account, pending: false, label: named ? account.label : providers.join(', ') }
 }
 
 type TimerHandle = unknown

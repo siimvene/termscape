@@ -15,8 +15,10 @@ import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'fs'
 import path from 'path'
 import { linesFromGrok, renderTranscriptLines } from './context-link-render'
+import { linesFromPi } from './pi-session'
 
 const buf = readFileSync(path.join(__dirname, '__fixtures__/grok/chat_history.jsonl'), 'utf8')
+const piBuf = readFileSync(path.join(__dirname, '__fixtures__/pi/session.jsonl'), 'utf8')
 
 describe('linesFromGrok over a real chat_history.jsonl', () => {
   it('renders user prompts and assistant text in file order', () => {
@@ -104,5 +106,12 @@ describe('linesFromGrok over a real chat_history.jsonl', () => {
 
   it('is routed by agent id, with no call-site comparison', () => {
     expect(renderTranscriptLines('grok', buf)).toEqual(linesFromGrok(buf))
+  })
+})
+
+describe('renderTranscriptLines routes pi to linesFromPi', () => {
+  it('is routed by agent id, over a real pi session', () => {
+    expect(renderTranscriptLines('pi', piBuf)).toEqual(linesFromPi(piBuf))
+    expect(renderTranscriptLines('pi', piBuf).some((l) => l.startsWith('user: '))).toBe(true)
   })
 })

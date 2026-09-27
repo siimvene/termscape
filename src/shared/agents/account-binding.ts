@@ -7,14 +7,15 @@
  * for exactly the users who have accounts. Written once here so a third agent gaining managed
  * accounts cannot light up one of the two and not the other.
  */
-export const ACCOUNT_CAPABLE_AGENT_IDS: readonly string[] = ['claude', 'codex']
+export const ACCOUNT_CAPABLE_AGENT_IDS: readonly string[] = ['claude', 'codex', 'pi']
 
 /**
  * Which managed account a node is actually BOUND to — the one rule behind both `data.accountId`
  * and the account's default node color.
  *
- * Managed accounts belong to the builtin **Claude and Codex** agents (S6). The id becomes a config
- * home path segment (`CLAUDE_CONFIG_DIR` / `CODEX_HOME`) and scopes every account-aware reader
+ * Managed accounts belong to the builtin **Claude, Codex and Pi** agents (S6; pi joined with its
+ * PI_CODING_AGENT_DIR-isolated accounts). The id becomes a config home path segment
+ * (`CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `PI_CODING_AGENT_DIR`) and scopes every account-aware reader
  * (transcript, context meter, find-bar index, usage), none of which mean anything for another
  * agent. A custom agent inheriting one of those harnesses is still its own agent, so it does not
  * bind either — account binding stays with the builtin the account picker offered it for.
@@ -35,9 +36,20 @@ export const ACCOUNT_CAPABLE_AGENT_IDS: readonly string[] = ['claude', 'codex']
  */
 export function boundAccountId(
   accountId: string | undefined,
-  agentId: string | undefined
+  agentId: string | undefined,
+  /** Where the node RUNS. Managed pi accounts are local-only (v1): `<userData>/pi-accounts/<id>`
+   *  exists on this machine, the remote spawn skips the pi scope (`piScoped && !options.sshRemote`),
+   *  so a pi account stamped on an SSH node would wear the account's color and chip while running
+   *  the host's system `~/.pi/agent` identity — the "pinned to another machine, never stamped onto
+   *  a node it cannot run on" rule. Claude has a host-pinned remote leg and Codex rows are
+   *  host-filtered by the pickers, so the node's SSH-ness is not their gate here. Optional so a
+   *  caller that genuinely cannot know keeps its binding, matching the "unstated keeps its
+   *  binding" stance above. Both minting surfaces DO know: `createAgentNode` from the project,
+   *  `appendProjectNode` from its SSH donor. */
+  where?: { ssh?: boolean }
 ): string | undefined {
   if (!accountId) return undefined
   if (agentId !== undefined && !ACCOUNT_CAPABLE_AGENT_IDS.includes(agentId)) return undefined
+  if (agentId === 'pi' && where?.ssh) return undefined
   return accountId
 }

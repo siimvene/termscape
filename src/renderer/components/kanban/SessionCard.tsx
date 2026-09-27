@@ -44,7 +44,7 @@ export const SessionCard = memo(function SessionCard({
   // The board is the canvas's other view of the same node (CONTRIBUTING), so the card carries the
   // node header's account chip from the same helper — created-with account, else what the session
   // was observed running as.
-  const accountChip = useAccountChip(session.spawn.accountId, status?.account)
+  const accountChip = useAccountChip(session.spawn.accountId, status?.account, session.spawn.agentId)
   // Local drag state only styles THIS card (ghost look) — the drag payload lives in KanbanView.
   const [dragging, setDragging] = useState(false)
   // Which edge a drag is hovering over → shows the drop line (top = before, bottom = after).

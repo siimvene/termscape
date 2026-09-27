@@ -23,6 +23,8 @@
 #        ~/.copilot/hooks/nodeterm-status.json (owned file) + copilot-instructions.md blocks
 #        ~/.grok/hooks/nodeterm-status.json    (owned file)
 #        ~/.config/opencode/plugins/nodeterm-status.js (owned, marker-checked) + AGENTS.md blocks
+#        ~/.pi/agent/extensions/nodeterm-status.js (owned, marker-checked) + skills/manage-nodeterm-canvas/
+#                                     + skills/get-linked-context/
 #      Your agents' credentials, sessions and own settings are never touched.
 #   4. Deletes nodeterm's own state: ~/.nodeterm, the Electron user-data dir, caches, prefs,
 #      logs, the Keychain entry, /Applications/nodeterm.app (or the brew cask), and the Server
@@ -71,6 +73,7 @@ SERVER_DATA="${NODETERM_DATA_DIR:-$HOME/.nodeterm-server}"
 APP_BUNDLE="/Applications/nodeterm.app"
 GROK_HOME="${GROK_HOME:-$HOME/.grok}"
 COPILOT_HOME="${COPILOT_HOME:-$HOME/.copilot}"
+PI_HOME="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
 if [ -n "${XDG_CONFIG_HOME:-}" ] && [ "${XDG_CONFIG_HOME#\/}" != "$XDG_CONFIG_HOME" ]; then
   OPENCODE_DIR="$XDG_CONFIG_HOME/opencode"
 else
@@ -85,6 +88,7 @@ CC_END='<!-- nodeterm:manage-canvas:end -->'
 CL_START='<!-- nodeterm:get-linked-context:start -->'
 CL_END='<!-- nodeterm:get-linked-context:end -->'
 OPENCODE_PLUGIN_MARKER='nodeterm managed plugin'
+PI_EXTENSION_MARKER='nodeterm managed pi extension'
 
 # ---- JS runtime for JSON/TOML surgery --------------------------------------------------------
 NODE_BIN=""
@@ -337,7 +341,7 @@ if [ -f "$HOME/.codex/hooks.json" ] && grep -Eq "$HOOK_MARKERS" "$HOME/.codex/ho
   plan "Remove nodeterm hook entries from ~/.codex/hooks.json + matching trust entries in ~/.codex/config.toml"
   FOUND_ANY=1
 fi
-for d in "$HOME/.claude/skills/manage-nodeterm-canvas" "$HOME/.claude/skills/get-linked-context"; do
+for d in "$HOME/.claude/skills/manage-nodeterm-canvas" "$HOME/.claude/skills/get-linked-context" "$PI_HOME/skills/manage-nodeterm-canvas" "$PI_HOME/skills/get-linked-context"; do
   [ -d "$d" ] && { plan "Delete skill dir $d"; FOUND_ANY=1; }
 done
 for f in "$GROK_HOME/hooks/nodeterm-status.json" "$COPILOT_HOME/hooks/nodeterm-status.json"; do
@@ -346,6 +350,10 @@ done
 OPENCODE_PLUGIN="$OPENCODE_DIR/plugins/nodeterm-status.js"
 if [ -f "$OPENCODE_PLUGIN" ] && head -1 "$OPENCODE_PLUGIN" | grep -qF "$OPENCODE_PLUGIN_MARKER"; then
   plan "Delete $OPENCODE_PLUGIN"; FOUND_ANY=1
+fi
+PI_EXTENSION="$PI_HOME/extensions/nodeterm-status.js"
+if [ -f "$PI_EXTENSION" ] && head -1 "$PI_EXTENSION" | grep -qF "$PI_EXTENSION_MARKER"; then
+  plan "Delete $PI_EXTENSION"; FOUND_ANY=1
 fi
 for f in "$HOME/.codex/AGENTS.md" "$HOME/.gemini/GEMINI.md" "$COPILOT_HOME/copilot-instructions.md" "$OPENCODE_DIR/AGENTS.md"; do
   has_blocks "$f" && { plan "Remove nodeterm marker blocks from $f"; FOUND_ANY=1; }
@@ -485,10 +493,13 @@ if [ -f "$HOME/.codex/hooks.json" ] && grep -Eq "$HOOK_MARKERS" "$HOME/.codex/ho
     warn "Could not clean ~/.codex — left as is (entries are inert without the hook script)"
   fi
 fi
-rm -rf "$HOME/.claude/skills/manage-nodeterm-canvas" "$HOME/.claude/skills/get-linked-context" 2>/dev/null || true
+rm -rf "$HOME/.claude/skills/manage-nodeterm-canvas" "$HOME/.claude/skills/get-linked-context" "$PI_HOME/skills/manage-nodeterm-canvas" "$PI_HOME/skills/get-linked-context" 2>/dev/null || true
 rm -f "$GROK_HOME/hooks/nodeterm-status.json" "$COPILOT_HOME/hooks/nodeterm-status.json" 2>/dev/null || true
 if [ -f "$OPENCODE_PLUGIN" ] && head -1 "$OPENCODE_PLUGIN" | grep -qF "$OPENCODE_PLUGIN_MARKER"; then
   rm -f "$OPENCODE_PLUGIN"
+fi
+if [ -f "$PI_EXTENSION" ] && head -1 "$PI_EXTENSION" | grep -qF "$PI_EXTENSION_MARKER"; then
+  rm -f "$PI_EXTENSION"
 fi
 for f in "$HOME/.codex/AGENTS.md" "$HOME/.gemini/GEMINI.md" "$COPILOT_HOME/copilot-instructions.md" "$OPENCODE_DIR/AGENTS.md"; do
   strip_blocks "$f"

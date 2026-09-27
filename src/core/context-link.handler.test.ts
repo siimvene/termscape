@@ -2,7 +2,7 @@
 // The cli test drives the shim against a stand-in handler; this one drives the actual code that
 // decides WHICH bytes a request may see, which is the part with teeth.
 import { describe, it, expect, beforeEach, afterAll, vi } from 'vitest'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { handleContextLinkRequest, initContextLink, type ContextLinkDeps } from './context-link'
@@ -178,5 +178,51 @@ describe('handleContextLinkRequest — remote (SSH) reads', () => {
     expect(await handleContextLinkRequest({ verb: 'summary', nodeId: 'node-A', args: {} })).toContain(
       'user: ship it'
     )
+  })
+})
+
+const PI_LINE = (text: string) =>
+  JSON.stringify({ type: 'message', message: { role: 'user', content: [{ type: 'text', text }] } })
+
+describe('pi node transcript resolution', () => {
+  it("prefers the injected tracker path (piPathFor) over any local scan", async () => {
+    const p = join(dir, 'pi-tracked.jsonl')
+    writeFileSync(p, PI_LINE('ship it'))
+    start({ piPathFor: (sessionId) => (sessionId === 'sess-pi' ? p : undefined) })
+    await setLinks({ 'node-A': [{ id: 'node-B', title: 'Pi', agentId: 'pi', sessionId: 'sess-pi' }] })
+    const out = await handleContextLinkRequest({ verb: 'summary', nodeId: 'node-A', args: {} })
+    expect(out).toContain('user: ship it')
+  })
+
+  it("falls back to locatePi's strict-by-sessionId scan when the tracker has no path (Server Edition)", async () => {
+    const agentDir = join(dir, 'pi-agent')
+    const sessDir = join(agentDir, 'sessions', 'proj')
+    mkdirSync(sessDir, { recursive: true })
+    writeFileSync(join(sessDir, 'ts_sess-scan.jsonl'), PI_LINE('scanned'))
+    const prev = process.env.PI_CODING_AGENT_DIR
+    process.env.PI_CODING_AGENT_DIR = agentDir
+    try {
+      start() // no piPathFor at all
+      await setLinks({ 'node-A': [{ id: 'node-B', title: 'Pi', agentId: 'pi', sessionId: 'sess-scan' }] })
+      const out = await handleContextLinkRequest({ verb: 'summary', nodeId: 'node-A', args: {} })
+      expect(out).toContain('user: scanned')
+    } finally {
+      if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR
+      else process.env.PI_CODING_AGENT_DIR = prev
+    }
+  })
+
+  it('never asks the LOCAL locator for a remote pi node\'s transcript', async () => {
+    const readRemoteFile = vi.fn(async () => CLAUDE_LINE)
+    start({
+      isRemoteNode: (id) => id === 'node-R',
+      readRemoteFile,
+      runRemoteCommand: async () => null,
+      piPathFor: () => join(dir, 'should-never-be-read.jsonl')
+    })
+    await setLinks({ 'node-A': [{ id: 'node-R', title: 'Remote', agentId: 'pi', sessionId: 'sess-r' }] })
+    const out = await handleContextLinkRequest({ verb: 'summary', nodeId: 'node-A', args: {} })
+    expect(out).toContain('no conversation transcript yet')
+    expect(readRemoteFile).not.toHaveBeenCalled()
   })
 })

@@ -753,6 +753,71 @@ describe('SettingsStore — shell-owned fields survive a snapshot (host, created
 //    is gone from disk after P2 writes).
 //  - drop the stamp re-check in readModifyWrite ⇒ the in-window case reddens (fn runs once and
 //    the externally landed row is lost).
+// piAccounts rides the same field-by-field reconcile as the Claude and Codex lists.
+// MUTATION: drop the piAccounts reconcile from saveNow ⇒ a snapshot's forged row lands, a removed
+// row comes back, and createdAt becomes renderer-writable — every case below reddens.
+describe('SettingsStore — shell-owned piAccounts membership + fields', () => {
+  let dir: string
+  let fake: ReturnType<typeof fakePlatform>
+
+  beforeEach(() => {
+    dir = mkdtempSync(path.join(tmpdir(), 'nodeterm-settings-pi-'))
+    fake = fakePlatform({ userDataDir: dir })
+    initPlatform(fake)
+  })
+
+  afterEach(() => {
+    resetPlatformForTests()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  const piRow = { id: 'p1', label: 'New Pi account', pending: true, createdAt: 1234 }
+  const boot = async (): Promise<SettingsStore> => {
+    const store = new SettingsStore()
+    store.init()
+    store.registerIpc()
+    await store.mutate((s) => ({ ...s, piAccounts: [...s.piAccounts, piRow] }))
+    return store
+  }
+  const save = (store: SettingsStore, patch: Partial<Settings>): Promise<void> =>
+    fake.handlers[IPC.settingsSave]({ ...store.get(), ...patch }) as Promise<void>
+
+  it('DEFAULT_SETTINGS carries an empty piAccounts list', () => {
+    expect(DEFAULT_SETTINGS.piAccounts).toEqual([])
+  })
+
+  it('a snapshot can neither add a pi row nor drop one', async () => {
+    const store = await boot()
+    await save(store, { piAccounts: [{ id: 'forged', label: 'x', createdAt: 1 }] })
+    expect(store.get().piAccounts.map((a) => a.id)).toEqual(['p1'])
+  })
+
+  it('a snapshot taken before a remove cannot resurrect the row', async () => {
+    const store = await boot()
+    const stale = store.get()
+    await store.mutate((s) => ({ ...s, piAccounts: [] }))
+    await fake.handlers[IPC.settingsSave](stale)
+    expect(store.get().piAccounts).toEqual([])
+  })
+
+  it('a snapshot edits label/color but not createdAt', async () => {
+    const store = await boot()
+    await save(store, { piAccounts: [{ ...piRow, label: 'work', color: '#ff375f', createdAt: 9 }] })
+    expect(store.get().piAccounts).toEqual([{ ...piRow, label: 'work', color: '#ff375f' }])
+  })
+
+  it('a stale still-pending placeholder snapshot cannot un-resolve a captured row', async () => {
+    const store = await boot()
+    const stale = store.get()
+    await store.mutate((s) => ({
+      ...s,
+      piAccounts: s.piAccounts.map((a) => ({ id: a.id, label: 'openai-codex', createdAt: a.createdAt }))
+    }))
+    await fake.handlers[IPC.settingsSave](stale)
+    expect(store.get().piAccounts).toEqual([{ id: 'p1', label: 'openai-codex', createdAt: 1234 }])
+  })
+})
+
 describe('SettingsStore — two instances on one file (cross-process read-modify-write)', () => {
   let dir: string
 

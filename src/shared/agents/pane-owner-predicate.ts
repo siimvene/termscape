@@ -64,7 +64,10 @@ export const AGENT_BINARIES: Record<string, readonly string[]> = {
   copilot: ['copilot'],
   gemini: ['gemini'],
   opencode: ['opencode'],
-  grok: ['grok']
+  grok: ['grok'],
+  // pi is a node script, but MEASURED (0.84.1, a live TUI under a pty) it rewrites its process
+  // title: the foreground process reads comm `pi` and argv `pi`, never `node …/cli.js`.
+  pi: ['pi']
 }
 
 /**

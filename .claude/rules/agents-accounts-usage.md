@@ -26,6 +26,18 @@ paths:
 > when the root routing table points here, read this file before touching the subsystem.
 <!-- moved-verbatim-from: CLAUDE.md -->
 
+- **Managed Pi accounts** (2026-09, `core/pi-accounts-*.ts`, `core/pi-config-dir.ts`) follow the
+  Claude model below one-for-one, with pi as the third provider: an account is
+  `<userData>/pi-accounts/<id>` used as `PI_CODING_AGENT_DIR` (spawn env + tmux `-e`; the name rides
+  `ACCOUNT_SCOPE_UPDATE_ENV`, pinned against a real tmux in `pi-account-env.realtmux.test.ts`), pi
+  owns login/storage/refresh in that dir, logged in = `auth.json` holds at least one provider, row
+  membership is the shell's (`SettingsStore.mutate`), and the status extension plus both canvas
+  skills are installed into every account dir. `ACCOUNT_CAPABLE_AGENT_IDS` includes `pi`, so
+  `boundAccountId` / `agentAccountColor` / `inheritableAccountId` (its `isPiAccount` resolver) answer
+  for it; the headless factory now asks that shared rule instead of hard-coding claude||codex. Pi
+  does NOT reuse Claude/Codex logins (a copied refresh token would rotate out from under the other
+  CLI). Local-only in v1: an SSH Pi node runs the host's system pi. Mobile mirror: no pi account
+  block yet. Details: `docs/pi-agent.md` §4, `.claude/rules/agents-pi.md`.
 - **Managed Claude accounts** (Claude-only) — run several logged-in Claude identities side by
   side by giving each its own config dir. `settings.claudeAccounts` is a list of `ClaudeAccount
   {id, label, email?, host?, pending?, createdAt}` (in `settings.json`; the account **list** is

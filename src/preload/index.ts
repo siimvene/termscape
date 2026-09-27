@@ -591,6 +591,12 @@ const api: NodeTerminalApi = {
         sourceAccountId
       )
   },
+  piAccounts: {
+    add: () => ipcRenderer.invoke(IPC.piAccountsAdd),
+    waitLogin: (id) => ipcRenderer.invoke(IPC.piAccountsWaitLogin, id),
+    cancelWaitLogin: (id) => ipcRenderer.invoke(IPC.piAccountsCancelWait, id),
+    remove: (id) => ipcRenderer.invoke(IPC.piAccountsRemove, id)
+  },
   transcripts: {
     search: (query: string) => ipcRenderer.invoke(IPC.transcriptSearch, query)
   },

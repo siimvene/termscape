@@ -155,6 +155,26 @@ describe('isSafeLocalTranscriptPath', () => {
   const legacy = '/Users/x/.claude/projects'
   const acctRoot = `${ud}/claude-accounts`
 
+  it('pi: only `<agentDir>/sessions/**` and managed `pi-accounts/<id>/sessions/**`, never auth.json', () => {
+    const P = (p: string, agentDir?: string): boolean =>
+      isSafeLocalTranscriptPath(p, home, ud, undefined, undefined, undefined, undefined, agentDir)
+    // default agent dir (~/.pi/agent) and a relocated one ($PI_CODING_AGENT_DIR)
+    expect(P('/Users/x/.pi/agent/sessions/--repo--/2026_sid.jsonl')).toBe(true)
+    expect(P('/opt/pi-home/sessions/--repo--/2026_sid.jsonl', '/opt/pi-home')).toBe(true)
+    expect(P('/Users/x/.pi/agent/sessions/--repo--/2026_sid.jsonl', '/opt/pi-home')).toBe(false)
+    // the credentials beside the sessions, and sibling-prefix roots, stay out
+    expect(P('/Users/x/.pi/agent/auth.json')).toBe(false)
+    expect(P('/Users/x/.pi/agent/sessions-evil/x.jsonl')).toBe(false)
+    expect(P('/Users/x/.pi/agent')).toBe(false)
+    // managed pi accounts: the account's own sessions only, id-validated
+    expect(P(`${ud}/pi-accounts/a1/sessions/--repo--/s.jsonl`)).toBe(true)
+    expect(P(`${ud}/pi-accounts/a1/auth.json`)).toBe(false)
+    expect(P(`${ud}/pi-accounts/a1/projects/s.jsonl`)).toBe(false)
+    expect(P(`${ud}/pi-accounts/..%2F/sessions/s.jsonl`)).toBe(false)
+    // and a pi id cannot borrow the claude tree's leaf (or vice versa)
+    expect(P(`${ud}/claude-accounts/a1/sessions/s.jsonl`)).toBe(false)
+  })
+
   it('accepts the legacy system root and paths under it', () => {
     expect(isSafeLocalTranscriptPath(legacy, home, ud)).toBe(true)
     expect(isSafeLocalTranscriptPath(`${legacy}/-repo/abc.jsonl`, home, ud)).toBe(true)

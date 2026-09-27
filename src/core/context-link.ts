@@ -42,8 +42,10 @@ import {
   type ContextLinkVerb
 } from './context-link-render'
 import { hookServer } from './agents/hook-server'
-import { locateClaude, locateCodex, locateGemini, locateGrok } from './handoff/locate'
+import { locateClaude, locateCodex, locateGemini, locateGrok, locatePi } from './handoff/locate'
 import { opencodeConfigDir } from './agents/hooks/opencode'
+import { piAgentDir } from './agents/hooks/pi'
+import { piSkillPathIn } from './agents/hooks/pi-skills'
 
 export { setNodeTranscript } from './context-link-core'
 
@@ -83,6 +85,24 @@ function installSkill(): void {
     fs.writeFileSync(skillPath(), buildContextLinkSkillBody(cliShimPath()), 'utf8')
   } catch (e) {
     console.warn('[context-link] skill install failed', e)
+  }
+  installPiLinkSkillInto(piAgentDir())
+}
+
+/**
+ * The get-linked-context skill for a pi agent dir. pi is CONTEXT_LINK_CAPABLE, but it discovers
+ * skills only from `<agentDir>/skills` and `~/.agents/skills` — never `~/.claude/skills` (MEASURED
+ * on 0.84.1) — so without this a linked pi node has no way to learn the CLI exists. Same body as
+ * the claude skill (pi's SKILL.md envelope is the same), so the two can never describe different
+ * verbs. Exported for the per-account loop: a managed pi account is its own agent dir. Best-effort.
+ */
+export function installPiLinkSkillInto(agentDir: string): void {
+  const p = piSkillPathIn(agentDir, 'get-linked-context')
+  try {
+    fs.mkdirSync(path.dirname(p), { recursive: true })
+    fs.writeFileSync(p, buildContextLinkSkillBody(cliShimPath()), 'utf8')
+  } catch (e) {
+    console.warn('[context-link] pi skill install failed', p, e)
   }
 }
 
@@ -127,6 +147,15 @@ export interface ContextLinkDeps {
   readRemoteFile?: (nodeId: string, filePath: string, maxBytes: number) => Promise<string | null>
   /** Run one command on a remote node's host and return stdout. null = it failed. */
   runRemoteCommand?: (nodeId: string, command: string) => Promise<string | null>
+  /**
+   * sessionId → that pi session's transcript path, i.e. `piSessions.pathFor` (the tracker built in
+   * both shells, core/pi-session.ts) — the same hook-fed shortcut `agent-session-name.ts`'s
+   * `piPathFor` uses, so a linked pi node's read does not pay a directory walk when the path is
+   * already known. Optional: the Server Edition (which builds no such tracker into this deps
+   * object today) simply falls through to `locatePi`'s strict-by-sessionId scan below, exactly as
+   * gemini and codex already do with no tracker at all.
+   */
+  piPathFor?: (sessionId: string) => string | undefined
 }
 
 // Remote transcripts are read from the END: a long-running session's file reaches tens of MB,
@@ -134,7 +163,16 @@ export interface ContextLinkDeps {
 // start mid-line, which only costs that one line (it fails to parse and is dropped).
 const REMOTE_TRANSCRIPT_MAX_BYTES = 2 * 1024 * 1024
 
-const LINK_LOCATORS = { claude: locateClaude, codex: locateCodex, gemini: locateGemini, grok: locateGrok }
+const LINK_LOCATORS = {
+  claude: locateClaude,
+  codex: locateCodex,
+  gemini: locateGemini,
+  grok: locateGrok,
+  // The tracker's path first (no directory walk when a hook already told us), the strict
+  // by-sessionId scan otherwise — same fail-open shape as every other leg here.
+  pi: (sessionId: string, accountId?: string) =>
+    Promise.resolve(deps.piPathFor?.(sessionId)).then((p) => p ?? locatePi(sessionId, accountId))
+}
 
 // The link documents, by node id — the same objects written to disk, kept in memory because they
 // are what authorizes a read (a node may only ever name a link inside ITS OWN document).

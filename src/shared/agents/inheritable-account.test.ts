@@ -89,3 +89,24 @@ describe('inheritableAccountId — provider must match, cross-provider drops', (
     ).toBeUndefined()
   })
 })
+
+// Pi joined with its own managed accounts: the third list, same one-alphabet problem.
+describe('inheritableAccountId — pi accounts', () => {
+  const PI_IDS = new Set(['pi-a'])
+  const isPiAccount = (id: string): boolean => PI_IDS.has(id)
+
+  it('pi → pi KEEPS the account', () => {
+    expect(inheritableAccountId('pi', 'pi-a', isClaudeAccount, isCodexAccount, isPiAccount)).toBe('pi-a')
+  })
+
+  it('a Claude or Codex conductor id never reaches a pi node, nor a pi id a claude/codex node', () => {
+    expect(inheritableAccountId('pi', 'claude-a', isClaudeAccount, isCodexAccount, isPiAccount)).toBeUndefined()
+    expect(inheritableAccountId('pi', 'codex-a', isClaudeAccount, isCodexAccount, isPiAccount)).toBeUndefined()
+    expect(inheritableAccountId('claude', 'pi-a', isClaudeAccount, isCodexAccount, isPiAccount)).toBeUndefined()
+    expect(inheritableAccountId('codex', 'pi-a', isClaudeAccount, isCodexAccount, isPiAccount)).toBeUndefined()
+  })
+
+  it('a caller with no pi resolver (predates pi accounts) gives a pi target nothing', () => {
+    expect(inheritableAccountId('pi', 'pi-a', isClaudeAccount, isCodexAccount)).toBeUndefined()
+  })
+})

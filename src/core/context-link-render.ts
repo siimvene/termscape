@@ -9,6 +9,7 @@
 // interpreter it needed exists only on the desktop. Moving the parsing here inverts it — the
 // remote side becomes a thin sh+curl client and the desktop does the reading and the parsing.
 import type { LinkDoc, LinkDocEntry } from './context-link-core'
+import { linesFromPi } from './pi-session'
 
 export type ContextLinkVerb = 'list' | 'summary' | 'transcript' | 'terminal'
 
@@ -312,6 +313,7 @@ linesFromGrok.skipped = (buf: string): number => grokParse(buf).skipped
 export function renderTranscriptLines(agent: string | undefined, buf: string): string[] {
   if (agent === 'gemini') return linesFromGemini(buf)
   if (agent === 'grok') return linesFromGrok(buf)
+  if (agent === 'pi') return linesFromPi(buf)
   const parse = agent === 'codex' ? linesFromCodex : linesFromClaude
   const lines: string[] = []
   for (const raw of buf.split('\n')) {

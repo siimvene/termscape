@@ -125,6 +125,19 @@ describe('assembleLaunchCommand — builtins (byte-identical to the historical p
       assembleLaunchCommand({ agentId: 'grok', initialPrompt: 'version', permissionMode: 'plan' }, ENV).command
     ).toBe("grok --permission-mode plan -- 'version'")
   })
+  it('pi puts the positional prompt AFTER its flags: argv[0] is where pi matches subcommands', () => {
+    // MEASURED on pi 0.84.1 (fresh PI_CODING_AGENT_DIR): `pi update --session-id <u>` runs the
+    // package command ("Unknown option --session-id for update"), while
+    // `pi --session-id <u> update` starts a session with "update" as the prompt. The subcommand
+    // match is argv[0] only, so the prompt goes after the flags and a one-word prompt equal to
+    // list/update/install/config/auth/remove/uninstall reaches the model.
+    expect(
+      assembleLaunchCommand(
+        { agentId: 'pi', initialPrompt: 'update', sessionId: 'abc-123', sessionIdFlagSupported: true },
+        ENV
+      ).command
+    ).toBe("pi --session-id abc-123 'update'")
+  })
   it('opencode uses --prompt (flag-prompt mode)', () => {
     expect(
       assembleLaunchCommand({ agentId: 'opencode', initialPrompt: 'fix it' }, ENV).command

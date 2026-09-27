@@ -40,6 +40,10 @@ export interface ServerContextLinkDeps {
   agentSessions?: () => Array<{ nodeId: string; agentId?: string; sessionId?: string }>
   /** nodeId → hook-fed transcript path; part of the change signature, not of the map. */
   transcriptOf?: (nodeId: string) => string
+  /** pi's hook-fed transcript path per session (`piSessions.pathFor` from wireAgentStatus): the same
+   *  shortcut the desktop hands `initContextLink`, so a linked pi node reads the file the hooks
+   *  reported instead of walking `<agentDir>/sessions`. Optional: absent, `locatePi` still finds it. */
+  piPathFor?: (sessionId: string) => string | undefined
   sweepMs?: number
   /**
    * Whether to write the context-link discovery surface into the machine's REAL agent
@@ -98,7 +102,8 @@ export function initServerContextLink(deps: ServerContextLinkDeps): {
 
   // No remote deps: the Server Edition runs ON the host whose transcripts and tmux it reads, so
   // the local-only behavior is the complete answer (SSH projects are a desktop-only concept here).
-  initContextLink(deps.ptyManager, {}, {
+  // pi's path authority rides along, as on the desktop (invariant 11).
+  initContextLink(deps.ptyManager, deps.piPathFor ? { piPathFor: deps.piPathFor } : {}, {
     installAgentIntegrations: deps.installAgentIntegrations
   })
 

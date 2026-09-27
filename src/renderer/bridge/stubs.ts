@@ -393,6 +393,14 @@ export function buildStubApi(): Omit<
       rollbackSwitch: U('codexAccounts.rollbackSwitch'),
       transferThreadToSsh: U('codexAccounts.transferThreadToSsh')
     },
+    // All four are REAL over the WS bridge (`buildPiAccountsApi`); this is the fallback for any
+    // assembly that spreads the stub alone — a relay tab, which must never mint accounts on a host.
+    piAccounts: {
+      add: U('piAccounts.add'),
+      waitLogin: U('piAccounts.waitLogin'),
+      cancelWaitLogin: U('piAccounts.cancelWaitLogin'),
+      remove: U('piAccounts.remove')
+    },
     transcripts: {
       search: U('transcripts.search')
     },

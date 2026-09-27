@@ -14,11 +14,15 @@
 //   codex  → `Thread.name`, read over the shared app-server's own socket (core/codex-session-name.ts).
 //            There is no file to read: with the shared server the name lives in the server, and the
 //            node's session id IS the thread id.
+//   pi     → its own session `.jsonl`, at the path the pi session tracker learned from its hook
+//            payload (`sessionFile`), read for the latest `session_info` record (`/name` or
+//            `--name`) — core/pi-session.ts. Same shape as gemini's leg: read-only, a bounded tail.
 // Anything else has no readable session name; the claude reader answers null for it, which is what
 // every pre-grok caller already got.
 import { readSessionName, readSmallTail, TITLE_TAIL_BYTES } from './transcript-reader'
 import { readGrokSessionName, type GrokRemoteSummaryReader } from './grok-session'
 import { pickGeminiTitle } from './gemini-session'
+import { pickPiTitle } from './pi-session'
 import { readCodexSessionName } from './codex-session-name'
 
 /**
@@ -47,6 +51,14 @@ export interface AgentSessionNameDeps {
    * honest: the node keeps its own title.
    */
   geminiPathFor?: (sessionId: string) => string | undefined
+  /**
+   * sessionId → that pi session's transcript path, i.e. `piSessions.pathFor` (the tracker built in
+   * both shells, core/pi-session.ts). Fed only by pi's own hook payloads (`sessionFile`), so
+   * `undefined` for a session no hook has been seen for and for a REMOTE (SSH) pi node, whose
+   * transcript the tracker deliberately never tracks a path for. Both mean "no name", which is
+   * honest: the node keeps its own title.
+   */
+  piPathFor?: (sessionId: string) => string | undefined
 }
 
 /** The gemini leg. Its transcript carries a model-generated name that it rewrites as the
@@ -60,6 +72,18 @@ async function readGeminiSessionName(
   if (!p) return null
   const tail = await readSmallTail(p, TITLE_TAIL_BYTES)
   return tail ? pickGeminiTitle(tail) : null
+}
+
+/** The pi leg. Read-only — pi's `/name` sets the session's OWN display name, but there is no
+ *  command that adopts a node's title back into pi, so this never round-trips either. */
+async function readPiSessionName(
+  sessionId: string,
+  pathFor?: (id: string) => string | undefined
+): Promise<string | null> {
+  const p = pathFor?.(sessionId)
+  if (!p) return null
+  const tail = await readSmallTail(p, TITLE_TAIL_BYTES)
+  return tail ? pickPiTitle(tail) : null
 }
 
 /**
@@ -83,6 +107,7 @@ export function readAgentSessionName(
   if (!sessionId) return Promise.resolve(null)
   if (agentId === 'grok') return readGrokSessionName(sessionId, deps?.grokRemoteSummary)
   if (agentId === 'gemini') return readGeminiSessionName(sessionId, deps?.geminiPathFor)
+  if (agentId === 'pi') return readPiSessionName(sessionId, deps?.piPathFor)
   // Never falls through to claude's reader: that one SCANS ~/.claude/projects on a cache miss, so
   // an unrouted codex node would pay that scan once a minute for a guaranteed null.
   if (agentId === 'codex') return readCodexSessionName(sessionId)

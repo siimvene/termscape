@@ -284,7 +284,8 @@ export function isSafeLocalTranscriptPath(
   codexHomeDir?: string,
   grokHomeDir?: string,
   linkedDirs?: readonly string[],
-  peerUserDataPath?: string
+  peerUserDataPath?: string,
+  piAgentDir?: string
 ): boolean {
   const legacyRoot = path.join(homeDir, '.claude', 'projects')
   if (abs === legacyRoot || abs.startsWith(legacyRoot + path.sep)) return true
@@ -305,6 +306,11 @@ export function isSafeLocalTranscriptPath(
   // means the context link silently never resolves, never a widened read.
   const grokRoot = path.join(grokHomeDir || path.join(homeDir, '.grok'), 'sessions')
   if (abs === grokRoot || abs.startsWith(grokRoot + path.sep)) return true
+  // pi: `<agentDir>/sessions/<encoded cwd>/<timestamp>_<id>.jsonl` (measured, 0.84.1). `sessions`
+  // and not the agent dir, because the same tree holds `auth.json` — pi's OAuth tokens. The shells
+  // resolve `$PI_CODING_AGENT_DIR` (`piAgentDir()`), same parameter discipline as codex and grok.
+  const piRoot = path.join(piAgentDir || path.join(homeDir, '.pi', 'agent'), 'sessions')
+  if (abs === piRoot || abs.startsWith(piRoot + path.sep)) return true
   // Linked accounts: a config dir the USER already drives (`CLAUDE_CONFIG_DIR=~/.claude-2 claude`)
   // that they adopted in Settings. `<dir>/projects` and below only — the `+ path.sep` is what keeps
   // a sibling-prefix root (`…/projects-evil`) out, exactly as for the roots above. The dirs come
@@ -320,15 +326,19 @@ export function isSafeLocalTranscriptPath(
   // because a session `claudeConfigDirForSpawn` resolved into the peer's account dir writes its
   // transcript there and POSTs that path to THIS instance's hook server. The peer root gets the
   // identical `<id>/projects` shape, nothing wider (the same tree holds `.credentials.json`).
-  const roots = [userDataPath, ...(peerUserDataPath ? [peerUserDataPath] : [])].map((ud) =>
-    path.join(ud, 'claude-accounts')
-  )
-  for (const accountsRoot of roots) {
+  const userDatas = [userDataPath, ...(peerUserDataPath ? [peerUserDataPath] : [])]
+  // Managed pi accounts mirror the claude shape one level over: `<userData>/pi-accounts/<id>` is the
+  // account's PI_CODING_AGENT_DIR, and only its `sessions/` is readable (`auth.json` sits beside it).
+  const accountTrees: ReadonlyArray<readonly [string, string]> = [
+    ...userDatas.map((ud) => [path.join(ud, 'claude-accounts'), 'projects'] as const),
+    ...userDatas.map((ud) => [path.join(ud, 'pi-accounts'), 'sessions'] as const)
+  ]
+  for (const [accountsRoot, leaf] of accountTrees) {
     if (abs !== accountsRoot && !abs.startsWith(accountsRoot + path.sep)) continue
-    // Relative to the accounts root: expect `<accountId>/projects[/…]`. Because `abs` is normalized
+    // Relative to the accounts root: expect `<accountId>/<leaf>[/…]`. Because `abs` is normalized
     // and confirmed under `accountsRoot`, `path.relative` yields no leading `..`.
     const segs = path.relative(accountsRoot, abs).split(path.sep)
-    return segs.length >= 2 && ACCOUNT_ID_RE.test(segs[0]) && segs[1] === 'projects'
+    return segs.length >= 2 && ACCOUNT_ID_RE.test(segs[0]) && segs[1] === leaf
   }
   return false
 }
@@ -403,7 +413,15 @@ export const AUTH_ENV_STRIP = [
 
 /** Where each supported agent keeps its config, credentials and (for opencode) its plugin code.
  *  One list because they are one hazard — see `isReservedSpawnEnvKey`'s clause on them. */
-const AGENT_CONFIG_DIR_ENV: readonly string[] = ['CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'XDG_CONFIG_HOME']
+const AGENT_CONFIG_DIR_ENV: readonly string[] = [
+  'CLAUDE_CONFIG_DIR',
+  'CODEX_HOME',
+  'XDG_CONFIG_HOME',
+  'PI_CODING_AGENT_DIR',
+  // pi's session store alone (0.84.1 `ENV_SESSION_DIR`): not code, but a repo-chosen value would put
+  // every transcript (tool output, pasted secrets) inside the checkout, or resume seeded sessions.
+  'PI_CODING_AGENT_SESSION_DIR'
+]
 
 /**
  * Names that make a program EXECUTE something it was never asked to, without changing which program
@@ -453,8 +471,8 @@ const INJECTION_ENV: readonly string[] = [
  *  - `AUTH_ENV_STRIP` is DELETED from the env when a managed account is selected, precisely so an
  *    inherited API key cannot shadow that account's OAuth login. A project re-adding one silently
  *    routes the session's traffic to a third party.
- *  - AGENT CONFIG DIRS — one clause, three names, because every supported agent has one and a repo
- *    naming any of them redirects that agent's credentials or code loading into itself. All three
+ *  - AGENT CONFIG DIRS — one clause, four names, because every supported agent has one and a repo
+ *    naming any of them redirects that agent's credentials or code loading into itself. All four
  *    read like build directories (`./.tooling`) in a consent table:
  *      · `CLAUDE_CONFIG_DIR` — where claude reads and WRITES credentials (the account path sets it).
  *      · `CODEX_HOME` — the same for codex (`auth.json` lives there; this app emits it in
@@ -464,6 +482,14 @@ const INJECTION_ENV: readonly string[] = [
  *        `$XDG_CONFIG_HOME/opencode` (`agents/hooks/opencode.ts`), which is where THIS app installs
  *        its managed plugin. A repo pointing that at itself is arbitrary JavaScript executed inside
  *        the agent process — the worst of the three, and the least legible as an env pair.
+ *      · `PI_CODING_AGENT_DIR` — pi's whole agent dir, the same hazard twice over. MEASURED on pi
+ *        0.84.1 (`dist/core/package-manager.js` `addAutoDiscoveredResources`): only the PROJECT
+ *        scope `<cwd>/.pi/extensions` is gated on `isProjectTrusted()`; the USER scope
+ *        `<agentDir>/extensions/*.js` is loaded unconditionally, so a repo pointing the dir at
+ *        itself runs its own JavaScript inside the agent process with no trust prompt. And
+ *        `auth.json` (pi's OAuth tokens) lives in that dir, so a `/login` in such a pane writes
+ *        the credential into the checkout. It is also the managed-account env (`PI_ACCOUNT_ENV`,
+ *        set by the spawn AFTER this filter would have merged a project value over it).
  *  - `MODEL_GATEWAY_ENV_KEYS` — the provider ROUTING vars (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`,
  *    `COPILOT_PROVIDER_BASE_URL`, and the keys that travel with them). A base URL redirects the
  *    CLI's traffic — carrying the USER's own credentials — to an attacker-chosen endpoint, and

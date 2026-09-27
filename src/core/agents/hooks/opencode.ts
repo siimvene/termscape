@@ -8,6 +8,7 @@ import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import { parseEndpointEnv } from '../hook-endpoint-parse'
+import { buildPluginHookClient } from './plugin-hook-client'
 
 export const PLUGIN_MARKER = '// nodeterm managed plugin — do not edit (reinstalled at app launch)'
 
@@ -62,68 +63,7 @@ const parseEndpointEnv = ${parseEndpointEnv.toString()}
 export const NodetermStatus = async () => {
   const nodeId = process.env.NODETERM_NODE_ID
   if (!nodeId) return {}
-  const live = () => {
-    const conf = {
-      port: process.env.NODETERM_HOOK_PORT,
-      sock: process.env.NODETERM_HOOK_SOCK,
-      token: process.env.NODETERM_HOOK_TOKEN,
-      version: process.env.NODETERM_HOOK_VERSION,
-      tokenDir: process.env.NODETERM_NODE_TOKEN_DIR
-    }
-    try {
-      const file = process.env.NODETERM_HOOK_ENDPOINT
-      if (file) {
-        const env = parseEndpointEnv(fs.readFileSync(file, 'utf8'))
-        if ('NODETERM_HOOK_PORT' in env) conf.port = env.NODETERM_HOOK_PORT
-        if ('NODETERM_HOOK_SOCK' in env) conf.sock = env.NODETERM_HOOK_SOCK
-        if ('NODETERM_HOOK_TOKEN' in env) conf.token = env.NODETERM_HOOK_TOKEN
-        if ('NODETERM_HOOK_VERSION' in env) conf.version = env.NODETERM_HOOK_VERSION
-        // The v2 endpoint line: where this instance keeps per-node tokens.
-        if ('NODETERM_NODE_TOKEN_DIR' in env) conf.tokenDir = env.NODETERM_NODE_TOKEN_DIR
-      }
-    } catch {}
-    return conf
-  }
-  // The PER-NODE capability, read fresh per POST from <dir>/<nodeId> — a lookup by name, never a
-  // scan, so this session can only ever present its own. Missing (pre-v2 endpoint, a node whose
-  // token was never materialised) is an ordinary state: the header goes out EMPTY and the server
-  // reads that as legacy, exactly like every client that predates this.
-  const nodeToken = (dir) => {
-    try {
-      if (!dir) return ''
-      return fs.readFileSync(dir + '/' + nodeId, 'utf8').split('\\n')[0].trim()
-    } catch {
-      return ''
-    }
-  }
-  const post = (event, extra) => {
-    try {
-      const { port, sock, token, version, tokenDir } = live()
-      if (!token || (!sock && !port)) return
-      const payload = JSON.stringify({ event, ...extra })
-      const headers = {
-        'content-type': 'application/x-www-form-urlencoded',
-        'x-nodeterm-hook-token': token,
-        'x-nodeterm-node-token': nodeToken(tokenDir)
-      }
-      const body =
-        'nodeId=' + encodeURIComponent(nodeId) +
-        '&version=' + encodeURIComponent(version || '') +
-        '&payload=' + encodeURIComponent(payload)
-      if (sock && typeof Bun !== 'undefined') {
-        fetch('http://localhost/hook/opencode', { method: 'POST', unix: sock, headers, body }).catch(() => {})
-      } else if (sock) {
-        const req = http.request(
-          { socketPath: sock, path: '/hook/opencode', method: 'POST', headers },
-          (res) => res.resume()
-        )
-        req.on('error', () => {})
-        req.end(body)
-      } else {
-        fetch('http://127.0.0.1:' + port + '/hook/opencode', { method: 'POST', headers, body }).catch(() => {})
-      }
-    } catch {}
-  }
+${buildPluginHookClient('/hook/opencode')}
   const seenUserMsgs = new Set()
   return {
     event: async (input) => {

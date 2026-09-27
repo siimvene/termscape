@@ -191,6 +191,8 @@ import { createWorkflowAgentsTail } from '../core/workflow-agents-tail'
 import { createContextTail, type TaskNotification } from '../core/context-tail'
 import { registerContextEnsureIpc } from '../core/context-ensure'
 import { grokContextParse, GROK_SIGNALS_FILE } from '../core/grok-signals'
+import { createPiSessionTracker } from '../core/pi-session'
+import { piAgentDir } from '../core/agents/hooks/pi'
 import { GROK_CHAT_HISTORY_FILE } from '../core/agents/grok-paths'
 import { createGrokSubagentFormatter } from '../core/grok-subagent-format'
 import { geminiContextParse } from '../core/gemini-session'
@@ -230,7 +232,7 @@ import { posixQuote, sshHostKey, type SshConnection } from '../shared/ssh'
 import { buildHandoff, type HandoffRemote } from './handoff'
 import { initContextLink, onLinkedRead, setNodeTranscript } from '../core/context-link'
 import { transcriptPathOf } from '../core/context-link-core'
-import { initCanvasControl, installCanvasSkillInto } from './canvas-control'
+import { initCanvasControl, installCanvasSkillInto, installPiCanvasSkillInto } from './canvas-control'
 import { DRY_RUN_VERBS, dryRunRequested, dryRunRefusal } from '../shared/control-verbs'
 import { CONTROL_REQUEST_TIMEOUT_MS } from '../shared/control-confirm'
 import { initTranscriptIndex, searchTranscripts } from '../core/transcript-index'
@@ -249,6 +251,7 @@ import { SpeechService } from '../core/speech/speech-service'
 import { registerSpeechIpc } from '../core/speech/register-ipc'
 import { initClaudeAccounts } from './claude-accounts'
 import { initCodexAccounts } from './codex-accounts'
+import { initPiAccounts } from './pi-accounts'
 import { claudeCliCaps, registerClaudeCliIpc, type ClaudeCliCaps } from '../core/claude-cli'
 import { registerGrokCliIpc } from '../core/grok-cli'
 import { refreshCodexIdentityCaps, registerCodexIdentityIpc } from '../core/codex-identity-caps'
@@ -273,6 +276,8 @@ import {
   remoteAccountConfigDirAbs
 } from '../core/claude-accounts-core'
 import { installHooksIntoLocalAccounts } from '../core/claude-accounts-service'
+import { installPiExtensionIntoLocalAccounts } from '../core/pi-accounts-service'
+import { installPiLinkSkillInto } from '../core/context-link'
 import { createPairingService } from './pairing-service'
 import {
   initRemoteHost,
@@ -1476,8 +1481,11 @@ app.whenReady().then(async () => {
   // been seen for and for a remote (SSH) gemini node, which the tails deliberately never track —
   // all of which mean "no name", never a throw.
   let geminiTranscriptPathFor: ((sessionId: string) => string | undefined) | undefined
+  // Same reason, same shape, for pi: assigned once `piSessions` exists (near its creation below).
+  let piTranscriptPathFor: ((sessionId: string) => string | undefined) | undefined
   const agentSessionNameDeps: AgentSessionNameDeps = {
-    geminiPathFor: (sessionId) => geminiTranscriptPathFor?.(sessionId)
+    geminiPathFor: (sessionId) => geminiTranscriptPathFor?.(sessionId),
+    piPathFor: (sessionId) => piTranscriptPathFor?.(sessionId)
   }
 
   // The reader is selected by the NODE's agent (core/agent-session-name.ts — the one copy of that
@@ -2389,6 +2397,17 @@ app.whenReady().then(async () => {
     parse: grokContextParse,
     wholeFile: true
   })
+  // pi needs no tail: its hook payload STATES the context usage (core/pi-session.ts). The tracker
+  // also holds the jailed transcript path its readers resolve through. `safeTranscriptPath` is
+  // declared further down; the arrow defers the lookup to the first hook event, long after init.
+  // Invariant 11 — the Server Edition builds the same tracker in src/server/agent-status.ts.
+  const piSessions = createPiSessionTracker({
+    send: pushContextUpdate,
+    safePath: (p) => safeTranscriptPath(p)
+  })
+  // Hand the pi session-name reader (and context-link's pi locator) its path authority, exactly
+  // like `geminiTranscriptPathFor` just above.
+  piTranscriptPathFor = (sessionId) => piSessions.pathFor(sessionId)
   // Remote (SSH-project) counterparts: a node whose pty runs on a remote host has its Claude
   // transcript on that host, so its meter / subagent transcript / search must read over the
   // project's ControlMaster. One RemoteFile bound to the SSH-project manager's own ssh runner
@@ -2729,6 +2748,18 @@ app.whenReady().then(async () => {
   // Edition's boot (src/core/claude-accounts-service.ts); each shell supplies its own canvas-skill
   // installer when that control surface is enabled.
   installHooksIntoLocalAccounts(settingsStore.get().claudeAccounts ?? [], installCanvasSkillInto)
+  // A managed pi account is its own agent dir, and pi reads skills per agent dir: each account gets
+  // BOTH skills the system dir gets (canvas control + get-linked-context), from the same builders.
+  const installPiAccountSkills = (agentDir: string): void => {
+    installPiCanvasSkillInto(agentDir)
+    installPiLinkSkillInto(agentDir)
+  }
+  // Managed pi accounts are each their own PI_CODING_AGENT_DIR, and pi loads extensions per agent
+  // dir — so the status extension has to reach every account dir too (the system ~/.pi/agent is
+  // installManagedAgentHooks'). Same loop the Server Edition's boot runs. The desktop also hands
+  // each account dir the canvas-control skill (pi reads skills per agent dir), as it does for
+  // managed Claude accounts above.
+  installPiExtensionIntoLocalAccounts(settingsStore.get().piAccounts ?? [], installPiAccountSkills)
   // Fan a normalized agent event to BOTH consumers: the renderer's agentStatus store (canvas badge)
   // and the mobile-facing mirror. Named so the deterministic-approval answer handler below can reuse
   // it for the optimistic flip.
@@ -2957,7 +2988,9 @@ app.whenReady().then(async () => {
       app.getPath('userData'),
       codexHome(),
       grokHomeDir(),
-      linkedClaudeConfigDirs()
+      linkedClaudeConfigDirs(),
+      undefined, // no co-located peer on the desktop
+      piAgentDir()
     )
       ? abs
       : undefined
@@ -3086,6 +3119,18 @@ app.whenReady().then(async () => {
     // meter needs no path DERIVATION the way grok's does — only its own token reader. The path is
     // jailed by the same `safeTranscriptPath` claude uses (widened to those two agents' transcript
     // roots), because a forged POST could otherwise aim a file read at an arbitrary local path.
+    // pi: the meter's numbers ride the payload itself (nodeterm's own extension forwards
+    // `ctx.getContextUsage()`), so they are machine-agnostic and a REMOTE node gets its meter too.
+    // Only the transcript PATH is local-disk knowledge, so it is tracked for local nodes alone — a
+    // host path clearing the local jail would point the readers at a same-named file on THIS
+    // machine. The association is set BEFORE the tracker pushes, so the very first meter update
+    // already maps back to its node for the mirror (pushContextUpdate reads nodeContextSession).
+    if (agentId === 'pi') {
+      const sid = typeof payload.sessionId === 'string' && payload.sessionId ? payload.sessionId : undefined
+      if (nodeId && sid) nodeContextSession.set(nodeId, sid)
+      piSessions.observe(payload, { trackPath: !(nodeId && ptyManager.sshRemoteForNode(nodeId)) })
+      return
+    }
     if (agentId === 'gemini' || agentId === 'codex') {
       const p = payload as {
         session_id?: string
@@ -3279,6 +3324,7 @@ app.whenReady().then(async () => {
       geminiContextTail.untrack(sessionId)
       codexContextTail.untrack(sessionId)
       grokContextTail.untrack(sessionId)
+      piSessions.untrack(sessionId)
       remoteContextTail.untrack(sessionId)
       remoteTranscriptBySession.delete(sessionId)
       locatedTranscriptSessions.delete(sessionId)
@@ -3745,7 +3791,11 @@ app.whenReady().then(async () => {
       } catch {
         return null
       }
-    }
+    },
+    // The tracker's hook-fed path, so a linked pi node's read skips the directory walk
+    // `locatePi` would otherwise do — same shortcut gemini's leg does not need (its locator is
+    // already a plain scan with no tracker).
+    piPathFor: (sessionId) => piSessions.pathFor(sessionId)
   }, {
     // The desktop app is the surface Context Link's discovery was designed for, so it installs
     // the skill + instruction blocks. Stated rather than defaulted: the flag is required so no
@@ -3835,6 +3885,9 @@ app.whenReady().then(async () => {
   // Codex node must see its migrated (SUN_LEN-safe) home on its very first spawn. Same lazy SSH
   // getter for the local→SSH transfer source leg.
   initCodexAccounts(settingsStore, () => sshProjectManager)
+  // Managed pi accounts (local-only in v1): core's handler table bound through ipcMain, never the
+  // peer-reachable platform table (INVARIANT 4c) — see src/main/pi-accounts.ts.
+  initPiAccounts(settingsStore, installPiAccountSkills)
   // The jailed core bridge both phone hosts serve: typed git verbs against the real GitService
   // (cwd-jailed to the shared canvas roots inside the handlers) and phone node registration
   // through the workspace store (written as an outside edit, so the watcher broadcasts it and
@@ -3860,7 +3913,8 @@ app.whenReady().then(async () => {
         // here would be the second copy that drifts.
         agentAccountColor(node.agentId, node.accountId, {
           claude: settingsStore.get().claudeAccounts ?? [],
-          codex: settingsStore.get().codexAccounts ?? []
+          codex: settingsStore.get().codexAccounts ?? [],
+          pi: settingsStore.get().piAccounts ?? []
         })
       ),
     // The phone's Board sheet. Two verbs, both landing in the store's own read-modify-write (which

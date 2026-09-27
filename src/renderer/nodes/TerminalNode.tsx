@@ -187,7 +187,13 @@ import { useWorktrees } from '../state/worktrees'
 import { isRemoteSessionNode } from '@shared/worktree'
 import { useSession, useActiveSessionPresence } from '../session/session'
 import { isBrowserRuntime } from '../bridge/runtime'
-import { agentLaunchOverride, COLLAPSED_HEIGHT, isCodexAccountLoginNode, type CanvasNode } from '../state/workspace'
+import {
+  agentLaunchOverride,
+  COLLAPSED_HEIGHT,
+  isCodexAccountLoginNode,
+  isPiAccountLoginNode,
+  type CanvasNode
+} from '../state/workspace'
 import { NodeColorSwatches } from '../components/NodeColorSwatches'
 import { AccountChip, useAccountChip } from '../components/AccountChip'
 import { effectiveAccountId } from '../lib/accountChip'
@@ -1614,7 +1620,7 @@ export function TerminalNode({
    * stays creation-time (`transport.create` keeps passing `data.accountId`).
    */
   const observedAccount = status?.account
-  const accountChip = useAccountChip(data.accountId, observedAccount)
+  const accountChip = useAccountChip(data.accountId, observedAccount, agentId)
   const accountForReads = effectiveAccountId(data.accountId, observedAccount, claudeAccounts)
   /** Mirror for the session-name poll, whose effect must not restart when a late hook event
    *  finally reveals the account (see its comment). */
@@ -3079,6 +3085,11 @@ export function TerminalNode({
           // fresh login's id may not have reached yet). An unresolvable managed home then REFUSES
           // instead of writing the user's system ~/.codex. See isCodexAccountLoginNode.
           codexLogin: isCodexAccountLoginNode(data),
+          // EXPLICIT pi login intent, the pi twin of `codexLogin`: forces the spawn to scope to
+          // the managed PI_CODING_AGENT_DIR fail-closed rather than re-deriving scope from the
+          // eventually-consistent pi account list. An unresolvable managed dir, or an SSH project,
+          // REFUSES instead of writing the system ~/.pi/agent. See isPiAccountLoginNode.
+          piLogin: isPiAccountLoginNode(data),
           sshRemote,
           // Belt AND braces: the guard above cannot see a `ssh` executable that has gone missing,
           // which is core's other route into the local branch.
@@ -3511,6 +3522,15 @@ export function TerminalNode({
         // forget it.
         if (data.initialCommand) {
           writeWhenShellReady(data.initialCommand)
+          // The pi login node runs bare `pi` — unlike `claude /login` / `codex login`, pi has no
+          // CLI login flag, so getting the user into a running session is only half the job. Print
+          // a display-only hint (never sent to the pty, so it cannot be mistaken for a typed
+          // command) telling them what to do once it starts.
+          if (isPiAccountLoginNode(data) && !disposed) {
+            term.write(
+              '\r\n\x1b[90m[once pi starts, type /login and pick a provider]\x1b[0m\r\n'
+            )
+          }
           updateNodeData(id, { initialCommand: undefined })
         } else if (coldStart && canColdRestore) {
           // Cold restart of an agent node: the live agent is gone, so re-launch it. Resume the

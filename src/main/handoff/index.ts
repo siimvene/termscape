@@ -17,8 +17,9 @@ import { renderClaudeTranscript } from './render-claude'
 import { renderCodexTranscript } from './render-codex'
 import { renderGeminiTranscript } from './render-gemini'
 import { renderGrokTranscript } from './render-grok'
+import { renderPiTranscript } from './render-pi'
 import { budgetHandoff } from './budget'
-import { locateClaude, locateCodex, locateGemini, locateGrok } from '../../core/handoff/locate'
+import { locateClaude, locateCodex, locateGemini, locateGrok, locatePi } from '../../core/handoff/locate'
 
 export type HandoffResult = { filePath: string } | { error: string }
 
@@ -29,14 +30,16 @@ const RENDERERS: Record<string, Renderer> = {
   claude: renderClaudeTranscript,
   codex: renderCodexTranscript,
   gemini: renderGeminiTranscript,
-  grok: renderGrokTranscript
+  grok: renderGrokTranscript,
+  pi: renderPiTranscript
 }
 
 const LOCATORS: Record<string, Locator> = {
   claude: locateClaude,
   codex: locateCodex,
   gemini: locateGemini,
-  grok: locateGrok
+  grok: locateGrok,
+  pi: locatePi
 }
 
 /** Filesystem-safe handoff filename for a node + ISO-ish timestamp. Node ids are

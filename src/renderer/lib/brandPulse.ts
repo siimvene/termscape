@@ -11,20 +11,25 @@ import claudeIcon from '../assets/claude.svg'
 import codexIcon from '../assets/codex-color.svg'
 import geminiIcon from '../assets/gemini-color.svg'
 import opencodeIcon from '../assets/opencode.svg'
+import piIcon from '../assets/pi.svg'
 
 // Brand logo per builtin agent; custom/unknown agents have none (callers fall back to the terminal
 // glyph, or to the plain pulsing dot).
 //
 // These asset marks carry their own fills and are loaded as an `<img src>` /
 // `background-image` (Vite hands us a URL). An SVG loaded that way is an isolated document —
-// `currentColor` has nothing to inherit there, which is why none of these assets uses it. Grok is
-// the exception: its mark is monochrome, so it is inlined from lib/grokMark.ts instead, and is
-// therefore NOT in this map.
+// `currentColor` has nothing to inherit there, which is why none of these assets uses it. Grok and
+// copilot are the exception: their marks are monochrome, so they are inlined from lib/grokMark.ts
+// / lib/copilotMark.ts instead, and are therefore NOT in this map. Pi's mark is an original glyph
+// (a stylized lowercase pi in a rounded square, its own brand color `#d4009a`), not a third-party
+// logo, drawn as an asset like gemini/opencode/codex because its rounded-square fill is part of the
+// mark itself, not something `currentColor` should repaint per theme.
 export const AGENT_LOGO: Partial<Record<string, string>> = {
   claude: claudeIcon,
   codex: codexIcon,
   gemini: geminiIcon,
-  opencode: opencodeIcon
+  opencode: opencodeIcon,
+  pi: piIcon
 }
 
 /**

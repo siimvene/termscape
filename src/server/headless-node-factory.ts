@@ -18,12 +18,14 @@ import {
   canControlCanvas,
   gatePermissionMode,
   hasHooks,
+  inheritableAccountId,
   resolvePermissionMode,
   supportsSessionIdFlag,
   type AgentId,
   type BuiltinAgentId
 } from '../shared/agents/config'
 import { assembleLaunchCommand } from '../shared/agents/launch'
+import { boundAccountId } from '../shared/agents/account-binding'
 import type { AgentState, NormalizedAgentEvent } from '../shared/agents/normalize'
 import { oneLine } from '../shared/one-line'
 import type {
@@ -130,7 +132,7 @@ const GROUP_PAD = 28
 const GROUP_HEADER = 34
 const AFTER_RETRY_MS = 500
 const AFTER_RETRY_LIMIT = 5
-const SERVER_AGENTS: ReadonlySet<string> = new Set(['claude', 'codex', 'gemini'])
+const SERVER_AGENTS: ReadonlySet<string> = new Set(['claude', 'codex', 'gemini', 'pi'])
 
 function token(): string {
   return randomBytes(4).toString('hex')
@@ -1090,7 +1092,7 @@ export class HeadlessNodeFactory {
       if (verb === 'open-agent' && (!agentId || !SERVER_AGENTS.has(agentId))) {
         return {
           ok: false,
-          error: 'open-agent: Server Edition v1 supports --agent claude|codex|gemini'
+          error: 'open-agent: Server Edition v1 supports --agent claude|codex|gemini|pi'
         }
       }
       // The Server shell owns the same shared Codex app-server spine as desktop. Ask its boot-time
@@ -1168,6 +1170,25 @@ export class HeadlessNodeFactory {
               ...(awaitWorking.length ? { awaitWorking: [...awaitWorking] } : {})
             }
           : undefined
+        // The opener's managed account, carried over only through the SHARED rules: the same
+        // provider (`inheritableAccountId` — the account lists share one id alphabet, so a Claude
+        // conductor's id must never reach a codex or pi node, where it names no account) and an
+        // agent that binds accounts at all (`boundAccountId` / ACCOUNT_CAPABLE_AGENT_IDS). This
+        // used to hard-code `claude || codex` and forward the id unchecked, which is exactly the
+        // cross-provider leak the desktop's `accountForSpawn` closed.
+        const inheritedAccountId =
+          verb === 'open-agent' && agentId
+            ? boundAccountId(
+                inheritableAccountId(
+                  agentId,
+                  source.node.accountId,
+                  (aid) => settings.claudeAccounts.some((a) => a.id === aid),
+                  (aid) => settings.codexAccounts.some((a) => a.id === aid),
+                  (aid) => (settings.piAccounts ?? []).some((a) => a.id === aid)
+                ),
+                agentId
+              )
+            : undefined
         const node: CanvasNodeState = {
           id,
           kind: 'terminal',
@@ -1182,10 +1203,7 @@ export class HeadlessNodeFactory {
           ...(verb === 'open-agent' ? { agentId: agentId as AgentId } : {}),
           ...(args.model && verb === 'open-agent' ? { agentModel: args.model } : {}),
           ...(mintedSessionId ? { agentSessionId: mintedSessionId } : {}),
-          ...(source.node.accountId && verb === 'open-agent' &&
-          (agentId === 'claude' || agentId === 'codex')
-            ? { accountId: source.node.accountId }
-            : {}),
+          ...(inheritedAccountId ? { accountId: inheritedAccountId } : {}),
           ...(pendingLaunch ? { pendingLaunch } : {})
         }
         created.push(node)

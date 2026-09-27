@@ -270,6 +270,10 @@ describe('buildGroupedAddMenu', () => {
   const agents = [
     agentWithAccounts('claude', ['System account', 'work@example.com']),
     agent('codex', 'New Codex'),
+    // pi joined ACCOUNT_CAPABLE_AGENT_IDS alongside claude/codex (managed PI_CODING_AGENT_DIR
+    // accounts), so its row is pinned at the top level exactly like theirs — see the two tests
+    // below for the account-picker shape and the stable-pin-with-no-accounts shape.
+    agent('pi', 'New Pi'),
     agent('gemini', 'New Gemini'),
     agent('grok', 'New Grok'),
     agent('custom:1', 'New My Agent')
@@ -282,6 +286,7 @@ describe('buildGroupedAddMenu', () => {
       'New remote…',
       'New claude',
       'New Codex',
+      'New Pi',
       AGENT_GROUP_LABEL,
       ADD_GROUP_LABEL.view,
       ADD_GROUP_LABEL.files,
@@ -347,6 +352,21 @@ describe('buildGroupedAddMenu', () => {
     expect(codex).toBeDefined()
     expect(codex?.type).toBe('submenu')
     expect(reachableLabels(items)).toContain('ci@example.com')
+  })
+
+  // The pi twin of the test above: pi joined ACCOUNT_CAPABLE_AGENT_IDS with the same shape as
+  // Claude and Codex, so a pi row that owns managed accounts must grow the same top-level picker.
+  it('keeps a pi account-picker row at the first level too', () => {
+    const withPiAccounts = [
+      agentWithAccounts('claude', ['System account']),
+      agentWithAccounts('pi', ['System account', 'openai-codex']),
+      agent('gemini', 'New Gemini')
+    ]
+    const items = buildGroupedAddMenu(CONTENT_ADD_ITEMS, handlers(), ctx, withPiAccounts)
+    const pi = items.find((i) => 'label' in i && i.label === 'New pi')
+    expect(pi).toBeDefined()
+    expect(pi?.type).toBe('submenu')
+    expect(reachableLabels(items)).toContain('openai-codex')
   })
 
   // The half of `isPinnedAgentEntry` that has NO live example yet, and is therefore the half a

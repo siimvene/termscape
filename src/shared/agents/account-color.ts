@@ -1,5 +1,6 @@
 import type { ClaudeAccount } from '../types'
 import type { CodexAccount } from '../codex-account'
+import type { PiAccount } from '../pi-account'
 
 /**
  * The minimum an account row must be to answer a color question. Structural on purpose: the two
@@ -31,10 +32,12 @@ export function accountNodeColor(
   return color.trim() || undefined
 }
 
-/** The two managed-account lists, as they sit in settings. */
+/** The managed-account lists, as they sit in settings. `pi` is optional so a caller that predates
+ *  managed pi accounts still compiles — and, passing none, simply gets no pi account color. */
 export interface ManagedAccountLists {
   claude: readonly ClaudeAccount[]
   codex: readonly CodexAccount[]
+  pi?: readonly PiAccount[]
 }
 
 /**
@@ -55,5 +58,6 @@ export function agentAccountColor(
 ): string | undefined {
   if (agentId === 'claude') return accountNodeColor(accountId, accounts.claude)
   if (agentId === 'codex') return accountNodeColor(accountId, accounts.codex)
+  if (agentId === 'pi') return accountNodeColor(accountId, accounts.pi ?? [])
   return undefined
 }

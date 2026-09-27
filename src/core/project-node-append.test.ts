@@ -134,6 +134,37 @@ describe('appendProjectNode', () => {
     expect(out.nodes[0].color).toBe('#0a84ff')
   })
 
+  // Pi joined ACCOUNT_CAPABLE_AGENT_IDS with its PI_CODING_AGENT_DIR accounts: a phone-registered
+  // pi node binds exactly like a Codex one, through the same shared rule.
+  it('binds a managed account to a Pi registration, color and all', () => {
+    const out = JSON.parse(
+      appendProjectNode(
+        baseFile([]),
+        { id: 'term-c-1', agentId: 'pi', accountId: 'acct1' },
+        NOW,
+        '#0a84ff'
+      )!
+    )
+    expect(out.nodes[0].accountId).toBe('acct1')
+    expect(out.nodes[0].color).toBe('#0a84ff')
+  })
+
+  // Managed pi accounts are local-only: a node that inherits a remote-tmux donor runs on the HOST,
+  // where the remote spawn skips the pi scope. Stamping the account there would paint it while the
+  // host's system pi runs (consort, 2026-09-26). Claude keeps its binding: it has a remote leg.
+  it('does NOT bind a managed Pi account to a node that will run on an SSH host', () => {
+    const pi = JSON.parse(
+      appendProjectNode(baseFile([sibling]), { id: 'term-c-1', agentId: 'pi', accountId: 'acct1' }, NOW, '#0a84ff')!
+    ).nodes[1]
+    expect(pi.sshRemoteTmux).toBe(true)
+    expect(pi.accountId).toBeUndefined()
+    expect(pi.color).not.toBe('#0a84ff')
+    const claude = JSON.parse(
+      appendProjectNode(baseFile([sibling]), { id: 'term-c-2', agentId: 'claude', accountId: 'acct1' }, NOW)!
+    ).nodes[1]
+    expect(claude.accountId).toBe('acct1')
+  })
+
   it('never binds one to a custom agent either, even one based on claude', () => {
     const out = JSON.parse(
       appendProjectNode(

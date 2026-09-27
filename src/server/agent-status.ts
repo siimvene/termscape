@@ -20,6 +20,8 @@ import { createContextTail, type ContextTail, type TaskNotification } from '../c
 import { geminiContextParse } from '../core/gemini-session'
 import { codexContextParse } from '../core/codex-session'
 import { grokContextParse, GROK_SIGNALS_FILE } from '../core/grok-signals'
+import { createPiSessionTracker } from '../core/pi-session'
+import { piAgentDir } from '../core/agents/hooks/pi'
 import { GROK_CHAT_HISTORY_FILE } from '../core/agents/grok-paths'
 import { createGrokSubagentFormatter } from '../core/grok-subagent-format'
 import { createCodexSubagentFormatter } from '../core/codex-subagent-format'
@@ -66,11 +68,18 @@ export interface WireAgentStatusOptions {
  * Returns its context tails so the boot step can give the readers the same hook-fed path authority
  * the desktop gives them: claude's for the transcript read channels (`registerTranscriptIpc`), and
  * gemini's for the session-name router, whose gemini leg reads the transcript at that path.
+ * `piSessions` joins them for the same reason — its `pathFor` is pi's session-name (and
+ * context-link) path authority, exactly like `geminiContextTail.pathFor`.
  */
 export function wireAgentStatus(
   platform: ServerPlatform,
   opts: WireAgentStatusOptions = {}
-): { contextTail: ContextTail; geminiContextTail: ContextTail; codexContextTail: ContextTail } {
+): {
+  contextTail: ContextTail
+  geminiContextTail: ContextTail
+  codexContextTail: ContextTail
+  piSessions: ReturnType<typeof createPiSessionTracker>
+} {
   const hooks = opts.hooks ?? hookServer
   // nodeId → the agent session id of whichever hook-capable CLI runs in that node (claude's, and
   // since the grok branch below, grok's)
@@ -182,6 +191,12 @@ export function wireAgentStatus(
     parse: grokContextParse,
     wholeFile: true
   })
+  // pi needs no tail: its hook payload STATES the context usage (core/pi-session.ts). Same tracker
+  // the desktop builds in src/main/index.ts (invariant 11).
+  const piSessions = createPiSessionTracker({
+    send: pushContextUpdate,
+    safePath: (p) => safeTranscriptPath(p)
+  })
 
   hooks.setListener((e) => {
     // Record FIRST: recordAgentEvent computes the stash-priority classification and returns the
@@ -220,7 +235,8 @@ export function wireAgentStatus(
       codexHome(),
       grokHomeDir(),
       linkedClaudeConfigDirs(),
-      platform.peerUserDataDir
+      platform.peerUserDataDir,
+      piAgentDir()
     )
       ? abs
       : undefined
@@ -342,6 +358,16 @@ export function wireAgentStatus(
     // The desktop's copy of this branch additionally skips REMOTE (SSH) nodes, whose transcript is
     // on the host; the server has no SSH-project manager (see the module header), so every node it
     // serves is local and there is nothing to skip.
+    //
+    // pi: the meter's numbers ride the payload (core/pi-session.ts); the association is set BEFORE
+    // the tracker pushes so the first update already maps to its node. Every node here is local, so
+    // the transcript path is always tracked — the desktop's copy skips remote nodes' paths.
+    if (agentId === 'pi') {
+      const sid = typeof payload.sessionId === 'string' && payload.sessionId ? payload.sessionId : undefined
+      if (nodeId && sid) nodeContextSession.set(nodeId, sid)
+      piSessions.observe(payload, { trackPath: true })
+      return
+    }
     if (agentId === 'gemini' || agentId === 'codex') {
       const p = payload as {
         session_id?: string
@@ -460,6 +486,7 @@ export function wireAgentStatus(
       geminiContextTail.untrack(sessionId)
       codexContextTail.untrack(sessionId)
       grokContextTail.untrack(sessionId)
+      piSessions.untrack(sessionId)
       nodeContextSession.delete(nodeId)
     }
     const subs = nodeSubagents.get(nodeId)
@@ -474,6 +501,7 @@ export function wireAgentStatus(
 
   // `codexContextTail` joins the two already returned so `src/server/index.ts` can register the
   // context-meter rehydration over all three. Keeping a tail private here would mean a second
-  // instance somewhere else metering the same sessions twice.
-  return { contextTail, geminiContextTail, codexContextTail }
+  // instance somewhere else metering the same sessions twice. `piSessions` joins them so its
+  // `pathFor` can be handed to the session-name sweep, the same way `geminiContextTail.pathFor` is.
+  return { contextTail, geminiContextTail, codexContextTail, piSessions }
 }
