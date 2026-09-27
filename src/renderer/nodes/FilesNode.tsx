@@ -35,6 +35,7 @@ import {
   breadcrumbs,
   childPath,
   classifyEmptyListing,
+  downloadMenuEntries,
   fileOpenTarget,
   filterEntries,
   folderTitle,
@@ -47,7 +48,9 @@ import { useProjects } from '../state/projects'
 import { promptDialog } from '../components/promptDialog'
 import { ContextMenu, type MenuItem } from '../components/ContextMenu'
 import { isBrowserRuntime } from '../bridge/runtime'
-import { canUseLocalShell } from '../lib/download'
+import { canUseLocalShell, downloadRoute } from '../lib/download'
+import { ROW_DOWNLOAD_TITLE, useDownloads, type RowDownloadState } from '../lib/useDownloads'
+import { DownloadStrip } from '../components/DownloadStrip'
 
 /**
  * Shown when the parent listing could not be read either. It deliberately names BOTH possible
@@ -72,6 +75,17 @@ function EntryGlyph({ dir }: { dir: boolean }) {
       <path d="M6 3h8l4 4v14H6z" />
       <path d="M14 3v4h4" />
     </svg>
+  )
+}
+
+/** A row's download feedback, at the row that was right-clicked: the menu is gone by the time the
+ *  transfer starts, so this is where "did it start?" gets answered. Nothing when idle. */
+function RowDownloadMark({ state }: { state: RowDownloadState | undefined }) {
+  if (!state) return null
+  return (
+    <span className={`files-node__dl ${state}`} title={ROW_DOWNLOAD_TITLE[state]} aria-live="polite">
+      {state === 'running' ? <span className="ex-dl__spin" /> : state === 'done' ? '✓' : '!'}
+    </span>
   )
 }
 
@@ -120,6 +134,16 @@ export function FilesNode({ id, data, selected }: NodeProps<CanvasNode>) {
    *  THIS machine. Both members are `noop` stubs in a browser tab, so an ungated call is a dead
    *  click — which is what "Reveal" was written to avoid and what `openPath` still did. */
   const localShell = canUseLocalShell({ browser: isBrowserRuntime(), ssh: isSshFs, source })
+  /** Same decision the Explorer drawer makes (lib/download.ts), read off THIS node's filesystem:
+   *  an SSH host's files come down over scp, a browser tab's over an HTTP ticket, and a desktop
+   *  local listing (already on this machine) or a relay peer's offers no Download at all. */
+  const route = downloadRoute({ browser: isBrowserRuntime(), ssh: isSshFs, source })
+  const { downloads, rowDl, download, downloadTo, dismiss } = useDownloads({
+    route,
+    // The same project `fs` lists through: an sshFs node lives in the active project.
+    projectId: activeProjectId || undefined,
+    files: api.files
+  })
 
   useEffect(() => {
     let live = true
@@ -304,6 +328,21 @@ export function FilesNode({ id, data, selected }: NodeProps<CanvasNode>) {
       items.push({ type: 'separator' })
       items.push({ label: 'New file…', onClick: () => void create(dir, 'file') })
       items.push({ label: 'New folder…', onClick: () => void create(dir, 'folder') })
+      const dl = downloadMenuEntries(route, path, { dir: entry ? entry.dir : true, here: !entry })
+      if (dl.length) {
+        items.push({ type: 'separator' })
+        const isDir = entry ? entry.dir : true
+        // A second start while the first is still running would land a duplicate `name (2)`.
+        const busy = rowDl[path] === 'running'
+        for (const d of dl) {
+          items.push({
+            label: d.label,
+            disabled: busy,
+            hint: busy ? 'Already downloading' : undefined,
+            onClick: () => void (d.pickFolder ? downloadTo(path, isDir) : download(path, isDir))
+          })
+        }
+      }
       items.push({ type: 'separator' })
       items.push({
         label: 'Copy path',
@@ -314,7 +353,7 @@ export function FilesNode({ id, data, selected }: NodeProps<CanvasNode>) {
       }
       setMenu({ x: e.clientX, y: e.clientY, items })
     },
-    [cwd, open, create, api, localShell, source]
+    [cwd, open, create, api, localShell, source, route, rowDl, download, downloadTo]
   )
 
   const toggleCollapse = () =>
@@ -482,10 +521,15 @@ export function FilesNode({ id, data, selected }: NodeProps<CanvasNode>) {
                 >
                   <EntryGlyph dir={entry.dir} />
                   <span className="files-node__name">{entry.name}</span>
+                  <RowDownloadMark state={rowDl[childPath(cwd, entry.name)]} />
                 </div>
               ))
             )}
           </div>
+
+          {/* Where a finished scp pull can be revealed, and where a failure says why — the row's
+              own mark only flashes ✓ / !. */}
+          <DownloadStrip downloads={downloads} onDismiss={dismiss} className="files-node__dls nodrag nowheel" />
         </>
       )}
 

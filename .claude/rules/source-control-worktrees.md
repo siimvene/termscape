@@ -32,6 +32,16 @@ paths:
   the publish flow). Status/history live in the per-cwd `state/scmCache.ts` store (same pattern
   as `scmDraft`), so the close→reopen cycle paints the last-known data instantly while the
   mount refresh replaces it silently — do not move them back into component `useState`.
+  **Branch observations** (`state/gitBranches.ts`) are shared by Source refreshes, Sessions project
+  headers and existing worktree status polls. They are scoped by GitApi identity + exact cwd + SSH
+  project id, never persisted, and latest-started reads win over late responses. Sessions resolves
+  each project's owning session (including background projects); its header reads the project cwd,
+  while a group header reads only its worktree path. No new timer: sidebar mount/reopen/cwd changes
+  read local checkouts once, Source operations refresh as before, and worktrees keep their existing
+  gated cadence.
+  SSH headers only observe Source refreshes: background SSH connections are not git-routable.
+  Local header probes also skip a cwd claimed by the active SSH route.
+  The branch projection does not replace worktree staleness/ownership decisions or SCM history.
 - **Worktrees** (bound to **group frames**) — a git worktree binds to a group node
   (`data.worktree: GroupWorktree {repoPath, branch, baseRef, path, createdByApp}`, persisted), and
   every node created inside that frame inherits the worktree path as its `cwd`

@@ -7,6 +7,7 @@ paths:
   - "src/renderer/session/**"
   - "src/renderer/remote/**"
   - "docs/fused-host-mode.md"
+  - "src/core/phone-approval*.ts"
 ---
 # Remote access (phone relay): free, not Pro
 
@@ -43,3 +44,20 @@ paths:
   ACL for the directory's and sshd would then refuse every admin key in it). Relay attach on Windows
   needs the session host packaged (#575, shipped by #579), else `pty.attach` spawns a new plain
   shell instead of joining the node's session while `sessionExists` still answers "warm".
+
+## Standing phone consent lifetime (#819)
+
+A browse socket can close before the human clicks the SAS dialog. `core/phone-approval.ts` retains
+only the handshake-bound id/key for 120 seconds, at most 64 requests, one per key. Socket closure
+releases presence and transport but does not discard that bounded consent; replacement, rejection,
+expiry and host stop clear the exact dialog id. Approval requires BOTH id and displayed key (no
+key-only match or mismatched-key fallback), consumes once, then persists before granting access.
+`remote:phone:approve` is raw, owner-window Electron IPC, never a relay RPC. Its response separates
+stale/persistence failure from approved/saved-disconnected; renderer rejection/timeout is explicitly
+unconfirmed. SAS derivation and mutual trust verification are unchanged. Legacy interactive offers
+remain session-only, and Server Edition rejects standing phone approval as unsupported.
+
+Pin/revoke mutations use `updateApprovedDevices` to queue the entire read/modify/write in process;
+unique-temp atomic rename alone cannot prevent lost updates. Non-ENOENT reads and malformed JSON
+reject rather than overwrite unknown trust state. The queue is not a cross-process lock. A click
+accepted before host stop may finish its disk save, but must never open the now-closed session.

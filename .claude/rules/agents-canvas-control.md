@@ -16,6 +16,12 @@ paths:
   - "src/renderer/canvas/pending-launch-delivery*.ts"
   - "src/renderer/lib/erroredTurn*.ts"
   - "src/renderer/lib/teamSpec.ts"
+  - "src/core/agents/agent-messag*.ts"
+  - "src/core/native-windows-pane*.ts"
+  - "src/core/settled-submit*.ts"
+  - "src/core/settled-text*.ts"
+  - "src/core/windows-delivery-safety*.ts"
+  - "src/renderer/lib/messageScopeSync*.ts"
 ---
 # Canvas control (nodeterm.sh shim, verbs, fan-in, --after, verify panel) and Context Link
 
@@ -96,6 +102,8 @@ paths:
   would inject a prompt into every session an agent just spawned — the exact intrusion that push
   was reverted for. Links are pull-based, so nothing is lost. The refusal matrix is the pure
   `planBridges` (`renderer/lib/noteLink.ts`, unit-tested); Canvas only wraps it in setState.
+  A missing endpoint is only absent from the calling project: report that scope and the
+  unsupported cross-project boundary, without probing other projects or exposing their metadata.
   Callers that create and link nodes **in the same tick** must pass their own `lookup` — `setNodes`
   is async, so resolving fresh nodes off `nodesRef` would skip every one as "no such node".
   **Dependency edges (`--after`, 2026-07):** `open-terminal`/`open-claude`/`open-agent` accept
@@ -108,19 +116,46 @@ paths:
   live **`lastTurnError`** is NOT (issue #521, below). (2) Only `hasHooks` agents may be
   waited on — a plain terminal never reports done, so `resolveAfter` **refuses** it rather than
   letting `launchesToFire` (which cannot tell "never will" from "not yet") hang the node forever.
-  (3) If the deps are **already satisfied at creation**, the node is NOT armed: the command stays
-  `initialCommand` so the node's own mount path delivers it through `writeWhenShellReady` —
-  arming would hand delivery to the canvas effect, which races the node's PTY into existence.
-  (4) Delivery is **exactly-once via the shared in-flight registry** (`beginLaunch` /
-  `settleLaunch` in `renderer/lib/pendingLaunch`, one claim per node id, consulted by BOTH the fire
-  effect and ▶ Run now — a landed delivery also consumes the consent synchronously, before the
-  `setNodes` that clears `pendingLaunch` can lag a re-render), and a **refused** `sendText` retries
-  (`launchRetryDelay`'s backoff, `LAUNCH_DELIVERY_ATTEMPTS` sends in all) instead of vanishing.
-  (5) `pendingLaunch` **is persisted** (unlike `initialCommand`), but agent state is not — so after
-  a restart nothing will ever report `done` and the node carries a manual ▶ **run-now** escape in
-  its QUEUED badge (which disarms only on a delivery that LANDED — dropping it unconditionally
-  threw the command away in exactly the state the button exists to rescue). (6) Canvas subscribes
-  to `armedDepSig`, NOT `useAgentStatus(s => s.byId)` —
+  (3) **Control opens always retain the command in `pendingLaunch` until delivery lands**
+  (#827/#811). Even a visible node with no deps has not mounted its PTY when the open reply is
+  sent. `queueControlLaunch` moves the command out of `initialCommand`; the PTY-ready gate below
+  makes this safe. The open reply says `queued`, and project serialization retains the brief.
+  (4) Desktop automatic and manual launch delivery share `terminal/launch-command.ts`, which
+  uses `deliverCommand`: echo verification, bounded Ctrl-U repair, platform kill-line and overlong
+  line refusal. The PTY-lifetime writer coalesces concurrent requests and remembers submission
+  across parked views. Relay queued/restored delivery, including Run now, is refused until a scoped durable
+  claim API exists: a relay workspace load can be project-scoped, while save replaces the host
+  index. Never use that load/save pair for a launch. A new relay UI initialCommand may instead
+  use the verified writer once on a fresh PTY without creating pendingLaunch or writing workspace
+  data. Its transient claim is consumed before settle and survives view remounts; relay snapshots
+  omit that initial command rather than converting it to durable intent. A parked-project deferral before any input
+  retains never-attempted intent and can proceed on activation without a retry timer.
+  New intent has `attempted:false`; the writer awaits a workspace save of
+  `attempted:true, manualOnly:true` before input, then rechecks the shell after that save. That
+  save is **`localOnly`** (`WorkspaceStore.save`): durable in this machine's index, with no SSH
+  read/reconcile/mirror — a changed entry is marked `unmirrored` and the next ordinary save pushes
+  it. Awaiting the mirror put two SSH round trips in front of every new agent on an SSH project.
+  A node's own first-open delivery (live `initialCommand`, no deps, no failure record) shows NO
+  QUEUED chip: its `pendingLaunch` is only the write-ahead record, and it carries `manualOnly`
+  from the claim until Enter lands, which painted "⚠ QUEUED" on every freshly opened agent. A warm
+  attach may automatically deliver never-attempted intent, preserving long-running `--after`
+  graphs through project switches/park expiry. Attempted/legacy-unknown intent stays manual: its
+  clearing autosave may have been lost after Enter. Explicit Run now rechecks the foreground shell and
+  clears any incomplete line; a refused/throwing/cancelled launch stays held, `manualOnly`.
+  (5) UI `initialCommand` stays until submission; serialization converts unsubmitted UI intent
+  into a never-attempted `pendingLaunch`, including a project switch during shell settle. A live
+  initialCommand alias on remount cannot reset an attempted marker. Server saves
+  `attempted:true, manualOnly:true` BEFORE sending and only clears the command after acknowledgment. Failed
+  independent/dependent launches are never retried by unrelated hooks. Boot remains inert.
+  Server deferred delivery is deliberately one-shot: a transient probe/send failure needs Run now.
+  Desktop keeps the attached echo-verification transport even for offscreen held nodes; a large
+  long-waiting fan-out therefore keeps those xterm instances in memory until delivery/recovery.
+  Fork carry (consort-reviewed, `599febf8`/`d6e817d1`): every delivery claim goes through ONE
+  shared in-flight registry (`beginLaunch` / `settleLaunch` in `renderer/lib/pendingLaunch`, one
+  claim per node id, consulted by BOTH the fire effect and ▶ Run now), and a landed delivery
+  consumes the held-launch consent synchronously, before the `setNodes` that clears
+  `pendingLaunch` can lag a re-render.
+  (6) Canvas subscribes to `armedDepSig`, NOT `useAgentStatus(s => s.byId)` —
   the same discipline as `loopSig`; the full map re-renders the canvas on every hook event.
   Pure logic + refusal matrix in `renderer/lib/pendingLaunch.ts` (unit-tested). The dep→node edge is
   a **persisted rope** (`ctrl-<dep>-<node>` in `project.ropes`, like the opener's) whose LOOK is
@@ -145,22 +180,26 @@ paths:
   an ADOPTED park (already typeable, and its create continuation ran on a previous mount) and, for
   a fresh spawn, at the SAME `whenShellSettled` moment `writeWhenShellReady` delivers an
   `initialCommand` — both write a CLI command line, and a line delivered across zsh's rc-file tty
-  flush comes out mangled. A **park keeps it** (a parked tmux session is still addressable by name);
-  only a real teardown clears it. The loop then WAITS instead of burning attempts, and the backoff
-  (`launchRetryDelay`, ~12 s: six sends over five backoff gaps, `LAUNCH_DELIVERY_ATTEMPTS`) covers
-  only the residual race after readiness.
+  flush comes out mangled. A **park keeps the writer and transport**; a real teardown removes
+  the writer. The loop WAITS instead of burning attempts before readiness. Once attempted,
+  only the verified writer's bounded echo repair runs; further recovery is explicit.
   Because a wait with no end is the failure mode this replaces, both give-up states are **visible**
   in the transient `state/launchDelivery.ts` and rendered by the QUEUED badge's amber ⚠ + tooltip
   (`launchTooltip`, pure): `stalled` = gate open, no terminal yet, **still held** (raised by a
   `LAUNCH_STALL_MS` timer with a fire-time re-ask; the launch still fires whenever the session
-  finally comes up — an SSH host reconnecting takes this path) and `failed` = the session came up
-  and refused every attempt, so nothing will retry it. Neither is ever inferred from silence, and
+  finally comes up) and `failed` = submission is unconfirmed, so automatic retry is stopped.
+  A persisted `manualOnly` record carries that warning after reload too. Neither is ever inferred from silence, and
   the tooltip names no cause it did not measure (the node's own overlay owns the diagnosis).
   The open verbs' replies carry the same fact for callers OUTSIDE the app: `result.queued` +
   `result.queuedIds` on `open-terminal`/`open-claude`/`open-agent`, always true for the
   `--project` cold-open branch — an orchestrator was previously told "opened" either way and
   routed work to a session that did not exist. Agent-facing copy is generated in
   `canvas-control-core.ts` and pinned in its test, per the sync rule above.
+  `queued:false` is NOT proof of a running CLI: Server's `deliveredIds` acknowledges terminal
+  delivery only. Its initial commands are persisted before attach/send and retained on failure;
+  only acknowledged sends clear them. Boot ownership remains fail-closed. Desktop `list` (live
+  and stored projects) names QUEUED / LAUNCH FAILED / DROPPED / AGENT STATUS UNCONFIRMED rather
+  than treating absence of a hook as success. Server v1 still explicitly refuses `list`.
   **(8) An armed node must not cold-start its own agent** (found while fixing (7)). The mount-time
   cold-restore relaunch (`fresh && agentId && canResume(...)`) carries a second, independent
   refusal beside the `paused` one (`shouldColdResume`): `!data.pendingLaunch`. A first open is
@@ -352,13 +391,25 @@ paths:
   retired — its embedded-JS parser now lives as tested TS in `core/context-link-render.ts`:
   parsers for **all four** formats — claude JSONL / codex rollout / gemini event-sourced chat /
   opencode export — plus `renderContextLink` over injected fetchers). `src/core/context-link.ts`
+  coalesces renderer updates before workspace-map construction with a non-resetting task.
+  Intermediate ACL publications retain previously resolved paths keyed by node, agent, session,
+  account, cwd, remote/local placement and hook path. Ingest prunes changed/removed identities,
+  so changing back during queued discovery cannot revive an invalidated path. Reinitialization
+  clears the cache, and only current-revision discovery may refill it. The service
   holds the link docs in memory (per-node files under `<userData>/context-links/` remain as a
   debug aid), carries per-entry `agentId`/`sessionId`/`accountId`, and answers the route;
   **authorization** = the doc is selected by the REQUESTER's node id, so a token-holding caller
   can only read nodes in its own (directional) link map. Codex/gemini paths resolve via the
   handoff locators (`locateCodex`/`locateGemini` by sessionId); claude keeps the hook-fed path +
-  `locateClaude(sessionId, accountId)` fallback (cwd-newest is claude-only); Canvas rewrites link
-  files when a linked node's sessionId appears (`linkSessionSig`). **SSH projects:** the shim +
+  `locateClaude(sessionId, accountId)` fallback (cwd-newest is claude-only).
+  `useContextLinkSync` publishes semantic map changes from live edges and subscribes to
+  background project/status changes. Geometry/status render churn cannot postpone publication;
+  relay-bound projects never enter the local core's map. A render-captured project epoch prevents
+  outgoing live nodes replacing the incoming project's persisted map during a tab switch. Core
+  replaces the read authorization map synchronously, then enriches/writes debug documents through
+  a recoverable serialized queue; revision checks prevent obsolete enrichment restoring a removed
+  link. Transcript paths can be temporarily unavailable while the current snapshot is enriched.
+  **SSH projects:** the shim +
   skill are installed on the remote host at connect (`RemoteHooks.installContextLink`, gated on
   the VERIFIED reverse hook tunnel; POSTs ride `--unix-socket` through it); a remote node's
   transcript is read over the ControlMaster (`initContextLink(ptyManager, deps)` — `src/main`
@@ -615,3 +666,62 @@ paths:
   every surviving pane is `unproven-target-owner` and refused — "on by default" would be false after
   every restart (the flip waits on a cross-restart ownership proof, #659). Server Edition reads the
   same grant; Mobile N/A.
+
+## Agent messaging: scope publication and Windows delivery (upstream v0.3.16)
+
+**Message scope publication:** desktop `send`/`reply`/`notify` wait for pending active-canvas edits
+to be saved when either endpoint is on that canvas (`renderer/lib/messageScopeSync.ts`). `list`
+and context links can already see a newly opened node while main's `persistedCanvases()` cannot;
+the scope resolver reports that absent target as `cross-project`. The publication barrier never
+travels, never overrides an external-edit conflict, and does not authorize anything: main still
+checks unique project membership, runtime ownership, consent, verified status and the native pane.
+An unrelated active canvas is not saved for a background message. Server control already writes
+its nodes through the authoritative store; the renderer barrier is a desktop concern. Mobile is
+not an agent-message sender.
+
+**Direct Windows agent messaging:** `core/native-windows-pane.ts` owns a headless screen for
+non-persistent native PTYs. Lookup uses the runtime node index, and the console identity probe
+uses `GetConsoleProcessList` plus OS executable paths/birth times. A single process reached
+through an unambiguous shell chain is required; detached or ambiguous candidates refuse. This
+is not a POSIX foreground-process-group claim. **An interpreter (`node`, `bun`, `python`, …) is
+named by its script, never by its own executable**: every npm-installed agent CLI on Windows is
+`cmd` → `node <package>\bin\<cli>.js`, and naming that pane `node` made Codex and every npx
+custom agent `not-agent`. The probe keeps only the interpreter's FIRST positional argument
+(`CommandLineToArgvW`, inside PowerShell; the rest of the command line, prompt text included, never
+leaves the probe) and `scriptCommandName` maps it to the key of its package's `bin` map, which is
+the table npm generated the `.cmd` shim from, falling back to the script basename exactly as the
+POSIX predicate does. The interpreter is the leaf, never a hop, so a CLI's own children (Codex's
+native `codex.exe`, MCP servers) cannot make the pane ambiguous.
+**A RELEASED session is still a messaging target.** Park expiry and the offscreen release drop the
+`Session`, but the host keeps it running, so `targetLive` asks `PtyManager.sessionExists` (attached,
+else tmux, else the host, with a failed read answering "exists") and the owner/paste/envelope probes
+route through `sessionHostOwns`, which falls back to the release record. Asking only for an attached
+client answered `targetGone`, terminal and never queued, about a live agent in another project. The project/verified-hook/idle/receipt gates still
+apply, paste mode must be observed, and the exact generation/process is checked before writing.
+`PtyManager.sendText` (the confirmed `write` verb, rename, note push, dictation) also routes a
+direct native PTY through `NativeWindowsPane.sendText` — framed only when paste mode was requested,
+no process attestation. It used to fall through to the session-host backend, which has no entry for
+a direct PTY, so every `write` to such a pane failed.
+Do not route the persistent session-host backend through this direct-PTY adapter. Its independently
+versioned `messageOwnerV1` / `messagePasteReadyV1` / `messageEnvelopeV1` extension runs in the host:
+the OS probe is bound to `HostSession.generation`, the session registry is rechecked after every
+await, and the emulator's paste mode is checked again immediately before the synchronous write.
+**The Enter is a SECOND write, sent only once the pane shows the envelope** — every backend
+(Server Edition tmux, session host, direct PTY) runs the one `core/settled-submit.ts`. Measured on
+the installed build (2026-09-14): with the `\r` in the same write as the paste, Codex rendered the
+whole envelope in its composer and never submitted it, so the delivery reported `stalled`; a
+separate Enter moments later sent it. A pane that never shows the envelope gets no Enter at all.
+An older live host refuses these unknown commands while keeping the v1/v2 terminal contract intact;
+never replace it automatically or fall back to name-only input to enable messaging. Windows OpenCode
+context exports go through `directExecutableInvocation` like every other app-owned subprocess (see
+Platform support), never a bare `execFile('opencode')`, which cannot execute the npm shim.
+
+Windows messaging final-submit checks cross a second OS identity probe and emulator barrier:
+`NativeWindowsPane.sendEnvelope` and `hostMessagePane.send` retain accepted-paste semantics when
+the child has changed or paste mode is off, but withhold Enter. The root PTY can outlive the CLI.
+`SessionHostClient.sendKeys` tracks whether its V2 frame was handed to the socket separately
+from an explicit negative host reply; loss of the reply after transmission returns conservative
+partial/unknown delivery, with no resend. The SessionStart idle rescue latch stores its session,
+agent and receive time; foreign/missing idle identity never creates proof or changes the
+renderer-visible session. These boundaries have behavioral regressions in
+`core/windows-delivery-safety.test.ts` and the mirror/client suites.

@@ -1,3 +1,4 @@
+import { reportTextDelivery } from '../lib/textDelivery'
 import { useEffect, useRef } from 'react'
 import { IconChevronDown, IconChevronRight, IconClose, IconPlay } from '../components/icons'
 import { Handle, NodeResizer, Position, type NodeProps } from '@xyflow/react'
@@ -32,7 +33,7 @@ export function LoopNode({ id, data, selected }: NodeProps<CanvasNode>) {
 
   const trigger = (e: React.MouseEvent) => {
     e.stopPropagation()
-    if (task) void api.pty.sendText(id.replace(/^loop-/, ''), task)
+    if (task) void api.pty.sendText(id.replace(/^loop-/, ''), task).then(reportTextDelivery)
   }
 
   // Manual dismiss: cron/schedule cards persist across turns/sessions/restarts, so a job
@@ -54,7 +55,7 @@ export function LoopNode({ id, data, selected }: NodeProps<CanvasNode>) {
 
   return (
     <div onPointerDownCapture={select} className={`loop-node${active ? ' working' : ''}`}>
-      <NodeResizer isVisible={selected} minWidth={NODE_MIN_SIZES.loop.width} minHeight={NODE_MIN_SIZES.loop.height} color="#bf7af0" />
+      <NodeResizer isVisible={selected} minWidth={NODE_MIN_SIZES.loop.width} minHeight={NODE_MIN_SIZES.loop.height} color="var(--state-automation)" />
       <Handle type="target" position={Position.Top} isConnectable={false} />
       <div className="loop-node__head nodrag" onClick={toggle} style={{ cursor: 'pointer' }}>
         <button

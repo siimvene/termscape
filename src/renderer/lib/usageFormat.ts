@@ -1,3 +1,4 @@
+import { SYSTEM_COLORS } from './palette'
 // Pure formatting helpers for the usage indicator.
 
 /** "just now" / "5m ago" / "2h ago". */
@@ -44,6 +45,9 @@ export function formatModelLabel(model: string | null): string | null {
   return version ? `${family} ${version}` : family
 }
 
+// Literals, not tokens: the notch HUD draws these too and does not load styles.css.
+const { red: RED, yellow: YELLOW, green: GREEN } = SYSTEM_COLORS.dark
+
 /**
  * Fill color for a CONTEXT-WINDOW meter: green while low, yellow from 60% used, red past 85%.
  * Keyed to USED percent — the inverse scale of `barColor`/`severityColor`, which are keyed to
@@ -52,16 +56,16 @@ export function formatModelLabel(model: string | null): string | null {
  * used to carry its own copy of these numbers (issue #78).
  */
 export function contextFillColor(usedPercent: number): string {
-  if (usedPercent > 85) return '#ff453a'
-  if (usedPercent >= 60) return '#ffd60a'
-  return '#30d158'
+  if (usedPercent > 85) return RED
+  if (usedPercent >= 60) return YELLOW
+  return GREEN
 }
 
 /** Bar color by remaining quota: green > 40%, yellow 20–40%, red < 20%. */
 export function barColor(leftPercent: number): string {
-  if (leftPercent > 40) return '#30d158'
-  if (leftPercent >= 20) return '#ffd60a'
-  return '#ff453a'
+  if (leftPercent > 40) return GREEN
+  if (leftPercent >= 20) return YELLOW
+  return RED
 }
 
 /**
@@ -73,12 +77,12 @@ export function barColor(leftPercent: number): string {
 export function severityColor(severity: string | null, leftPercent: number): string {
   switch (severity) {
     case 'normal':
-      return '#30d158'
+      return GREEN
     case 'warning':
-      return '#ffd60a'
+      return YELLOW
     case 'critical':
     case 'exceeded':
-      return '#ff453a'
+      return RED
     default:
       return barColor(leftPercent)
   }

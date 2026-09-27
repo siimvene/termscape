@@ -21,6 +21,7 @@ import {
   type AgentPermissionMode
 } from '@shared/agents/config'
 import { bypassNoSandboxCaveat, permissionModeAgentsLabel } from '@shared/agents/approval-mode'
+import { codexApprovalCaps } from '@renderer/state/codexCli'
 
 interface TabBarProps {
   onSwitch: (id: string) => void
@@ -163,8 +164,13 @@ export function TabBar({
 
   const openMenu = (id: string, anchor: HTMLElement) => {
     const r = anchor.getBoundingClientRect()
+    // Under Liquid Glass the bar is a visible glass slab and the caret sits inside it, so the menu
+    // hangs from the BAR's bottom edge rather than 3px inside it (visual QA N11). Still a plain
+    // position, so useMenuFlip keeps flipping/clamping a tall menu.
+    const glass = document.documentElement.dataset.ntGlass === 'on'
+    const bottom = glass ? Math.max(r.bottom, anchor.closest('.tabbar')?.getBoundingClientRect().bottom ?? 0) : r.bottom
     setMenuId(id)
-    setMenuPos({ top: r.bottom + 4, left: r.left, flipBase: r.top - 4 })
+    setMenuPos({ top: bottom + 4, left: r.left, flipBase: r.top - 4 })
   }
 
   // Viewport-edge flip for the caret menu, same behavior as the right-click ContextMenu. The
@@ -557,10 +563,11 @@ export function TabBar({
                       m === 'bypassPermissions'
                         ? // Both the agent list and the sandbox caveat are derived from the mapping
                           // (approval-mode.ts): the list names exactly the agents "Bypass all"
-                          // reaches, and the caveat names those whose bypass ALSO drops the OS sandbox
-                          // (codex now maps to --dangerously-bypass-approvals-and-sandbox), so the
-                          // copy cannot drift from which agents each fact is true of.
-                          `Skips every permission prompt. This override is saved in the project file (.nodeterm/project.json), so if you commit it, everyone who clones the repo runs their ${permissionModeAgentsLabel({ mode: 'bypassPermissions' })} sessions without permission checks too. ${bypassNoSandboxCaveat()}`.trim()
+                          // actually reaches (under the codex CLI's own vocabulary, codexApprovalCaps),
+                          // and the caveat names those whose bypass ALSO drops the OS sandbox (fork:
+                          // codex maps to --dangerously-bypass-approvals-and-sandbox), so the copy
+                          // cannot drift from which agents each fact is true of.
+                          `Skips every permission prompt. This override is saved in the project file (.nodeterm/project.json), so if you commit it, everyone who clones the repo runs their ${permissionModeAgentsLabel({ mode: 'bypassPermissions', caps: codexApprovalCaps() })} sessions without permission checks too. ${bypassNoSandboxCaveat(codexApprovalCaps())}`.trim()
                         : m === 'auto'
                           ? (menuAutoHint ?? undefined)
                           : undefined

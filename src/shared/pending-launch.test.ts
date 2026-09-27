@@ -28,3 +28,17 @@ describe('sanitizePendingLaunch — project.json / peer input is hostile', () =>
     for (const v of [undefined, null, 'x', 1, true, []]) expect(sanitizePendingLaunch(v)).toBeUndefined()
   })
 })
+
+describe('sanitizePendingLaunch — upstream delivery-state fields survive (v0.3.16 merge)', () => {
+  it('keeps attempted / manualOnly / executor / awaitWorking in their declared shapes', () => {
+    expect(sanitizePendingLaunch({
+      after: [], command: 'x', attempted: false, manualOnly: true, executor: 'server', awaitWorking: ['n1']
+    })).toEqual({ after: [], command: 'x', attempted: false, manualOnly: true, executor: 'server', awaitWorking: ['n1'] })
+    expect(sanitizePendingLaunch({ after: [], command: 'x', attempted: true })).toEqual({ after: [], command: 'x', attempted: true })
+  })
+  it('drops those fields when malformed, without voiding the launch', () => {
+    expect(sanitizePendingLaunch({
+      after: [], command: 'x', attempted: 'no', manualOnly: 1, executor: 'renderer', awaitWorking: ['']
+    })).toEqual({ after: [], command: 'x' })
+  })
+})

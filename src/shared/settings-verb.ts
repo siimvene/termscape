@@ -127,6 +127,13 @@ export const SETTINGS_VERB_FORBIDDEN = new Set<keyof Settings | keyof Project>([
   'hookIdentityStrict',
   // Browser control — a capability that acts as the user on the web.
   'agentBrowserControl',
+  // Issue reporting — the only capability whose effect LEAVES THE MACHINE. An agent that could
+  // switch on its own auto-reporting is a self-granting loop aimed at a public tracker, so this is
+  // never settable from the CLI whatever the allowlist says. The name pattern below does NOT catch
+  // it (none of "report", "issue" or "github" is a forbidden name class, and adding one would be
+  // guessing at words rather than at capabilities), so this entry is the key's ONLY fence — which
+  // is why it is also named in settings-verb.test.ts's escapees tripwire.
+  'agentIssueReporting',
   // This machine's consent record for capabilities; writable only by the human's answer.
   'capabilityAck',
   // Accounts, credentials, model gateway, and anything that decides WHAT COMMAND runs.

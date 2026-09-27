@@ -1,6 +1,7 @@
 import { getViewportForBounds, type Padding, type Rect, type Viewport } from '@xyflow/system'
 
-import { NO_INSETS, type ScreenInsets } from './pinnedInsets'
+import { NO_INSETS, measurePinnedInsets, type RectLike, type ScreenInsets } from './pinnedInsets'
+import { measureMaximizeInsets } from './maximizeInsets'
 
 /**
  * "Zoom to this node" geometry, computed OURSELVES — the whole of it, measured or not.
@@ -208,23 +209,26 @@ export function viewportForRect(
   const freeWidth = containerWidth - insets.left - insets.right
   const originX = freeWidth > 0 ? insets.left : 0
   const width = freeWidth > 0 ? freeWidth : containerWidth
+  const freeHeight = containerHeight - (insets.top ?? 0) - (insets.bottom ?? 0)
+  const originY = freeHeight > 0 ? (insets.top ?? 0) : 0
+  const height = freeHeight > 0 ? freeHeight : containerHeight
   if (zoom !== undefined) {
     if (!(zoom > 0)) return null
     return finiteViewport({
       x: originX + width / 2 - (rect.x + rect.width / 2) * zoom,
-      y: containerHeight / 2 - (rect.y + rect.height / 2) * zoom,
+      y: originY + height / 2 - (rect.y + rect.height / 2) * zoom,
       zoom
     })
   }
   const fitted = getViewportForBounds(
     rect,
     width,
-    containerHeight,
+    height,
     FIT_NODE_OPTIONS.minZoom,
     FIT_NODE_OPTIONS.maxZoom,
     FIT_NODE_OPTIONS.padding
   )
-  return finiteViewport(originX ? { ...fitted, x: fitted.x + originX } : fitted)
+  return finiteViewport({ ...fitted, x: fitted.x + originX, y: fitted.y + originY })
 }
 
 /** Whether React Flow already knows this node's on-screen size — i.e. whether its measurement can
@@ -235,4 +239,21 @@ export function isMeasured(
   node: { measured?: { width?: number | null; height?: number | null } } | null | undefined
 ): boolean {
   return !!(numeric(node?.measured?.width) && numeric(node?.measured?.height))
+}
+
+/** Shared Canvas focus policy. A maximized node uses its placement's chrome reservations
+ * (`measureMaximizeInsets`: pinned side panels plus the persistent top controls and bottom dock),
+ * so it lands exactly where maximize put it (#743). Every OTHER node is centred in the band the
+ * PINNED side panels leave free (`measurePinnedInsets`, fork invariant: `.claude/rules/canvas.md`,
+ * "insets is measurePinnedInsets(box) for EVERY node"). Upstream centres ordinary nodes in the
+ * whole pane; that re-parks them half under a pinned sessions sidebar. With nothing pinned the
+ * insets are zero and the result is upstream's whole-pane centring. */
+export function viewportForNodeFocus(
+  node: { data?: { premaxRect?: unknown } },
+  rect: Rect,
+  box: RectLike & { width: number; height: number },
+  zoom?: number
+): Viewport | null {
+  const insets = isMaximized(node) ? measureMaximizeInsets(box) : measurePinnedInsets(box)
+  return viewportForRect(rect, box.width, box.height, zoom, insets)
 }

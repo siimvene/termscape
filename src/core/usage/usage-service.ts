@@ -25,6 +25,7 @@ import {
   type RemoteUsageTarget
 } from './remote-claude-usage'
 import { fetchCodexUsage } from './codex-usage'
+import { fetchRemoteCodexUsage } from './remote-codex-usage'
 import { fetchGeminiUsage } from './gemini-usage'
 import { fetchGrokUsage } from './grok-usage'
 import { fetchKimiUsage } from './kimi-usage'
@@ -61,6 +62,7 @@ interface OAuthCreds {
    * working one is not worth reporting.
    */
   unreadable?: true
+  organization?: ClaudeUsage['organization']
 }
 
 /**
@@ -82,7 +84,11 @@ const realCredsIo: CredsIo = {
   readFile: (file) => fs.readFile(file, 'utf-8'),
   keychainRead: async (service) =>
     (await execFileP('security', ['find-generic-password', '-s', service, '-w'])).stdout,
-  darwin: process.platform === 'darwin'
+  // Read per call, not once at load: a getter keeps the leg honest under a platform override
+  // (upstream's identity tests spy `process.platform` after import).
+  get darwin() {
+    return process.platform === 'darwin'
+  }
 }
 
 /** `security`'s exit status for "no such item" — the one keychain failure that IS an absence. */
@@ -128,7 +134,7 @@ const errnoCode = (e: unknown): string | number | undefined =>
   (e as { code?: string | number } | null)?.code
 
 /**
- * macOS Keychain → {config}/.credentials.json → email backfill from {config}/.claude.json.
+ * macOS Keychain → {config}/.credentials.json; identity metadata from {config}/.claude.json.
  * With an `accountId` the config dir is the managed account's isolated dir (scoped Keychain
  * service first); without, it's exactly the system default (`~/.claude`, unscoped services).
  *
@@ -150,7 +156,9 @@ export async function resolveCreds(accountId?: string, io: CredsIo = realCredsIo
   let unreadable = false
 
   if (io.darwin) {
-    for (const service of services) {
+    // An unscoped Keychain entry belongs to the system account. Using it here would
+    // label the system token's limits with the managed account's organization.
+    for (const service of configDir ? services.slice(0, 1) : services) {
       try {
         const parsed = parseCreds((await io.keychainRead(service)).trim())
         if (parsed.accessToken) {
@@ -177,7 +185,7 @@ export async function resolveCreds(accountId?: string, io: CredsIo = realCredsIo
     }
   }
 
-  if (creds.accessToken && !creds.email) {
+  if (creds.accessToken) {
     try {
       const j = JSON.parse(await io.readFile(identityFile)) as Record<string, any>
       const acct = j.oauthAccount as Record<string, any> | undefined
@@ -185,13 +193,37 @@ export async function resolveCreds(accountId?: string, io: CredsIo = realCredsIo
         (acct && typeof acct.emailAddress === 'string' && acct.emailAddress) ||
         (acct && typeof acct.email === 'string' && acct.email) ||
         null
-      if (email) creds = { ...creds, email }
+      // Identity may lag a login. A known email mismatch must not label this token
+      // with another user's organization; missing metadata still leaves usage intact.
+      if (!creds.email || !email || creds.email === email) {
+        const text = (value: unknown): string | undefined =>
+          typeof value === 'string' ? value.trim() || undefined : undefined
+        const name = text(acct?.organizationName)
+        creds = {
+          ...creds,
+          email: creds.email || email,
+          ...(name
+            ? { organization: {
+                name,
+                uuid: text(acct?.organizationUuid),
+                type: text(acct?.organizationType),
+                rateLimitTier: text(acct?.organizationRateLimitTier)
+              } }
+            : {})
+        }
+      }
     } catch {
       // best-effort only — the email is decoration, the token is the credential
     }
   }
 
-  if (creds.accessToken) return { accessToken: creds.accessToken, email: creds.email }
+  if (creds.accessToken) {
+    return {
+      accessToken: creds.accessToken,
+      email: creds.email,
+      ...(creds.organization ? { organization: creds.organization } : {})
+    }
+  }
   return unreadable
     ? { accessToken: null, email: creds.email, unreadable: true }
     : { accessToken: null, email: creds.email }
@@ -224,13 +256,17 @@ export async function fetchUsage(
   const now = Date.now()
   const readCreds = deps?.resolveCreds ?? resolveCreds
   const doFetch = deps?.fetchImpl ?? fetch
-  const { accessToken, email, unreadable } = await readCreds(accountId)
+  const { accessToken, email, unreadable, organization } = await readCreds(accountId)
+  const identify = (usage: ClaudeUsage): ClaudeUsage =>
+    organization ? { ...usage, organization } : usage
   // A store we could not read is 'error' (the pill stays visible, ⚠), not 'unavailable' (which
   // hides it): hiding the pill claims "nothing to show for this identity", and we do not know that.
   if (!accessToken) {
-    return unreadable
-      ? emptyUsage(email, now, 'error', { cause: 'credentials-unreadable' })
-      : emptyUsage(email, now, 'unavailable', { cause: 'no-credentials' })
+    return identify(
+      unreadable
+        ? emptyUsage(email, now, 'error', { cause: 'credentials-unreadable' })
+        : emptyUsage(email, now, 'unavailable', { cause: 'no-credentials' })
+    )
   }
   let res: Response
   try {
@@ -242,19 +278,19 @@ export async function fetchUsage(
       headers: { authorization: `Bearer ${accessToken}`, 'anthropic-beta': OAUTH_BETA }
     }).finally(() => clearTimeout(t))
   } catch (e) {
-    return emptyUsage(email, now, 'error', { cause: classifyUsageThrow(e) })
+    return identify(emptyUsage(email, now, 'error', { cause: classifyUsageThrow(e) }))
   }
   if (!res.ok) {
     const { status, cause, httpStatus } = classifyUsageResponseStatus(res.status)
-    return emptyUsage(email, now, status, { cause, httpStatus })
+    return identify(emptyUsage(email, now, status, { cause, httpStatus }))
   }
   // Split from the request above so a body we cannot read is reported as 'parse' rather than
   // being laundered into 'network' — the endpoint answered, and that is worth knowing.
   try {
     const data = (await res.json()) as Record<string, any>
-    return usageFromPayload(data, email, now)
+    return identify(usageFromPayload(data, email, now))
   } catch {
-    return emptyUsage(email, now, 'error', { cause: 'parse', httpStatus: res.status })
+    return identify(emptyUsage(email, now, 'error', { cause: 'parse', httpStatus: res.status }))
   }
 }
 
@@ -600,23 +636,32 @@ export function startUsageService(opts: UsageServiceOptions = {}): UsageService 
   // providers above, fetched ON DEMAND rather than polled: each row costs an ssh exec plus an
   // HTTPS request made on someone else's machine, and the pill is informational. The renderer
   // asks on mount, when the popover opens, and whenever the set of connected projects changes.
-  const remoteCache = new Map<string, { at: number; usage: ClaudeUsage }>()
-  const remoteInFlight = new Map<string, Promise<ClaudeUsage>>()
+  const remoteCache = new Map<string, { at: number; usage: ClaudeUsage | ProviderUsage }>()
+  const remoteInFlight = new Map<string, Promise<ClaudeUsage | ProviderUsage>>()
+  const remoteKey = (t: RemoteUsageTarget): string => JSON.stringify([
+    t.provider ?? 'claude', t.hostKey, t.accountId, t.projectId, t.remoteHome, t.connectionKey, t.key
+  ])
 
   const runRemote = async (
     deps: RemoteUsageDeps,
     target: RemoteUsageTarget
-  ): Promise<ClaudeUsage> => {
-    const pending = remoteInFlight.get(target.key)
+  ): Promise<ClaudeUsage | ProviderUsage> => {
+    const key = remoteKey(target)
+    const pending = remoteInFlight.get(key)
     if (pending) return pending
-    const p = fetchRemoteUsage(target, deps.run, Date.now())
-    remoteInFlight.set(target.key, p)
+    const p = target.provider === 'codex'
+      ? fetchRemoteCodexUsage(target, deps.run, Date.now())
+      : fetchRemoteUsage(target, deps.run, Date.now())
+    remoteInFlight.set(key, p)
     try {
       const u = await p
-      remoteCache.set(target.key, { at: Date.now(), usage: u })
+      // A replaced connection/account cannot repopulate the cache with a late old reply.
+      if (remoteInFlight.get(key) === p && deps.targets().some(t => remoteKey(t) === key)) {
+        remoteCache.set(key, { at: Date.now(), usage: u })
+      }
       return u
     } finally {
-      remoteInFlight.delete(target.key)
+      if (remoteInFlight.get(key) === p) remoteInFlight.delete(key)
     }
   }
 
@@ -633,8 +678,9 @@ export function startUsageService(opts: UsageServiceOptions = {}): UsageService 
     // reporting numbers from a connection that no longer exists. Evicted against the FULL target
     // list rather than the caller's filtered one: switching between two SSH projects would
     // otherwise throw away each host's cache on the way to the other.
-    const live = new Set(all.map((t) => t.key))
+    const live = new Set(all.map(remoteKey))
     for (const key of [...remoteCache.keys()]) if (!live.has(key)) remoteCache.delete(key)
+    for (const key of [...remoteInFlight.keys()]) if (!live.has(key)) remoteInFlight.delete(key)
     // The scoped indicator asks for ONE host — the machine the active project runs on — so the
     // other connections cost nothing while you are not looking at them.
     const targets = query?.hostKey ? all.filter((t) => t.hostKey === query.hostKey) : all
@@ -642,13 +688,19 @@ export function startUsageService(opts: UsageServiceOptions = {}): UsageService 
     // One slow / unreachable host must not withhold the others.
     const rows = await Promise.all(
       targets.map(async (t): Promise<RemoteAccountUsage> => {
-        const cached = remoteCache.get(t.key)
+        const cached = remoteCache.get(remoteKey(t))
         const fresh = cached && Date.now() - cached.at < REFETCH_DEBOUNCE_MS
         const usage =
           !force && fresh
             ? cached.usage
-            : await runRemote(deps, t).catch(() => emptyUsage(null, Date.now(), 'error'))
-        return { hostKey: t.hostKey, accountId: t.accountId, label: t.label, usage }
+            : await runRemote(deps, t).catch((): ClaudeUsage | ProviderUsage => t.provider === 'codex'
+              ? { provider: 'codex', accountId: t.accountId ?? undefined, account: t.accountId ? t.label : null,
+                  status: 'error', limits: [], updatedAt: Date.now() }
+              : emptyUsage(null, Date.now(), 'error'))
+        const identity = { hostKey: t.hostKey, accountId: t.accountId, label: t.label }
+        return 'provider' in usage
+          ? { ...identity, provider: 'codex', usage }
+          : { ...identity, usage }
       })
     )
     return rows

@@ -702,7 +702,7 @@ describe('size negotiation: smallest subscriber wins', () => {
   })
 
   // ── A PARKED terminal is subscribed but not looking ──────────────────────────────────────
-  // The renderer keeps a node's xterm+PTY alive for 5 minutes after unmount (TERM_PARK_MS), so a
+  // The renderer keeps a node's xterm+PTY alive for the park window after unmount (`settings.terminalParkMinutes`), so a
   // parked client stays a subscriber. Its (possibly tiny) last fit must NOT shrink the terminal
   // for the people still watching — it reports a null size instead: "listening, not viewing".
   it('a parked subscriber (null size) stops constraining the shared pty but keeps its output', async () => {
@@ -1266,6 +1266,8 @@ describe('a tmux-backed joiner is told to enable mouse tracking', () => {
       fresh: boolean
       screen?: string
       coAttachMouse?: boolean
+      coAttachAltScreen?: boolean
+      tmuxClient?: boolean
     }>
 
   it('sets coAttachMouse on a joiner whose grid EQUALS the pty (the screen-painted branch)', async () => {
@@ -1307,6 +1309,73 @@ describe('a tmux-backed joiner is told to enable mouse tracking', () => {
     const b = await create(BOB, 80, 24)
     expect(b.fresh).toBe(false) // it did join the live session…
     expect(b.coAttachMouse).toBeUndefined() // …but a plain shell has no tmux mouse to turn on
+  })
+
+  // A joiner also missed tmux's attach-time `\e[?1049h`, so its xterm stays on the NORMAL buffer
+  // (scrollback piles up; every output frame forces a layout). `coAttachAltScreen` tells it to
+  // enter the alternate buffer — tmux-backed only: a plain shell's normal-buffer scrollback is the
+  // only history it has.
+  it('sets coAttachAltScreen on a tmux-backed joiner whose grid EQUALS the pty (the screen-painted branch)', async () => {
+    const m = await tmuxManager()
+    vi.spyOn(m, 'captureForResync').mockResolvedValue('current screen')
+    await create(ALICE, 80, 24)
+
+    const b = await create(BOB, 80, 24)
+    expect(b.screen).toBe('current screen')
+    expect(b.coAttachAltScreen).toBe(true)
+  })
+
+  it('sets coAttachAltScreen on a joiner that SHRINKS the pty too', async () => {
+    const m = await tmuxManager()
+    const capture = vi.spyOn(m, 'captureForResync').mockResolvedValue('current screen')
+    await create(ALICE, 120, 40)
+
+    const b = await create(BOB, 80, 24)
+    expect(capture).not.toHaveBeenCalled()
+    expect(b.screen).toBeUndefined()
+    expect(b.coAttachAltScreen).toBe(true)
+  })
+
+  it('never sets coAttachAltScreen on the SOLO spawn', async () => {
+    await tmuxManager()
+    const a = await create(ALICE, 80, 24)
+    expect(a.coAttachAltScreen).toBeUndefined()
+  })
+
+  // A resync's `term.reset()` drops ANY tmux client (the solo spawn too, not only a joiner) out of
+  // the alternate buffer and clears its mouse tracking. `tmuxClient` tells the renderer to put
+  // both back — so it rides EVERY tmux-backed create, never a plain shell's.
+  it('sets tmuxClient on the SOLO tmux spawn and on a tmux join', async () => {
+    const m = await tmuxManager()
+    vi.spyOn(m, 'captureForResync').mockResolvedValue('current screen')
+    const a = await create(ALICE, 80, 24)
+    expect(a.tmuxClient).toBe(true)
+    const b = await create(BOB, 80, 24)
+    expect(b.tmuxClient).toBe(true)
+  })
+
+  it('never sets tmuxClient for a plain shell (spawn or join)', async () => {
+    const { PtyManager } = await import('./pty-manager')
+    const m = new PtyManager()
+    m.registerIpc()
+    vi.spyOn(m, 'captureForResync').mockResolvedValue('current screen')
+    const a = await create(ALICE, 80, 24)
+    expect(a.tmuxClient).toBeUndefined()
+    const b = await create(BOB, 80, 24)
+    expect(b.fresh).toBe(false)
+    expect(b.tmuxClient).toBeUndefined()
+  })
+
+  it('does NOT set coAttachAltScreen on a plain-shell join (its scrollback is the only history)', async () => {
+    const { PtyManager } = await import('./pty-manager')
+    const m = new PtyManager()
+    m.registerIpc()
+    vi.spyOn(m, 'captureForResync').mockResolvedValue('current screen')
+    await create(ALICE, 80, 24)
+
+    const b = await create(BOB, 80, 24)
+    expect(b.fresh).toBe(false)
+    expect(b.coAttachAltScreen).toBeUndefined()
   })
 })
 

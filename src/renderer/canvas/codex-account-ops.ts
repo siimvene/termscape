@@ -66,24 +66,43 @@ export type CodexSwitchDecision =
  *   - the node must be a Codex node (`agentId === 'codex'`);
  *   - it must have a resumable conversation id (`sessionId`) and an absolute-ish cwd;
  *   - the target must differ from the source (a no-op switch is refused, not run);
- *   - the target must pass `codexAccountSelectable` (missing/hostile/unconnected ⇒ refused).
+ *   - the target must pass `codexAccountSelectable` (missing/hostile/unconnected ⇒ refused);
+ *   - the target must live on the node's OWN machine (`hostKey`: this one when undefined) — an
+ *     account on another machine has no home where the pane runs. Refused as `unavailable`;
+ *     a remote node whose host cannot be named is refused as `no-connection`.
  * The returned `plan.expected.sessionId` and `plan.sessionId` are BOTH the node's current id, so the
  * orchestration can never fork the conversation onto the switched account.
  */
 export function planCodexAccountSwitch(
-  node: { agentId?: string; cwd?: string; accountId?: string; ssh?: boolean; sessionId?: string },
+  node: {
+    agentId?: string
+    cwd?: string
+    accountId?: string
+    ssh?: boolean
+    sessionId?: string
+    /** `sshHostKey` of the host an SSH node's pane runs on; undefined = this machine. */
+    hostKey?: string
+  },
   targetAccountId: string | undefined,
   accounts: readonly CodexAccount[],
   connectedProjectIdForHost: (host: string) => string | undefined
 ): CodexSwitchDecision {
   if (node.agentId !== 'codex') return { ok: false, reason: 'not-codex' }
   if (!node.sessionId || !node.cwd) return { ok: false, reason: 'no-session' }
+  // Remote with no nameable host (`sshRemoteTmux` but no `ssh` spec): the pane runs on SOME host,
+  // so the same-machine rule below would wrongly read it as this one. Refuse, never switch as local.
+  if (node.ssh && !node.hostKey) return { ok: false, reason: 'no-connection' }
   const source = node.accountId || undefined
   const target = targetAccountId || undefined
   // A switch to the account the node already runs is a no-op — refuse rather than reserve/recycle.
   if (source === target) return { ok: false, reason: 'same-account' }
   const selectable = codexAccountSelectable(target, accounts, connectedProjectIdForHost)
   if (!selectable.ok) return { ok: false, reason: selectable.reason }
+  if (
+    target !== undefined &&
+    (accounts.find((a) => a.id === target)?.host || undefined) !== (node.hostKey || undefined)
+  )
+    return { ok: false, reason: 'unavailable' }
   return {
     ok: true,
     plan: {

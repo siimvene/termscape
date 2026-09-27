@@ -63,7 +63,8 @@ describe('planCodexAccountSwitch (fail-closed switch origination — §3.5)', ()
   }
 
   it('plans a switch to a present account, preserving the conversation id', () => {
-    const d = planCodexAccountSwitch(codexNode, 'account-r', accounts, connected)
+    // `account-r` lives on u@box, so the node must run there too — a switch never crosses machines.
+    const d = planCodexAccountSwitch({ ...codexNode, ssh: true, hostKey: 'u@box' }, 'account-r', accounts, connected)
     expect(d.ok).toBe(true)
     if (!d.ok) return
     expect(d.plan.sourceAccountId).toBe('account-a')
@@ -97,6 +98,21 @@ describe('planCodexAccountSwitch (fail-closed switch origination — §3.5)', ()
     })
   })
 
+  // A persisted node can be remote (`sshRemoteTmux`) with no `ssh` spec left to name its host
+  // (the worktree gate's drift class). Its pane is on SOME host, so neither a local account nor
+  // this machine's system login may be planned for it: refuse instead of switching it as local.
+  it('refuses a remote node whose host cannot be named, for a local or a system target', () => {
+    const drifted = { ...codexNode, accountId: undefined, ssh: true, hostKey: undefined }
+    expect(planCodexAccountSwitch(drifted, 'account-a', accounts, connected)).toEqual({
+      ok: false,
+      reason: 'no-connection'
+    })
+    expect(planCodexAccountSwitch({ ...drifted, accountId: 'account-a' }, undefined, accounts, connected)).toEqual({
+      ok: false,
+      reason: 'no-connection'
+    })
+  })
+
   it('refuses a no-op switch to the account the node already runs', () => {
     // MUTATION PIN: drop the `source === target` short-circuit → a same-account switch would be
     // ORIGINATED (reserving + recycling for nothing). Must stay red.
@@ -116,9 +132,39 @@ describe('planCodexAccountSwitch (fail-closed switch origination — §3.5)', ()
   })
 
   it('REFUSES a remote target whose host is not connected', () => {
-    expect(planCodexAccountSwitch(codexNode, 'account-r', accounts, noConnection)).toEqual({
+    expect(
+      planCodexAccountSwitch({ ...codexNode, ssh: true, hostKey: 'u@box' }, 'account-r', accounts, noConnection)
+    ).toEqual({
       ok: false,
       reason: 'no-connection'
+    })
+  })
+})
+
+describe('planCodexAccountSwitch — the account must live on the node\'s machine', () => {
+  const accts = [
+    { id: 'loc', label: 'Local' },
+    { id: 'rem', label: 'Remote', host: 'u@h' },
+    { id: 'rem2', label: 'Remote 2', host: 'u@h' },
+    { id: 'far', label: 'Elsewhere', host: 'x@y' }
+  ]
+  const connected = (): string => 'p1'
+  const base = { agentId: 'codex', cwd: '/srv/app', sessionId: 't1' }
+
+  it('switches an SSH node between accounts on its host, and to the host system login', () => {
+    const ssh = { ...base, ssh: true, hostKey: 'u@h', accountId: 'rem' }
+    expect(planCodexAccountSwitch(ssh, 'rem2', accts, connected)).toMatchObject({ ok: true })
+    expect(planCodexAccountSwitch(ssh, undefined, accts, connected)).toMatchObject({ ok: true })
+  })
+
+  it('refuses an account on another machine, in both directions', () => {
+    const ssh = { ...base, ssh: true, hostKey: 'u@h', accountId: 'rem' }
+    expect(planCodexAccountSwitch(ssh, 'loc', accts, connected)).toEqual({ ok: false, reason: 'unavailable' })
+    expect(planCodexAccountSwitch(ssh, 'far', accts, connected)).toEqual({ ok: false, reason: 'unavailable' })
+    const local = { ...base, accountId: 'loc' }
+    expect(planCodexAccountSwitch(local, 'rem', accts, connected)).toEqual({
+      ok: false,
+      reason: 'unavailable'
     })
   })
 })

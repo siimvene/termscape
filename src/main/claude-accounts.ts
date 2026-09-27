@@ -40,7 +40,9 @@ export function initClaudeAccounts(
       add: (projectId, id) => mgr.remoteAccountAdd(projectId, id),
       readLogin: (projectId, id) => mgr.remoteAccountReadLogin(projectId, id),
       remove: (projectId, id) => mgr.remoteAccountRemove(projectId, id),
-      hostKey: (projectId) => mgr.hostKeyFor(projectId)
+      hostKey: (projectId) => mgr.hostKeyFor(projectId),
+      copySession: (projectId, sessionId, source, target) =>
+        mgr.remoteClaudeSessionCopy(projectId, sessionId, source, target)
     }
   }
   // The event is stripped exactly as the core seam would strip it: none of the four reads a sender.

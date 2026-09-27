@@ -54,6 +54,17 @@ export interface AgentLaunchTrustedContext {
   resolveExecutableKind?: AgentLaunchExecutableKindResolver;
   /** Trusted absolute Windows PowerShell executable used only as cmd's ASCII-safe wrapper. */
   windowsPowerShellPath?: string;
+  /**
+   * What the host's `codex` accepts for `--ask-for-approval`, from `core/codex-cli.ts`'s probe of
+   * the binary this plan will exec. Host-authoritative like everything else here, and injected
+   * rather than read inline so this planner stays pure and testable.
+   *
+   * Absent = unknown = the baseline vocabulary, which is the safe degrade everywhere: the launch
+   * still happens, at worst `manual` falls back to codex's own default. The value that makes this
+   * field necessary is `untrusted`, which codex removed in 0.149.0 — clap EXITS on a value it does
+   * not know, so emitting it blind is a dead session, not a degraded one.
+   */
+  codexApprovalValues?: readonly string[] | null;
 }
 
 /** Core-private launch material. It must never cross the renderer/preload/relay boundary. */
@@ -342,7 +353,9 @@ function logicalLaunch(
   if (intent.permissionMode !== undefined && !hasPermissionMode(config.id))
     fail("invalid-intent");
   const modeFlags = intent.permissionMode
-    ? approvalFlags(config.id, intent.permissionMode)
+    ? approvalFlags(config.id, intent.permissionMode, {
+        codexApprovalValues: context.codexApprovalValues,
+      })
     : [];
 
   if (intent.action === "resume") {

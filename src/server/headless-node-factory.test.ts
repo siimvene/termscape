@@ -41,6 +41,8 @@ class FakePty implements HeadlessPty {
     return { sessionId: `pty-${options.persistKey}`, fresh: true, persistent: true }
   }
 
+  async paneCommand(): Promise<string | null> { return 'bash' }
+
   async sessionExists(persistKey: string): Promise<boolean> {
     return this.live.has(persistKey)
   }
@@ -96,6 +98,7 @@ describe('HeadlessNodeFactory', () => {
   let ownership: HeadlessNodeOwnership
   let codexSharedIdentity: boolean
   let settingsOverride: Partial<Settings> = {}
+  let codexApprovalValues: { approvalValues: string[] | null }
 
   const settings = (): Settings => ({
     ...DEFAULT_SETTINGS,
@@ -118,6 +121,7 @@ describe('HeadlessNodeFactory', () => {
     publishedProjects = []
     codexSharedIdentity = false
     settingsOverride = {}
+    codexApprovalValues = { approvalValues: ['on-request', 'never'] }
     ownership = createHeadlessNodeOwnership()
     ownership.record('term-upstream', {
       sourceNodeId: 'term-source',
@@ -162,6 +166,10 @@ describe('HeadlessNodeFactory', () => {
       // `models: []` is grok's own "no catalogue" answer (a failed/absent `grok models`), which is
       // the pre-feature behaviour: no model switching offered, never a partial list.
       grokCaps: async () => ({ sessionIdFlag: false, models: [] }),
+      // Likewise stated. The default is the CURRENT codex vocabulary (0.149.0 dropped `untrusted`),
+      // so the assembled lines below are the ones a Server Edition on a current CLI really sends;
+      // the old vocabulary gets its own case rather than being the silent default.
+      codexCaps: async () => codexApprovalValues,
       codexSharedIdentity: async () => codexSharedIdentity,
       ownership,
       stateOf: (id) => states[id],
@@ -196,7 +204,8 @@ describe('HeadlessNodeFactory', () => {
       })
     ])
     expect(pty.sends).toEqual([{ nodeId: id, text: 'printf hello' }])
-    expect(published.map((node) => node.id)).toEqual([id])
+    // The persisted hold is published first, then its acknowledged delivery.
+    expect(published.map((node) => node.id)).toEqual([id, id])
 
     expect(fs.existsSync(path.join(dataDir, 'workspace.json'))).toBe(true)
     const projectFile = path.join(projectDir, '.nodeterm', 'project.json')
@@ -511,7 +520,7 @@ describe('HeadlessNodeFactory', () => {
       factory.link('term-source', { to: 'term-upstream,term-other-project' }, true)
     ).resolves.toMatchObject({
       ok: false,
-      error: expect.stringContaining('link-project-refused')
+      error: "link-project-refused: term-other-project is not exclusively in the caller's project; cross-project linking is not supported"
     })
     expect((await store.load({ sideline: false })).projects[0].bridges).toEqual([])
     expect(publishedProjects).toEqual([])
@@ -895,7 +904,10 @@ describe('HeadlessNodeFactory', () => {
 
   it.each([
     ['claude', "claude 'do work'"],
-    ['codex', "codex 'do work' --ask-for-approval untrusted"],
+    // Manual is the resolved mode in this fixture, and on a current codex it has NO expressible
+    // value — `untrusted` was removed in 0.149.0 and clap exits on it (issue #785). The honest
+    // line is the bare one; the case below pins the old CLI, which still gets the flag.
+    ['codex', "codex 'do work'"],
     ['gemini', "gemini 'do work'"]
   ] as const)('assembles the %s launch through the shared command builder', async (agent, command) => {
     const reply = await factory.openAgent(
@@ -1041,8 +1053,106 @@ describe('HeadlessNodeFactory', () => {
     const id = (reply.result as { id: string }).id
     expect(pty.sends.at(-1)).toEqual({
       nodeId: id,
-      text: "nodeterm-codex 'do work' --ask-for-approval untrusted"
+      text: "nodeterm-codex 'do work'"
     })
+  })
+
+  /**
+   * The Server Edition's Codex sessions run on THIS host's `codex`, so the host's own probe is the
+   * authority for them — not a constant, and not the desktop's. A host still on <= 0.148.0 keeps
+   * "Ask each time" working; the case above shows the same factory dropping it on a host that
+   * cannot express it. Both come out of one probe, which is the whole point of #785's fix.
+   */
+  it('keeps `untrusted` for a host whose codex still advertises it', async () => {
+    codexApprovalValues = { approvalValues: ['untrusted', 'on-request', 'never'] }
+
+    const reply = await factory.openAgent('term-source', { agent: 'codex', prompt: 'do work' }, true)
+
+    expect(reply.ok).toBe(true)
+    const id = (reply.result as { id: string }).id
+    expect(pty.sends.at(-1)).toEqual({
+      nodeId: id,
+      text: "codex 'do work' --ask-for-approval untrusted"
+    })
+  })
+
+  it.each(['claude', 'codex'])('reports delivered, not running, for %s', async (agent) => {
+    const reply = await factory.openAgent('term-source', { agent, prompt: 'work' }, true)
+    const id = (reply.result as { id: string }).id
+    expect(reply).toMatchObject({ ok: true, result: { queued: false, queuedIds: [], deliveredIds: [id], failed: [] } })
+    expect(reply.message).toContain('agent startup is not confirmed')
+    const workspace = await store.load({ sideline: false })
+    expect(workspace.projects[0].nodes.find((node) => node.id === id)?.pendingLaunch).toBeUndefined()
+  })
+
+  it.each(['refused', 'throws', 'no-pty'])('retains the exact initial command after %s', async (failure) => {
+    if (failure === 'no-pty') vi.spyOn(pty, 'createHeadless').mockRejectedValueOnce(new Error('unavailable'))
+    else if (failure === 'throws') vi.spyOn(pty, 'sendText').mockRejectedValueOnce(new Error('disconnected'))
+    else vi.spyOn(pty, 'sendText').mockResolvedValueOnce(false)
+    const reply = await factory.openAgent('term-source', { agent: 'claude', prompt: 'keep this brief' }, true)
+    const id = (reply.result as { id: string }).id
+    expect(reply).toMatchObject({ ok: false, result: { deliveredIds: [], failed: [id] } })
+    expect(reply.error).toContain('do not repeat the open request')
+    const workspace = await store.load({ sideline: false })
+    expect(workspace.projects[0].nodes.find((node) => node.id === id)?.pendingLaunch).toMatchObject({
+      after: [], command: "claude 'keep this brief'", executor: 'server'
+    })
+  })
+
+  it.each(['vim', null])('refuses initial input when the pane is %s and never retries on hooks', async (pane) => {
+    vi.spyOn(pty, 'paneCommand').mockResolvedValue(pane)
+    const reply = await factory.openAgent('term-source', { agent: 'claude', prompt: 'brief' }, true)
+    expect(reply.ok).toBe(false)
+    expect(pty.sends).toEqual([])
+    await factory.refreshArmed({ nodeId: 'term-upstream', state: 'done' })
+    expect(pty.sends).toEqual([])
+  })
+
+  it('saves manual recovery intent before sending, including a successful send whose clearing save fails', async () => {
+    const save = vi.spyOn(store, 'save')
+    vi.spyOn(pty, 'sendText').mockImplementationOnce(async (id) => {
+      const durable = await store.load({ sideline: false })
+      expect(durable.projects[0].nodes.find((n) => n.id === id)?.pendingLaunch)
+        .toMatchObject({ command: "claude 'brief'", manualOnly: true })
+      save.mockRejectedValueOnce(new Error('disk unavailable after delivery'))
+      pty.sends.push({ nodeId: id, text: 'brief' })
+      return true
+    })
+    await expect(factory.openAgent('term-source', { agent: 'claude', prompt: 'brief' }, true))
+      .rejects.toThrow('disk unavailable')
+    await factory.refreshArmed({ nodeId: 'term-upstream', state: 'done' })
+    expect(pty.sends).toHaveLength(1)
+  })
+
+  it('a failed dependent launch is retained durably and not replayed after unrelated hooks', async () => {
+    states['term-upstream'] = 'working'
+    const reply = await factory.openAgent('term-source', {
+      agent: 'claude', prompt: 'brief', after: 'term-upstream'
+    }, true)
+    const id = (reply.result as { id: string }).id
+    const send = vi.spyOn(pty, 'sendText').mockResolvedValue(false)
+    await factory.refreshArmed({ nodeId: 'term-upstream', state: 'done' })
+    await factory.refreshArmed({ nodeId: 'term-source', state: 'done' })
+    await factory.refreshArmed()
+    expect(send).toHaveBeenCalledTimes(1)
+    const durable = await store.load({ sideline: false })
+    expect(durable.projects[0].nodes.find((n) => n.id === id)?.pendingLaunch)
+      .toMatchObject({ command: "claude 'brief'", manualOnly: true })
+  })
+
+  it('reports a partial batch and never retries the retained launch on unrelated hooks', async () => {
+    vi.spyOn(pty, 'sendText').mockResolvedValueOnce(true).mockResolvedValueOnce(false)
+    const reply = await factory.openAgent('term-source', { agent: 'codex', prompt: 'work', count: '2' }, true)
+    const [delivered, failed] = (reply.result as { ids: string[] }).ids
+    expect(reply).toMatchObject({ ok: false, result: { deliveredIds: [delivered], failed: [failed], queuedIds: [] } })
+    const workspace = await store.load({ sideline: false })
+    expect(workspace.projects[0].nodes.find((node) => node.id === failed)?.pendingLaunch?.command)
+      .toContain("codex 'work'")
+    pty.sends.length = 0
+    await factory.refreshArmed()
+    await factory.refreshArmed()
+    expect(pty.sends).toEqual([])
+    expect(workspace.projects[0].nodes.find((node) => node.id === failed)?.pendingLaunch?.manualOnly).toBe(true)
   })
 
   it('persists --after without launching, then flushes exactly once on the idle state', async () => {
@@ -1055,11 +1165,14 @@ describe('HeadlessNodeFactory', () => {
     expect(reply.ok).toBe(true)
     const id = (reply.result as { id: string }).id
     expect(pty.sends).toEqual([])
+    expect(reply.result).toMatchObject({ queued: true, queuedIds: [id], deliveredIds: [] })
+    expect(reply.message).toContain('queued:')
 
     let workspace = await store.load({ sideline: false })
     expect(workspace.projects[0].nodes.find((node) => node.id === id)?.pendingLaunch).toEqual({
       after: ['term-upstream'],
       command: "claude 'consume result'",
+      attempted: false,
       executor: 'server'
     })
     expect(workspace.projects[0].bridges).toEqual(

@@ -18,12 +18,17 @@ import {
   UNKNOWN_CLAUDE_CLI_CAPS,
   UNKNOWN_GROK_CLI_CAPS,
   UNKNOWN_CODEX_IDENTITY_CAPS,
+  UNKNOWN_CODEX_CLI_CAPS,
   type ClaudeUsage,
   type NodeTerminalApi,
   type NotifyPayload,
   type UpdatePolicy
 } from '../../shared/types'
 import { E_UNSUPPORTED } from '../../shared/rpc'
+import { isMacPlatform } from '../../shared/platform-utils'
+import { effectiveBindings, terminalShortcutPolicy } from '../lib/keybindingOverrides'
+import type { ContextElement } from '../lib/keyContext'
+import { createMarkdownToggleSource } from './markdown-toggle-key'
 
 /** Reject with a coded error the RPC layer + renderer recognize (renderer degrades silently). */
 export function unsupported(name: string): Promise<never> {
@@ -198,7 +203,7 @@ export function buildStubApi(): Omit<
       // the project's ControlMaster). Resolve a typed refusal instead of rejecting so the
       // VideoNode shows the reason rather than a generic load failure.
       allowSsh: (): Promise<{ ok: false; error: string }> =>
-        Promise.resolve({ ok: false, error: 'Playing videos from an SSH host is not available in the browser.' }),
+        Promise.resolve({ ok: false, error: 'Playing media from an SSH host is not available in the browser.' }),
       writeHtml: U('media.writeHtml')
     },
     browser: {
@@ -218,6 +223,9 @@ export function buildStubApi(): Omit<
       onProgress: noopUnsub,
       onError: noopUnsub,
       onNotAvailable: noopUnsub,
+      // Server Edition has no updater at all (initUpdater runs only in src/main) and a browser
+      // tab cannot self-install, so there is no channel state to report either way.
+      onNoChannel: noopUnsub,
       check: noop,
       getVersion: U('updates.getVersion'),
       // Boot path awaits this and reads `p.mandatory` UNGUARDED (UpdateCard.tsx), so the old
@@ -280,6 +288,15 @@ export function buildStubApi(): Omit<
       read: () => Promise.resolve({ ok: false, rows: [], mem: null }),
       host: () => Promise.resolve(null)
     },
+    wallpaper: {
+      // Superseded by the real WS-backed namespace in ws-bridge (registerWallpaperIpc runs in the
+      // server shell). A RELAY tab keeps this: the wallpaper is this window's own appearance, and
+      // the peer's disk has nothing to say about it. No stills, nothing to load (gradient presets
+      // are pure CSS and need no bridge), and import refuses.
+      listStills: () => Promise.resolve([]),
+      load: () => Promise.resolve(null),
+      importImage: U('wallpaper.importImage')
+    },
     triggers: {
       // Superseded by the real WS-backed namespace in ws-bridge (startTriggerService registers the
       // handlers in the server shell). On the RELAY tab this stub stays in force and REFUSES: the
@@ -296,14 +313,20 @@ export function buildStubApi(): Omit<
       // one the Server Edition gives on purpose (see server/handlers/index.ts): no shared
       // identity, so every Codex launch line stays the bare `codex`.
       identityCaps: () => Promise.resolve(UNKNOWN_CODEX_IDENTITY_CAPS),
+      // A RELAY tab keeps this stub: its sessions run on the GUEST's machine, whose codex is a
+      // different binary from the one this probe could reach, and applying our vocabulary to their
+      // launch line is precisely the cross-machine guess this gate exists to stop. Unknown ⇒ the
+      // baseline vocabulary ⇒ the two values every measured codex accepts; "Ask each time" is
+      // reported as unsupported there rather than gambling `untrusted` on someone else's CLI.
+      // Overridden by the real WS-backed namespace in ws-bridge for the Server Edition.
+      cliCaps: () => Promise.resolve(UNKNOWN_CODEX_CLI_CAPS),
       onIdentity: noopUnsub
     },
     claude: {
       // Overridden by the real WS-backed namespace in ws-bridge; the stub still answers with the
       // fail-open caps (never rejects) because the permission-mode gate reads it on the boot path.
       cliCaps: () => Promise.resolve(UNKNOWN_CLAUDE_CLI_CAPS),
-      readTranscript: U('claude.readTranscript'),
-      copySessionTranscript: U('claude.copySessionTranscript')
+      readTranscript: U('claude.readTranscript')
     },
     grok: {
       // Same shape and same reason as claude's above: the launch path reads this synchronously, so
@@ -370,7 +393,8 @@ export function buildStubApi(): Omit<
       cancelWaitLogin: U('claudeAccounts.cancelWaitLogin'),
       remove: U('claudeAccounts.remove'),
       link: U('claudeAccounts.link'),
-      setSkillSharing: U('claudeAccounts.setSkillSharing')
+      setSkillSharing: U('claudeAccounts.setSkillSharing'),
+      copySession: U('claudeAccounts.copySession')
     },
     // The first six members are REAL over the WS bridge (`buildCodexAccountsApi` spreads this stub
     // and then overrides them); these stay as the fallback for any assembly that spreads the stub
@@ -391,6 +415,7 @@ export function buildStubApi(): Omit<
       commitSwitch: U('codexAccounts.commitSwitch'),
       finishSwitch: U('codexAccounts.finishSwitch'),
       rollbackSwitch: U('codexAccounts.rollbackSwitch'),
+      switchThreadRemote: U('codexAccounts.switchThreadRemote'),
       transferThreadToSsh: U('codexAccounts.transferThreadToSsh')
     },
     // All four are REAL over the WS bridge (`buildPiAccountsApi`); this is the fallback for any
@@ -411,6 +436,8 @@ export function buildStubApi(): Omit<
       onApplyMutation: noopUnsub,
       onPeerPending: noopUnsub,
       onPeerPendingCleared: noopUnsub,
+      // Standing phone hosting is Desktop-only; never pretend that a browser pinned a phone.
+      approvePhone: U('remoteHost.approvePhone'),
       approve: (_id: string) => {},
       reject: (_id: string) => {},
       setPhoneAccess: noop
@@ -456,7 +483,8 @@ export function buildStubApi(): Omit<
       // Deliberate no-op (not a gap): the recording bit exists to stand the DESKTOP's
       // `before-input-event` intercepts down, and a browser tab has no application menu to steal
       // ⌘W/⌘M/⌘0 back from — nothing intercepts here, so there is nothing to suspend. The
-      // recorder's own preventDefault/stopPropagation is the whole path in this shell.
+      // recorder's own preventDefault/stopPropagation is the whole path in this shell; that also
+      // covers the ⌘M window listener below, which is bubble-phase and skips a prevented event.
       setRecording: noop,
       // Deliberate no-op for the same reason, one step further: the mirror exists so the DESKTOP's
       // intercepts can stand down under `terminal-first`, and there are no intercepts here to
@@ -464,7 +492,20 @@ export function buildStubApi(): Omit<
       // renderer's own dispatcher (`keyDispatchContextFor`), which reads focus directly.
       setTerminalFocused: noop
     },
-    onMarkdownToggle: noopUnsub,
+    // REAL, not a stub: a browser tab has no main process to intercept ⌘/Ctrl+M, so the chord is
+    // matched by a window keydown listener here (bindings, terminal-first stand-down and focus all
+    // read live — see markdown-toggle-key.ts, including why macOS Chrome never delivers ⌘M).
+    // Node-env tests have no window: they get the inert unsubscribe the boot contract requires.
+    onMarkdownToggle:
+      typeof window === 'undefined'
+        ? noopUnsub
+        : createMarkdownToggleSource({
+            target: window,
+            bindings: () => effectiveBindings('node.toggleMarkdown'),
+            isMac: isMacPlatform,
+            policy: terminalShortcutPolicy,
+            activeElement: () => document.activeElement as unknown as ContextElement | null
+          }),
     onCloseNode: noopUnsub,
     // Deliberate no-op (not a gap): a browser tab has no application menu to steal ⌘0, so the
     // renderer's own keydown handler is the whole path there.

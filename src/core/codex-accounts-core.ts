@@ -7,6 +7,7 @@
 //
 // Ships INERT (nothing spawns against it yet) but fully tested. Based on @Corvin's
 // `codex-accounts-core.ts` in PR #112, re-sliced to the S6 PR-1 model layer.
+import { capabilityAgentId } from '../shared/agents/config'
 import { createHash, randomUUID } from 'crypto'
 import {
   existsSync,
@@ -264,7 +265,7 @@ export function needsCodexAccountScope(
   codexLoginIntent = false
 ): boolean {
   if (codexLoginIntent) return true
-  if (agentId === 'codex') return true
+  if (agentId && capabilityAgentId(agentId) === 'codex') return true
   if (!accountId) return false
   return isCodexAccount(accountId)
 }

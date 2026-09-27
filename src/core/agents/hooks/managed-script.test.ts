@@ -55,7 +55,7 @@ describe('buildManagedScript', () => {
     expect((s.match(/\n *curl -sS/g) ?? []).length).toBe(4)
     // The two answered POSTs are wrapped in a `{ … ; rm … } &` group that self-deletes the payload
     // temp file, so `nt_hook_headers |` there is preceded by `{ ` — match either form.
-    expect((s.match(/\n *(\{ )?nt_hook_headers \|/g) ?? []).length).toBe(4)
+    expect((s.match(/\n *(\{ |nt_code=\$\()?nt_hook_headers \|/g) ?? []).length).toBe(4)
     expect((s.match(/--config -/g) ?? []).length).toBe(4)
   })
 
@@ -96,8 +96,11 @@ describe('buildManagedScript', () => {
     it('fires a backgrounded "answered" POST in the wait branch after reading a valid answer', () => {
       // Guarded on a valid allow/deny answer, tagged nodeterm_answered on both transports, and
       // backgrounded (& + short --max-time) so the decision JSON is never delayed.
-      expect(s).toContain('if [ "$nt_decision" = "allow" ] || [ "$nt_decision" = "deny" ]; then')
-      const answered = s.match(/--data-urlencode "nodeterm_answered=\$\{nt_decision\}"/g) ?? []
+      // The VERB decoded from the answer file (never the file itself: a structured answer carries
+      // user text, which must not reach an argv) — see managed-script.answer.test.ts.
+      expect(s).toContain('if [ "$nt_verb" = "allow" ] || [ "$nt_verb" = "deny" ]; then')
+      expect(s).not.toContain('nodeterm_answered=${nt_decision}')
+      const answered = s.match(/--data-urlencode "nodeterm_answered=\$\{nt_verb\}"/g) ?? []
       expect(answered.length).toBe(2)
       // Each backgrounded answered POST reads the payload from the temp file and self-deletes it
       // after curl returns (the file must never outlive its reader).
@@ -119,7 +122,9 @@ describe('buildManagedScript', () => {
     })
     it('polls the answer file every 0.5s up to the armed seconds', () => {
       expect(s).toContain('nt_answer="$HOME/.nodeterm/pending/$nt_pending.answer"')
-      expect(s).toContain('nt_max=$((NODETERM_PERM_WAIT_SECS * 2))')
+      // nt_wait = NODETERM_PERM_WAIT_SECS, or the long interactive hold for a plan / question.
+      expect(s).toContain('nt_wait="$NODETERM_PERM_WAIT_SECS"')
+      expect(s).toContain('nt_max=$((nt_wait * 2))')
       expect(s).toContain('sleep 0.5')
     })
     it('prints the exact allow / deny decision JSON', () => {
@@ -143,14 +148,15 @@ describe('buildManagedScript', () => {
     it('the wait branch is ABSENT from a non-claude agent script, not merely env-inert', () => {
       for (const agent of ['codex', 'gemini', 'grok', 'copilot', 'opencode']) {
         const script = buildManagedScript(agent)
-        expect(script, `${agent} script arms the perm wait`).not.toContain('NODETERM_PERM_WAIT_SECS * 2')
+        expect(script, `${agent} script arms the perm wait`).not.toContain('"$NODETERM_PERM_WAIT_SECS"')
+        expect(script, `${agent} script holds`).not.toContain('nt_wait')
         expect(script, `${agent} script polls the answer file`).not.toContain('.answer')
         expect(script, `${agent} script can print a decision`).not.toContain('hookSpecificOutput')
         expect(script).toContain(`/hook/${agent}`)
       }
       // And claude keeps the whole branch.
       const claude = buildManagedScript('claude')
-      expect(claude).toContain('nt_max=$((NODETERM_PERM_WAIT_SECS * 2))')
+      expect(claude).toContain('nt_max=$((nt_wait * 2))')
       expect(claude).toContain('"behavior":"deny"')
     })
   })
@@ -1042,7 +1048,7 @@ describe('managed script presents the per-node token', () => {
   // different secret): if it survived the fallback — because the dir was not cleared, or because
   // the read happened once at the top — the server would see a foreign kid and label the event
   // `legacy`, i.e. verified:false. Only a genuine re-read produces verified:true.
-  it.skipIf(!shAvailable)('re-reads the token from the endpoint it FELL BACK to', async () => {
+  it.skipIf(!shAvailable).each(['dead', 'wrong-owner'])('re-reads the token after a %s endpoint', async (primary) => {
     const home = newHome('home-failover')
     const primaryTokens = tokenDirWith('tokens-primary', {
       [NODE]: nodeAuthToken(FOREIGN_SECRET, NODE)
@@ -1051,7 +1057,7 @@ describe('managed script presents the per-node token', () => {
     const dead = join(home, '.nodeterm', 'hook-endpoint-dead.env')
     writeFileSync(
       dead,
-      `NODETERM_HOOK_SOCK=${join(home, '.nodeterm', 'nothing-listens-here.sock')}\nNODETERM_HOOK_TOKEN=dead\nNODETERM_HOOK_VERSION=2\nNODETERM_NODE_TOKEN_DIR=${primaryTokens}\n`,
+      `NODETERM_HOOK_SOCK=${primary === 'dead' ? join(home, '.nodeterm', 'nothing-listens-here.sock') : hookServer.getSockPath()}\nNODETERM_HOOK_TOKEN=dead\nNODETERM_HOOK_VERSION=2\nNODETERM_NODE_TOKEN_DIR=${primaryTokens}\n`,
       'utf8'
     )
     const live = join(home, '.nodeterm', 'hook-endpoint-live.env')
@@ -1171,4 +1177,38 @@ describe('the managed script bail path (issues #186/#187), under /bin/sh', () =>
       expect(res.stdout).toBe('')
     }
   )
+})
+
+describe('session context env on the executed hook wire', () => {
+  const shAvailable = spawnSync('sh', ['-c', 'exit 0']).status === 0
+  it.skipIf(!shAvailable)('reports only Claude decimal context env and sends empty to invalidate it', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hook-context-'))
+    try {
+      const bin = join(dir, 'bin')
+      mkdirSync(bin)
+      const log = join(dir, 'curl.log')
+      writeFileSync(join(bin, 'curl'), fakeCurlScript(log), { mode: 0o755 })
+      const script = join(dir, 'hook.sh')
+      for (const [agent, value, expected] of [
+        ['claude', '1048576', '1048576'],
+        ['claude', '', ''],
+        ['claude', '32000oops', ''],
+        ['claude', '9'.repeat(17), ''],
+        ['codex', '1048576', '']
+      ]) {
+        writeFileSync(script, buildManagedScript(agent, null))
+        await new Promise<void>((resolve, reject) => {
+          const child = spawn('sh', [script], {
+            env: { PATH: `${bin}:${process.env.PATH}`, HOME: dir, NODETERM_NODE_ID: 'fixture', NODETERM_HOOK_PORT: '1', CLAUDE_CODE_MAX_CONTEXT_TOKENS: value },
+            stdio: ['pipe', 'pipe', 'pipe']
+          })
+          child.stdin.on('error', reject)
+          child.on('error', reject)
+          child.on('close', code => code === 0 ? resolve() : reject(new Error(`exit ${code}`)))
+          child.stdin.end('{"hook_event_name":"Stop"}')
+        })
+        expect(curlCalls(log).at(-1)?.argv).toContain(`--data-urlencode nodeterm_context_window=${expected} --data-urlencode`)
+      }
+    } finally { rmSync(dir, { recursive: true, force: true }) }
+  })
 })

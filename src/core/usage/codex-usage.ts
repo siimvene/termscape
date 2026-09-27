@@ -18,7 +18,7 @@ import type { ProviderUsage, UsageLimit } from '../../shared/types'
 import { parseResetTimestamp } from './claude-usage-map'
 import { directExecutableInvocation, findInLoginPath } from '../exec-path'
 
-const BACKEND_USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage'
+export const CODEX_BACKEND_USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage'
 const FETCH_TIMEOUT_MS = 8000
 const APP_SERVER_TIMEOUT_MS = 10_000
 
@@ -202,7 +202,7 @@ async function fetchViaBackend(home: string, auth?: CodexAuth): Promise<Provider
 
   const ctrl = new AbortController()
   const t = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS)
-  const res = await fetch(BACKEND_USAGE_URL, { signal: ctrl.signal, headers }).finally(() =>
+  const res = await fetch(CODEX_BACKEND_USAGE_URL, { signal: ctrl.signal, headers }).finally(() =>
     clearTimeout(t)
   )
   if (!res.ok) return null
@@ -218,20 +218,29 @@ async function fetchViaBackend(home: string, auth?: CodexAuth): Promise<Provider
 
 /**
  * Tier 2: `codex app-server` speaks JSON-RPC over stdio. Costs a subprocess, so it runs only
- * when the backend tier declined. Sandboxed read-only/untrusted — this must never be a way for
- * a quota refresh to touch the user's files.
+ * when the backend tier declined. Sandboxed read-only — this must never be a way for a quota
+ * refresh to touch the user's files.
+ *
+ * The approval policy is `never`, and it used to be `untrusted`. That value was removed from
+ * codex's vocabulary in 0.149.0 and clap refuses the whole invocation rather than ignoring it:
+ *
+ *   error: invalid value 'untrusted' for '--ask-for-approval <APPROVAL_POLICY>'
+ *
+ * so on every current CLI this tier exited 2 before it spoke a word of JSON-RPC and silently
+ * returned null forever (issue #785). Unlike the launch path there is nothing to probe for here:
+ * `never` is accepted by EVERY codex we have measured, 0.146.0 through 0.154.0 (checked by running
+ * `-s read-only -a never app-server` against each binary), so one value serves both vocabularies.
+ * It is also the right value on its own terms — this is a non-interactive read with no user to
+ * prompt, and `-s read-only` is what actually keeps it away from the user's files; an approval
+ * policy that escalates would only have hung it.
  */
+export const CODEX_APP_SERVER_ARGS = ['-s', 'read-only', '-a', 'never', 'app-server'] as const
+
 export async function fetchCodexUsageViaAppServerAt(
   bin: string,
   home: string
 ): Promise<ProviderUsage | null> {
-  const invocation = directExecutableInvocation(bin, [
-    '-s',
-    'read-only',
-    '-a',
-    'untrusted',
-    'app-server'
-  ])
+  const invocation = directExecutableInvocation(bin, [...CODEX_APP_SERVER_ARGS])
   if (!invocation) return null
   return new Promise<ProviderUsage | null>((resolve) => {
     let child: ReturnType<typeof spawn>

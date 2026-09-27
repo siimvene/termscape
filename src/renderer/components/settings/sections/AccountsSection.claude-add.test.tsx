@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// "Add account" (Claude) mirrors the row the SHELL registered, and opens its `claude /login` node
+// "Add Claude account" mirrors the row the SHELL registered, and opens its `claude /login` node
 // only once `add()` has resolved — the same shape as AccountsSection.codex-add.test.tsx.
 //
 // The row used to be the RENDERER's to write: it built `{id, label:'New account', pending, host}`
@@ -43,7 +43,8 @@ function render(): { host: HTMLElement; root: Root } {
 
 const addButton = (host: HTMLElement): HTMLButtonElement | undefined =>
   Array.from(host.querySelectorAll('button')).find((b) =>
-    /^add account$/i.test((b.textContent ?? '').trim())
+    // Upstream 304e25b0 (one machine-grouped Accounts surface) names the provider on the button.
+    /^add claude account$/i.test((b.textContent ?? '').trim())
   )
 
 const until = async (pred: () => boolean, ms = 1500): Promise<void> => {

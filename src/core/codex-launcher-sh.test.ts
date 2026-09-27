@@ -323,6 +323,9 @@ describe('generated Codex launcher', () => {
       recovering
     )
 
+    // First launch carries the prompt (minus the approval override, #811); the recovery resume
+    // carries nothing at all, which is the pre-existing rule this fix made the first launch agree
+    // with.
     expect(codexArgv()).toEqual([
       '--remote unix:// resume thread-abc --model test-model fix the bug',
       '--remote unix:// resume thread-abc'
@@ -737,5 +740,72 @@ describe('the pane agent id reaches the record', () => {
     await callLauncher([], { NODETERM_AGENT_ID: '' })
     expect(started).toEqual([{ nodeId: 'node-1', cwd: fs.realpathSync(dir) }])
     expect(fallbacks).toEqual([])
+  })
+})
+
+// Issue #811. `codex-cli 0.154.0` refuses an approval OVERRIDE on a remote resume whatever its
+// value — MEASURED against a real thread on a running shared app-server, under a pty:
+//
+//   codex --remote unix:// resume <thread> --ask-for-approval on-request
+//   Error: Permission overrides are not supported when resuming a remote task.
+//
+// `on-request` is in that build's own enum and is its default policy, so this is not the missing
+// `untrusted` of #785; the same command with the flag removed resumes and the TUI stays up, and
+// `-c approval_policy=never` is refused identically. nodeterm appends the flag from `approvalFlags`
+// and this launcher forwarded it into the resume, so every shared-identity Codex node died on its
+// first turn and the pane fell back to a bare shell.
+//
+// The cases below run the generated shell for real, because "was the flag removed and everything
+// else kept, on the resume but NOT on the fallback?" is the whole fix and a string assertion on the
+// script cannot answer it.
+describe('the approval override never rides a remote resume (#811)', () => {
+  // Merged semantics (fork, Termscape): upstream #811 STRIPS the override inside nt_run_shared and
+  // keeps the node on the shared identity without its mode. The fork's preflight (0ed9d6da) runs
+  // first and sends any explicit approval/sandbox/bypass flag to PLAIN codex instead, so the
+  // selected mode is honoured; the remote resume therefore never sees the flag either way. These
+  // assert the fork's outcome for upstream's inputs — flag kept, no daemon, the stated reason.
+  const policyFallback = [{ nodeId: 'node-1', reason: 'permission-policy-requires-local' }]
+
+  it('sends `--ask-for-approval <value>` to plain codex with the rest intact', async () => {
+    await callLauncher(['--model', 'gpt-5', '--ask-for-approval', 'on-request', 'fix the bug'])
+    expect(codexArgv()).toEqual(['--model gpt-5 --ask-for-approval on-request fix the bug'])
+    expect(fallbacks).toEqual(policyFallback)
+  })
+
+  it('treats the short spelling and the `=` forms a wrapper may use the same way', async () => {
+    // `withPermissionMode` leaves a command alone when it already spells the flag (#601), so a
+    // user's `settings.agentLaunchCommands` wrapper is how these reach the launcher.
+    await callLauncher(['-a', 'never', 'one'])
+    await callLauncher(['--ask-for-approval=never', 'two'])
+    await callLauncher(['-a=never', 'three'])
+    expect(codexArgv()).toEqual(['-a never one', '--ask-for-approval=never two', '-a=never three'])
+    expect(started).toEqual([])
+  })
+
+  it('does so for a caller-supplied resume too, binding nothing', async () => {
+    await callLauncher(['resume', 'thread-xyz', '--ask-for-approval', 'never'])
+    expect(bound).toEqual([])
+    expect(codexArgv()).toEqual(['resume thread-xyz --ask-for-approval never'])
+    expect(fallbacks).toEqual(policyFallback)
+  })
+
+  it('does not eat a value-less trailing flag\'s neighbour', async () => {
+    await callLauncher(['fix the bug', '--ask-for-approval'])
+    expect(codexArgv()).toEqual(['fix the bug --ask-for-approval'])
+    expect(fallbacks).toEqual(policyFallback)
+  })
+
+  // The other exit. Every identity-setup failure ends in `exec codex "$@"` — plain codex, no
+  // `--remote` — and 0.154 accepts the flag there (`codex --ask-for-approval never --version`
+  // prints the version). Suppressing it in the TypeScript that builds the launch line would take
+  // the permission mode away from exactly the nodes that could not get a managed identity, against
+  // this launcher's own rule that such a node must still be a working node. This is the assertion
+  // that makes the strip's PLACEMENT load-bearing rather than incidental.
+  it('keeps the flag on the plain-codex fallback', async () => {
+    await callLauncher(['--ask-for-approval', 'never', 'fix the bug'], {
+      NODETERM_HOOK_ENDPOINT: '/nonexistent/hook-endpoint.env'
+    })
+    expect(codexArgv()).toEqual(['--ask-for-approval never fix the bug'])
+    expect(fallbacks.map((f) => f.reason)).toContain('hook-endpoint-unavailable')
   })
 })

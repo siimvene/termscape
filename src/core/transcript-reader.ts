@@ -4,16 +4,18 @@
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
-import type { TranscriptLine, ChatMessage, ChatPart } from '../shared/types'
+import type { TranscriptLine, ChatMessage, ChatPart, ChatCarriedToolResult } from '../shared/types'
 import { transcriptRootFor } from './claude-accounts-core'
 import { linkedClaudeConfigDirFor } from './claude-config-dir'
 import { platform } from './platform'
+import { toolBody } from './chat-tool-body'
+import { ASK_USER_QUESTION_TOOL, readQuestions } from '../shared/agents/permission-answer'
 
 // Transcript root for a managed account (its `projects` dir) or the system default
 // (`~/.claude/projects` when accountId is undefined — bit-for-bit the old behavior). Impure
 // wrapper over the pure `transcriptRootFor`: the userData dir comes from the CorePlatform seam
 // (and only for the account branch) so this module — and its vitest test — stays electron-free.
-function transcriptRoot(accountId?: string): string {
+export function transcriptRoot(accountId?: string): string {
   const userData = accountId ? platform().userDataDir : null
   // A LINKED account's transcripts live in the dir the USER owns (`~/.claude-2/projects`), not
   // under `{userData}`. Resolved through the registry so this — and with it `resolveTranscriptPath`,
@@ -65,6 +67,10 @@ function linesFrom(raw: string): TranscriptLine[] {
       else if (c.type === 'tool_use') {
         const arg = toolArg(c.input)
         out.push({ role: 'tool', text: `$ ${c.name ?? 'tool'}${arg ? ` ${arg}` : ''}` })
+        // A plan / question is prose the user reads in full in the ⌘M view, so it is indexed in
+        // full too — the same treatment an assistant text block gets (the find bar splits lines).
+        const body = toolBody(c.name ?? '', c.input)
+        if (body) out.push({ role: 'tool', text: body })
       }
     }
   } else if (o.type === 'user' && Array.isArray(content)) {
@@ -128,17 +134,44 @@ export async function readTranscriptLines(filePath: string): Promise<TranscriptL
 // text + tool_use blocks become one message's ordered parts; a later user-line tool_result is
 // correlated back onto its tool part by tool_use_id. User lines that carry only tool_results
 // (no prose) are NOT rendered as bubbles — they're tool output, attached to the tool instead.
-export function parseChatMessages(rawLines: string[]): ChatMessage[] {
+//
+// `paged` switches on the three things only a paged read needs (the legacy result grows only by
+// the optional `at` both paths carry): a `key` per message (its line's absolute byte offset), the `tool_use` id on
+// each tool part, and the list of results whose tool was not among these lines.
+interface ChatRecordsOut {
+  messages: ChatMessage[]
+  unmatched: Map<string, string>
+}
+/** A transcript line's ISO `timestamp` as epoch ms; undefined when absent or not a date string. */
+function lineTime(v: unknown): number | undefined {
+  if (typeof v !== 'string' || !v) return undefined
+  const t = Date.parse(v)
+  return Number.isFinite(t) ? t : undefined
+}
+
+function parseChatRecords(
+  records: Iterable<{ raw: string; offset: number }>,
+  paged: boolean
+): ChatRecordsOut {
   const messages: ChatMessage[] = []
+  const unmatched = new Map<string, string>()
   const toolById = new Map<string, Extract<ChatPart, { kind: 'tool' }>>()
-  for (const raw of rawLines) {
+  let at: number | undefined
+  const push = (m: ChatMessage, offset: number): void => {
+    // `at` rides BOTH paths (additive): the time the line was written, for the thread's relative
+    // timestamp. Absent when the line states none — never a made-up time.
+    const withAt = at === undefined ? m : { ...m, at }
+    messages.push(paged ? { ...withAt, key: offset } : withAt)
+  }
+  for (const { raw, offset } of records) {
     if (!raw.trim()) continue
-    let o: { type?: string; message?: { content?: unknown } }
+    let o: { type?: string; timestamp?: unknown; message?: { content?: unknown } }
     try {
       o = JSON.parse(raw)
     } catch {
       continue
     }
+    at = lineTime(o.timestamp)
     const content = o.message?.content
     if (o.type === 'assistant' && Array.isArray(content)) {
       const parts: ChatPart[] = []
@@ -156,11 +189,18 @@ export function parseChatMessages(rawLines: string[]): ChatMessage[] {
             name: c.name ?? 'tool',
             arg: toolArg(c.input)
           }
+          const body = toolBody(part.name, c.input)
+          if (body) part.body = body
+          if (part.name === ASK_USER_QUESTION_TOOL) {
+            const questions = readQuestions(c.input)
+            if (questions) part.questions = questions
+          }
+          if (paged && typeof c.id === 'string' && c.id) part.id = c.id
           parts.push(part)
           if (c.id) toolById.set(c.id, part)
         }
       }
-      if (parts.length) messages.push({ role: 'assistant', parts })
+      if (parts.length) push({ role: 'assistant', parts }, offset)
     } else if (o.type === 'user' && Array.isArray(content)) {
       const parts: ChatPart[] = []
       for (const c of content as Array<{
@@ -172,18 +212,127 @@ export function parseChatMessages(rawLines: string[]): ChatMessage[] {
         if (c.type === 'text' && c.text) parts.push({ kind: 'text', text: c.text })
         else if (c.type === 'tool_result') {
           const tool = c.tool_use_id ? toolById.get(c.tool_use_id) : undefined
+          const s = summarizeResult(c.content)
           if (tool) {
-            const s = summarizeResult(c.content)
             if (s) tool.result = s
+          } else if (paged && s && typeof c.tool_use_id === 'string' && c.tool_use_id) {
+            // Its tool_use is in an OLDER window (claude writes the call before its result, so it
+            // can never be in a newer one). Carried so the renderer can attach it later.
+            unmatched.set(c.tool_use_id, s)
           }
         }
       }
-      if (parts.length) messages.push({ role: 'user', parts })
+      if (parts.length) push({ role: 'user', parts }, offset)
     } else if (o.type === 'user' && typeof content === 'string' && content.trim()) {
-      messages.push({ role: 'user', parts: [{ kind: 'text', text: content }] })
+      push({ role: 'user', parts: [{ kind: 'text', text: content }] }, offset)
     }
   }
-  return messages
+  return { messages, unmatched }
+}
+
+export function parseChatMessages(rawLines: string[]): ChatMessage[] {
+  return parseChatRecords(
+    rawLines.map((raw) => ({ raw, offset: 0 })),
+    false
+  ).messages
+}
+
+/** A paged chat read's answer, minus `found` (the caller knows whether anything resolved). */
+export interface ChatWindowParse {
+  messages: ChatMessage[]
+  olderCursor: number | null
+  unmatchedResults: ChatCarriedToolResult[]
+  /**
+   * The window (not starting at 0) held no complete line: one record is bigger than the whole
+   * window. Explicit rather than inferred from "no messages", because a window of complete lines
+   * can legitimately yield no messages (metadata-only records). The reader (`readChatPage`) GROWS
+   * the window on this flag — a pasted screenshot is routinely bigger than a page — and only past
+   * the 5 MB cap takes the `olderCursor` below and skips the record. Never sent over the wire.
+   */
+  noCompleteLine: boolean
+}
+
+/**
+ * Parse one byte window of a transcript. PURE — the local reader and the remote (SSH) leg hand it
+ * the same kind of buffer, so both sides page identically.
+ *
+ * `buf` holds the file's bytes from absolute offset `bufStart` to the window end. When `bufStart`
+ * is not 0, everything up to and including the first `\n` is dropped as a partial line, and
+ * `olderCursor` is the offset right after that newline — where the first COMPLETE line starts,
+ * i.e. the `before` of the next older page. Callers should start `buf` ONE BYTE before the window
+ * they want (`readChatWindow` / `transcriptPageCommand` do): that lookbehind byte is the only way
+ * to recognize a line that begins exactly on the window edge; without it such a line would be
+ * dropped as partial.
+ *
+ * Working in bytes, not a decoded string, is what keeps the offsets exact: a line's key is the
+ * absolute byte offset of its first byte, which a prepend or an append can never change, and a
+ * multi-byte character cut by the window edge only ever lands in the dropped partial line (each
+ * kept line is decoded on its own, from newline to newline).
+ *
+ * A line longer than the whole window leaves no complete line in it: `noCompleteLine` is set, and
+ * `olderCursor` is `bufStart` — strictly older than the window end, so a caller that gives up
+ * (`readChatPage`, only once the window is already at the 5 MB cap) keeps paging and skips that one
+ * record. Answering the window end instead would ask for the identical window forever.
+ */
+export function parseChatWindow(buf: Buffer, bufStart: number): ChatWindowParse {
+  const end = bufStart + buf.length
+  let from = 0
+  let olderCursor: number | null = null
+  if (bufStart > 0) {
+    const nl = buf.indexOf(0x0a)
+    if (nl < 0 || bufStart + nl + 1 >= end) {
+      return { messages: [], olderCursor: bufStart, unmatchedResults: [], noCompleteLine: true }
+    }
+    from = nl + 1
+    olderCursor = bufStart + from
+  }
+  const records: Array<{ raw: string; offset: number }> = []
+  while (from < buf.length) {
+    const nl = buf.indexOf(0x0a, from)
+    const to = nl < 0 ? buf.length : nl
+    if (to > from) records.push({ raw: buf.toString('utf8', from, to), offset: bufStart + from })
+    from = to + 1
+  }
+  const { messages, unmatched } = parseChatRecords(records, true)
+  return {
+    messages,
+    olderCursor,
+    unmatchedResults: [...unmatched].map(([id, result]) => ({ id, result })),
+    noCompleteLine: false
+  }
+}
+
+/**
+ * Read one window of a transcript for `parseChatWindow`: at most `maxBytes` ending at `before`
+ * (`null`, or past EOF = the file size), plus one byte of lookbehind when the window does not start
+ * at 0. `start` is the absolute offset of `data[0]` (the lookbehind byte, when there is one); `end`
+ * the window end actually used. Undefined when the file cannot be read.
+ */
+export async function readChatWindow(
+  filePath: string,
+  page: { before: number | null; maxBytes: number }
+): Promise<{ data: Buffer; start: number; end: number } | undefined> {
+  try {
+    const fd = await fs.promises.open(filePath, 'r')
+    try {
+      const { size } = await fd.stat()
+      const end = page.before === null || page.before > size ? size : page.before
+      const windowStart = Math.max(0, end - page.maxBytes)
+      const start = windowStart > 0 ? windowStart - 1 : 0
+      const length = end - start
+      if (length <= 0) return { data: Buffer.alloc(0), start, end }
+      const { buffer, bytesRead } = await fd.read({
+        position: start,
+        length,
+        buffer: Buffer.alloc(length)
+      })
+      return { data: buffer.subarray(0, bytesRead), start, end: start + bytesRead }
+    } finally {
+      await fd.close()
+    }
+  } catch {
+    return undefined
+  }
 }
 
 export async function readChatMessages(filePath: string): Promise<ChatMessage[]> {
@@ -347,6 +496,13 @@ export function setRemoteTranscriptReader(
   remoteReader = fn
 }
 
+// Title polls hit this every 4–15 s per agent node. The name can only change when the transcript
+// does, so (size, mtime) gates the 128 KB tail read. Keyed by the RESOLVED path (the account is
+// already folded into it). Bounded: oldest entries go first. A failed tail read is not cached — a
+// transient error must not pin a null title until the file next changes.
+const TITLE_CACHE_MAX = 500
+const titleCache = new Map<string, { size: number; mtimeMs: number; name: string | null }>()
+
 export async function readSessionName(
   sessionId: string,
   accountId?: string
@@ -361,9 +517,17 @@ export async function readSessionName(
   // Stale cache entries are healed inside resolveTranscriptPath (access-checked per hit).
   const p = await resolveTranscriptPath(sessionId, accountId)
   if (!p) return null
+  const st = await fs.promises.stat(p).catch(() => null)
+  const hit = st ? titleCache.get(p) : undefined
+  if (st && hit && hit.size === st.size && hit.mtimeMs === st.mtimeMs) return hit.name
   const tail = await readSmallTail(p, TITLE_TAIL_BYTES)
-  if (!tail) return null
-  return pickSessionName(tail)
+  const name = tail ? pickSessionName(tail) : null
+  if (st && tail !== undefined) {
+    titleCache.delete(p)
+    titleCache.set(p, { size: st.size, mtimeMs: st.mtimeMs, name })
+    if (titleCache.size > TITLE_CACHE_MAX) titleCache.delete(titleCache.keys().next().value!)
+  }
+  return name
 }
 
 // Durable resolver by working directory: Claude stores a project's transcripts under

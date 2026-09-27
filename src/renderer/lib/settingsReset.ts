@@ -37,9 +37,13 @@ export const APPEARANCE_RESET_KEYS = [
   'uiScale',
   'tabBarHeight',
   'accent',
+  'desktopWallpaper',
   'hiddenNodeMenuItems',
   'hiddenHeaderButtons',
   'showResumeCard',
+  'canvasDots',
+  'glassTint',
+  'glassBlurWhileMoving',
   'windowTitleActiveSession'
 ] as const satisfies readonly (keyof Settings)[]
 

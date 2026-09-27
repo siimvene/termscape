@@ -218,11 +218,21 @@ describe('⌘M → markdown view, stolen back from Window ▸ Minimize', () => {
     expect(press({ control: true, key: 'm', code: 'KeyM' })).toEqual(UNTOUCHED)
   })
 
-  it('repeats keep toggling (no auto-repeat rule here, unlike ⌘0)', () => {
+  // A held chord used to forward a toggle on every OS repeat, strobing the view; the Server
+  // Edition's browser listener never did. Both shells now agree: the repeat is still CLAIMED (so
+  // it cannot fall through to Window ▸ Minimize, whose accelerator this is) but forwards nothing —
+  // the held-⌘0 shape.
+  it('drops OS auto-repeat while still swallowing the key', () => {
     expect(press({ meta: true, key: 'm', code: 'KeyM', isAutoRepeat: true })).toEqual({
       prevented: true,
-      sent: [IPC.appToggleMarkdown]
+      sent: []
     })
+    expect(
+      press({ control: true, key: 'm', code: 'KeyM', isAutoRepeat: true }, { isMac: false })
+    ).toEqual({ prevented: true, sent: [] })
+    expect(
+      keydownIntercept(input({ meta: true, key: 'm', code: 'KeyM', isAutoRepeat: true }), DEFAULTS, true)
+    ).toEqual({ action: null })
   })
 })
 

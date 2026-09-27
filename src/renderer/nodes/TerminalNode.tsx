@@ -1,3 +1,15 @@
+import { useContextEnsure } from '../terminal/useContextEnsure'
+import { canPlainApprove, sendHeaderAnswer } from '../lib/approveGate'
+import { FIND_DECORATIONS } from '../lib/palette'
+import { ptyRefusal } from '@shared/pty-refusal'
+
+import { patchImeModeSwitch } from '../terminal/ime-mode-switch'
+import { installGlassCellBackgrounds, scheduleGlassCellAlpha, setGlassCellAlpha } from '../terminal/glass-cell-backgrounds'
+
+import { deliverRelayInitialLaunch } from '../terminal/relay-initial-launch'
+import { commitLaunch } from '../terminal/launch-attempt'
+import { isLaunchShell } from '@shared/agents/pane'
+import { createLaunchWriter, deliverInitialLaunch, launchCommand, registerLaunchWriter, trustsFreshShell } from '../terminal/launch-command'
 import { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { NODE_MIN_SIZES } from '../lib/nodeSizing'
 import {
@@ -12,10 +24,13 @@ import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { SearchAddon } from '@xterm/addon-search'
 import { WebglAddon } from '@xterm/addon-webgl'
+import { ChatPanelFallback } from './ChatPanelFallback'
 // ChatPanel (the ⌘M transcript view) is code-split with the markdown renderer it uses: neither is
 // on the path to painting a terminal, and both were in the startup chunk purely by being imported
-// here. `lazy` + a null fallback — the panel replaces the terminal body on a keypress, and a
-// one-frame spinner in that slot reads as a glitch.
+// here. The fallback is the panel's own shell (`ChatPanelFallback`: bar + spinner + "Loading
+// conversation…"), NOT null: a null fallback was chosen on the theory that the chunk arrives in a
+// frame, but in use the ⌘M face sat blank long enough to be reported as broken (2026-09-26). The
+// shell has the panel's exact geometry, so a fast load still reads as the panel appearing.
 const ChatPanel = lazy(() => import('./ChatPanel').then((m) => ({ default: m.ChatPanel })))
 import { LocalTransport } from '../terminal/local-transport'
 import { clipboardImages, droppedPaths, pasteHasText, pastedFiles } from '../terminal/file-drop'
@@ -31,8 +46,14 @@ import {
   createOsc8LinkHandler,
   createUrlLinkProvider,
   installLinkClickFallback,
+  installLinkContextMenu,
   makeDirListingLookup
 } from '../terminal/file-links'
+import { linkMenuItems, resolveLinkTarget, type LinkMenuTarget } from '../terminal/link-menu'
+import { ContextMenu } from '../components/ContextMenu'
+import { DownloadStrip } from '../components/DownloadStrip'
+import { canUseLocalShell, downloadRoute } from '../lib/download'
+import { useDownloads } from '../lib/useDownloads'
 import { fileLinkDialect } from '../terminal/file-link-dialect'
 import { hostPlatformFor } from '../terminal/host-platform'
 import { sshFs } from '../terminal/ssh-fs'
@@ -61,6 +82,7 @@ import {
   xtermOptionsFromSettings,
   SHIFT_ENTER_SEQ,
   CO_ATTACH_MOUSE_SEQ,
+  CO_ATTACH_ALT_SCREEN_SEQ,
   type SessionLife
 } from '../terminal/terminal-config'
 import { useXtermVisualSettings } from '../terminal/useXtermVisualSettings'
@@ -69,13 +91,15 @@ import { loseWebglContexts, registerWebglClient, type WebglClientHandle } from '
 import { quantizeCharSize } from '../terminal/char-size-quantize'
 import { resyncDomRendererSpacing } from '../terminal/dom-renderer-spacing'
 import {
-  PARK_MAX,
+  parkCap,
+  parkWindowMs,
   armParkExpiry,
   canDisposeParkedEntry,
   disposableParks,
   planParkEviction,
   type ParkTimer
 } from '../terminal/park-budget'
+import { agentProcessInPane } from '../terminal/live-work'
 import {
   mayDisposeOffscreen,
   offscreenCoreIsRemote,
@@ -119,6 +143,15 @@ import {
   resumeSessionMissing
 } from '../terminal/resume-fallback'
 import { MAX_LAUNCH_LINE_BYTES, lineBytes } from '@shared/canonical-line'
+import { binariesFor, type PaneOwner } from '@shared/agents/pane-owner-predicate'
+import {
+  captureWakeContext,
+  decideHibernateExit,
+  decideWakeResume,
+  wakeRefusalReason,
+  wakeVerdictIsTransient,
+  type WakeVerdict
+} from '../terminal/wake-identity'
 import {
   agentHibernateFns,
   exitSequence,
@@ -135,6 +168,7 @@ import {
   restartEligibility,
   restartSessionId,
   RESTART_EXIT_TIMEOUT_MS,
+  RESTART_LATE_EXIT_MS,
   type ExitPhaseOutcome,
   type PauseOutcome,
   type ResumePhaseOutcome
@@ -151,27 +185,33 @@ import { shouldAutoWake, shouldColdResume } from '../terminal/hibernation-policy
 import { coldSelfHealVerdict } from '../terminal/cold-self-heal'
 import { WakeInputBuffer } from '../terminal/wake-input-buffer'
 import { FindBar } from '../components/FindBar'
+import { TerminalMarkdownView } from './TerminalMarkdownView'
+import {
+  focusXtermUnlessCovered,
+  requestTerminalFocusOnExit,
+  terminalOwnsFileInput,
+  useMdModeFocus
+} from '../terminal/useMdModeFocus'
+import { canvasOwnsMarkdownChord } from '../lib/markdownChord'
 import { IconChat, IconChevronDown, IconChevronRight, IconClose, IconEye, IconEyeOff, IconGrid, IconMic, IconMoveTo, IconPlay, IconReload, IconSearch, IconSparkle } from '../components/icons'
 import { NodeLabels } from '../components/kanban/NodeLabels'
+import { MdViewHintButton } from '../components/MdViewHintButton'
+import { mdViewHint } from '../lib/mdViewHint'
 import { Tooltip } from '../components/Tooltip'
 import { useTerminalSearch } from '../terminal/useTerminalSearch'
 import { useCopyFeedback } from '../terminal/useCopyFeedback'
 import { ContextMeter } from '../components/ContextMeter'
 import { isZoomModifierHeld } from '../lib/zoomModifier'
 import { isHidden } from '../lib/ui-visibility'
+import { useTerminalGlass } from '../lib/useTerminalGlass'
+import { isLiquidGlass } from '../lib/appTheme'
 import { readsClaudeTranscript } from '../lib/transcriptGates'
 import { mayRelaunchAgent } from '../lib/pendingLaunch'
 import { liveProjectJumpTarget } from '../lib/projectJump'
 import { pushSessionRename } from '../lib/sessionRename'
-import {
-  planAccountSwitch,
-  BUSY_STATES,
-  executeAccountSwitch,
-  registerAccountSwitch,
-  type AccountSwitchFn
-} from '../lib/accountSwitch'
 import { useSettings } from '../state/settings'
 import { useCodexIdentity, codexSharedIdentity, codexFallbackText } from '../state/codexIdentity'
+import { codexApprovalCaps } from '../state/codexCli'
 import { useAgentStatus, agentStatusForApi, inferInterruptAfterSettle } from '../state/agentStatus'
 import { useLaunchDelivery } from '../state/launchDelivery'
 import { beginLaunch, erroredDeps, forgetArmed, launchTooltip, settleLaunch } from '../lib/pendingLaunch'
@@ -221,6 +261,7 @@ import { ensureActivePermissionMode } from '../state/permissionMode'
 import { buildSshArgs, sshConnectionIdForProject, sshHostKey, type SshConnection } from '@shared/ssh'
 import {
   chipFor,
+  commandTooltip,
   effectiveBindings,
   terminalChordBubbles,
   terminalShortcutPolicy
@@ -264,6 +305,16 @@ export const SLOW_REMOTE_SPAWN_NOTICE_MS = 1500
 export function sshConnectionScope(conn: SshConnection): string {
   const { activeProjectId, getProject } = useProjects.getState()
   return sshConnectionIdForProject(activeProjectId, conn, getProject(activeProjectId)?.ssh?.server)
+}
+
+/**
+ * Which ControlMaster a node's file uploads go over: its OWN connection's scope (for an attached
+ * node, the host attachment — not the local project), else the active project. ONE definition for
+ * the terminal drop, the card modal's live viewer and the ⌘M composer's attach, so the three can
+ * never upload one file to two different machines.
+ */
+export function nodeUploadScope(ssh: SshConnection | undefined): string {
+  return ssh ? sshConnectionScope(ssh) : useProjects.getState().activeProjectId
 }
 
 /**
@@ -461,13 +512,13 @@ export function setSshRetryHandler(
 /**
  * Parked terminals: when a node unmounts (project switch), its xterm instance and live PTY
  * session are kept — the `.xterm` element is detached from the DOM and held here — so a remount
- * within TERM_PARK_MS re-adopts them instead of respawning. This makes switching back to a
- * project instant AND exact: the tmux client never detaches, so the full terminal state
+ * within the park window (`settings.terminalParkMinutes`) re-adopts them instead of respawning.
+ * This makes switching back to a project instant AND exact: the tmux client never detaches, so the full terminal state
  * (alternate screen, mouse-tracking modes, scrollback, cursor) carries over with no redraw and
  * no mode re-negotiation to get wrong. After the window the entry is disposed for real (the
  * PTY client detaches; the tmux session itself keeps running, as always). The park is bounded in
- * COUNT as well as time — beyond `PARK_MAX` the oldest entries are evicted early (see
- * `terminal/park-budget.ts`), so a remount past the cap is the same warm reattach as one past the
+ * COUNT as well as time — beyond `settings.terminalParkMax` the oldest entries are evicted early,
+ * local before remote (see `terminal/park-budget.ts`), so a remount past the cap is the same warm reattach as one past the
  * window.
  *
  * "The PTY client detaches; the session keeps running" is true ONLY with tmux underneath. On the
@@ -490,6 +541,10 @@ interface ParkedTerminal {
    *  lever reads later than that, so without this snapshot every park looks agent-less. See
    *  `effectiveAgentState`. */
   parkedAgentState?: AgentState
+  /** An agent CLI was in the pane at park time — see `ParkedEntryState.agentProcess`. */
+  agentProcess: boolean
+  /** Live read: has the CLI announced its exit since? The veto over `agentProcess`. */
+  readSessionEnded: () => boolean
   /** When this entry was parked — what ages the snapshot above (`parkedStateFloor`). */
   parkedAt: number
   /** The node's agent state RIGHT NOW, read from the store of the session this node belongs to
@@ -507,9 +562,15 @@ interface ParkedTerminal {
   life: SessionLife & { killed: boolean }
   /** The park window, which RE-ARMS while the entry is protected (see `armParkExpiry`). */
   timer: ParkTimer
+  /** Rebuilding this session costs a network round trip — an SSH-project node (remote tmux over
+   *  the ControlMaster) or a relay tab. The LRU cap evicts these LAST (`planParkEviction`). */
+  remote: boolean
 }
 const parkedTerminals = new Map<string, ParkedTerminal>()
-const TERM_PARK_MS = 5 * 60 * 1000
+// The park window is `settings.terminalParkMinutes` (default 10 — the old TERM_PARK_MS was 5; 0 =
+// until the app quits) and the count cap `settings.terminalParkMax` (default PARK_MAX = 20), both
+// read at PARK time through their validators (`parkWindowMs` / `parkCap`), so a change applies to
+// the next switch-away without touching entries already parked. Issue #886.
 
 /** May the BUDGET levers dispose this park? The entry carries both halves of the answer: the
  *  session's tmux-backedness, and a live read of the node's OWN agent-status store with the
@@ -521,6 +582,8 @@ function parkDisposable(key: string): boolean {
   return canDisposeParkedEntry({
     tmuxBacked: p.tmuxBacked,
     parkedAgentState: p.parkedAgentState,
+    agentProcess: p.agentProcess,
+    liveSessionEnded: p.readSessionEnded(),
     parkedAt: p.parkedAt,
     liveAgentState: p.readAgentState()
   })
@@ -550,7 +613,7 @@ export function disposeParkedTerminal(key: string): void {
   disposeParked(p)
 }
 
-/** Memory-pressure lever: drop EVERY parked terminal now, without waiting out `TERM_PARK_MS`. The
+/** Memory-pressure lever: drop EVERY parked terminal now, without waiting out the park window. The
  *  park is a cache, not state — each dropped entry costs only its warm re-adopt, and the node
  *  re-mounts as an ordinary warm reattach (tmux redraws; the session and its scrollback are
  *  untouched). Idempotent; iterates a copy because `disposeParkedTerminal` mutates the map.
@@ -1083,11 +1146,15 @@ export function wakeHibernatedNode(nodeId: string): void {
 /**
  * The mounted instance publishes its copy-feedback sink here, for the same reason as
  * `restartSubs`: the OSC 52 handler is registered ONCE per xterm instance and that instance
- * SURVIVES A PARK (project switch → remount within TERM_PARK_MS), so a handler holding this
+ * SURVIVES A PARK (project switch → remount within the park window), so a handler holding this
  * component's `setState` would be feeding a component that unmounted two projects ago. Looked up
  * at call time instead. No entry = nobody is mounted = nothing to show.
  */
 const copySubs = new Map<string, (text: string) => void>()
+
+/** The right-click link menu's sink, published for the same reason as `copySubs`: the listener
+ *  (`installLinkContextMenu`) is installed once per xterm instance and survives a park. */
+const linkMenuSubs = new Map<string, (target: LinkMenuTarget, x: number, y: number) => void>()
 
 function getCo(key: string): CoState {
   return coStates.get(key) ?? NO_CO
@@ -1223,6 +1290,16 @@ export function TerminalNode({
   // Scoped to the OWNING project so its `terminal.theme` / `terminal.fontFamily` layer over the
   // global settings for this node, and for no other project's nodes.
   const visual = useXtermVisualSettings(owningProjectId())
+  // Glass terminals (Settings → Appearance): xterm paints no background and the node supplies a
+  // translucent tint of THIS node's effective theme (lib/useTerminalGlass.ts).
+  const { glass, tint, vars: glassVars } = useTerminalGlass(visual.terminalTheme)
+  // The alpha app-painted cell backgrounds follow on this node (null = not glass, stock rendering).
+  // A ref too, because `acquireWebgl` (inside the lifecycle closure) syncs every fresh addon to it.
+  const glassCellAlphaRef = useRef<number | null>(null)
+  // The live WebGL addon, for the one job of installing the glass cell-background wrap when glass
+  // turns on after the context was granted. May point at a disposed addon; installing on one is a
+  // no-op (the wrap finds no renderer), and the next grant installs on the fresh one.
+  const webglAddonRef = useRef<WebglAddon | null>(null)
   // The account list, for the chip and for the READERS below: a config dir the user links while
   // this pane sits quiet must resolve to its new account immediately, not at the next hook event.
   const claudeAccounts = useSettings((s) => s.settings.claudeAccounts)
@@ -1273,6 +1350,66 @@ export function TerminalNode({
       if (copySubs.get(termKey) === copy.notifyCopy) copySubs.delete(termKey)
     }
   }, [termKey, copy.notifyCopy])
+  // Right-click on a link in the output → open / reveal / download / copy (terminal/link-menu.ts).
+  // The listener lives in the lifecycle effect and reaches this state through `linkMenuSubs`.
+  const [linkMenu, setLinkMenu] = useState<{ x: number; y: number; target: LinkMenuTarget } | null>(
+    null
+  )
+  useEffect(() => {
+    const sink = (target: LinkMenuTarget, x: number, y: number): void => setLinkMenu({ x, y, target })
+    linkMenuSubs.set(termKey, sink)
+    return () => {
+      if (linkMenuSubs.get(termKey) === sink) linkMenuSubs.delete(termKey)
+    }
+  }, [termKey])
+  // The file links resolve against the ACTIVE project's filesystem (see `projectFs` in the
+  // lifecycle effect), so Download follows it too: an SSH project's file comes down over scp. Two
+  // primitive selectors, not the project object — that is rebuilt on every node serialization.
+  const activeProjectId = useProjects((s) => s.activeProjectId)
+  const activeIsSsh = useProjects((s) => !!s.projects.find((p) => p.id === s.activeProjectId)?.ssh)
+  const linkDlCtx = { browser: isBrowserRuntime(), ssh: activeIsSsh, source: session.source }
+  const linkDownloads = useDownloads({
+    route: downloadRoute(linkDlCtx),
+    projectId: activeProjectId || undefined,
+    files: api.files
+  })
+  /** The link menu's rows, read against the project as it is when the menu opens. Every action
+   *  reuses the channel Cmd+click, the Explorer or the file-manager node already goes through. */
+  const linkMenuRows = (target: LinkMenuTarget) => {
+    const project = useProjects.getState().getProject(activeProjectId ?? '')
+    // Literal event names on purpose: nodeterm-events.test.ts pairs every dispatch with its
+    // listener by reading `new CustomEvent('nodeterm:…'` out of the source.
+    const send = (ev: CustomEvent): void => void window.dispatchEvent(ev)
+    return linkMenuItems(
+      target,
+      {
+        route: downloadRoute(linkDlCtx),
+        localShell: canUseLocalShell(linkDlCtx),
+        // The Explorer drawer's own root (ExplorerPanel: `ssh ? ssh.remoteCwd : project.cwd`).
+        explorerRoot: project?.ssh ? project.ssh.remoteCwd : project?.cwd,
+        terminals: session.source !== 'relay',
+        downloading: (p) => linkDownloads.rowDl[p] === 'running'
+      },
+      {
+        openUrl: (url) => window.nodeTerminal.shell.openExternal(url),
+        // A browser node is an Electron `<webview>`; in a browser tab it would render nothing.
+        openUrlInNode: linkDlCtx.browser
+          ? undefined
+          : (url) =>
+              send(new CustomEvent('nodeterm:open-url-node', { detail: { url, sourceNodeId: id } })),
+        copy: (text) => window.nodeTerminal.clipboard.writeText(text),
+        openFile: (abs) =>
+          send(new CustomEvent('nodeterm:open-file', { detail: { path: abs, ssh: activeIsSsh } })),
+        revealInExplorer: (abs) =>
+          send(new CustomEvent('nodeterm:reveal-file', { detail: { path: abs } })),
+        revealInOs: (abs) => window.nodeTerminal.shell.reveal(abs),
+        openTerminal: (dir) =>
+          send(new CustomEvent('nodeterm:open-terminal', { detail: { cwd: dir } })),
+        download: (abs, dir, pickFolder) =>
+          void (pickFolder ? linkDownloads.downloadTo(abs, dir) : linkDownloads.download(abs, dir))
+      }
+    )
+  }
   const fitRef = useRef<FitAddon | null>(null)
   const searchAddonRef = useRef<SearchAddon | null>(null)
   // The live session's "measure my grid, render it, report it" routine (set by the lifecycle
@@ -1394,7 +1531,6 @@ export function TerminalNode({
       }
     }
   }, [focused])
-  const [mdHtml, setMdHtml] = useState('')
   const [editingTitle, setEditingTitle] = useState(false)
   const hoveredRef = useRef(false)
   // Render-fresh respawnNonce for the lifecycle cleanup: React updates this ref (render) before
@@ -1473,6 +1609,10 @@ export function TerminalNode({
   const titleEditStartRef = useRef('')
   const skipBlurRef = useRef(false)
   const mdMode = !!data.mdMode
+  // Read by the "take the keyboard" paths (dwell, click, sidebar jump), which are closures that
+  // outlive a render: while the ⌘M view covers the terminal they must not focus the hidden xterm.
+  const mdModeRef = useRef(mdMode)
+  mdModeRef.current = mdMode
   const collapsed = !!data.collapsed
   // "This node must NOT hold a grid on the shared canvas right now." Four states, two reasons:
   //
@@ -1504,6 +1644,14 @@ export function TerminalNode({
   // offer this node's in-place restart from the SAME derivation, and a second copy drifting from
   // this one yields a row whose closure refuses every click.
   const agentId = createdAgentId(data)
+  /** Is an agent CLI believed to be running in this pane right now? The created agent, else one a
+   *  hook event identified (a hand-launched CLI). Read through a ref by the release/park levers. */
+  const readAgentProcess = (): boolean => {
+    const st = agentStatusStore.getState().byId[id]
+    return agentProcessInPane(agentId ?? st?.agentId, st)
+  }
+  const readAgentProcessRef = useRef(readAgentProcess)
+  readAgentProcessRef.current = readAgentProcess
   // Gate each former `isClaude` site by the capability it actually represents.
   const showStatus = !!agentId && hasHooks(agentId) // status badge + session-title capture
   const showLoop = !!agentId && canRecur(agentId) // /loop · /schedule · /cron chrome
@@ -1706,6 +1854,14 @@ export function TerminalNode({
         // 'not-eligible' — usually timing, not a refusal that will stand: at mount the spawn is
         // still in flight (no session id yet), and right after a reveal tmux may not have answered
         // `paneCommand` yet. See `retryLater`.
+        //
+        // …unless the resume half wrote a REASON. That is its standing refusals only (the pane
+        // belongs to something else now, or the record predates the proof) — the transient one
+        // leaves the field null on purpose. Retrying a standing refusal only burns the attempts
+        // that the genuinely-transient cases need, and re-asks a question whose answer cannot
+        // change without the user doing something. The chip carries the sentence; its click is
+        // the way forward, and it re-checks.
+        if (useAgentStatus.getState().byId[id]?.wakeBlocked) return
         retryLater()
       })
       .catch(() => {
@@ -1822,12 +1978,24 @@ export function TerminalNode({
   // ordinary case (still waiting on a dependency); the two states it can carry are the ones that
   // used to be invisible — see the store. Selected by id so an unarmed node never re-renders on
   // another node's delivery.
-  const launchDelivery = useLaunchDelivery((s) => s.byId[id])
+  const observedLaunchDelivery = useLaunchDelivery((s) => s.byId[id])
+  const launchDelivery = observedLaunchDelivery ?? (pendingLaunch?.manualOnly
+    ? { kind: 'failed' as const, attempts: 1, at: 0 } : undefined)
   // ▶ Run now's in-flight guard is NOT a component-local latch: it is the module-level registry in
   // lib/pendingLaunch (`beginLaunch` / `settleLaunch`), shared with the canvas fire effect, so the
   // two paths that can type this launch into the shell see one claim. A local ref here could not
   // see a canvas send mid-flight (double submit), and releasing it on `pendingLaunch` identity let a
   // same-content peer upsert reopen it while a send was outstanding (consort review, 2026-09-02).
+  // A node's own first-open launch is in flight: the live `initialCommand` alias is still set
+  // (it is cleared on every outcome) and nothing holds it. Its `pendingLaunch` is only the durable
+  // write-ahead record — and it carries `manualOnly` from the claim until Enter lands — so showing
+  // the chip here painted "⚠ QUEUED" on EVERY freshly opened agent for the length of its delivery.
+  // A real hold (deps, setup script) or a reported failure/stall still shows.
+  const firstOpenInFlight =
+    !!data.initialCommand &&
+    !observedLaunchDelivery &&
+    !(pendingLaunch?.after?.length) &&
+    !pendingLaunch?.awaitSetupGroup
   const pendingWaitingOn = [
     ...(pendingLaunch?.after ?? []).map(
       (depId) => ((getNode(depId) as CanvasNode | undefined)?.data.title as string) || depId
@@ -1856,37 +2024,11 @@ export function TerminalNode({
     : ''
   // Use the chat panel only for a chat-capable agent with a known session; otherwise the
   // markdown-of-output view (computed in the capture effect below) is shown as a fallback.
-  const useChat = mdMode && showChat && !!status?.sessionId
-  // Feed the context meter without waiting for a live hook event: after an app restart the
-  // continuing tmux session is idle and emits no event, so the core tailer is never re-fed.
-  // Re-runs if the sessionId changes (track is idempotent). cwd is a path fallback.
-  //
-  // Gated on `showUsage` — the METER's own capability — and NOT on `claudeTranscript`, which still
-  // gates the find bar's transcript index one line below. That is the opposite of the rule this
-  // site used to carry, and the reason is that the thing the rule protected against moved: the
-  // handler no longer resolves every agent through claude's `resolveTranscript` (whose cwd fallback
-  // answers *the newest claude transcript for that cwd*, i.e. a stranger's session for a
-  // codex/gemini id). It now routes on `agentId` to that agent's OWN locator and tail
-  // (`core/context-ensure.ts`), so the gate can finally be the capability the feature actually
-  // needs. Both extra arguments are load-bearing, not diagnostics: `id` is how the handler learns
-  // this session runs on an SSH project's host (no local resolver can see that transcript), and
-  // `agentId` is what picks the resolver. An agent with no rehydration path (grok) is refused
-  // there, not here — one closed switch beside the tails, rather than a second list to keep in
-  // sync. See lib/transcriptGates.ts for the gate that did NOT move.
-  useEffect(() => {
-    const sid = status?.sessionId
-    if (showUsage && sid)
-      window.nodeTerminal.context.ensure(
-        sid,
-        (data.cwd as string) || undefined,
-        accountForReads,
-        id,
-        agentId
-      )
-    // `accountForReads`, not `data.accountId`: the transcript this meter tails lives under the
-    // account the session is RUNNING as, which for a plain terminal is only ever the observed one.
-    // It can arrive after mount (the first hook event), hence its place in the deps.
-  }, [showUsage, status?.sessionId, data.cwd, accountForReads, id, agentId])
+  // `chatAvailable` is split out because the label-row ⌘M hint names the face BEFORE it is open:
+  // one value feeds both, so the hint cannot say "Chat view" while the chord opens markdown.
+  const chatAvailable = showChat && !!status?.sessionId
+  const useChat = mdMode && chatAvailable
+  useContextEnsure(session.api.context, id, agentId, status?.sessionId, (data.cwd as string) || undefined, accountForReads)
   const updateNodeInternals = useUpdateNodeInternals()
 
   const [searchOpen, setSearchOpen] = useState(false)
@@ -2004,12 +2146,7 @@ export function TerminalNode({
   // Single source of truth for the on-screen highlight colors (used by both the
   // initial-highlight effect and the prev/next nav handlers below).
   const findOpts = {
-    decorations: {
-      matchBackground: '#ffd54f55',
-      activeMatchBackground: '#ffb300',
-      matchOverviewRuler: '#ffd54f',
-      activeMatchColorOverviewRuler: '#ffb300'
-    }
+    decorations: FIND_DECORATIONS
   }
 
   // Navigation steps the hook's authoritative cursor AND xterm's on-screen highlight.
@@ -2043,7 +2180,41 @@ export function TerminalNode({
     const container = bodyRef.current
     if (!container) return
 
-    // Adopt-or-create: a parked terminal (this node unmounted less than TERM_PARK_MS ago) is
+    /**
+     * Kernel truth about this node's pane, within the same budget the pane-command polls use.
+     *
+     * One `display-message` plus one `ps` locally (one ControlMaster exec channel for a remote
+     * pane), and it is asked at most twice per hibernation — once before the exit, once after it —
+     * for at most `HIBERNATE_BATCH_MAX` nodes a sweep. It is deliberately NOT on any timer: the
+     * question it answers is only meaningful at the instant something is about to be written.
+     *
+     * `null` on anything that is not a clean answer, including the deadline: every caller treats
+     * that as "we cannot see this pane", which is a refusal on both sides of the pair.
+     */
+    const readPaneOwner = async (): Promise<PaneOwner | null> => {
+      let lapse: ReturnType<typeof setTimeout> | undefined
+      try {
+        return await Promise.race([
+          api.pty.paneOwner(id),
+          new Promise<null>((r) => {
+            lapse = setTimeout(() => r(null), RESTART_EXIT_TIMEOUT_MS)
+          })
+        ])
+      } catch {
+        return null
+      } finally {
+        clearTimeout(lapse)
+      }
+    }
+    /** The binary names this node's agent actually runs as. Passed explicitly so a CUSTOM agent is
+     *  verifiable from its own launch command — without it `binariesFor` cannot name a
+     *  `custom:<uuid>` and answers `unknown`, which here is a refusal, i.e. Eco silently off for
+     *  every custom agent on the canvas. */
+    const paneBinaries = (): readonly string[] | null =>
+      agentId ? binariesFor(agentId, useSettings.getState().settings.customAgents) : null
+
+
+    // Adopt-or-create: a parked terminal (this node unmounted within the park window) is
     // re-adopted with its live PTY session and full xterm state intact; otherwise a fresh
     // xterm + session are built. `myNonce` vs the render-updated ref tells the cleanup below
     // whether it runs for a respawn (worktree move — must NOT park) or a plain unmount.
@@ -2062,7 +2233,7 @@ export function TerminalNode({
     const s = useSettings.getState().settings
     // Appearance comes from ONE place, shared with the kanban card modal's viewer of this same
     // session (`ModalTerminal`) — see `xtermOptionsFromSettings`.
-    const term = parked?.term ?? new Terminal(xtermOptionsFromSettings(s))
+    const term = parked?.term ?? new Terminal(xtermOptionsFromSettings(s, isLiquidGlass(s.appTheme)))
     // Only on a FRESH instance: a parked terminal already carries the table, and the buffer it kept
     // alive was measured with it — re-registering under a live buffer buys nothing.
     if (!parked) activateUnicode11(term)
@@ -2229,6 +2400,13 @@ export function TerminalNode({
         })
         term.loadAddon(a)
         webgl = a
+        // Glass: app-painted cell backgrounds become tinted glass (glass-cell-backgrounds.ts). A
+        // fresh addon starts from an empty model, so the repaint below already applies the alpha.
+        // The wrap patches the addon's SHARED renderer prototype, so it is installed only once a
+        // glass terminal needs it: a user who never turns glass on never runs a patched renderer.
+        webglAddonRef.current = a
+        if (glassCellAlphaRef.current !== null) installGlassCellBackgrounds(a)
+        setGlassCellAlpha(term, glassCellAlphaRef.current)
         // THE RESTORE PATH — rebuild, never trust the addon's in-place recovery.
         //
         // When the GPU process resets (returning from a GPU-heavy app; sleep/wake; memory
@@ -2801,6 +2979,7 @@ export function TerminalNode({
       term.loadAddon(fit)
       term.loadAddon(searchAddon)
       term.open(container)
+      patchImeModeSwitch(term)
       // Renderer-parity: quantize the char measurement to the device-pixel grid, so a budget
       // grant/release swaps renderers without the text visibly reflowing (see the helper).
       quantizeCharSize(term)
@@ -2892,6 +3071,17 @@ export function TerminalNode({
           openUrl: (uri) => window.nodeTerminal.shell.openExternal(uri),
           fileEnabled: () => pathConvention() !== null,
           convention: pathConvention
+        })
+        // Right-click on the same links → a menu (open / reveal / download / copy). Same hit-test,
+        // same routed lookup; the menu itself is state on whichever instance is mounted now.
+        installLinkContextMenu(term, term.element, {
+          getCwd,
+          fileEnabled: () => pathConvention() !== null,
+          convention: pathConvention,
+          openMenu: (hit, x, y) =>
+            void resolveLinkTarget(hit, lookup).then((target) =>
+              linkMenuSubs.get(termKey)?.(target, x, y)
+            )
         })
       }
     }
@@ -3106,7 +3296,10 @@ export function TerminalNode({
           screen,
           cursor,
           coAttachMouse,
+          coAttachAltScreen,
+          tmuxClient,
           persistent,
+          sessionHost,
           unavailable
         }) => {
         // The spawn answered: whatever it says, we are no longer waiting on the host.
@@ -3115,24 +3308,27 @@ export function TerminalNode({
         // round-trip, or `ssh` is missing). Nothing was spawned — land in the same offline state
         // the near-side guard above produces, retry included.
         if (unavailable) {
-          // A LOCAL Codex node whose explicitly selected managed account has no Codex home — the
-          // fail-closed Codex-scope refusal in pty-manager (`resolveCodexSessionScope`), NOT a host
-          // outage. Routing it through `offline` rendered the SSH "not connected to the host —
-          // session not started locally" overlay on a local node, hiding the real reason. Surface it
-          // by name through `spawnError` (whose "Try again" is exactly right: sign the account in
-          // and a retry succeeds).
-          if (unavailable === 'codex-account') {
-            const acct = data.accountId ? String(data.accountId) : 'system'
-            const reason = `Codex refused: managed account ${acct} has no Codex home. Log in under Settings → Accounts, or open this node on the system Codex account.`
-            setCo(termKey, { spawnError: reason })
-            if (!disposed)
-              term.write(`\r\n\x1b[90m[codex refused: managed account ${acct} has no Codex home]\x1b[0m\r\n`)
-            return
-          }
-          setCo(termKey, { offline: true })
+          const refusal = ptyRefusal(unavailable)
+          // Fork (Termscape): a LOCAL Codex node whose explicitly selected managed account has no
+          // Codex home names the account and the fix — "Try again" is exactly right once the
+          // account is signed in. SSH refusals keep upstream's generic copy (the local advice
+          // would be wrong there).
+          const localCodexAccount = unavailable === 'codex-account' && !ssh
+          const acct = data.accountId ? String(data.accountId) : 'system'
+          const message = localCodexAccount
+            ? `Codex refused: managed account ${acct} has no Codex home. Log in under Settings → Accounts, or open this node on the system Codex account.`
+            : refusal.message
+          setCo(
+            termKey,
+            refusal.connectionLost
+              ? { offline: true }
+              : { offline: false, spawnError: message }
+          )
           if (!disposed)
-            term.write('\r\n\x1b[90m[not connected — nothing was started locally]\x1b[0m\r\n')
-          if (sshProjectId) reportSshDrop(sshProjectId, id)
+            term.write(
+              `\r\n\x1b[90m[${localCodexAccount ? `codex refused: managed account ${acct} has no Codex home` : refusal.message}]\x1b[0m\r\n`
+            )
+          if (refusal.connectionLost && sshProjectId) reportSshDrop(sshProjectId, id)
           return
         }
         // REFUSED: core's tombstone says another client deleted this node while we weren't
@@ -3227,13 +3423,6 @@ export function TerminalNode({
             })
           )
         }
-        // A restart we did not ask for: say why once, before the new session's output lands. (We
-        // JOIN the replacement session, so tmux — which already has a client — does not redraw for
-        // us; the first thing on this screen is whatever the new shell prints next.)
-        if (wasRecycled)
-          term.write(
-            '\r\n\x1b[90m── session restarted by another user (moved to a new folder) ──\x1b[0m\r\n'
-          )
         // Flow control: track xterm's unprocessed write backlog (bytes handed to
         // term.write but not yet parsed, plus anything still queued in the gate below). Past a
         // high watermark we pause the source so a flood can't grow this buffer without bound;
@@ -3308,7 +3497,7 @@ export function TerminalNode({
               if (!shouldApplyResync(resyncScreen)) return
               superseded = true
               relieve(gate.reset())
-              repaintResync(term, resyncScreen, () => !life.dead)
+              repaintResync(term, resyncScreen, () => !life.dead, tmuxClient === true)
             })
           )
         }
@@ -3339,6 +3528,11 @@ export function TerminalNode({
               term.write('\r\n\x1b[90m── session restored (process ended by a restart) ──\x1b[0m\r\n')
             }
           } else if (replay === 'warm-attach') {
+            // A joiner's xterm never saw tmux's attach-time `\e[?1049h` (PtyCreateResult
+            // .coAttachAltScreen). Before the paint: entering the alt buffer clears the display.
+            // Not once a resync has superseded the seed: its repaint (`term.reset()` + the capture)
+            // may already have landed, and entering the alt buffer now would blank it.
+            if (coAttachAltScreen && !superseded) term.write(CO_ATTACH_ALT_SCREEN_SEQ)
             // tmux is attached to this client and paints it: the visible screen on attach, its own
             // history under the wheel. So there is nothing to hydrate — EXCEPT for a CO-ATTACH
             // JOINER, whose `screen` was captured inside `create()`: tmux only repaints on SIGWINCH,
@@ -3363,6 +3557,15 @@ export function TerminalNode({
           // wheel-scroll tmux history. Enable it (see CO_ATTACH_MOUSE_SEQ). Only ever set on a join,
           // so this never fires on the solo spawn / warm-reattach-with-own-tmux-client path.
           if (coAttachMouse) term.write(CO_ATTACH_MOUSE_SEQ)
+          // A restart we did not ask for: say why once, before the new session's output lands (the
+          // gate below is still shut). We JOIN the replacement session, so tmux — which already has
+          // a client — does not redraw for us. AFTER the seed, never before it: a joiner enters the
+          // alternate buffer above (coAttachAltScreen), and a banner written earlier would sit in
+          // the normal buffer the user no longer sees — or be cleared by the switch.
+          if (wasRecycled)
+            term.write(
+              '\r\n\x1b[90m── session restarted by another user (moved to a new folder) ──\x1b[0m\r\n'
+            )
         } catch (err) {
           // Never let a seed failure freeze the terminal: the live stream matters more than the
           // history. `finally` still opens the gate below.
@@ -3422,6 +3625,17 @@ export function TerminalNode({
             unsub()
           })
         }
+        const launchWriterOptions = {
+          io: { write: (d: string) => transport.write(sid, d), onData: (cb: (data: string) => void) => transport.onData(sid, cb) },
+          // A fresh shell is known at spawn; subsequent/manual deliveries must recheck the pane.
+          shellReady: async (manual: boolean) =>
+            trustsFreshShell({ manual, fresh, persistent: sessionPersistent, sessionHost }) || isLaunchShell(await queryPaneWithin(() => api.pty.paneCommand(id), RESTART_EXIT_TIMEOUT_MS)),
+          killLine: getTerminalKillLine(),
+          cleanup: (cancel: () => void) => { cleanups.push(cancel) }
+        }
+        const launchWriter = createLaunchWriter({ ...launchWriterOptions,
+          claimAttempt: (manual, command) => commitLaunch(api, id, command, manual)
+        })
         const writeWhenShellReady = (cmd: string): void => {
           whenShellSettled(() => {
             cleanups.push(
@@ -3450,7 +3664,10 @@ export function TerminalNode({
         // comes out mangled. Published unconditionally (not only for an armed node): whether this
         // node is armed is Canvas's question, it can change after the spawn resolves, and the
         // subscribers filter by id anyway.
-        whenShellSettled(() => setSessionReady(id, true))
+        whenShellSettled(() => {
+          cleanups.push(registerLaunchWriter(id, launchWriter, api))
+          setSessionReady(id, true)
+        })
         // Paused (see agentStatus.paused) is the ONE exception to the "a cold start always resumes"
         // rule below: it exists precisely to survive a cold restart, so it must NOT be dropped, and
         // the auto-resume branch must be skipped — only an explicit Resume (which reuses the same
@@ -3469,7 +3686,7 @@ export function TerminalNode({
         // resume, not armed, not paused. A plain terminal has no conversation to lose, and paying
         // a probe to tell it so would be the channel pressure this whole area exists to reduce.
         const canColdRestore =
-          !!agentId && canResume(agentId) && !data.pendingLaunch && shouldColdResume(pausedNow)
+          session.source !== 'relay' && !!agentId && canResume(agentId) && !data.pendingLaunch && shouldColdResume(pausedNow)
         let coldStart = fresh
         if (!fresh && freshUnverified && !data.initialCommand && canColdRestore) {
           // After the shell has settled, not at this instant: the attach is a network round trip
@@ -3521,7 +3738,26 @@ export function TerminalNode({
         // Run a one-shot command on first open (e.g. "gh auth login" or the agent CLI), then
         // forget it.
         if (data.initialCommand) {
-          writeWhenShellReady(data.initialCommand)
+          const command = data.initialCommand
+          if (session.source === 'relay') {
+            deliverRelayInitialLaunch({ scope: api, id, fresh, pending: data.pendingLaunch, command,
+              consume: () => updateNodeData(id, { initialCommand: undefined }),
+              whenReady: whenShellSettled, writer: launchWriterOptions,
+              onFailure: (outcome) => {
+                useLaunchDelivery.getState().markFailed(id, 1)
+                if (outcome === 'line-too-long') setCo(termKey, { launchTooLongBytes: lineBytes(command) })
+              }
+            })
+          } else deliverInitialLaunch(command, {
+            pending: data.pendingLaunch,
+            whenReady: whenShellSettled,
+            write: launchWriter,
+            update: (patch) => updateNodeData(id, patch),
+            onFailure: (outcome) => {
+              useLaunchDelivery.getState().markFailed(id, 1)
+              if (outcome === 'line-too-long') setCo(termKey, { launchTooLongBytes: lineBytes(command) })
+            }
+          })
           // The pi login node runs bare `pi` — unlike `claude /login` / `codex login`, pi has no
           // CLI login flag, so getting the user into a running session is only half the job. Print
           // a display-only hint (never sent to the pty, so it cannot be mistaken for a typed
@@ -3531,7 +3767,6 @@ export function TerminalNode({
               '\r\n\x1b[90m[once pi starts, type /login and pick a provider]\x1b[0m\r\n'
             )
           }
-          updateNodeData(id, { initialCommand: undefined })
         } else if (coldStart && canColdRestore) {
           // Cold restart of an agent node: the live agent is gone, so re-launch it. Resume the
           // prior conversation by its session id when we have one; otherwise start the agent
@@ -3609,6 +3844,10 @@ export function TerminalNode({
               permissionMode: mode,
               model: data.agentModel,
               sharedIdentity: shared,
+              // Which `--ask-for-approval` values the codex that will run this node actually has.
+              // Same remoteness question `shared` just answered: an SSH node runs the HOST's codex,
+              // which this machine's probe never saw.
+              approvalCaps: codexApprovalCaps(data.ssh || data.sshRemoteTmux),
               // The launch-command override rides the relaunch too, so a wrapper user's node comes
               // back through its wrapper after a reboot — the moment env/account setup matters.
               // Scoped to the OWNING project (`warmOwningProjectId`) so a project-level wrapper does
@@ -3673,6 +3912,7 @@ export function TerminalNode({
                     permissionMode: mode,
                     model: data.agentModel,
                     sharedIdentity: shared,
+                    approvalCaps: codexApprovalCaps(data.ssh || data.sshRemoteTmux),
                     launchCmdOverride: agentLaunchOverride(agentId, ownerProjectId)
                   },
                   agentEnvSnapshot()
@@ -3700,15 +3940,17 @@ export function TerminalNode({
           // The auto-resume above was skipped (that's the feature), but this mount's PANE is
           // brand new either way — tmux respawned it, whether from the deep "pause & end session"
           // recycle or from a genuine reboot that took a shallow-paused session's tmux with it.
-          // The later Resume's pane-recognition (`isShellCommand(pane)` OR the recorded
-          // `hibernatedPane` — see performExitPhase's wake half) would otherwise refuse a user
-          // whose default shell sits outside the `isShellCommand` allowlist (nu/xonsh/pwsh)
+          // The later Resume's pane-recognition (see `decideWakeResume`) would otherwise refuse a
+          // user whose default shell sits outside the `isShellCommand` allowlist (nu/xonsh/pwsh)
           // forever: a PAUSED chip that can never resume, with a live conversation on disk. Record
           // what this fresh pane actually is, the same way the exit half does — replacing any
-          // stale value a pre-reboot shallow pause left behind, which described a pane that no
+          // stale record a pre-reboot shallow pause left behind, which described a pane that no
           // longer exists.
-          const settled = await queryPaneWithin(() => api.pty.paneCommand(id), RESTART_EXIT_TIMEOUT_MS)
-          useAgentStatus.getState().setHibernatedPane(id, settled)
+          //
+          // No ownership gate here, and none is owed: nothing is being QUIT: this pane was just
+          // respawned by tmux and holds a brand-new shell, which is the context the later resume
+          // is meant to launch into. The gate belongs where an exit is written.
+          useAgentStatus.getState().setHibernatedContext(id, captureWakeContext(await readPaneOwner()))
         }
       })
       .catch((err: unknown) => {
@@ -3766,7 +4008,7 @@ export function TerminalNode({
     }
     const unregisterRestart = registerAgentRestart(
       id,
-      guardConcurrentRestart(id, async (targetAgentId?: AgentId, targetModel?: string, restartShell?: boolean, clearEnv?: boolean) => {
+      guardConcurrentRestart(id, async (targetAgentId?: AgentId, targetModel?: string, restartShell?: boolean, clearEnv?: boolean, beforeRecycle?: () => Promise<Record<string, unknown> | void>) => {
         const st = useAgentStatus.getState().byId[id]
         const currentNode = getNode(id)
         // An armed node still holding its `pendingLaunch` has never launched: `agentSessionId` is a
@@ -3873,11 +4115,18 @@ export function TerminalNode({
             sessionId: agentSessionId,
             io: restartIo,
             paneCommand: () => api.pty.paneCommand(id),
+            // A user-asked restart, like performRestartResume: a CLI that is slow to quit is
+            // waited on rather than left to quit unwatched (issue #899 was this exact action).
+            lateExitMs: RESTART_LATE_EXIT_MS,
             isLive: restartTarget
           })
           if (exited !== 'exited') return exited
+          // Swallowed: a failed step must not strand the pane at a bare shell — the recycle below
+          // still brings the conversation back (on whatever account the node is bound to).
+          const patch = beforeRecycle ? await beforeRecycle().catch(() => undefined) : undefined
           transport.recycle(id)
           updateNodeData(id, (node) => ({
+            ...(patch ?? {}),
             agentId: target,
             respawnNonce: ((node.data.respawnNonce as number | undefined) ?? 0) + 1
           }))
@@ -3908,6 +4157,7 @@ export function TerminalNode({
             customAgent: customTarget,
             sessionId: agentSessionId,
             permissionMode: await ensureActivePermissionMode(target),
+            approvalCaps: codexApprovalCaps(data.ssh || data.sshRemoteTmux),
             model: selectedModel ?? undefined,
             // The launch-command override rides the restart too (the global layer is undefined for
             // a custom target, which already owns its launchCmd) — it is a property of how the
@@ -3947,97 +4197,6 @@ export function TerminalNode({
       })
     )
 
-    // Switch this running CLAUDE node onto another managed account (Canvas node menu). The
-    // choreography deliberately reuses the MODEL-SWITCH sequence above (terminateForeground →
-    // transport.recycle → updateNodeData respawn bump); the ONE thing it does first is COPY the
-    // session transcript into the target account dir, so the cold-restore `claude --resume <sid>`
-    // that the respawn fires finds the conversation under the new dir. A failed copy mutates
-    // NOTHING (a half-switch strands the resume). Registered in the effect BODY, like the restart
-    // closure, so an adopted (parked → remounted) terminal is still switchable. All facts are read
-    // at CALL time — the account, the agent state and this session's `sessionId` all arrive after
-    // mount. Guarded by the SAME `guardConcurrentRestart(id, …)` set as the restart/hibernate
-    // closures, so a switch can never write into a pane a restart is already driving.
-    const accountSwitch: AccountSwitchFn = guardConcurrentRestart(
-      id,
-      async (targetAccountId: string | undefined) => {
-        const st = useAgentStatus.getState().byId[id]
-        const currentNode = getNode(id)
-        // The node's own agent id, NOT a hardcoded 'claude': planAccountSwitch admits claude-BASE
-        // custom agents (capabilityAgentId), whose pane runs their own launchCmd binary — the
-        // identity gate must be asked about that binary (binariesFor resolves it in core), exactly
-        // as the model switch above passes `target`.
-        const switchAgentId = createdAgentId(currentNode?.data)
-        const decision = planAccountSwitch(
-          {
-            agentId: switchAgentId,
-            source: session.source,
-            // An SSH-project node is source 'local' but its transcripts + managed accounts live on
-            // the host — the local copy handler can't reach them (planAccountSwitch refuses it).
-            // The SHARED predicate, not a bare data.ssh check: a node carrying only
-            // sshRemoteTmux is equally remote (the worktree gate's documented drift class).
-            ssh: isRemoteSessionNode(currentNode?.data ?? {}),
-            sessionId: restartSessionId(st?.sessionId, currentNode?.data.agentSessionId),
-            accountId: (currentNode?.data.accountId as string | undefined) || undefined,
-            state: st?.state,
-            cwd: currentNode?.data.cwd as string | undefined,
-            hibernated: !!st?.hibernated,
-            recurringKind: st?.loop?.kind,
-            backgroundTaskAt: st?.backgroundTaskAt
-          },
-          targetAccountId,
-          useSettings.getState().settings.claudeAccounts
-        )
-        if (!decision.ok) return decision.reason
-        const { plan } = decision
-        // A pane teardown mid-await (unmount, destroy, recycle) must abort before the copy: the
-        // node the switch was launched from is gone.
-        if (!restartTarget()) return 'no-session'
-        const outcome = await executeAccountSwitch({
-          // COPY FIRST — into the target dir, keyed by the SAME session id the resume will ask for.
-          copyTranscript: () =>
-            api.claude.copySessionTranscript(
-              plan.sessionId,
-              plan.sourceAccountId,
-              plan.targetAccountId,
-              plan.cwd
-            ),
-          // Fire-time re-ask (the Eco rule): the copy is an await window in which a turn can start
-          // or the node can unmount — refuse before anything destructive rather than SIGTERM a
-          // turn that began mid-copy.
-          recheckEligible: () => {
-            if (!restartTarget()) return 'no-session'
-            const now = useAgentStatus.getState().byId[id]
-            if (BUSY_STATES.has(now?.state ?? '')) return 'busy'
-            if (now?.hibernated) return 'hibernated'
-            // The session RESUMED AS someone else mid-copy (branch, restart, /clear): killing the
-            // pane and resuming the PLANNED id would resurrect a superseded conversation
-            // (consort finding — plan revalidation).
-            if (now?.sessionId && now.sessionId !== plan.sessionId) return 'no-session'
-            return null
-          },
-          // Identity-gated: core SIGTERMs the foreground group ONLY if this node's harness still
-          // owns it, so a stale menu can never kill vim or a build in this pane. The fallback is
-          // unreachable (the plan refused a node with no agent id) and exists so a missing id can
-          // never drop the gate to the legacy shell-only guard.
-          terminateForeground: () => api.pty.terminateForeground(id, switchAgentId ?? 'claude'),
-          recycle: () => transport.recycle(id),
-          // Stamp the new account + bump the respawn nonce; the cold-restore auto-resume relaunches
-          // `claude --resume <sid>` under the target account dir. `undefined` = the system account.
-          commit: () =>
-            updateNodeData(id, (node) => ({
-              accountId: plan.targetAccountId,
-              respawnNonce: ((node.data.respawnNonce as number | undefined) ?? 0) + 1
-            }))
-        })
-        return outcome.ok
-          ? 'switched'
-          : outcome.reason === 'recheck-failed'
-            ? outcome.refusal
-            : outcome.reason
-      }
-    )
-    const unregisterAccountSwitch = registerAccountSwitch(id, accountSwitch)
-
     // Eco / hibernation (`settings.agentHibernationEnabled`): the same two halves as the restart
     // above, registered as a PAIR because they are driven far apart in time — Canvas's sweep quits
     // an idle, offscreen CLI to reclaim its RAM, and the node's own wake resumes the conversation
@@ -4074,6 +4233,28 @@ export function TerminalNode({
         // permission prompt ANSWERS it).
         const gate = restartEligibility(agentId, st?.state, agentSessionId)
         if (!gate.ok || !agentId || !agentSessionId || !restartTarget()) return 'not-eligible'
+        // ── IS THE CLI ACTUALLY IN THIS PANE? (issue #823) ──────────────────────────────────────
+        // Everything above asks about the node's STATE; this asks about the pane, and it is the
+        // only question that makes "resume it where we exited it" a promise we can keep. `done`
+        // is a memory of the last hook event, and hooks arrive over a reverse tunnel from wherever
+        // the agent actually runs: a node whose agent was reached over an interactive `ssh` that
+        // has since died still reads `done`, and its pane is now the LOCAL login shell. Exiting it
+        // types `/exit` into that shell, records it as SLEEPING, and hands the later wake a pane
+        // in which the remote session id cannot resolve — which is exactly the reported bug.
+        //
+        // `isAgentPane` (via `decideHibernateExit`) answers from the kernel's foreground process
+        // group, so it sees through both disguises the name-based read cannot: `node` for every
+        // npm-installed CLI, and `ssh` for an agent on another machine. Refusing costs one sweep;
+        // being wrong costs a conversation.
+        const exitVerdict = decideHibernateExit(await readPaneOwner(), agentId, paneBinaries())
+        if (exitVerdict !== 'agent-owns-pane') {
+          // Only the TERMINAL verdict is recorded. `'unreadable'` is a probe that failed (no tmux,
+          // a pane mid-teardown, a lapsed deadline) and the next sweep re-asks; latching it would
+          // drop the node out of the plan for the rest of the run on no evidence at all.
+          useAgentStatus.getState().setPaneUnverified(id, exitVerdict === 'not-in-this-pane')
+          return 'not-eligible'
+        }
+        useAgentStatus.getState().setPaneUnverified(id, false)
         const outcome = await performExitPhase({
           agentId,
           sessionId: agentSessionId,
@@ -4082,19 +4263,19 @@ export function TerminalNode({
           isLive: restartTarget
         })
         if (outcome === 'exited') {
-          // Remember WHAT the pane settled to. The wake will only type into a pane it recognizes,
-          // and its `isShellCommand` allowlist does not know `nu`, `xonsh` or `pwsh` — while the
-          // exit half accepts those through its allowlist-free "the command stopped being the CLI"
-          // signal. Without this record the wake is STRICTER than the exit that produced it, and
-          // such a user is hibernated and then never woken: the chip refuses forever.
-          // One extra poll rather than a value out of `performExitPhase`, whose behavior is pinned
+          // Remember the pane we exited INTO — the proof the wake spends. It carries the command
+          // (the wake's recognition allowlist does not know `nu`, `xonsh` or `pwsh`, while the exit
+          // half accepts those through its allowlist-free "the command stopped being the CLI"
+          // signal, so without it the wake would be STRICTER than the exit that produced it and
+          // such a user would be hibernated and never woken) AND the pane's own identity, so a
+          // record cannot authorise a write into a pane it never described.
+          //
+          // One extra read rather than a value out of `performExitPhase`, whose behavior is pinned
           // byte-for-byte by Task 8's tests. `null` (a pane we could not read) FORGETS the old
-          // value: a stale string must never stand in as permission to type into today's pane.
-          const settled = await queryPaneWithin(
-            () => api.pty.paneCommand(id),
-            RESTART_EXIT_TIMEOUT_MS
-          )
-          useAgentStatus.getState().setHibernatedPane(id, settled)
+          // record: absent is refused, and that is the correct answer for an exit whose landing we
+          // did not witness. A stale record must never stand in as permission to type into today's
+          // pane.
+          useAgentStatus.getState().setHibernatedContext(id, captureWakeContext(await readPaneOwner()))
         }
         return outcome
       }),
@@ -4133,6 +4314,7 @@ export function TerminalNode({
             customAgent,
             sessionId: agentSessionId,
             permissionMode: await ensureActivePermissionMode(agentId),
+            approvalCaps: codexApprovalCaps(data.ssh || data.sshRemoteTmux),
             sharedIdentity: false,
             // The launch-command override lives on the user's own PATH (or is an absolute path),
             // not in a generated launcher dir, so it rides the wake too — project layer included.
@@ -4151,15 +4333,34 @@ export function TerminalNode({
         // resume, and the pane is a REPL the user can type into: by now it may belong to vim, to
         // `top`, or to a claude the user launched by hand — and a launch line typed into a live
         // program is sent to that program, as a message or a mangled command. A pane we cannot
-        // READ answers null and is refused for the same reason.
+        // READ is refused for the same reason.
         //
-        // Two ways to recognize it, mirroring the exit half's two: a KNOWN shell, or the exact
-        // command this node's own exit measured the pane settling to (`hibernatedPane`). The
-        // second is what keeps a `nu` / `xonsh` / `pwsh` user — whom the exit accepts through its
-        // allowlist-free signal — from being hibernated and never woken.
-        const pane = await queryPaneWithin(() => api.pty.paneCommand(id), RESTART_EXIT_TIMEOUT_MS)
-        const settled = useAgentStatus.getState().byId[id]?.hibernatedPane
-        if (!isShellCommand(pane) && !(pane !== null && pane === settled)) return 'not-eligible'
+        // What this asks is not "is a shell here?" but "is this the pane we exited the CLI in?".
+        // The difference is the whole of issue #823: a name-based read cannot tell the local login
+        // shell that an agent's `ssh` died back to apart from the shell that agent would have left
+        // behind, so it typed the resume into the wrong machine. The proof travels with the
+        // hibernation record instead, taken at the exit while the difference was still visible
+        // (`decideHibernateExit`), and this is where it is spent. See wake-identity.ts for the
+        // measurements and for why a node with no proof — every node hibernated by the build that
+        // shipped the bug — is refused rather than guessed at.
+        //
+        // `exitedByUs` splits the two wake families: a deep "pause & end session" RECYCLES the tmux
+        // session and a `dropped` node's CLI died on its own, so neither has a pane of ours to
+        // match; both keep exactly the shell recognition they have today, and both gain the
+        // agent-running refusal they did not.
+        const stWake = useAgentStatus.getState().byId[id]
+        const verdict: WakeVerdict = decideWakeResume({
+          owner: await readPaneOwner(),
+          recorded: stWake?.hibernatedContext,
+          exitedByUs: !!stWake?.hibernated,
+          agentId,
+          binaries: paneBinaries()
+        })
+        // Always written, so a refusal that has since been fixed does not leave a stale sentence on
+        // the chip. `null` for `'resume'` and for the transient `'unreadable'` — the latter is
+        // timing, and the trigger's bounded retry (which reads this field) owns it.
+        useAgentStatus.getState().setWakeBlocked(id, wakeRefusalReason(verdict))
+        if (verdict !== 'resume') return 'not-eligible'
         // Clear the line before the launch line goes in. The shell above is the one WE exited to,
         // hours ago — nothing stops a passer-by (or a stray paste, or the user's own aborted
         // command) from having left a half-typed line at its prompt, and `deliverCommand`'s first
@@ -4208,6 +4409,20 @@ export function TerminalNode({
         // real command — junk output, and it would eat any half-typed line the user left there.
         // Skip straight to marking (and, if deep, recycling) — there is nothing left to exit.
         const alreadyExited = !!st?.hibernated
+        // The same pane-ownership question Eco's exit asks, and for the same reason: a manual pause
+        // ends in the same SLEEPING record and the same much-later wake, so a pause whose CLI is
+        // not in this pane would leave behind the exact record #823 is about. Skipped when the pane
+        // was ALREADY exited by us — there is no agent to find, and `alreadyExited` is precisely the
+        // case where that is expected rather than suspicious.
+        //
+        // Unlike the sweep this refusal is NOT latched into `paneUnverified`: that flag exists to
+        // keep a node out of the automatic plan, and a user who presses Pause is entitled to press
+        // it again. They get the ordinary `'not-eligible'`, which the menu already has wording for.
+        if (
+          !alreadyExited &&
+          decideHibernateExit(await readPaneOwner(), agentId, paneBinaries()) !== 'agent-owns-pane'
+        )
+          return 'not-eligible'
         const outcome = alreadyExited
           ? 'exited'
           : await performExitPhase({
@@ -4237,8 +4452,7 @@ export function TerminalNode({
           // it so the SLEEPING machinery (pane-recognition on wake) still applies — plus `paused`,
           // which is the only thing that changes: no auto-wake on reveal, and no auto-resume should
           // the tmux session itself later die and come back `fresh` (a reboot, e.g.).
-          const settled = await queryPaneWithin(() => api.pty.paneCommand(id), RESTART_EXIT_TIMEOUT_MS)
-          useAgentStatus.getState().setHibernatedPane(id, settled)
+          useAgentStatus.getState().setHibernatedContext(id, captureWakeContext(await readPaneOwner()))
           useAgentStatus.getState().setHibernated(id, true)
           useAgentStatus.getState().setPaused(id, true)
         }
@@ -4424,8 +4638,6 @@ export function TerminalNode({
       // Nothing may restart a node that is no longer mounted — park, respawn and real teardown all
       // pass through here. A remount re-registers (superseding, so a stale unregister is inert).
       unregisterRestart()
-      // …and nothing may switch its account after it is gone (the menu row falls back to a no-op).
-      unregisterAccountSwitch()
       // …and nothing may hibernate or wake one either: with no registration the sweep reads this
       // node as unwired (`planHibernation` refuses it) and the wake finds nothing to resume into.
       unregisterHibernate()
@@ -4487,7 +4699,7 @@ export function TerminalNode({
       const co = getCo(termKey)
       if (sessionId && !isRespawn && !co.closed && !co.ended && !noParkIds.delete(termKey)) {
         // Park = "subscribed, but not viewing": report no size at all, so this window's (possibly
-        // small) grid stops clamping every other subscriber's terminal for the next five minutes.
+        // small) grid stops clamping every other subscriber's terminal for as long as it stays parked.
         // The subscription itself stays — output keeps streaming into the parked xterm — and the
         // adopting mount re-reports its size (sentCols/sentRows are NOT carried over; see above).
         transport.resize(sessionId, null, null)
@@ -4502,6 +4714,8 @@ export function TerminalNode({
           // Snapshot NOW, because the departure effect declared below this one clears this node's
           // agent status on this very unmount — every lever reads later and would see nothing.
           parkedAgentState: readAgentState(),
+          agentProcess: readAgentProcessRef.current(),
+          readSessionEnded: () => agentStatusStore.getState().byId[id]?.sessionEnded === true,
           parkedAt: Date.now(),
           readAgentState,
           cleanups,
@@ -4517,8 +4731,9 @@ export function TerminalNode({
                 disposeParked(entry)
               }
             },
-            TERM_PARK_MS
-          )
+            parkWindowMs(useSettings.getState().settings.terminalParkMinutes)
+          ),
+          remote: sshRemoteTmux || session.source === 'relay'
         }
         disposeParkedTerminal(termKey) // defensive: never stack two entries for one node
         parkedTerminals.set(termKey, entry)
@@ -4533,7 +4748,14 @@ export function TerminalNode({
         // re-adopt. A microtask is what defers past the whole synchronous passive-effect flush
         // (cleanups AND mounts); adoption has removed its entries from the map by then.
         queueMicrotask(() => {
-          for (const k of planParkEviction([...parkedTerminals.keys()], PARK_MAX, parkDisposable)) {
+          const cap = parkCap(useSettings.getState().settings.terminalParkMax)
+          const remoteKey = (k: string): boolean => parkedTerminals.get(k)?.remote ?? false
+          for (const k of planParkEviction(
+            [...parkedTerminals.keys()],
+            cap,
+            parkDisposable,
+            remoteKey
+          )) {
             if (k !== termKey) disposeParkedTerminal(k)
           }
         })
@@ -4687,7 +4909,8 @@ export function TerminalNode({
             if (
               shouldDeferReleaseForLiveWork({
                 tmuxBacked: sessionPersistentRef.current,
-                agentState: readAgentStateRef.current()
+                agentState: readAgentStateRef.current(),
+                agentProcess: readAgentProcessRef.current()
               })
             ) {
               // Re-stamp the offscreen clock: this node is not RELEASABLE yet, and the Eco
@@ -4808,6 +5031,21 @@ export function TerminalNode({
     // focus / visibilitychange listeners now provide.
   }, [positionAbsoluteX, positionAbsoluteY])
 
+  // Glass cell backgrounds follow the node's tint alpha (slider, Reduce Transparency). Backgrounds
+  // are only recomputed for CHANGED cells, so an alpha change rebuilds the WebGL model — debounced
+  // while the slider is dragged (scheduleGlassCellAlpha); the shared glyph grid stands glass down,
+  // and so does this. Declared ABOVE the applyLiveOptions effect: the glyphgrid effect below that
+  // one must stay immediately after it (see its comment).
+  const glassCellAlpha = tint && !glyphMounted ? tint.alpha : null
+  useEffect(() => {
+    glassCellAlphaRef.current = glassCellAlpha
+    const term = termRef.current
+    if (!term) return
+    // Glass turned on after this terminal's WebGL grant: install the wrap now (idempotent).
+    if (glassCellAlpha !== null && webglAddonRef.current) installGlassCellBackgrounds(webglAddonRef.current)
+    return scheduleGlassCellAlpha(term, glassCellAlpha, () => term.clearTextureAtlas())
+  }, [glassCellAlpha])
+
   // Live-apply the appearance settings to the running terminal, so a Settings change reaches the
   // terminals already on the canvas instead of only the next fresh one.
   //
@@ -4824,10 +5062,10 @@ export function TerminalNode({
   useEffect(() => {
     const term = termRef.current
     if (!term) return
-    const { metricsChanged, themeChanged } = applyLiveOptions(term, visual)
+    const { metricsChanged, themeChanged } = applyLiveOptions(term, visual, glass)
     if (metricsChanged) applyFitRef.current?.()
     if (themeChanged) fullRepaintRef.current?.()
-  }, [visual])
+  }, [visual, glass])
 
   // glyphgrid participation — whether this node should hold a grid RIGHT NOW.
   //
@@ -4923,7 +5161,7 @@ export function TerminalNode({
     const aimed = opts?.ack !== false
     if (dwellRef.current) clearTimeout(dwellRef.current)
     if (aimed) setArmed(false)
-    termRef.current?.focus()
+    focusXtermUnlessCovered(termRef.current, mdModeRef.current)
     useTerminalFocus.getState().remember(id)
     useAgentStatus.getState().setActive(id, true)
     if (aimed) {
@@ -4959,7 +5197,7 @@ export function TerminalNode({
         return
       }
       setArmed(false)
-      termRef.current?.focus()
+      focusXtermUnlessCovered(termRef.current, mdModeRef.current)
       useTerminalFocus.getState().remember(id)
       useAgentStatus.getState().setActive(id, true)
       useAgentStatus.getState().clearUnread(id)
@@ -5009,6 +5247,8 @@ export function TerminalNode({
   }
 
   // ---- file drop: paste dropped file paths into the terminal (native-terminal behavior) ----
+  // Uploads go over the master this node's PTY runs on (`nodeUploadScope`).
+  const dropProjectId = (): string => nodeUploadScope(data.ssh as SshConnection | undefined)
   /**
    * Files arriving by DROP or by PASTE become paths in the terminal — what a native terminal does
    * on a drop, and the only thing a shell (or an agent reading its prompt) can act on. Shared so
@@ -5028,12 +5268,7 @@ export function TerminalNode({
       // Remote terminal: uploading over the ControlMaster takes seconds and pastes nothing until
       // it's done, so show an overlay while it runs — without it a drop looks like it silently did
       // nothing. (The upload + REMOTE-path resolution itself lives in the shared droppedPaths.)
-      // Uploads go over the master this node's PTY runs on — its scope, which for an attached
-      // node is the host attachment, not the (local) project.
-      const dropConn = data.ssh as SshConnection | undefined
-      const projectId = dropConn
-        ? sshConnectionScope(dropConn)
-        : useProjects.getState().activeProjectId
+      const projectId = dropProjectId()
       if (uploadNoteTimer.current) clearTimeout(uploadNoteTimer.current)
       setUploadNote({
         text: `Uploading ${files.length === 1 ? files[0].name : `${files.length} files`}…`,
@@ -5078,14 +5313,29 @@ export function TerminalNode({
   }
 
   // A drop from Finder is a file drag we raise our window for; the hook keeps a flaky-tick Finder
-  // drag from wedging the overlay (see useFileDropZone / acceptsFileDrag).
-  const drop = useFileDropZone((files) => void insertFiles(files, { raiseWindow: true }))
+  // drag from wedging the overlay (see useFileDropZone / acceptsFileDrag). Upstream's ⌘M rule rides
+  // on top: while the ⌘M view covers the terminal it owns file input, so no overlay and no insert
+  // (see terminalOwnsFileInput). dragleave always passes through so a covered drag still clears.
+  const dropZone = useFileDropZone((files) => void insertFiles(files, { raiseWindow: true }))
+  const onBodyDragEnter = (e: React.DragEvent) => {
+    if (!terminalOwnsFileInput(mdModeRef.current)) return // the ⌘M view is on top: no drop overlay
+    dropZone.onDragEnter(e)
+  }
+  const onBodyDragOver = (e: React.DragEvent) => {
+    if (!terminalOwnsFileInput(mdModeRef.current)) return // the ⌘M view is on top: no drop overlay
+    dropZone.onDragOver(e)
+  }
+  const onBodyDrop = (e: React.DragEvent) => {
+    if (!terminalOwnsFileInput(mdModeRef.current)) return // covered by the ⌘M view (see predicate)
+    dropZone.onDrop(e)
+  }
 
   // Cmd/Ctrl+V of a FILE (copied in Finder/Explorer) or of raw image bytes (a screenshot). A paste
   // carrying neither is ordinary text and belongs to xterm — hence the early return, and hence the
   // CAPTURE phase: xterm listens on its own textarea below us, so stopping here is the only way to
   // keep it from also pasting whatever text the clipboard happened to carry alongside the file.
   const onBodyPaste = (e: React.ClipboardEvent) => {
+    if (!terminalOwnsFileInput(mdModeRef.current)) return // the ChatPanel composer takes its own paste
     const files = pastedFiles(e.clipboardData)
     if (files.length) {
       e.preventDefault()
@@ -5196,10 +5446,12 @@ export function TerminalNode({
     }
   }, [id, canReadTitleNode, status?.sessionId, data.titleAuto, updateNodeData])
 
-  // Cmd/Ctrl+M toggles markdown view of this terminal's output (only when hovered).
+  // Cmd/Ctrl+M toggles markdown view of this terminal's output — only when hovered, and never while
+  // a board is up (the card modal owns the chord there; see `canvasOwnsMarkdownChord`).
   useEffect(() => {
     return window.nodeTerminal.onMarkdownToggle(() => {
-      if (hoveredRef.current) updateNodeData(id, (n) => ({ mdMode: !n.data.mdMode }))
+      if (!canvasOwnsMarkdownChord(hoveredRef.current, isGlobalKanbanOpen() || isKanbanOpen(useProjects.getState().activeProjectId ?? ''))) return
+      updateNodeData(id, (n) => ({ mdMode: !n.data.mdMode }))
     })
   }, [id, updateNodeData])
 
@@ -5227,21 +5479,13 @@ export function TerminalNode({
     return () => window.removeEventListener('keydown', onKey, true)
   }, [])
 
-  // When markdown mode turns on, capture the terminal output and render it. Skipped when the
-  // chat panel is active (it loads its own structured transcript), but still runs as the
-  // fallback when a chat-capable node has no sessionId yet.
-  useEffect(() => {
-    if (data.mdMode && !useChat) {
-      // Full scrollback (not just the visible viewport) so the whole session renders.
-      // `marked` + DOMPurify are imported HERE rather than at module scope: this node is on the
-      // startup path (it is what the canvas is made of), the markdown renderer is not — it runs
-      // only after someone presses ⌘M. The capture is already a round trip to main, so the extra
-      // chunk fetch is not even on a path the user can perceive.
-      void Promise.all([api.pty.capture(id, true), import('../lib/markdown')]).then(
-        ([text, md]) => setMdHtml(md.renderMarkdown(text))
-      )
-    }
-  }, [data.mdMode, id, useChat])
+  // The ⌘M face (output view or ChatPanel) covers the xterm: blur it on entry so keystrokes stop
+  // reaching a pane nobody can see, and hand focus back on exit only if it had it on entry.
+  useMdModeFocus(mdMode, () => termRef.current, () => rootRef.current, id)
+  // Full-scrollback capture for the output view (TerminalMarkdownView owns the lifecycle: capture on
+  // mount, ↻, stale-answer guard, line cap, scroll-to-latest). Session-bound, so a relay tab
+  // captures the PEER's pane.
+  const captureFull = useCallback((nodeId: string) => api.pty.capture(nodeId, true), [api])
 
   // Unread = the agent finished (not still working/waiting/blocked) while you weren't looking.
   // Drives both the header badge and a node-wide glow so it's obvious at a glance.
@@ -5254,7 +5498,11 @@ export function TerminalNode({
   // Whatever the markdown toggle is bound to; '' when the user unbound it, in which case the
   // markdown view's hint names the action instead of promising a chord that never fires.
   const mdChip = chipFor('node.toggleMarkdown')
+  const mdHint = mdViewHint({ chip: mdChip, open: mdMode, chatAvailable, hidden: hiddenHeaderButtons })
 
+  // The experimental shared glyph renderer paints text on a canvas BELOW the nodes, so a glass
+  // tint would sit on top of every glyph: glass stands down while a grid is mounted.
+  const glassOn = glassVars !== null && !glyphMounted
   return (
     <>
     {/* Sibling of the root: .term-node is overflow:hidden and would clip the half-pill. */}
@@ -5264,9 +5512,11 @@ export function TerminalNode({
         isUnread ? ' unread' : ''
       }${status?.state === 'working' ? ' working' : ''}${
         status?.state === 'waiting' || status?.state === 'blocked' ? ' attention' : ''
-      }${glyphMounted ? ' term-node--glyphgrid' : ''}${focused ? ' term-node--focused' : ''}`}
+      }${glyphMounted ? ' term-node--glyphgrid' : ''}${focused ? ' term-node--focused' : ''}${
+        glassOn ? ' term-node--glass' : ''
+      }`}
       ref={rootRef}
-      style={{ borderTopColor: data.color }}
+      style={glassOn ? { ...glassVars, borderTopColor: data.color } : { borderTopColor: data.color }}
       onMouseEnter={() => (hoveredRef.current = true)}
       onMouseLeave={() => (hoveredRef.current = false)}
     >
@@ -5437,7 +5687,7 @@ export function TerminalNode({
             SSH {(data.ssh as SshConnection).user}@{(data.ssh as SshConnection).host}
           </span>
         ) : null}
-        {showUsage && <ContextMeter sessionId={status?.sessionId ?? null} />}
+        {showUsage && <ContextMeter sessionId={status?.sessionId ?? null} nodeId={id} remote={!!remoteSession} agentId={agentId} />}
         {/* Who else is in this node. Subscribes to presence itself — see PresenceChips. */}
         <PresenceChips nodeId={id} />
         {status?.state === 'working' && (
@@ -5485,15 +5735,24 @@ export function TerminalNode({
         ) : (
           status?.hibernated && (
             <button
-              className="term-node__status term-node__status--sleeping nodrag"
-              title="Agent hibernated to save memory — click to resume"
+              className={
+                'term-node__status term-node__status--sleeping nodrag' +
+                (status.wakeBlocked ? ' term-node__status--wake-blocked' : '')
+              }
+              /* A refused wake used to be visible only as whatever the pane said afterwards — in
+                 the reported case, claude's own red "No conversation found" in a shell the user
+                 never asked to be typed into. The node believed it had woken. Now the refusal has
+                 a sentence, and it lives on the chip that is already the way back: still clickable,
+                 because a re-check is exactly what the user wants once they have fixed the pane
+                 (ssh'd back in, quit whatever took it over). */
+              title={status.wakeBlocked ?? 'Agent hibernated to save memory — click to resume'}
               onClick={(e) => {
                 e.stopPropagation()
                 wakeRef.current()
               }}
             >
               <span className="term-node__status-dot" />
-              SLEEPING
+              {status.wakeBlocked ? 'SLEEPING — NOT RESUMED' : 'SLEEPING'}
             </button>
           )
         )}
@@ -5515,18 +5774,19 @@ export function TerminalNode({
             that simply failed to start — and it carries the manual escape, because agent state is
             transient: after an app restart nothing will ever report `done` again, so without a
             "run now" an armed node left over from before the restart would be a dead end. */}
-        {pendingLaunch && (
+        {pendingLaunch && !firstOpenInFlight && (
           <span
             className={`term-node__status term-node__status--queued nodrag${
               launchDelivery ? ' term-node__status--queued-warn' : ''
             }`}
-            title={launchTooltip(launchDelivery, pendingWaitingOn, pendingLaunch.command, pendingErroredOn)}
+            title={launchTooltip(launchDelivery, pendingWaitingOn, pendingLaunch.command, pendingErroredOn, session.source === 'relay')}
           >
             <span className="term-node__status-dot" />
             {launchDelivery ? '⚠ ' : ''}QUEUED
             <button
               className="term-node__queued-run"
-              title="Run now without waiting"
+              disabled={session.source === 'relay'}
+              title={session.source === 'relay' ? "Open the host to run this command" : pendingLaunch.manualOnly ? "Retry launch at a shell prompt" : "Run now without waiting"}
               onClick={(e) => {
                 e.stopPropagation()
                 // This click IS the user's consent for a launch that was loaded from the project file
@@ -5548,11 +5808,15 @@ export function TerminalNode({
                 forgetArmed(id)
                 const currentLaunch = (): PendingLaunch | undefined =>
                   (getNode(id) as CanvasNode | undefined)?.data.pendingLaunch as PendingLaunch | undefined
-                void api.pty.sendText(id, pendingLaunch.command).then((ok) => {
+                // The delivery itself is upstream's shared launch writer (`launchCommand`: shell
+                // probe, write-ahead claim, kill-line, one in-flight attempt per node); the claim and
+                // the settle-time judgement around it are the fork's.
+                void launchCommand(id, pendingLaunch.command, true, api).then((outcome) => {
+                  const ok = outcome === 'submitted'
                   if (settleLaunch(id, sentKey, ok, currentLaunch()) === 'stale') return
                   if (ok) {
                     useLaunchDelivery.getState().clear(id)
-                    updateNodeData(id, { pendingLaunch: undefined })
+                    updateNodeData(id, { initialCommand: undefined, pendingLaunch: undefined })
                   } else {
                     useLaunchDelivery.getState().markFailed(id, 1)
                   }
@@ -5598,24 +5862,29 @@ export function TerminalNode({
             state leaves `blocked` (the store clears pendingId). */}
         {status?.state === 'blocked' && status?.pendingId && (
           <span className="term-node__approve nodrag">
-            <button
-              className="term-node__approve-btn term-node__approve-btn--allow"
-              title="Approve this permission request"
-              onClick={() =>
-                void window.nodeTerminal.answerPermission({
-                  nodeId: id,
-                  pendingId: status.pendingId!,
-                  decision: 'allow'
-                })
-              }
-            >
-              ✓ Approve
-            </button>
+            {/* Approve is hidden when THIS ticket is a held AskUserQuestion (lib/approveGate.ts);
+                Deny still declines it. A held ExitPlanMode keeps Approve: the hook maps a plain
+                allow to "restore the pre-plan mode" (docs/hook-reply-approvals.md). */}
+            {canPlainApprove(status) && (
+              <button
+                className="term-node__approve-btn term-node__approve-btn--allow"
+                title="Approve this permission request"
+                onClick={() =>
+                  void sendHeaderAnswer(window.nodeTerminal.answerPermission, {
+                    nodeId: id,
+                    pendingId: status.pendingId!,
+                    decision: 'allow'
+                  })
+                }
+              >
+                ✓ Approve
+              </button>
+            )}
             <button
               className="term-node__approve-btn term-node__approve-btn--deny"
               title="Deny this permission request"
               onClick={() =>
-                void window.nodeTerminal.answerPermission({
+                void sendHeaderAnswer(window.nodeTerminal.answerPermission, {
                   nodeId: id,
                   pendingId: status.pendingId!,
                   decision: 'deny'
@@ -5779,17 +6048,31 @@ export function TerminalNode({
         />
       )}
 
-      {!collapsed && <NodeLabels nodeId={id} />}
+      {!collapsed && (
+        <NodeLabels
+          nodeId={id}
+          trailing={
+            mdHint && (
+              <MdViewHintButton
+                hint={mdHint}
+                tooltip={commandTooltip(mdMode ? 'Back to the terminal' : `Open ${mdHint.label.toLowerCase()}`, 'node.toggleMarkdown')}
+                // The same flip as the chord handler and the context-menu item.
+                onToggle={() => updateNodeData(id, (n) => ({ mdMode: !n.data.mdMode }))}
+              />
+            )
+          }
+        />
+      )}
 
       {/* Body always mounted (keeps xterm alive); hidden via CSS when collapsed. */}
       <div
-        className={`term-node__body${drop.dropping ? ' dropping' : ''}`}
+        className={`term-node__body${dropZone.dropping ? ' dropping' : ''}`}
         onMouseEnter={onBodyEnter}
         onMouseLeave={onBodyLeave}
-        onDragEnter={drop.onDragEnter}
-        onDragOver={drop.onDragOver}
-        onDragLeave={drop.onDragLeave}
-        onDrop={drop.onDrop}
+        onDragEnter={onBodyDragEnter}
+        onDragOver={onBodyDragOver}
+        onDragLeave={dropZone.onDragLeave}
+        onDrop={onBodyDrop}
         onPasteCapture={onBodyPaste}
       >
         <div
@@ -5811,6 +6094,21 @@ export function TerminalNode({
           <div className={`term-copy-pill term-copy-pill--${copy.feedback.kind}`}>
             {copy.feedback.label}
           </div>
+        )}
+        {/* Downloads started from a link's right-click menu, reported on the terminal they were
+            clicked in (the same corner as the copy receipt) — not in a drawer that may be shut. */}
+        <DownloadStrip
+          downloads={linkDownloads.downloads}
+          onDismiss={linkDownloads.dismiss}
+          className="term-node__dls nodrag nowheel"
+        />
+        {linkMenu && (
+          <ContextMenu
+            x={linkMenu.x}
+            y={linkMenu.y}
+            items={linkMenuRows(linkMenu.target)}
+            onClose={() => setLinkMenu(null)}
+          />
         )}
         {/* Offscreen-disposed: the xterm and the PTY client are gone, the tmux session is not.
             Deliberately above the overlays below it in the DOM but the least insistent of them —
@@ -5947,7 +6245,7 @@ export function TerminalNode({
         )}
         {mdMode &&
           (useChat ? (
-            <Suspense fallback={null}>
+            <Suspense fallback={<ChatPanelFallback />}>
               <ChatPanel
                 nodeId={id}
                 sessionId={status?.sessionId}
@@ -5958,16 +6256,26 @@ export function TerminalNode({
                 // system-root one. Spawn/env identity is unaffected — that stays creation-time.
                 accountId={accountForReads}
                 agentId={agentId}
+                // The composer's attach resolves files exactly as a drop onto THIS terminal does.
+                pathsForFiles={(files) =>
+                  droppedPaths(files, {
+                    sshRemoteTmux: !!data.sshRemoteTmux,
+                    projectId: data.sshRemoteTmux ? dropProjectId() : ''
+                  })
+                }
+                onShowTerminal={() => {
+                  // An explicit "go to the terminal": the picker just opened there needs the keyboard.
+                  requestTerminalFocusOnExit(id)
+                  updateNodeData(id, () => ({ mdMode: false }))
+                }}
               />
             </Suspense>
           ) : (
-            <div className="term-md nodrag nowheel">
-              <div className="term-md__bar">
-                <span>Markdown</span>
-                <span className="term-md__hint">{mdChip ? `${mdChip} to exit` : 'Exit'}</span>
-              </div>
-              <div className="term-md__content" dangerouslySetInnerHTML={{ __html: mdHtml }} />
-            </div>
+            <TerminalMarkdownView
+              nodeId={id}
+              capture={captureFull}
+              hint={mdChip ? `${mdChip} to exit` : 'Exit'}
+            />
           ))}
       </div>
     </div>

@@ -1294,6 +1294,99 @@ describe('ssh reconcile self-write recognition (the spurious conflict bar)', () 
   })
 })
 
+// Autosave runs 800 ms after every edit or camera move. It must not re-parse every folder project's
+// last-written bytes, nor rewrite an index whose bytes it already wrote — but a write another
+// writer made on disk since then must still be answered with ours.
+describe('autosave skips unchanged work', () => {
+  const indexPath = () => path.join(userData, 'workspace.json')
+  const readIndex = async () =>
+    JSON.parse((await fs.readFile(indexPath(), 'utf-8')).replace(/\r\n/g, '\n'))
+  const tick = () => new Promise((r) => setTimeout(r, 20))
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('a second identical save does not rewrite workspace.json', async () => {
+    const store = new WorkspaceStore()
+    await store.save(ws([project({ cwd: projRoot })]))
+    const first = (await fs.stat(indexPath())).mtimeMs
+    await tick()
+    await store.save(ws([project({ cwd: projRoot })]))
+    expect((await fs.stat(indexPath())).mtimeMs).toBe(first)
+  })
+
+  it('rewrites workspace.json when another writer changed it on disk, even if our index is unchanged', async () => {
+    const store = new WorkspaceStore()
+    await store.save(ws([project({ cwd: projRoot })]))
+    await fs.writeFile(indexPath(), '{"version":3,"entries":[]}') // another instance
+    await store.save(ws([project({ cwd: projRoot })]))
+    expect((await readIndex()).entries.length).toBeGreaterThan(0)
+  })
+
+  // A coarse-mtime filesystem (whole seconds) cannot tell a same-size rewrite inside the same
+  // second from no write at all. Every writer publishes by rename, so the inode can.
+  it('rewrites after a same-size, same-mtime rewrite on a coarse-mtime filesystem (new inode)', async () => {
+    const realStat = fs.stat.bind(fs)
+    vi.spyOn(fs, 'stat').mockImplementation((async (p: string) => {
+      const st = await realStat(p)
+      return Object.assign(st, { mtimeMs: Math.floor(st.mtimeMs / 1000) * 1000 })
+    }) as typeof fs.stat)
+    const store = new WorkspaceStore()
+    await store.save(ws([project({ cwd: projRoot })]))
+    const ours = await realStat(indexPath())
+    // Another instance rewrites the SAME bytes via rename (new inode), same second.
+    const tmp = indexPath() + '.other'
+    await fs.writeFile(tmp, await fs.readFile(indexPath()))
+    await fs.utimes(tmp, ours.atime, ours.mtime)
+    await fs.rename(tmp, indexPath())
+    const theirs = await realStat(indexPath())
+    expect(theirs.ino).not.toBe(ours.ino)
+    expect(theirs.size).toBe(ours.size)
+    await store.save(ws([project({ cwd: projRoot })]))
+    expect((await realStat(indexPath())).ino).not.toBe(theirs.ino) // we wrote ours back
+  })
+
+  it('a changed index is still written', async () => {
+    const store = new WorkspaceStore()
+    await store.save(ws([project({ cwd: projRoot })]))
+    await store.save(ws([project({ cwd: projRoot, name: 'renamed' })]))
+    expect((await readIndex()).entries[0].name).toBe('renamed')
+  })
+
+  it('the first save of a store instance always writes, even when the bytes on disk already match', async () => {
+    await new WorkspaceStore().save(ws([project({ cwd: projRoot })]))
+    const again = new WorkspaceStore()
+    const loaded = await again.load()
+    const before = (await fs.stat(indexPath())).mtimeMs
+    await tick()
+    await again.save(loaded)
+    expect((await fs.stat(indexPath())).mtimeMs).not.toBe(before)
+  })
+
+  it('steady-state autosaves do not re-parse the project file last written', async () => {
+    const store = new WorkspaceStore()
+    await store.save(ws([project({ cwd: projRoot })]))
+    await store.save(ws([project({ cwd: projRoot })])) // parses the last write once
+    const raw = await fs.readFile(path.join(projRoot, '.nodeterm/project.json'), 'utf-8')
+    const parse = vi.spyOn(JSON, 'parse')
+    await store.save(ws([project({ cwd: projRoot })]))
+    expect(parse.mock.calls.some(([text]) => text === raw)).toBe(false)
+  })
+
+  it('compares against the NEWEST write: A → B → A writes the project file every time', async () => {
+    const store = new WorkspaceStore()
+    const file = path.join(projRoot, '.nodeterm/project.json')
+    await store.save(ws([project({ cwd: projRoot, name: 'a' })]))
+    await store.save(ws([project({ cwd: projRoot, name: 'b' })]))
+    expect(JSON.parse(await fs.readFile(file, 'utf-8')).name).toBe('b')
+    await store.save(ws([project({ cwd: projRoot, name: 'a' })]))
+    const back = JSON.parse(await fs.readFile(file, 'utf-8'))
+    expect(back.name).toBe('a')
+    expect(back.rev).toBe(3)
+  })
+})
+
 // Field bug (2026-08-10): two projects + rapid tab switching → both canvases wiped. Every switch
 // fires an un-awaited full save; save() was unserialized and writeAtomic used one fixed tmp path,
 // so overlapping saves spliced each other's tmp bytes (corrupt JSON published by rename) and a slow
@@ -2207,4 +2300,50 @@ describe('ssh mirror: an optimistically-acked write that never lands must not re
       expect((msg!.args[0] as Project).nodes.map((n) => n.id)).toContain('term-a')
     })
   }
+})
+
+describe('localOnly save (the launch write-ahead barrier)', () => {
+  const sshConn = { server: { host: 'h', user: 'u' } as any, remoteCwd: '~/app' }
+  const makeIo = () => {
+    const remote: Record<string, string> = {}
+    const calls: string[] = []
+    const io = {
+      read: async (id: string) => (calls.push(`read:${id}`),
+        remote[id] != null ? { status: 'ok' as const, content: remote[id] } : { status: 'absent' as const }),
+      write: async (id: string, _s: any, c: string) => (calls.push(`write:${id}`), (remote[id] = c), true)
+    }
+    return { io, remote, calls }
+  }
+  const withNodes = (ids: string[]) => project({
+    id: 'ps', ssh: sshConn, cwd: undefined,
+    nodes: ids.map((id) => ({ id, kind: 'terminal' as const, position: { x: 0, y: 0 }, size: { width: 1, height: 1 }, title: 't', color: '#fff', group: null }))
+  })
+
+  it('touches no ssh host, persists the cache to the local index, and the next ordinary save mirrors it', async () => {
+    const { io, remote, calls } = makeIo()
+    const store = new WorkspaceStore(io)
+    await store.save(ws([withNodes(['term-1'])])) // reconciled + mirrored
+    calls.length = 0
+
+    await store.save(ws([withNodes(['term-1', 'term-2'])]), { localOnly: true })
+    expect(calls).toEqual([])
+    const index = JSON.parse(await fs.readFile(path.join(userData, 'workspace.json'), 'utf-8'))
+    const entry = index.entries.find((e: { id: string }) => e.id === 'ps')
+    expect(entry.cache.nodes.map((n: { id: string }) => n.id)).toEqual(['term-1', 'term-2'])
+    expect(JSON.parse(remote['ps']).nodes.map((n: { id: string }) => n.id)).toEqual(['term-1'])
+
+    // Unchanged content — only the owed mirror can make this save write.
+    await store.save(ws([withNodes(['term-1', 'term-2'])]))
+    expect(calls.some((c) => c === 'write:ps')).toBe(true)
+    expect(JSON.parse(remote['ps']).nodes.map((n: { id: string }) => n.id)).toEqual(['term-1', 'term-2'])
+  })
+
+  it('never blind-writes an unreconciled entry: it is left for the next ordinary save to read first', async () => {
+    const { io, calls } = makeIo()
+    const store = new WorkspaceStore(io)
+    await store.save(ws([withNodes(['term-1'])]), { localOnly: true })
+    expect(calls).toEqual([])
+    await store.save(ws([withNodes(['term-1'])]))
+    expect(calls[0]).toBe('read:ps')
+  })
 })

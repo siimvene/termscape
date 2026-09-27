@@ -39,6 +39,7 @@ import {
   permissionModeAgentsLabel,
   unsupportedModesNote
 } from '@shared/agents/approval-mode'
+import { codexApprovalCaps } from '@renderer/state/codexCli'
 import { AgentIcon } from '../../../lib/agentIcons'
 import { chipFor } from '../../../lib/keybindingOverrides'
 import { NODE_IDENTITY_STRICT_DATE } from '@shared/node-identity'
@@ -247,9 +248,15 @@ const ENTRIES = [
  * space) the day every capable agent expresses every mode.
  */
 function permissionModeDescription(): string {
+  // The gaps are not a constant: codex's `--ask-for-approval` vocabulary changes between releases
+  // (it lost `untrusted`, and with it "Ask each time", in 0.149.0), so the sentence is derived
+  // against the codex ON THIS MACHINE rather than a table pinned to one release. Read at render;
+  // the probe is warmed at boot, so by the time Settings can be opened this is the real answer,
+  // and an unprobed read degrades to the baseline vocabulary like every other consumer.
+  const caps = codexApprovalCaps()
   return [
     `The mode ${permissionModeAgentsLabel()} terminal sessions start in; other agents ignore it.`,
-    unsupportedModesNote(),
+    unsupportedModesNote(caps),
     'Shift+Tab still switches modes at any time. Projects can override this from the tab ⌄ menu.'
   ]
     .filter(Boolean)

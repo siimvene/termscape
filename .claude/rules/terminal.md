@@ -105,23 +105,38 @@ Lifecycle, by intent:
   identical call kills it and everything under it — an agent CLI mid-turn included. Issue #126: a
   project switch terminated a working Claude agent, which then auto-resumed from wherever the kill
   landed. The predicate is deliberately the narrowest one that closes it — a tmux-backed session is
-  never protected (the kill costs a redraw), and neither is a plain terminal, a finished agent or
-  an unknown state (nothing is running to lose). **A fifth lever owes the same gate.**
-  The fifth is the offscreen release of an ARMED node (`--after`, `shouldDeferReleaseForHeldLaunch`,
-  2026-09-02): the held launch is delivered by session NAME, so with tmux underneath the release is
-  harmless and the node stays `sessionReady` (the teardown keeps the flag for an offscreen release
-  of a tmux-backed session); on the plain-shell fallback the release would destroy the very pane
-  the launch is typed into, so it is deferred while armed. MEASURED before the fix: a released
-  QUEUED node held its launch through its dependency going `done`, the badge claimed the terminal
-  "has not started yet", and only a camera travel (revive) ever fired it — "the chain works when I
-  look at it" was this.
+  never protected (the kill costs a redraw), and neither is a plain terminal. **An IDLE agent CLI on
+  a non-persistent pty IS protected** (`agentProcess`, `agentProcessInPane`; not once hibernated,
+  paused, dropped, or once its CLI announced a SessionEnd, `sessionEnded`, which is its own
+  transient flag because `state: undefined` alone is also what an idle agent looks like): killing it looked free because cold restore `--resume`s it on revive, but the
+  resumed CLI fires `SessionStart:resume` and idles with no further hook event, the status mirror
+  leaves it unverified, and agent messaging refused it for as long as it stayed idle — measured
+  2026-09-13 on Windows native ptys. The mirror now also lets a verified `idle_prompt` right after a
+  verified `SessionStart` commit a verified non-inferred `done` (`MirrorEntry.sessionStarted`), and
+  the decider reports a proven node reset by a boundary as `targetNotIdleUnknown`, not
+  `targetStatusStale`. **A fifth lever owes the same gate.**
+  The fifth is the offscreen release of an ARMED node (`shouldDeferReleaseForHeldLaunch`):
+  held launches now require the attached transport for echo verification, on every backend.
+  Keep that transport until delivery or recovery; a blind paste by session name loses the
+  shell-init repair and canonical-line protections.
 - **Node unmount (project switch)** → the RENDERER **parks** the terminal (`TerminalNode.tsx`
   `parkedTerminals`): the xterm instance + its attached PTY stay alive with the `.xterm` element
-  detached from the DOM, so a remount within `TERM_PARK_MS` (5 min) re-adopts them — instant, and
+  detached from the DOM, so a remount within the park window re-adopts them — instant, and
   exact (the tmux client never detaches, so mouse-tracking/alternate-screen modes and scrollback
   carry over; do NOT "optimize" this into a respawn+redraw — a fresh xterm on a reused client
   misses the attach-time mode sequences and breaks scrolling). The park timer then runs the real
-  teardown: `kill()` detaches the PTY client; the tmux session keeps running. WebGL contexts are
+  teardown: `kill()` detaches the PTY client; the tmux session keeps running. **Window and cap
+  are settings (issue #886)**: `settings.terminalParkMinutes` (default **10**, raised from 5; **0 = until app quit** —
+  `parkWindowMs` returns `null` and NO timer is armed, never `Infinity`, which `setTimeout` clamps
+  to ~1 ms and would dispose every park at once) and `settings.terminalParkMax` (default **20**, raised from 12), both
+  re-validated at park time. The LRU cap evicts **local parks before remote ones**
+  (`planParkEviction`'s `isRemote`): a local re-adopt miss is a warm reattach in ms, an SSH one is
+  a new client per terminal paced 4-per-master, plus a login if the master idled out
+  (`ControlPersist`) — and a live parked client is also what keeps that master from idling out.
+  Parking does not raise sshd `MaxSessions` pressure: masters are per project, so a parked SSH
+  project holds exactly the channels it held while in view. Measured (headless xterm, 200×50): a
+  parked tmux-backed terminal ≈ **2 MB** (alternate screen, empty normal buffer — tmux owns the
+  history); a plain shell with a full 10k scrollback ≈ **27 MB**. WebGL contexts are
   **viewport-scoped and budgeted** (browsers cap ~16 live contexts, and a canvas holds far more
   terminals). A per-terminal `IntersectionObserver` (`rootMargin` pre-announces approach) only
   REPORTS visibility to a **module-level budget coordinator** (`terminal/webgl-budget.ts`) that owns
@@ -209,7 +224,12 @@ Lifecycle, by intent:
   (250 ms) until a SHELL owns the pane, then echo-deliver `resumeCommand(...)` — the same
   `claude --resume` / `codex resume` the cold restore uses. **Nothing is ever killed**: if the CLI
   has not quit within `RESTART_EXIT_TIMEOUT_MS` (6 s) the run reports `exit-timeout` and leaves the
-  session running. A `working` **or `blocked`** session is refused — `/exit` typed into a
+  session running. **A user-asked restart gets a late window on top** (`RESTART_LATE_EXIT_MS`, 60 s,
+  spent only while the pane still reads): issue #899 was a 19 h cron session whose CLI quit a moment
+  AFTER the 6 s, with nothing left watching — the node sat at a bare shell with no agent and no
+  resume. The Eco sweep and Pause keep the bare 6 s (the sweep is serialized canvas-wide). The
+  exit-timeout notice (`exitTimeoutNotice`) hands over the bare resume line for exactly that
+  late-quit case. A `working` **or `blocked`** session is refused — `/exit` typed into a
   permission prompt would ANSWER it, not quit — and a node is held one-restart-at-a-time until the
   resume line has actually LEFT the pane (an un-submitted line is where a second `/exit` would be
   spliced in). The bulk action runs the same per-node closure sequentially over every idle agent
@@ -278,6 +298,26 @@ unreachable there by construction; a Linux host is expected to have its own. Und
 `scripts/build-tmux.mjs` writes its artifact. If tmux is unavailable from all three,
 `PtyManager` still falls back to a plain shell; `TMUX`/`TMUX_PANE` are stripped from the child env to avoid nesting refusal.
 
+**A session-host session follows its most recently ACTIVE viewer, like tmux's `window-size
+latest`** (issue #914). Under tmux a relay-mirrored phone is its own tmux client, so dismissing its
+keyboard gives it its rows back; on the session host the phone and the desktop node share ONE
+client socket, and the old componentwise minimum held the phone to the desktop node's rows with an
+empty band and no explanation. `latestClaimSize` (`core/pty-size.ts`) picks the claim with the
+highest recency — bumped by an attach, a claim that CHANGES, and a write that is not an emulator's
+automatic answer (`core/terminal-reports.ts`; every attached xterm answers a DA/CPR/OSC query, and
+counting those would hand the session to whoever answered last). Three rules, each load-bearing:
+(1) a viewer that cannot adapt is a CEILING — a pty wider than the phone's screen would wrap into
+garbage there (or, rendered at the pty's size, be clipped to its left ~45 columns), so a relay sink is
+`bounding` unless `pty.attach` said `resizedFrames: true`. The iOS app deliberately does NOT send it:
+it reads `OP.Resized` only to show a "Sized to another screen · Fit this screen" hint, and every
+phone report is ANSWERED (the sink's `sinkShown` is forgotten on each report) because the phone
+clears that hint whenever it sends a size; (2) the real size flows back to every viewer (`SessionHostPty.onSize` →
+`PtyManager.applyBackendSize` → `pty:size`, and `OP.Resized` to the sink), and a session-host
+`Session`'s `applySize` only VOTES; (3) the host's `geometry` push is NEGOTIATED at `hello`
+(`SESSION_HOST_FEATURES`) and sent only to sockets that asked — an older client reads every
+non-`data` push frame as an EXIT. Across app connections the host still takes the minimum. Full
+write-up: `docs/windows-session-host.md` → "Output ordering, flow ownership, and geometry".
+
 ### Stale cwd on a warm reattach (issue #464) — tmux's string is a LINUX-only signal
 
 A warm `new-session -A` reattach can land in a session whose shell sits on a DELETED directory
@@ -338,6 +378,20 @@ session (you can't keep a live OS process across a reboot):
   renderer reads it via `pty.readScrollback` and writes it back into xterm (with a "session
   restored" separator). Warm reattach skips it (tmux already redraws). Deleted with the node in
   `destroySession`.
+  **The periodic capture is paced, serialized and deduplicated** (`snapshotTick`,
+  `core/scrollback-cadence.ts`). A working agent's spinner keeps its session dirty forever, so the
+  old tick spawned a `capture-pane -S -1500` (an ssh exec for a remote node) and rewrote up to
+  256 KB for EVERY busy session, all in the same instant, every 15 s. Now: a dirty session is
+  captured on its first `BUSY_AFTER_TICKS` (4) consecutive dirty ticks, then every
+  `BUSY_EVERY_TICKS`-th (60 s); an off-cadence tick KEEPS the dirty bit, which is what lets
+  detach/quit still take their final capture; an idle tick resets the count. Captures run one at a
+  time on `snapshotChain`, a session whose capture is still queued is never queued twice
+  (`snapshotQueued`), and a failed capture OR a failed disk write re-marks it dirty
+  (`writeScrollbackIfChanged` reports the write; a skipped unchanged capture counts as done). Every write (periodic, detach, quit)
+  goes through `writeScrollbackIfChanged`, which skips a capture whose sha1 matches the last one
+  written; the digest is dropped with the file in `endSession`, so a recreated node always writes.
+  The cost is bounded and deliberate: a continuously busy session's post-reboot replay can be up to
+  ~60 s stale, since the snapshot only serves a machine reboot.
 - **Agent resume** — on a cold start of a node whose `agentId` is in `RESUMABLE_AGENTS`, the
   renderer re-launches the agent CLI: `resumeCommand(agentId, sessionId)` (from the session id
   persisted in `agentStatus` localStorage — `claude --resume`, `codex resume`, `gemini
@@ -459,7 +513,31 @@ seed** — the cases are:
   (gated on `persistKey`, on BOTH the screen and resize branches) and the renderer writes
   `CO_ATTACH_MOUSE_SEQ` into the fresh xterm (both `ModalTerminal` and `TerminalNode`). tmux is
   always `mouse on`, so this matches its invariant client state; the enable is idempotent. Was the
-  "can't scroll the kanban card-modal terminal until you press a key" bug.
+  "can't scroll the kanban card-modal terminal until you press a key" bug. **A co-attach joiner
+  ALSO misses tmux's attach-time `\e[?1049h`**, and a renderer reload is a joiner too (it re-joins
+  the SAME still-alive tmux client via `join()`, so tmux never re-attaches it). `join()` therefore
+  sets `coAttachAltScreen` for tmux-backed sessions only — gated on `tmuxBacked && !sessionHost`,
+  never plain-shell/session-host, whose normal-buffer scrollback is their only history — and the
+  renderer writes `CO_ATTACH_ALT_SCREEN_SEQ` **BEFORE** painting (entering the alternate buffer
+  clears the display, so writing it after would erase the paint; TerminalNode skips it once a
+  resync has superseded the seed, since that repaint may already be on screen). **Known
+  limitation of "never plain-shell":** a REMOTE SSH session on a host WITHOUT tmux
+  (`tmuxOrExplain`'s plain login-shell fallback) is still recorded `tmuxBacked` — core cannot tell
+  from here that the remote command degraded — so it too gets the alt switch (and `coAttachMouse`,
+  and `tmuxClient`'s resync re-apply), hiding that shell's normal-buffer scrollback; detecting the
+  degrade is a follow-up. Without it a
+  renderer reload left every terminal on the normal buffer, piling up to 10k lines of scrollback
+  and forcing a layout per output frame — measured 16.1% vs 7.3% CPU for one terminal at
+  20 lines/s, 313 vs 1 forced layouts per 20 s. **A resync repaint loses the same two modes**:
+  `repaintResync`'s `term.reset()` drops ANY terminal — the solo spawn too, not only a joiner —
+  back to the normal buffer and clears mouse tracking, and resyncs happen under backpressure, i.e.
+  on exactly the streaming terminals the alt switch exists for. So every create now reports
+  `PtyCreateResult.tmuxClient` (same `tmuxBacked && !sessionHost` gate, set on spawn AND join), and
+  `repaintResync` writes `CO_ATTACH_ALT_SCREEN_SEQ + CO_ATTACH_MOUSE_SEQ` between the reset and the
+  paint when it is set. Optional on purpose: an older core or relay peer omits it and gets the old
+  behavior (nothing re-applied), never a guess. The recycle banner ("session restarted by another
+  user") is written AFTER the joiner's seed paint for the same reason — written before the alt
+  switch, it sat in a buffer nobody could see.
 
 xterm's own `scrollback` (`xtermScrollback(settings.tmuxScrollback)`, floored at 1000, capped at
 `XTERM_SCROLLBACK_MAX` = 10000) is kept for the sessions tmux does *not* back (a plain shell when
@@ -491,12 +569,21 @@ received and acted upon, so they stay uncertainty and reject the caller.
 between the pane's app and the headless emulator, so a `?2004h` the host sees was written by the app
 itself — what `paste-buffer -p` asks tmux for. `HostSession.bracketedPasteRequested()` reads it
 (behind `outputTail`, since xterm writes are async) and `sendKeysWrites` (`send-keys-delivery.ts`)
-mirrors the tmux plan: `sanitizePasteText` ALWAYS, the frame only when the app asked, the Enter as its
-own write AFTER the close marker (never inside the framed burst, the shape #453 measured as mangled);
-unframed stays one write. Before this the host sent a raw `text + '\r'`, so an injected prompt landed
-in a paste-aware composer (Codex, Claude) and never submitted. **NOT device-verified**: whether ConPTY
-re-emits an app's `?2004h` into the pty stream — if not, the mode is always false and every write is
-the old one (no fix, no regression).
+sanitizes ALWAYS and frames only when the app asked. Separate writes alone can still be read
+as one burst (#780). Both native Windows `sendText` and host `sendKeys` now execute through
+`core/settled-text.ts`: capture a baseline, paste without Enter, then poll at 40 ms for at most
+15 polls for a changed, stable screen containing the sanitized text. Only then write one Enter,
+after rechecking liveness/generation and paste mode. Unknown capture, unchanged output or timeout
+leaves the paste unsubmitted and returns `pasted-not-submitted`, never `true`. The discriminant
+survives IPC/WS and `sendKeysV2`; canvas writes name the partial delivery, trigger runs record
+a terminal miss (including queue flush), and one-way UI writers raise a visible warning. Test
+success with `=== true`, never truthiness. Do not retry an unconfirmed submit and duplicate the paste. Overlapping sendText operations on the same pane
+are refused before input; insert-only, empty Enter and unframed input retain their contracts.
+A collapsed/hidden/oversize paste may require manual Enter. This is an observed-screen heuristic,
+not an application acknowledgement. Linux fake-PTY tests cover a 150 ms busy reader; real Windows
+Codex/Claude, context-link/write, dictation and rename device checks remain required. Existing
+hosts refuse the additive `sendKeysV2` command until they retire; no raw-write fallback or
+automatic host restart is performed. Legacy clients still use the existing `sendKeys` command.
 
 ## Terminal node lifecycle (gotchas)
 
@@ -525,6 +612,13 @@ the old one (no fix, no regression).
 - The xterm container is `nodrag nowheel`; a transparent **hover-guard** overlay sits on top
   until you dwell `settings.panHoverDelay` (so quick drag = move node, scroll = pan). After
   the dwell the guard is removed and xterm takes input. The header stays draggable.
+- **FitAddon reads the host's computed size, not its content rect.** The absolute, inset
+  canvas host uses `box-sizing: content-box` so its padding is excluded from that size
+  (#671). Its outer hit/plate rect still fills the body. The board modal instead keeps
+  padding on a separate wrapper. Do not put border-box padding back on a fit host:
+  it over-reports rows and clips the last line. `scripts/terminal-fit-layout.test.ts`
+  measures real xterm layout through resize sweeps at DPR 1, 1.25, 1.5 and 2 in Chrome
+  (`CHROME_BIN` overrides the executable); this does not verify GPU row-seam rendering.
 - A `ResizeObserver` drives `FitAddon.fit()` + `transport.resize`. Canvas zoom is a CSS
   transform, so it does *not* change `clientWidth` — cols/rows stay stable across zoom.
   `scale-fix.ts` patches xterm's mouse coords so text selection stays aligned when zoomed.
@@ -538,6 +632,29 @@ the old one (no fix, no regression).
   record on a responsive shared process must not trigger killing the "orphan". Both shells wire the
   spine (`server/codex-shared-identity.ts`); generated-shell tests cover replaced-socket,
   missing-daemon, healthy-client-error (the mutation guard) and responsive-orphan under real `/bin/sh`.
+  **No approval override ever rides that remote resume** (issue #811). MEASURED on
+  `codex-cli 0.154.0` against a real thread on a running shared app-server, under a pty:
+  `codex --remote unix:// resume <thread> --ask-for-approval on-request` answers
+  `Error: Permission overrides are not supported when resuming a remote task.` and exits 1 —
+  `on-request` being that build's own default policy and a member of its enum, so this is **not**
+  the missing `untrusted` of #785. The same command with the flag removed resumes and the TUI stays
+  up, and `-c approval_policy=never` is refused identically: the rule is about the OVERRIDE, not
+  about a value or a spelling, so there is no mapping of `manual`/`auto`/`bypassPermissions` that
+  survives this path and nothing to decide. Since `withPermissionMode` appends the flag to every
+  agent launch, every shared-identity Codex node died on its first turn at a bare shell.
+  `nt_run_shared` therefore strips `--ask-for-approval`/`-a` (both the spaced and the `=` form)
+  from the first-launch argv. **The strip is in the LAUNCHER, not in the TypeScript that builds the
+  line, and that placement is the invariant**: every identity-setup failure above it ends in
+  `exec codex "$@"` — plain codex, no `--remote` — where 0.154 still accepts the flag, so
+  suppressing it one layer up would take the permission mode away from exactly the nodes that could
+  not get a managed identity. The `else` branch has always resumed with no caller options at all,
+  so this only makes the first launch agree with the recovery beside it; the cost on an older codex
+  that still accepts the flag on a resume is that the mode is not applied on the managed path, which
+  after the first daemon reset was already true. **There is deliberately no capability gate**: the
+  refusal is a runtime check, absent from `--help`, so `codexCliSupportsRemote`'s shape does not
+  transfer — and it fires AFTER the session lookup, so a throwaway thread id answers "no saved
+  session" with or without the flag. Probing costs a real resumable thread, which is the thing being
+  launched.
 - **Where the wheel stops being the terminal's is decided by HIT TEST, per packet** (`Canvas.tsx`
   `overNativeScrollable` = `target?.closest('.nowheel')`, the class React Flow's `panOnScroll` walks
   too). (a) **Inside the body the wheel is already the terminal's, inset band included**:
@@ -551,3 +668,11 @@ the old one (no fix, no regression).
   the canvas — the guard's "quick drag = move, scroll = pan" contract, and why issue #767's incidents
   cannot be reproduced on demand. Do not hoist `nowheel` to `.term-node__body` (swallows the guard) or
   to the whole node (kills wheel-zoom-to-cursor).
+
+## IME mode switching (#680)
+
+`terminal/ime-mode-switch.ts` adapts xterm 5.5's composition helper after `open()` in both terminal
+surfaces. Caps Lock must not finalize an active composition: the subsequent native compositionend
+owns that commit. The test executes the dependency's real helper, with an unpatched double-send
+control. This pins one event ordering, not every native IME; macOS Chinese Caps Lock still needs a
+device run, including insertText and compositionend orderings. Revalidate the adapter on xterm upgrades.

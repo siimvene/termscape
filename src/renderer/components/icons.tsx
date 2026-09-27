@@ -426,6 +426,14 @@ export const IconMoreVertical = () => (
   </svg>
 )
 
+/** Two overlapping sheets: copy to the clipboard (the ⌘M thread's per-turn Copy). */
+export const IconCopy = () => (
+  <svg {...S}>
+    <rect x="9" y="9" width="11" height="11" rx="2" />
+    <path d="M5 15V6a2 2 0 0 1 2-2h9" />
+  </svg>
+)
+
 /** Bare checkmark. IconCircleCheck is the badged variant and means something else: a completed
  *  thing, not a selected one. */
 export const IconCheck = () => (

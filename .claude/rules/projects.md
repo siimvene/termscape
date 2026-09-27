@@ -67,7 +67,14 @@ project's nodes only.** The contract:
   and latched to the first run, so flipping the setting mid-session never reaches into storage and
   locks a canvas someone is using. Desktop + Server Edition; **Mobile: N/A** (no canvas).
 - Before any project switch / add / delete, `commitActiveToStore()` serializes the live
-  React Flow nodes back into the store, so nothing is lost. Then disk is written.
+  React Flow nodes back into the store, so nothing is lost. Then disk is written. The commit is
+  guarded by the epoch tag `nodesProjectIdRef` (`canCommitCanvas`), and **that tag must live in
+  React STATE beside the nodes** (`canvas/nodesEpoch.ts`), never in a ref alone: the load effect's
+  `setNodes(flow)` is a DefaultLane update, every zustand write after it is a SyncLane re-render
+  that skips it, and the render-time `nodesRef` mirror then paired the PREVIOUS project's nodes
+  with the NEW project's tag. A commit in that window wrote an SSH project's 7 nodes over a local
+  project's 18 in its `.nodeterm/project.json` (2026-09-26). `nodesEpoch.test.tsx` reproduces the
+  interleaving with real React (no `act`, which would flush both lanes together and hide it).
 - Switching away unmounts the old project's `TerminalNode`s → their tmux clients detach but
   the sessions keep running; switching back reattaches. tmux session names are per-node-id
   (globally unique), so projects never collide.

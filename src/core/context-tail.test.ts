@@ -13,6 +13,27 @@ describe('parseLatestUsage', () => {
     ].join('\n')
     expect(parseLatestUsage(text)).toEqual({ used: 120, model: 'claude-y' })
   })
+  it("reads the reasoning effort Claude Code records on the LATEST usage record (top-level `effort`)", () => {
+    // Shape measured on 2.1.283 transcripts: `effort` sits beside `message`, and changes on the
+    // first request after `/effort`.
+    const text = [
+      JSON.stringify({ type: 'assistant', effort: 'medium', perTurnEffort: 'medium', message: { model: 'claude-x', usage: { input_tokens: 10 } } }),
+      JSON.stringify({ type: 'assistant', effort: 'xhigh', perTurnEffort: 'xhigh', message: { model: 'claude-x', usage: { input_tokens: 20 } } })
+    ].join('\n')
+    expect(parseLatestUsage(text)).toEqual({ used: 20, model: 'claude-x', effort: 'xhigh' })
+  })
+  it('does NOT carry an older effort forward: a latest record with none (a model without effort) has none', () => {
+    const text = [
+      JSON.stringify({ type: 'assistant', effort: 'high', message: { model: 'claude-opus-5', usage: { input_tokens: 10 } } }),
+      JSON.stringify({ type: 'assistant', message: { model: 'claude-haiku-4-5', usage: { input_tokens: 20 } } })
+    ].join('\n')
+    expect(parseLatestUsage(text)).toEqual({ used: 20, model: 'claude-haiku-4-5' })
+    expect(parseLatestUsage(text)).not.toHaveProperty('effort')
+  })
+  it('ignores a non-string effort', () => {
+    const text = JSON.stringify({ type: 'assistant', effort: { level: 'x' }, message: { model: 'm', usage: { input_tokens: 5 } } })
+    expect(parseLatestUsage(text)).toEqual({ used: 5, model: 'm' })
+  })
   it('ignores non-assistant lines, zero-usage, and garbled JSON; null when none', () => {
     expect(parseLatestUsage('not json\n{"type":"assistant","message":{"usage":{"input_tokens":0}}}')).toBeNull()
     expect(parseLatestUsage('')).toBeNull()
@@ -255,4 +276,93 @@ describe('createContextTail — `wholeFile` (grok: a document rewritten, not app
     const pushes = await pushesAfterRewrite({})
     expect(JSON.stringify(pushes)).not.toContain('222222')
   }, 8000)
+})
+
+it('delivers each tool result ID across a torn local transcript read', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nt-question-tail-'))
+  const file = path.join(dir, 'session.jsonl')
+  const onToolResult = vi.fn()
+  const tail = createContextTail(() => {}, { onToolResult })
+  try {
+    fs.writeFileSync(file, '')
+    tail.track('session', file)
+    await new Promise(resolve => setTimeout(resolve, 1200))
+    const line = JSON.stringify({ type: 'user', message: { content: [
+      { type: 'tool_result', tool_use_id: 'other', content: 'ok' },
+      { type: 'tool_result', tool_use_id: 'ask', content: 'User declined to answer questions' }
+    ] } })
+    fs.appendFileSync(file, line.slice(0, 40))
+    await new Promise(resolve => setTimeout(resolve, 1200))
+    expect(onToolResult).not.toHaveBeenCalled()
+    fs.appendFileSync(file, line.slice(40) + '\n')
+    await new Promise(resolve => setTimeout(resolve, 1200))
+    expect(onToolResult.mock.calls).toEqual([['session', 'other'], ['session', 'ask']])
+  } finally {
+    tail.untrack('session')
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+}, 8000)
+describe('session-scoped context configuration (#818)', () => {
+  it('overrides even a sonnet guess, isolates equal model ids, and invalidates changed/removed env', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'context-env-'))
+    const file = path.join(dir, 'session.jsonl')
+    fs.writeFileSync(file, JSON.stringify({ type: 'assistant', message: { model: 'vendor-sonnet', usage: { input_tokens: 16000 } } }) + '\n')
+    const send = vi.fn()
+    const tail = createContextTail(send)
+    try {
+      tail.track('small', file, 32000)
+      tail.track('large', file, 1048576)
+      await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(2))
+      expect(send.mock.calls.map(([p]) => p)).toEqual(expect.arrayContaining([
+        expect.objectContaining({ sessionId: 'small', windowTokens: 32000, usedPercent: 50, windowSource: 'session-env' }),
+        expect.objectContaining({ sessionId: 'large', windowTokens: 1048576, windowSource: 'session-env' })
+      ]))
+      send.mockClear()
+      tail.track('small', file, 32000)
+      tail.track('small', file) // legacy hook, no new observation
+      expect(send).not.toHaveBeenCalled()
+      tail.replay('small') // renderer reload: preserve observed env
+      expect(send).toHaveBeenCalledWith(expect.objectContaining({ windowTokens: 32000, windowSource: 'session-env' }))
+      tail.track('small', file, 64000)
+      await vi.waitFor(() => expect(send).toHaveBeenLastCalledWith(expect.objectContaining({ sessionId: 'small', windowTokens: 64000 })), { timeout: 1800 })
+      tail.track('small', file, null)
+      await vi.waitFor(() => expect(send).toHaveBeenLastCalledWith(expect.objectContaining({ sessionId: 'small', windowSource: 'estimate' })), { timeout: 1800 })
+    } finally {
+      tail.untrack('small'); tail.untrack('large')
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('createContextTail — effort (the ⌘M composer label)', () => {
+  it('pushes the recorded effort, and pushes again when ONLY the effort changed (a `/effort` pick)', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ctxtail-effort-'))
+    const file = path.join(dir, 'sess.jsonl')
+    const rec = (effort: string) =>
+      JSON.stringify({ type: 'assistant', effort, message: { model: 'claude-opus-5', usage: { input_tokens: 100 } } }) + '\n'
+    fs.writeFileSync(file, rec('medium'))
+    const send = vi.fn()
+    const tail = createContextTail(send)
+    tail.track('s1', file)
+    await new Promise((r) => setTimeout(r, 300))
+    // Same used tokens, same model: before effort was part of the snapshot this was no push at all.
+    fs.appendFileSync(file, rec('xhigh'))
+    await new Promise((r) => setTimeout(r, 1300))
+    tail.untrack('s1')
+    const efforts = send.mock.calls.map((c) => (c[0] as { effort?: string }).effort)
+    expect(efforts).toEqual(['medium', 'xhigh'])
+  }, 6000)
+
+  it('omits the field when the transcript records none (older CLI / other agent)', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ctxtail-noeffort-'))
+    const file = path.join(dir, 'sess.jsonl')
+    fs.writeFileSync(file, JSON.stringify({ type: 'assistant', message: { model: 'claude-opus-5', usage: { input_tokens: 100 } } }) + '\n')
+    const send = vi.fn()
+    const tail = createContextTail(send)
+    tail.track('s1', file)
+    await new Promise((r) => setTimeout(r, 300))
+    tail.untrack('s1')
+    expect(send).toHaveBeenCalledTimes(1)
+    expect(send.mock.calls[0][0]).not.toHaveProperty('effort')
+  })
 })

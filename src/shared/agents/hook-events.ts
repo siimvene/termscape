@@ -19,7 +19,21 @@
  * claude/codex/gemini stay plain strings, so their emitted config is byte-identical to what it has
  * always been.
  */
-export type ManagedHookEvent = string | { event: string; matcher: string }
+export type ManagedHookEvent = string | { event: string; matcher?: string; timeout?: number }
+
+/** A subscription's event name, whichever form it was declared in. */
+export function managedEventName(e: ManagedHookEvent): string {
+  return typeof e === 'string' ? e : e.event
+}
+
+/**
+ * The `timeout` (seconds) we write on claude's PermissionRequest handler. Claude's command-hook
+ * default is 600 s today, but a held plan/question waits up to `PERM_WAIT_SECS_INTERACTIVE` (540 s,
+ * core/agents/permission-decision.ts) — so the bound the hold is sized against is written down in
+ * the user's settings instead of borrowed from a CLI default that could change under us. Existing
+ * installs pick it up at the next install (the managed entry is always rewritten fresh).
+ */
+export const PERMISSION_REQUEST_HOOK_TIMEOUT_SECS = 600
 
 /** Claude Code hook events. Each maps to a `NormalizedAgentEvent` in shared/agents/normalize.ts. */
 export const CLAUDE_HOOK_EVENTS = [
@@ -30,12 +44,13 @@ export const CLAUDE_HOOK_EVENTS = [
   // status badge sticks on "working" after any errored turn.
   'StopFailure',
   'Notification',
-  // Dedicated permission-prompt signal (→ blocked), more direct than Notification.
-  'PermissionRequest',
+  // Dedicated permission-prompt signal (→ blocked), more direct than Notification. Carries an
+  // explicit timeout because the managed hook HOLDS it (hook-reply approvals, up to 540 s).
+  { event: 'PermissionRequest', timeout: PERMISSION_REQUEST_HOOK_TIMEOUT_SECS },
   'SessionEnd',
   'PreToolUse',
   'PostToolUse'
-] as const
+] as const satisfies readonly ManagedHookEvent[]
 
 /**
  * Gemini CLI hook events (→ normalizeGemini) — its own names, NOT Claude's.

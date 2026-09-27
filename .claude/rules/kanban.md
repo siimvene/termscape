@@ -110,9 +110,22 @@ paths:
   cards edit their text in the modal (live both ways).
   The modal header carries the terminal node's actions (search via `useTerminalSearch`+
   `FindBar` on the modal xterm; dictate via the same `nodeterm:dictate` event — `.dictation`
-  overlay z is 60, ABOVE the modal scrim; ✦ `pty.generateName` through the modal rename funnel).
+  overlay z is 60, ABOVE the modal scrim; ✦ `pty.generateName` through the modal rename funnel;
+  and the **⌘M view** — a header toggle (`IconMarkdown`) plus the chord, which lays the SAME face
+  the canvas node shows over the live viewer: `ChatPanel` when `canChat(created agent)` and the
+  session id is known, else `TerminalMarkdownView`. Three rules: the state is MODAL-LOCAL and per OPENING
+  (never `data.mdMode` — that would flip the canvas node under the board too); the viewer
+  stays MOUNTED underneath (covered, not swapped, so its co-attach never detaches/re-attaches) and
+  gets the same focus hand-off as the node (`ModalTerminal`'s `covered` → `useMdModeFocus`); and the
+  chord reaches the modal through `window.nodeTerminal.onMarkdownToggle` only while it is the top
+  dialog, while the canvas terminal AND editor nodes' own subscriptions refuse the chord whenever a
+  board is up (`lib/markdownChord.ts` `canvasOwnsMarkdownChord` — a hover flag can go stale under
+  the opaque board, so one press could otherwise flip both). The header also carries the node's
+  pause chips — DROPPED, PAUSED and SLEEPING (Eco, with the refused-wake sentence) — each clicking
+  through the same `wakeHibernatedNode` trigger as the canvas chip. The overlay sits at z 5 in the pane, BELOW the
+  sheet's resize handles (z 6/7, issue #389) — pinned in `styles.kanban.test.ts`.
   **The 💬 icon means COMMENTS on both surfaces** (repurposed from the markdown view — ⌘M still
-  toggles markdown/chat on the canvas node): on a terminal node it opens a right-side comments
+  toggles markdown/chat on the canvas node, and on the card modal): on a terminal node it opens a right-side comments
   flyout (`.term-node__comments`, a sibling of the overflow:hidden root, hosting BoardLogPanel
   with `card: Pick<KanbanSession,'id'>`); in the modal it collapses/reopens the panel, which is
   OPEN BY DEFAULT there. Under the modal header sits the **card metadata strip** (`CardMetaBar.tsx`): Members (assign) —
@@ -137,7 +150,14 @@ paths:
   changes via fs.watch; desktop SSH projects poll 5s while subscribed; inline projects show a
   hint. Relay tabs BRIDGE boardLog to the host (pre-dispatch `sharedProjectId` scope guard in the
   relay dispatch — an out-of-scope projectId is refused before any registry/path resolution; a
-  connection drop replays its outstanding onChanged unsubscribes). Deliberate v1 gaps: column-level
+  connection drop replays its outstanding onChanged unsubscribes). **The relay-guest scope jail is
+  keyed on channel CLASS, not a per-feature list** (`main/remote/relay-project-scope.ts`): every
+  method whose name starts with `githubIssues:` / `board-log:` / `projects.` is project-scoped, and
+  one the table cannot read a projectId out of is REFUSED on a scoped session. The switch it
+  replaced had a `default: not project-scoped` arm, so a new verb in one of those namespaces reached
+  another project's data with no refusal anywhere. A new channel in a scoped class therefore needs a
+  table row to become reachable — and `relay-project-scope.test.ts` fails if a live IPC channel in a
+  scoped class has none, so the fail-closed default cannot silently swallow a shipped verb. Deliberate v1 gaps: column-level
   events are stored but no card feed shows them; canvas-born nodes get no card-created; no
   card-deleted type.
   Per-column "+ New session" menus create agents/terminal/sticky nodes assigned to the column
@@ -147,10 +167,23 @@ paths:
   click opens the board). Server Edition works as-is (pure renderer + workspace.save). Scope: no
   agent-driven card movement yet, no board undo.
 
-- **Mobile (`nodeterm-ios`) reaches the board through two relay verbs** in
-  `WorkspaceStore.ensureRemoteBoard` / `setRemoteCardColumn` (host-service `handleKanban`, pure
-  transforms in `core/project-kanban-write.ts`): `projects.ensureBoard` seeds the default columns,
-  `projects.setCardColumn` moves one card. Why: (1) the desktop board is a LAZY default (`kanban` is
+- **Mobile (`nodeterm-ios`) reaches the board through three relay verbs** in
+  `WorkspaceStore.ensureRemoteBoard` / `setRemoteCardColumn` / `editRemoteCardLabels` (host-service
+  `handleKanban`, pure transforms in `core/project-kanban-write.ts`): `projects.ensureBoard` seeds the
+  default columns, `projects.setCardColumn` moves one card, and `projects.editCardLabels` adds / removes /
+  creates **board labels** on one card (the phone's long-press label sheet, 2026-09). There is ONE
+  label model — the per-project palette in `kanban.labels` plus per-card ids in `kanban.meta[].labels`
+  — and the label verb writes it through the SAME transforms the canvas node's "+ Label" row and the
+  kanban card use: the card-meta + label half of `lib/kanban.ts` moved to `@shared/kanban-labels`
+  (re-exported, renderer call sites unchanged) so core can apply it; a test pins that a phone edit
+  produces the board `toggleCardLabel` produces. Params are validated at the write site
+  (`parseCardLabelEdit`: bounded control-free ids, 1–60-char control-free names, colour from the closed
+  palette, no id both added and removed) because they land in a git-shared, hand-editable file; a
+  created name matching an existing label case-insensitively REUSES it (the picker offers no Create
+  on an exact match); the first label on a board-less project seeds the default board, as the
+  desktop's first "+ Label" does; a stale `add` answers `edited:false` with the CURRENT palette so the
+  phone can redraw. Deleting/renaming palette entries is deliberately desktop-only (it touches every
+  card). The iOS direct-SSH path has a Swift twin of the transform for projects on the host it dials. Why: (1) the desktop board is a LAZY default (`kanban` is
   unwritten until the first edit), so most files carry NO board and the phone, which knows a project
   only by its file, could not offer one (1 of 13 files here had a `kanban` block) — defaults live in
   `@shared/kanban-default-board`, copied verbatim (pinned both sides) by iOS `KanbanDefaults`; (2) an

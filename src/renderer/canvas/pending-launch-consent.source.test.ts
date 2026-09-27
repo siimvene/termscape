@@ -101,7 +101,9 @@ describe('wholesale replacements of the ACTIVE list prune consents and claims (p
 
   it('the legacy phone mutation result', () => {
     expect(canvas).toMatch(
-      /const next = applyCanvasMutation\(flowToNodeStates\(ns\), mutation\)[\s\S]{0,400}?pruneArmed\(next\)\s*\n\s*return nodeStatesToFlow\(next\)/
+      // upstream v0.3.16 (ef0f872b) passes flowToNodeStates a second arg (retain the UI command
+      // unless the project is a relay snapshot); the pin is on the prune, not that argument.
+      /const next = applyCanvasMutation\(flowToNodeStates\(ns(?:, [^\n]*?)?\), mutation\)[\s\S]{0,400}?pruneArmed\(next\)\s*\n\s*return nodeStatesToFlow\(next\)/
     )
   })
 

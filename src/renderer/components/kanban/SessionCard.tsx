@@ -3,16 +3,13 @@ import type { KanbanCardMeta, KanbanLabel, KanbanPriority } from '@shared/types'
 import { useAgentStatus } from '../../state/agentStatus'
 import { AccountChip, useAccountChip } from '../AccountChip'
 import { ContextMeter } from '../ContextMeter'
+import { isRemoteSessionNode } from '@shared/worktree'
 import { NodeIconView } from '../NodeIcon'
 import { LabelChips } from './LabelChips'
+import { PRIORITIES } from './CardMetaBar'
 import type { KanbanSession } from './KanbanView'
 
-const PRIO_COLOR: Record<KanbanPriority, string> = {
-  low: '#8e8e93',
-  medium: '#ffd60a',
-  high: '#ff9f0a',
-  urgent: '#ff453a'
-}
+const PRIO_COLOR = Object.fromEntries(PRIORITIES.map((p) => [p.id, p.color])) as Record<KanbanPriority, string>
 
 interface SessionCardProps {
   session: KanbanSession
@@ -160,7 +157,7 @@ export const SessionCard = memo(function SessionCard({
             {priority !== undefined && PRIO_COLOR[priority] && (
               <span
                 className="kanban-due kanban-prio-chip"
-                style={{ background: `${PRIO_COLOR[priority]}26`, color: PRIO_COLOR[priority] }}
+                style={{ background: `color-mix(in srgb, ${PRIO_COLOR[priority]} 15%, transparent)`, color: PRIO_COLOR[priority] }}
               >
                 {priority.toUpperCase()}
               </span>
@@ -191,7 +188,7 @@ export const SessionCard = memo(function SessionCard({
             <span className="kanban-card__stickytext">{stickyPreview}</span>
           ) : (
             <>
-              <ContextMeter sessionId={status?.sessionId ?? null} />
+              <ContextMeter sessionId={status?.sessionId ?? null} nodeId={session.id} remote={isRemoteSessionNode(session.spawn)} agentId={session.agentId ?? session.spawn.agentId ?? status?.agentId} />
               <AccountChip chip={accountChip} />
               {status?.session && (
                 <span className="kanban-card__session" title={status.session}>
