@@ -244,6 +244,9 @@ body,
   background: var(--bg);
   color: var(--text);
   overflow: hidden;
+  /* Keep horizontal canvas/trackpad gestures from navigating browser history,
+     including gestures that escape a terminal or editor at its scroll boundary. */
+  overscroll-behavior-x: none;
 }
 
 .canvas-root {
