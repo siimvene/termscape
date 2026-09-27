@@ -98,6 +98,21 @@ describe('planCodexAccountSwitch (fail-closed switch origination — §3.5)', ()
     })
   })
 
+  // A persisted node can be remote (`sshRemoteTmux`) with no `ssh` spec left to name its host
+  // (the worktree gate's drift class). Its pane is on SOME host, so neither a local account nor
+  // this machine's system login may be planned for it: refuse instead of switching it as local.
+  it('refuses a remote node whose host cannot be named, for a local or a system target', () => {
+    const drifted = { ...codexNode, accountId: undefined, ssh: true, hostKey: undefined }
+    expect(planCodexAccountSwitch(drifted, 'account-a', accounts, connected)).toEqual({
+      ok: false,
+      reason: 'no-connection'
+    })
+    expect(planCodexAccountSwitch({ ...drifted, accountId: 'account-a' }, undefined, accounts, connected)).toEqual({
+      ok: false,
+      reason: 'no-connection'
+    })
+  })
+
   it('refuses a no-op switch to the account the node already runs', () => {
     // MUTATION PIN: drop the `source === target` short-circuit → a same-account switch would be
     // ORIGINATED (reserving + recycling for nothing). Must stay red.

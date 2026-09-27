@@ -68,7 +68,8 @@ export type CodexSwitchDecision =
  *   - the target must differ from the source (a no-op switch is refused, not run);
  *   - the target must pass `codexAccountSelectable` (missing/hostile/unconnected ⇒ refused);
  *   - the target must live on the node's OWN machine (`hostKey`: this one when undefined) — an
- *     account on another machine has no home where the pane runs. Refused as `unavailable`.
+ *     account on another machine has no home where the pane runs. Refused as `unavailable`;
+ *     a remote node whose host cannot be named is refused as `no-connection`.
  * The returned `plan.expected.sessionId` and `plan.sessionId` are BOTH the node's current id, so the
  * orchestration can never fork the conversation onto the switched account.
  */
@@ -88,6 +89,9 @@ export function planCodexAccountSwitch(
 ): CodexSwitchDecision {
   if (node.agentId !== 'codex') return { ok: false, reason: 'not-codex' }
   if (!node.sessionId || !node.cwd) return { ok: false, reason: 'no-session' }
+  // Remote with no nameable host (`sshRemoteTmux` but no `ssh` spec): the pane runs on SOME host,
+  // so the same-machine rule below would wrongly read it as this one. Refuse, never switch as local.
+  if (node.ssh && !node.hostKey) return { ok: false, reason: 'no-connection' }
   const source = node.accountId || undefined
   const target = targetAccountId || undefined
   // A switch to the account the node already runs is a no-op — refuse rather than reserve/recycle.

@@ -108,7 +108,7 @@ describe('the states either side of it are unchanged', () => {
   it('a Linux .deb update still names its version on the manual card', () => {
     act(() => fire.available({ version: '0.3.8', notes: '', manual: true }))
     expect(text()).toContain('Update available')
-    expect(text()).toContain('nodeterm v0.3.8 is available. Download it to update.')
+    expect(text()).toContain('Termscape v0.3.8 is available. Download it to update.')
     expect(text()).not.toContain('No update channel')
   })
 })

@@ -93,7 +93,7 @@ export function noSelfInstallCopy(
   if (delivery === 'manual-install') {
     return {
       title: 'Update available',
-      body: `nodeterm v${version ?? ''} is available. Download it to update.`,
+      body: `Termscape v${version ?? ''} is available. Download it to update.`,
       action: 'Download'
     }
   }

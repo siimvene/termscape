@@ -4,13 +4,14 @@ paths:
   - "src/core/codex-accounts-core.ts"
   - "src/core/codex-config-dir.ts"
   - "src/core/codex-identity-*.ts"
-  - "src/core/account-transcript-copy.ts"
+  - "src/core/claude-session-copy.ts"
+  - "src/core/remote-claude-session-copy.ts"
   - "src/core/usage/**"
   - "src/core/pty-manager.ts"
   - "src/main/claude-accounts.ts"
   - "src/main/claude-usage.ts"
   - "src/main/codex-accounts.ts"
-  - "src/renderer/lib/accountSwitch.ts"
+  - "src/renderer/canvas/claude-account-switch.ts"
   - "src/renderer/lib/usageScope.ts"
   - "src/renderer/components/UsageIndicator.tsx"
   - "src/renderer/state/systemAccount.ts"
@@ -367,26 +368,19 @@ paths:
     not fall back to the host's system login. System Codex retains the host environment even before
     home discovery during early attach. Never guess HOME/CODEX_HOME. Desktop and Server share this
     core gate; Desktop supports the remote lifecycle, while Server account management remains unavailable.
-  - **Switch account (running node)** — the node context menu's **Switch account** submenu moves an
-    already-running Claude session onto another local account (or back to the system `~/.claude`).
-    Because `data.accountId` is immutable at creation, this is a **copy-then-flip cold restore**,
-    not a mutation of the live dir. The **transcript-copy invariant** is the whole point: the
-    file-level half is the core service `copySessionTranscript` (`core/account-transcript-copy.ts`,
-    IPC `claude:copy-session-transcript`, registered in **BOTH** shells, reached at
-    `window.nodeTerminal.claude.copySessionTranscript`), which mirrors `<sessionId>.jsonl` **and**
-    its subagents sibling tree from the source account's `projects` root into the target's
-    (`transcriptRootFor`), STRICTLY by sessionId (never the newest transcript). The renderer driver
-    `executeAccountSwitch` (`renderer/lib/accountSwitch.ts`) runs the ONE safe order: **copy FIRST**,
-    then identity-gated `terminateForeground` → `transport.recycle(id)` → `updateNodeData(id,
-    {accountId: target|undefined, respawnNonce: +1})` (the model-switch sequence); **a failed copy
-    mutates NOTHING** — a resume that finds no transcript in the target dir is a lost conversation.
-    Refusal matrix (`planAccountSwitch`, fail-closed): not a Claude node, a **remote** session
-    (relay tab / SSH-project node — those account dirs live on another machine), **busy**
-    (`working`/`blocked`), no resumable sessionId, a **same-account** no-op, or a target that is
-    missing / forged / `host`ed / still `pending`. Both `fromAccountId`/`toAccountId` are validated
-    with the same rule as `accountConfigDir` (`isSafeAccountId`) at the handler AND with a
-    defense-in-depth regex in the renderer — a forged id interpolated into a path must never
-    traverse. Server Edition switches accounts too (no remote leg — the server runs ON the host).
+  - **The fork's own copy-FIRST switcher is gone (v0.3.16 merge, 2026-09-27).** Both sides had built
+    a running-node Claude account switch; the merge kept upstream's (**Switch Claude account**, above:
+    quit the CLI, then `claudeAccounts.copySession`, then rebind + recycle) because it also covers SSH
+    hosts, the kanban card and the usage popover's bulk move. The fork's driver
+    (`renderer/lib/accountSwitch.ts`) and its core copy service (`core/account-transcript-copy.ts`,
+    IPC `claude:copy-session-transcript`) were deleted rather than left callerless: that channel sat
+    on the peer-reachable `platform().handle` table, so an approved relay guest could still move a
+    transcript between account roots on the host with nothing in the product using it. Accepted
+    differences from the old fork contract: a failed copy no longer "mutates nothing" (the CLI has
+    already quit, so the pane restarts and resumes under the SOURCE account: an interruption, not a
+    lost conversation, and the copy then works from a FINAL source file); upstream's planner has no
+    `hibernated` refusal; and only the builtin `claude` switches (a claude-BASED custom agent no
+    longer does, matching the `boundAccountId` rule that custom agents never bind an account).
 
 - **Active Claude organization** (#552) — local Desktop and Server usage snapshots carry optional
   `organization` metadata from the SAME account's `.claude.json` (system, managed or linked).

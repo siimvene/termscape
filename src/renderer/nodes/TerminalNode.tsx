@@ -209,13 +209,6 @@ import { readsClaudeTranscript } from '../lib/transcriptGates'
 import { mayRelaunchAgent } from '../lib/pendingLaunch'
 import { liveProjectJumpTarget } from '../lib/projectJump'
 import { pushSessionRename } from '../lib/sessionRename'
-import {
-  planAccountSwitch,
-  BUSY_STATES,
-  executeAccountSwitch,
-  registerAccountSwitch,
-  type AccountSwitchFn
-} from '../lib/accountSwitch'
 import { useSettings } from '../state/settings'
 import { useCodexIdentity, codexSharedIdentity, codexFallbackText } from '../state/codexIdentity'
 import { codexApprovalCaps } from '../state/codexCli'
@@ -4204,97 +4197,6 @@ export function TerminalNode({
       })
     )
 
-    // Switch this running CLAUDE node onto another managed account (Canvas node menu). The
-    // choreography deliberately reuses the MODEL-SWITCH sequence above (terminateForeground →
-    // transport.recycle → updateNodeData respawn bump); the ONE thing it does first is COPY the
-    // session transcript into the target account dir, so the cold-restore `claude --resume <sid>`
-    // that the respawn fires finds the conversation under the new dir. A failed copy mutates
-    // NOTHING (a half-switch strands the resume). Registered in the effect BODY, like the restart
-    // closure, so an adopted (parked → remounted) terminal is still switchable. All facts are read
-    // at CALL time — the account, the agent state and this session's `sessionId` all arrive after
-    // mount. Guarded by the SAME `guardConcurrentRestart(id, …)` set as the restart/hibernate
-    // closures, so a switch can never write into a pane a restart is already driving.
-    const accountSwitch: AccountSwitchFn = guardConcurrentRestart(
-      id,
-      async (targetAccountId: string | undefined) => {
-        const st = useAgentStatus.getState().byId[id]
-        const currentNode = getNode(id)
-        // The node's own agent id, NOT a hardcoded 'claude': planAccountSwitch admits claude-BASE
-        // custom agents (capabilityAgentId), whose pane runs their own launchCmd binary — the
-        // identity gate must be asked about that binary (binariesFor resolves it in core), exactly
-        // as the model switch above passes `target`.
-        const switchAgentId = createdAgentId(currentNode?.data)
-        const decision = planAccountSwitch(
-          {
-            agentId: switchAgentId,
-            source: session.source,
-            // An SSH-project node is source 'local' but its transcripts + managed accounts live on
-            // the host — the local copy handler can't reach them (planAccountSwitch refuses it).
-            // The SHARED predicate, not a bare data.ssh check: a node carrying only
-            // sshRemoteTmux is equally remote (the worktree gate's documented drift class).
-            ssh: isRemoteSessionNode(currentNode?.data ?? {}),
-            sessionId: restartSessionId(st?.sessionId, currentNode?.data.agentSessionId),
-            accountId: (currentNode?.data.accountId as string | undefined) || undefined,
-            state: st?.state,
-            cwd: currentNode?.data.cwd as string | undefined,
-            hibernated: !!st?.hibernated,
-            recurringKind: st?.loop?.kind,
-            backgroundTaskAt: st?.backgroundTaskAt
-          },
-          targetAccountId,
-          useSettings.getState().settings.claudeAccounts
-        )
-        if (!decision.ok) return decision.reason
-        const { plan } = decision
-        // A pane teardown mid-await (unmount, destroy, recycle) must abort before the copy: the
-        // node the switch was launched from is gone.
-        if (!restartTarget()) return 'no-session'
-        const outcome = await executeAccountSwitch({
-          // COPY FIRST — into the target dir, keyed by the SAME session id the resume will ask for.
-          copyTranscript: () =>
-            api.claude.copySessionTranscript(
-              plan.sessionId,
-              plan.sourceAccountId,
-              plan.targetAccountId,
-              plan.cwd
-            ),
-          // Fire-time re-ask (the Eco rule): the copy is an await window in which a turn can start
-          // or the node can unmount — refuse before anything destructive rather than SIGTERM a
-          // turn that began mid-copy.
-          recheckEligible: () => {
-            if (!restartTarget()) return 'no-session'
-            const now = useAgentStatus.getState().byId[id]
-            if (BUSY_STATES.has(now?.state ?? '')) return 'busy'
-            if (now?.hibernated) return 'hibernated'
-            // The session RESUMED AS someone else mid-copy (branch, restart, /clear): killing the
-            // pane and resuming the PLANNED id would resurrect a superseded conversation
-            // (consort finding — plan revalidation).
-            if (now?.sessionId && now.sessionId !== plan.sessionId) return 'no-session'
-            return null
-          },
-          // Identity-gated: core SIGTERMs the foreground group ONLY if this node's harness still
-          // owns it, so a stale menu can never kill vim or a build in this pane. The fallback is
-          // unreachable (the plan refused a node with no agent id) and exists so a missing id can
-          // never drop the gate to the legacy shell-only guard.
-          terminateForeground: () => api.pty.terminateForeground(id, switchAgentId ?? 'claude'),
-          recycle: () => transport.recycle(id),
-          // Stamp the new account + bump the respawn nonce; the cold-restore auto-resume relaunches
-          // `claude --resume <sid>` under the target account dir. `undefined` = the system account.
-          commit: () =>
-            updateNodeData(id, (node) => ({
-              accountId: plan.targetAccountId,
-              respawnNonce: ((node.data.respawnNonce as number | undefined) ?? 0) + 1
-            }))
-        })
-        return outcome.ok
-          ? 'switched'
-          : outcome.reason === 'recheck-failed'
-            ? outcome.refusal
-            : outcome.reason
-      }
-    )
-    const unregisterAccountSwitch = registerAccountSwitch(id, accountSwitch)
-
     // Eco / hibernation (`settings.agentHibernationEnabled`): the same two halves as the restart
     // above, registered as a PAIR because they are driven far apart in time — Canvas's sweep quits
     // an idle, offscreen CLI to reclaim its RAM, and the node's own wake resumes the conversation
@@ -4736,8 +4638,6 @@ export function TerminalNode({
       // Nothing may restart a node that is no longer mounted — park, respawn and real teardown all
       // pass through here. A remount re-registers (superseding, so a stale unregister is inert).
       unregisterRestart()
-      // …and nothing may switch its account after it is gone (the menu row falls back to a no-op).
-      unregisterAccountSwitch()
       // …and nothing may hibernate or wake one either: with no registration the sweep reads this
       // node as unwired (`planHibernation` refuses it) and the wake finds nothing to resume into.
       unregisterHibernate()

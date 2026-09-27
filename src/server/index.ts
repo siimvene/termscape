@@ -107,7 +107,6 @@ import { maybeStartPeerStatusBridge, readFreshPeerMirror } from './peer-status-b
 import { initServerContextLink } from './context-link'
 import { createServerWorkspaceWatcher } from './workspace-external-watch'
 import { registerTranscriptIpc } from '../core/transcript-ipc'
-import { copySessionTranscript } from '../core/account-transcript-copy'
 import { registerContextEnsureIpc } from '../core/context-ensure'
 import { IPC } from '@shared/ipc'
 import { WhisperModelStore } from '../core/speech/whisper-models'
@@ -543,22 +542,6 @@ export async function startServer(
   // leg: the Server Edition runs ON the host whose transcripts it reads, so local resolution is
   // the complete answer (an SSH-project node is a desktop-only concept here).
   registerTranscriptIpc({ pathFor: (sessionId) => contextTail.pathFor(sessionId) })
-  // Account switcher's file-level half — registered here too so the Server Edition switches
-  // accounts (the both-shells rule; the desktop leg is in src/main/index.ts). No remote leg: the
-  // server runs ON the host whose transcript roots these are.
-  platform.handle(
-    IPC.claudeCopySessionTranscript,
-    (
-      sessionId: string,
-      fromAccountId: string | undefined,
-      toAccountId: string | undefined,
-      cwd: string
-    ) =>
-      copySessionTranscript(sessionId, fromAccountId, toAccountId, cwd, {
-        homeDir: os.homedir(),
-        userDataDir: config.dataDir
-      })
-  )
   // The context meter's mount-time rehydration, registered beside the read channels and for the
   // same reason: the tails it feeds are the ones created just above. Until this landed the Server
   // Edition had NO handler for `context:ensure` at all — the browser cast it and nothing received

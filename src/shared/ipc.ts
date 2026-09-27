@@ -53,7 +53,6 @@ export const IPC = {
    *  `PtyLimitFixResult`. NEVER invoked on the app's own initiative — see main/ptmx-limit.ts. */
   ptyRaiseDeviceLimit: 'pty:raise-device-limit',
   claudeReadTranscript: 'claude:read-transcript',
-  claudeCopySessionTranscript: 'claude:copy-session-transcript',
   chatReadTranscript: 'chat:read-transcript',
   /** Does a claude-shaped transcript exist for this session id? Tri-state
    *  (`present | absent | unknown`) — see `TranscriptPresence`. The one caller that ACTS on a

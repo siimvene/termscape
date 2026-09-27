@@ -170,7 +170,7 @@ describe('noSelfInstallCopy', () => {
   it('the Linux .deb sentence is byte-identical to the one that shipped', () => {
     expect(manual).toEqual({
       title: 'Update available',
-      body: 'nodeterm v0.3.8 is available. Download it to update.',
+      body: 'Termscape v0.3.8 is available. Download it to update.',
       action: 'Download'
     })
   })
