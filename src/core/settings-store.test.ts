@@ -12,6 +12,7 @@ import { tmpdir } from 'os'
 import path from 'path'
 import { IPC } from '../shared/ipc'
 import { sanitizeKeybindingOverrides } from '../shared/keybindings'
+import { defaultWallpaper } from '../shared/wallpaper'
 import { initPlatform, resetPlatformForTests } from './platform'
 import { fakePlatform } from './platform-fake'
 import {
@@ -53,15 +54,33 @@ describe('SettingsStore nested-default merge', () => {
   })
 
   it.each([
-    ['true over auto becomes Liquid Glass', { glassTerminals: true }, 'liquid-glass'],
+    ['true over auto becomes Liquid Glass', { glassTerminals: true, appTheme: 'auto' }, 'liquid-glass'],
     ['true over an explicit dark keeps dark', { glassTerminals: true, appTheme: 'dark' }, 'dark'],
-    ['false changes nothing', { glassTerminals: false }, 'auto']
+    ['false changes nothing', { glassTerminals: false, appTheme: 'auto' }, 'auto']
   ] as const)('pre-release glassTerminals: %s, and the key is dropped', (_name, saved, theme) => {
     writeFileSync(path.join(dir, 'settings.json'), JSON.stringify(saved), 'utf-8')
     const store = new SettingsStore()
     store.init()
     expect(store.get().appTheme).toBe(theme)
     expect('glassTerminals' in store.get()).toBe(false)
+  })
+
+  it('a fresh install is Liquid Glass over the first gradient, never glass over plain black', () => {
+    const store = new SettingsStore()
+    store.init()
+    expect(store.get().appTheme).toBe('liquid-glass')
+    expect(store.get().desktopWallpaper).toEqual(defaultWallpaper([]))
+  })
+
+  it.each([
+    ['an existing auto file keeps auto and no wallpaper', { appTheme: 'auto' }, 'auto', { kind: 'none' }],
+    ['a glass user who picked None keeps None', { appTheme: 'liquid-glass', desktopWallpaper: { kind: 'none' } }, 'liquid-glass', { kind: 'none' }]
+  ] as const)('the glass default never overrides a saved choice: %s', (_name, saved, theme, wallpaper) => {
+    writeFileSync(path.join(dir, 'settings.json'), JSON.stringify(saved), 'utf-8')
+    const store = new SettingsStore()
+    store.init()
+    expect(store.get().appTheme).toBe(theme)
+    expect(store.get().desktopWallpaper).toEqual(wallpaper)
   })
 
   it('turns pty shadow clients ON for an existing settings.json that predates the flag', () => {

@@ -104,6 +104,13 @@ function mergeSettings(saved: Partial<Settings> | null | undefined): Settings {
   const legacyGlass = (saved as { glassTerminals?: unknown } | null | undefined)?.glassTerminals;
   if (legacyGlass === true && merged.appTheme === "auto") merged.appTheme = "liquid-glass";
   delete (merged as { glassTerminals?: unknown }).glassTerminals;
+  // Liquid Glass over the first gradient is the out-of-box pair (DEFAULT_SETTINGS). A file that
+  // never saved a wallpaper and is NOT on glass predates wallpapers: it keeps the canvas it had
+  // ("none"), not a gradient it never chose. Keyed on the SAVED file, so a glass user who picked
+  // "None" keeps it and a saved wallpaper is never touched.
+  const savedWallpaper = (saved as { desktopWallpaper?: unknown } | null | undefined)?.desktopWallpaper;
+  if (savedWallpaper === undefined && merged.appTheme !== "liquid-glass")
+    merged.desktopWallpaper = { kind: "none" };
   return merged;
 }
 
