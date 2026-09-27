@@ -5,6 +5,13 @@
 // live connection only. The rules pinned here are the ones a regression would make silently wrong:
 // a remote add/remove never runs locally, a disconnected host never reaches the remote leg, and a
 // saved server with nothing on it and no connection stays out of the way.
+//
+// Fork shape (`.claude/rules/agents-accounts-usage.md`, "Account ROW membership (both lists) is the
+// shell's"): `add()` registers the row in the shell and returns it (`account`), and `remove()` is
+// ALWAYS the shell's verb, which branches on the ROW's host. A disconnected Codex host therefore
+// still calls `remove(id)` with NO ctx (the shell only forgets a row carrying `host`, never a local
+// teardown); a disconnected Claude host is REFUSED by the shell (teardown must be confirmed on the
+// host) and the row stays.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -70,7 +77,12 @@ beforeEach(() => {
   window.addEventListener('nodeterm:add-codex-account-login', onEvent)
   window.addEventListener('nodeterm:add-account-login', onEvent)
   codexApi = {
-    add: vi.fn(async () => ({ id: 'cx-new', home: '/home/deploy/.nodeterm/cx/x' })),
+    // The shell's add returns the row it registered, pinned to the host it minted on.
+    add: vi.fn(async () => ({
+      id: 'cx-new',
+      home: '/home/deploy/.nodeterm/cx/x',
+      account: { id: 'cx-new', label: 'New account', pending: true, host: PROD } as CodexAccount
+    })),
     waitLogin: vi.fn(async () => ({ email: 'ops@example.com' })),
     cancelWaitLogin: vi.fn(async () => {}),
     identity: vi.fn(async () => null),
@@ -78,7 +90,12 @@ beforeEach(() => {
     remove: vi.fn(async () => {})
   }
   claudeApi = {
-    add: vi.fn(async () => ({ id: 'cl-new', configDir: '~/x', versionSupported: true })),
+    add: vi.fn(async () => ({
+      id: 'cl-new',
+      configDir: '~/x',
+      versionSupported: true,
+      account: { id: 'cl-new', label: 'New account', pending: true, host: PROD, createdAt: 0 } as ClaudeAccount
+    })),
     waitLogin: vi.fn(async () => ({ email: 'ops@example.com' })),
     cancelWaitLogin: vi.fn(async () => {}),
     remove: vi.fn(async () => {})
@@ -157,12 +174,16 @@ describe('AccountsSection — Codex on an SSH host', () => {
     expect(useSettings.getState().settings.codexAccounts).toEqual([])
   })
 
-  it('only forgets a remote account whose host is not connected — never a local remove', async () => {
+  it('only forgets a remote account whose host is not connected — never a remote-leg remove', async () => {
     render({ codex: [{ id: 'c1', label: 'Prod codex', host: PROD }], connected: false })
     act(() => byLabel('Remove Codex account')!.click())
     expect(document.body.textContent).toContain('not connected, so nodeterm only forgets it')
     await act(async () => buttonIn(document.body, 'Remove')!.click())
-    expect(codexApi.remove).not.toHaveBeenCalled()
+    // The shell drops the row; with no ctx it never reaches the SSH leg, and its local verb reads
+    // the row's `host` from disk and skips every local teardown for it.
+    expect(codexApi.remove).toHaveBeenCalledTimes(1)
+    expect(codexApi.remove).toHaveBeenCalledWith('c1')
+    expect(codexApi.remove).not.toHaveBeenCalledWith('c1', expect.anything())
     expect(useSettings.getState().settings.codexAccounts).toEqual([])
   })
 
@@ -183,12 +204,20 @@ describe('AccountsSection — Codex on an SSH host', () => {
 })
 
 describe('AccountsSection — Claude on an SSH host', () => {
-  it('only forgets a remote Claude account whose host is not connected', async () => {
+  it('refuses to remove a remote Claude account whose host is not connected, and keeps the row', async () => {
+    // The shell drops a remote Claude row only after CONFIRMED teardown on its host; the SSH remove
+    // primitive reports false for a disconnected project, so the verb rejects.
+    claudeApi.remove.mockRejectedValueOnce(new Error('Could not remove the Claude account on the SSH host'))
     render({ claude: [{ id: 'a1', label: 'Server login', host: PROD, createdAt: 0 }], connected: false })
     act(() => byLabel('Remove account')!.click())
+    expect(document.body.textContent).toContain('is not connected, so the account cannot be removed yet')
     await act(async () => buttonIn(document.body, 'Remove')!.click())
-    expect(claudeApi.remove).not.toHaveBeenCalled()
-    expect(useSettings.getState().settings.claudeAccounts).toEqual([])
+    // Routed at the host's (saved, disconnected) project, never a local remove.
+    expect(claudeApi.remove).toHaveBeenCalledWith('a1', { projectId: 'p1' })
+    expect(useSettings.getState().settings.claudeAccounts).toEqual([
+      { id: 'a1', label: 'Server login', host: PROD, createdAt: 0 }
+    ])
+    expect(host.textContent).toContain('Reconnect the project and try again')
   })
 
   it('removes it ON the host when connected', async () => {

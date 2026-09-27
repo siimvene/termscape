@@ -100,7 +100,8 @@ describe('the states either side of it are unchanged', () => {
   it('"not available" still renders the up-to-date card', () => {
     act(() => fire.notAvailable())
     expect(text()).toContain("You're up to date")
-    expect(text()).toContain('nodeterm is on the latest version.')
+    // Fork brand rule (root CLAUDE.md): user-visible product name is Termscape.
+    expect(text()).toContain('Termscape is on the latest version.')
     expect(text()).not.toContain('No update channel')
   })
 

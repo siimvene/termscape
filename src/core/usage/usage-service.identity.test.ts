@@ -23,6 +23,12 @@ const identity = (name: string) => JSON.stringify({ oauthAccount: {
   organizationRateLimitTier: 'default_raven'
 } })
 let files: Record<string, string>
+// Misses carry the codes the real stores report (fs ENOENT, `security` exit 44). The merged reader
+// (fork 1183119c, "say WHY usage could not be read") treats any OTHER failure as "could not look"
+// and reports status 'error' / 'credentials-unreadable' instead of hiding the row, so a code-less
+// fixture error would model an unreadable store, not an absent one.
+const enoent = () => Object.assign(new Error('fixture missing'), { code: 'ENOENT' })
+const keychainMiss = (msg = 'fixture missing') => Object.assign(new Error(msg), { code: 44 })
 
 beforeEach(() => {
   initPlatform(fakePlatform({ userDataDir: '/fixture-data' }))
@@ -30,11 +36,11 @@ beforeEach(() => {
   files = { '/fixture-home/.claude/.credentials.json': token, '/fixture-home/.claude.json': identity('Personal') }
   vi.mocked(fs.readFile).mockImplementation(async (file) => {
     const raw = files[String(file)]
-    if (raw === undefined) throw new Error('fixture missing')
+    if (raw === undefined) throw enoent()
     return raw
   })
   keychain.mockReset()
-  keychain.mockImplementation((_cmd, _args, cb) => cb(new Error('fixture missing')))
+  keychain.mockImplementation((_cmd, _args, cb) => cb(keychainMiss()))
   vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ five_hour: { utilization: 12 } }))))
 })
 afterEach(() => {
@@ -78,9 +84,9 @@ describe('active Claude organization', () => {
   })
   it('never combines managed identity with an unscoped system Keychain token', async () => {
     vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
-    keychain.mockImplementation((_cmd, args, cb) => args.includes('Claude Code-credentials') ? cb(null, { stdout: token, stderr: '' }) : cb(new Error('no scoped entry')))
+    keychain.mockImplementation((_cmd, args, cb) => args.includes('Claude Code-credentials') ? cb(null, { stdout: token, stderr: '' }) : cb(keychainMiss('no scoped entry')))
     files['/fixture-data/claude-accounts/team/.claude.json'] = identity('Team')
-    expect(await fetchUsage('team')).toMatchObject({ status: 'unavailable' })
+    expect(await fetchUsage('team')).toMatchObject({ status: 'unavailable', cause: 'no-credentials' })
     expect(fetch).not.toHaveBeenCalled()
     expect(keychain).toHaveBeenCalledTimes(1)
   })
@@ -105,7 +111,7 @@ it('preserves email backfill and drops malformed optional fields', async () => {
 })
 it('does not advertise stale organization metadata without credentials', async () => {
   delete files['/fixture-home/.claude/.credentials.json']
-  expect(await fetchUsage()).toMatchObject({ status: 'unavailable' })
+  expect(await fetchUsage()).toMatchObject({ status: 'unavailable', cause: 'no-credentials' })
   expect((await fetchUsage()).organization).toBeUndefined()
   expect(fetch).not.toHaveBeenCalled()
 })

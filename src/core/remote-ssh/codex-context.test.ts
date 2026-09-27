@@ -1,7 +1,7 @@
 import { isKnownRemoteCodexAccount } from './codex-home'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { execFileSync } from 'child_process'
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from 'fs'
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, realpathSync } from 'fs'
 import { tmpdir } from 'os'
 import path from 'path'
 import { createRemoteCodexContext, remoteCodexTranscriptCommand, parseRemoteCodexTranscript, type RemoteCodexContextTarget } from './codex-context'
@@ -166,7 +166,9 @@ describe.skipIf(process.platform === 'win32')('real shell remote Codex transcrip
     return parseRemoteCodexTranscript(stdout, sid)
   }
   it('honors host CODEX_HOME; managed reads never fall back to system or another account', () => {
-    dir = mkdtempSync(path.join(tmpdir(), 'codex-remote-context-'))
+    // Canonical root: the remote command resolves physical paths, and macOS tmpdir() is the
+    // /var -> /private/var symlink, so a raw mkdtemp path never equals the path it reports.
+    dir = realpathSync(mkdtempSync(path.join(tmpdir(), 'codex-remote-context-')))
     const system = path.join(dir, 'custom home'), t = { ...target, remoteHome: dir }
     const own = rollout(remoteCodexHome(dir, 'a')), other = rollout(remoteCodexHome(dir, 'b')), sys = rollout(system)
     expect(run(t, system)).toBe(own)
@@ -177,7 +179,7 @@ describe.skipIf(process.platform === 'win32')('real shell remote Codex transcrip
     expect(run(t, system)).toBeUndefined()
   })
   it('rejects symlinked files/date directories and unsafe ids without reading outside the account', () => {
-    dir = mkdtempSync(path.join(tmpdir(), 'codex-remote-context-'))
+    dir = realpathSync(mkdtempSync(path.join(tmpdir(), 'codex-remote-context-')))
     const root = path.join(dir, 'custom'), outside = path.join(dir, 'outside')
     const external = rollout(outside)
     const own = rollout(root)

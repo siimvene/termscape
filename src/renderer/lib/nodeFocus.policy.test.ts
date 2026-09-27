@@ -38,18 +38,34 @@ describe('Canvas focus policy (#743, #711)', () => {
     const target = maximizeTargetRect(camera, box.width, box.height, 24, measureMaximizeInsets(box))!
     const maximized = maximizeNodeToRect([node], node.id, target)
     const restored = restoreMaximizedNode(maximized, node.id)[0]
-    const readChrome = vi.spyOn(document, 'querySelectorAll')
-
-    // Normal and restored nodes centre in the whole pane, regardless of visible chrome.
+    // Fork contract (.claude/rules/canvas.md, "insets is measurePinnedInsets(box) for EVERY node";
+    // a0c86e92 / 1d7a7da3): normal and restored nodes centre in the band the PINNED side panels
+    // leave free, never in the whole pane (upstream's shape, which parks them half under a pinned
+    // sessions sidebar). Pinned insets are horizontal only: left=322 → x centre 322 + 878/2 = 761;
+    // the controls cluster and dock are NOT reserved here, so y stays at the pane centre, 400.
     for (const candidate of [node, restored]) {
       const rect = nodeFitRect(candidate, [candidate])!
       expect(rect).toEqual(originalRect)
       const focus = viewportForNodeFocus(candidate, rect, box, zoom)!
-      expect((rect.x + rect.width / 2) * focus.zoom + focus.x).toBeCloseTo(600)
+      expect((rect.x + rect.width / 2) * focus.zoom + focus.x).toBeCloseTo(761)
       expect((rect.y + rect.height / 2) * focus.zoom + focus.y).toBeCloseTo(400)
+      // Clear of the pinned sidebar (right edge 422 on screen, box.left = 100) whenever the node
+      // fits the free band at all; at keepZoom=2 it is 1320px wide and cannot clear an 878 band.
+      if (rect.width * focus.zoom <= box.width - 322) {
+        expect(rect.x * focus.zoom + focus.x + box.left).toBeGreaterThanOrEqual(422 - 1e-8)
+      }
       if (zoom !== undefined) expect(focus.zoom).toBe(zoom)
     }
-    expect(readChrome).not.toHaveBeenCalled()
+    // Only PINNED panels count: unpin the sidebar and the ordinary node centres in the whole pane
+    // again (upstream's ultrawide concern), while the unpinned chrome is still in the DOM.
+    document.querySelector('.sessions-sidebar--pinned')!.className = 'sessions-sidebar'
+    {
+      const rect = nodeFitRect(node, [node])!
+      const focus = viewportForNodeFocus(node, rect, box, zoom)!
+      expect((rect.x + rect.width / 2) * focus.zoom + focus.x).toBeCloseTo(600)
+      expect((rect.y + rect.height / 2) * focus.zoom + focus.y).toBeCloseTo(400)
+    }
+    document.querySelector('.sessions-sidebar')!.className = 'sessions-sidebar--pinned'
 
     const rect = nodeFitRect(maximized[0], maximized)!
     const focus = viewportForNodeFocus(maximized[0], rect, box, zoom)!

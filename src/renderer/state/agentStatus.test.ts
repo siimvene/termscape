@@ -48,8 +48,16 @@ describe('sessionEnded — an announced exit is its own fact, not an idle state'
     const src = readFileSync(resolve(__dirname, '../../..', 'src/renderer/canvas/Canvas.tsx'), 'utf8')
     const end = src.slice(src.indexOf("if (e.sessionPhase === 'end') {"))
     expect(end.slice(0, 600)).toMatch(/cs\.setSessionEnded\(e\.nodeId, true\)/)
-    const start = src.slice(src.indexOf("if (e.sessionPhase === 'start') {"), src.indexOf("if (e.sessionPhase === 'end') {"))
-    expect(start).toMatch(/cs\.setSessionEnded\(e\.nodeId, false\)/)
+    // The fork (73c6ea6d) folds every SessionStart reset into ONE `applySessionStart`, shared by a
+    // `session` start and codex's start-phase `state`; upstream's inline withdraw lives there since
+    // the v0.3.16 merge. Pin both halves: the helper withdraws the flag, and the session-start path
+    // actually runs the helper.
+    const helperAt = src.indexOf('const applySessionStart = (): void => {')
+    expect(helperAt).toBeGreaterThan(-1)
+    const helper = src.slice(helperAt, src.indexOf('switch (e.kind) {', helperAt))
+    expect(helper).toMatch(/cs\.setSessionEnded\(e\.nodeId, false\)/)
+    const sessionCase = src.slice(src.indexOf("case 'session':", helperAt), src.indexOf("if (e.sessionPhase === 'end') {"))
+    expect(sessionCase).toMatch(/if \(e\.sessionPhase === 'start'\) applySessionStart\(\)/)
   })
 })
 

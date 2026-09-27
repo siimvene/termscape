@@ -54,11 +54,22 @@ it('excludes keep-alive ghosts from both rectangles and bounds without hiding th
   const expectedBounds = bounds()
   const pool = retireIntoPool([], 'other', [browser], 1)
   setNodes(mergeWithKeepAlive([terminal], [], pool, 'active'))
-  // The unmodified upstream minimap reproduces the bug with our real keep-alive output.
-  expect(rects('raw')).toHaveLength(2)
+  // With our real keep-alive output the unmodified minimap still has the BOUNDS half of the bug.
+  // The rectangle half is already gone at the source in this fork: `ghostFlowNode` carries no
+  // width/height (dcfe1fa5), so the raw minimap draws no phantom, but the ghost's origin still
+  // enters `getInternalNodesBounds` — the residual that fix documents and VisibleMiniMap closes.
+  expect(rects('raw')).toHaveLength(1)
   expect(bounds('raw')).not.toBe(expectedBounds)
   expect(rects()).toHaveLength(1)
   expect(bounds()).toBe(expectedBounds)
+  // And the rectangle half stays covered here too: a ghost that DOES carry a size (upstream's
+  // shape before dcfe1fa5) is drawn by the raw minimap and excluded by ours.
+  const sizedGhost = { ...mergeWithKeepAlive([], [], pool, 'active')[0], width: 200, height: 100 } as CanvasNode
+  setNodes([terminal, sizedGhost])
+  expect(rects('raw')).toHaveLength(2)
+  expect(rects()).toHaveLength(1)
+  expect(bounds()).toBe(expectedBounds)
+  setNodes(mergeWithKeepAlive([terminal], [], pool, 'active'))
   const guest = store.getState().nodeLookup.get('browser')!
   expect(guest.hidden).not.toBe(true)
   expect(guest.style?.display).toBe('none')

@@ -27,6 +27,7 @@ import { IPC } from '../shared/ipc'
 import { fakePlatform } from '../core/platform-fake'
 
 let userDataDir = ''
+let settings: import('../core/settings-store').SettingsStore
 const mgr = {
   remoteCodexAccountAdd: vi.fn(async (_p: string, id: string) => ({ home: `/home/u/.nodeterm/cx/${id}` })),
   remoteCodexAuthPresent: vi.fn(async (): Promise<boolean | null> => true),
@@ -34,7 +35,9 @@ const mgr = {
     email: 'ops@example.com'
   })),
   remoteCodexAccountRemove: vi.fn(async () => true),
-  remoteCodexSwitchThread: vi.fn(async () => {})
+  remoteCodexSwitchThread: vi.fn(async () => {}),
+  // The row's `host` comes from the SSH manager (shell-owned provenance), never the renderer ctx.
+  hostKeyFor: vi.fn((_p: string): string | undefined => 'ops@build-box')
 }
 const sender = { id: 1, isDestroyed: () => false, once: () => {}, removeListener: () => {} }
 const call = (channel: string, ...args: any[]) => h.handlers[channel]({ sender }, ...args)
@@ -48,8 +51,12 @@ beforeEach(async () => {
   vi.resetModules()
   const { initPlatform } = await import('../core/platform')
   initPlatform(fakePlatform({ userDataDir }))
+  const { SettingsStore } = await import('../core/settings-store')
+  settings = new SettingsStore()
+  settings.init()
   const { initCodexAccounts } = await import('./codex-accounts')
-  initCodexAccounts(() => mgr as any)
+  // Fork shape: the shell owns account ROW membership, so the store is a required first argument.
+  initCodexAccounts(settings, () => mgr as any)
 })
 afterEach(async () => {
   vi.useRealTimers()
@@ -69,11 +76,16 @@ describe('Codex account verbs over SSH', () => {
     expect(mgr.remoteCodexAccountAdd).toHaveBeenCalledWith('p1', res.id)
     expect(res.home).toBe(`/home/u/.nodeterm/cx/${res.id}`)
     expect(localHomes()).toEqual([])
+    // The shell registered the row, pinned to the host the SSH manager names.
+    expect(mgr.hostKeyFor).toHaveBeenCalledWith('p1')
+    const row = (await settings.readAccountsFromDisk()).codexAccounts.find((a) => a.id === res.id)
+    expect(row).toMatchObject({ id: res.id, pending: true, host: 'ops@build-box' })
   })
 
   it('add refuses when the host is not connected', async () => {
     mgr.remoteCodexAccountAdd.mockResolvedValueOnce(null as never)
     await expect(call(IPC.codexAccountsAdd, CTX)).rejects.toThrow(/not connected/)
+    expect((await settings.readAccountsFromDisk()).codexAccounts).toEqual([])
   })
 
   it('waitLogin polls the host and reads the email there', async () => {
@@ -99,10 +111,14 @@ describe('Codex account verbs over SSH', () => {
   })
 
   it('remove deletes the home ON the host, and throws when it could not', async () => {
-    await call(IPC.codexAccountsRemove, 'acct1', CTX)
-    expect(mgr.remoteCodexAccountRemove).toHaveBeenCalledWith('p1', 'acct1')
+    const { id } = (await call(IPC.codexAccountsAdd, CTX)) as { id: string }
     mgr.remoteCodexAccountRemove.mockResolvedValueOnce(false)
-    await expect(call(IPC.codexAccountsRemove, 'acct1', CTX)).rejects.toThrow(/SSH host/)
+    await expect(call(IPC.codexAccountsRemove, id, CTX)).rejects.toThrow(/SSH host/)
+    // Home-then-row: a failed teardown keeps the row visible and retryable.
+    expect((await settings.readAccountsFromDisk()).codexAccounts.map((a) => a.id)).toEqual([id])
+    await call(IPC.codexAccountsRemove, id, CTX)
+    expect(mgr.remoteCodexAccountRemove).toHaveBeenLastCalledWith('p1', id)
+    expect((await settings.readAccountsFromDisk()).codexAccounts).toEqual([])
   })
 })
 
