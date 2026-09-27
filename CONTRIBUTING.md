@@ -895,8 +895,8 @@ in CLAUDE.md § Idle energy.
 
 ## Pull requests
 
-- Branch from `main`. CI runs `quality` and `quality-windows`; keep both green (this private plan has no
-  branch protection, so nothing enforces it for you). `security.yml` also runs CodeQL and
+- Branch from `main`. CI runs `quality` and `quality-windows`; keep both green (`main` has no branch
+  protection, so nothing enforces it for you). `security.yml` also runs CodeQL and
   Dependency review, byte-identical to upstream's. They were removed while the repo was private
   (both need GitHub Advanced Security there, and a private repo without it answers with a failing
   upload, not a skipped scan) and came back once it went public, where both are free.
