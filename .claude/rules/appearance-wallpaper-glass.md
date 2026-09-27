@@ -30,6 +30,11 @@ light/dark base follows the terminal theme exactly like `auto`. Choosing it with
 one (`defaultWallpaper`: the first macOS still, Sonoma Horizon when present, else a gradient) so
 glass never sits over plain black; a wallpaper the user chose is never replaced. The pre-release
 `glassTerminals: true` maps to it once in `settings-store` (only over `auto`).
+**Liquid Glass over `gradient:dusk` is the out-of-box pair** (`DEFAULT_SETTINGS`, 2026-09-27): a
+fresh install starts glass over a wallpaper, never glass over black. `mergeSettings` clears the
+wallpaper back to `none` for a saved file that never stored one and is not on glass (it predates
+wallpapers), so an upgrade keeps the canvas it had; any saved value, including a glass user's
+explicit "None", is kept.
 
 - **The wallpaper is painted on `.canvas-root`** (`Canvas.tsx`), which spans the whole window —
   tab bar row included, so Liquid Glass's tab bar is glass over the picture — and is never

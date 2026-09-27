@@ -1483,13 +1483,14 @@ export interface Settings {
   /** Characters that end a word during xterm double-click selection. */
   terminalWordSeparator: string
   cursorBlink: boolean
-  /** Appearance of the APP chrome (tab bar, panels, node headers, menus). `auto` (the default)
+  /** Appearance of the APP chrome (tab bar, panels, node headers, menus). `auto`
    *  takes it from the terminal colour theme, so picking a light terminal theme doesn't leave a
    *  black window framing it; `dark`/`light` pin it. `liquid-glass` follows the terminal theme like
    *  `auto` AND turns the Liquid Glass appearance on: every canvas node and the app chrome go
    *  translucent + blurred over the wallpaper, and terminal windows drop their per-node accent
    *  colour; tint opacities keep the primary text at WCAG 4.5:1 over any backdrop
-   *  (renderer/lib/glassContrast.ts). See renderer/lib/appTheme.ts. */
+   *  (renderer/lib/glassContrast.ts). `liquid-glass` is the out-of-box default (a saved file keeps
+   *  its own value). See renderer/lib/appTheme.ts. */
   appTheme: 'auto' | 'dark' | 'light' | 'liquid-glass'
   /** Scale factor for the whole application UI (1 = 100%; issue #299, 4K readability). Applied as
    *  PAGE ZOOM (`webFrame.setZoomFactor`) on desktop, so menus, node headers, dialogs — and
@@ -1510,8 +1511,8 @@ export interface Settings {
    *  (settings.json is hand-editable): an unknown id falls back to the default theme, whose
    *  colours reproduce the pre-feature hardcoded `#1e1e1e`/`#e6e6e6` exactly. */
   terminalTheme: string
-  /** Desktop wallpaper behind the canvas (Liquid Glass appearance). Opt-in; `none` draws the
-   *  canvas exactly as before. Hand-editable: read through `normalizeWallpaper` (shared/wallpaper). */
+  /** Desktop wallpaper behind the canvas (Liquid Glass appearance). Defaults to the first gradient,
+   *  paired with the glass default; `none` draws the canvas exactly as before. Hand-editable: read through `normalizeWallpaper` (shared/wallpaper). */
   desktopWallpaper: import('./wallpaper').DesktopWallpaper
   /** The most recent imported wallpaper image's cache path, kept after switching to a preset so the
    *  "Your image" tile stays and the cache prune keeps its file (`recentWallpaperImage`). */
@@ -1977,11 +1978,13 @@ export const DEFAULT_SETTINGS: Settings = {
   // defaults. Picking a theme is opt-in — an update must not repaint anybody's terminals.
   // Follows the terminal theme, whose own default is dark — so an install that never touches
   // either setting keeps the dark chrome it has always had.
-  appTheme: 'auto',
+  appTheme: 'liquid-glass',
   uiScale: 1,
   windowTitleActiveSession: false,
   terminalTheme: 'nodeterm-dark',
-  desktopWallpaper: { kind: 'none' },
+  // Paired with the Liquid Glass default: glass over plain black reads as a dark theme with
+  // smudges. Same pick the Appearance picker makes where there are no macOS stills.
+  desktopWallpaper: { kind: 'preset', id: 'gradient:dusk' },
   recentWallpaperImage: null,
   fontWeight: 400,
   fontWeightBold: 700,
