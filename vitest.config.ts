@@ -20,7 +20,10 @@ export default defineConfig({
       'test/acceptance/**/*.test.ts',
       // Opt-in end-to-end tests against a real sshd in Docker. They self-skip unless
       // NODETERM_SSH_DOCKER is set, so a machine without Docker still runs a green suite.
-      'test/ssh-docker/**/*.test.ts'
+      'test/ssh-docker/**/*.test.ts',
+      // Repo tooling that CI depends on (the release-notes generator). Not shipped in any
+      // bundle and not in a tsconfig project, but its pure parts decide what a release says.
+      'scripts/**/*.test.ts'
     ],
     environment: 'node',
     // SELF-HOST UNGATE (src/core/license.ts) must be OFF for the suite whatever the developer's

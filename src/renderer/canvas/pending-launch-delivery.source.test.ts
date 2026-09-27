@@ -49,11 +49,6 @@ describe('armed-launch delivery (source pins)', () => {
     expect(src).toMatch(/subscribeSessionReady\(\(nodeId\) => \{[\s\S]{0,400}?n\.data\.pendingLaunch/)
   })
 
-  it('retries a refused delivery on the shared backoff and gives up only when it is exhausted', () => {
-    const body = launchEffect()
-    expect(body).toContain('launchRetryDelay(attempt)')
-    expect(body).toMatch(/delay !== null[\s\S]{0,200}?setTimeout/)
-  })
 
   it('a give-up is REPORTED, not only logged — the console.warn is no longer the whole story', () => {
     const body = launchEffect()
@@ -78,7 +73,7 @@ describe('armed-launch delivery (source pins)', () => {
     expect(body).toMatch(/setTimeout\(\(\) => \{[\s\S]{0,600}?!isSessionReady\(f\.id\)[\s\S]{0,300}?markStalled/)
   })
 
-  it('keeps the exactly-once and dep-satisfaction invariants the feature already had', () => {
+  it('keeps the exactly-once, consent and dep-satisfaction invariants the feature already had', () => {
     const body = launchEffect()
     // Exactly-once: the node is CLAIMED before the send — in the registry SHARED with ▶ Run now
     // (lib/pendingLaunch), not a ref of this component's own, or the two paths cannot see each
@@ -91,7 +86,14 @@ describe('armed-launch delivery (source pins)', () => {
     // Every settle — landed, refused OR a rejected RPC — goes through the key-checked settle, and
     // the rejection is routed to the same refusal path rather than left unhandled.
     expect(body).toMatch(/settleLaunch\(\s*f\.id,\s*sentKey,\s*ok,/)
-    expect(body).toContain('.then(settle, () => settle(false))')
+    expect(body).toContain(".then(settle, () => settle('cancelled'))")
+    // Delivery itself is upstream's verified writer (shell-ready probe, write-ahead claim, echo
+    // repair); a `deferred` outcome (parked canvas, nothing typed) releases the claim only.
+    expect(body).toContain('launchCommand(f.id, f.command, false, activeSession.api)')
+    expect(body).toMatch(/outcome === 'deferred'[\s\S]{0,400}?settleLaunch\(f\.id, sentKey, false,/)
+    // No automatic retry after a failed delivery (upstream ef0f872b): it becomes manual-only.
+    expect(body).not.toContain('launchRetryDelay')
+    expect(body).toMatch(/manualOnly: true[\s\S]{0,200}?forgetArmed\(f\.id\)/)
     expect(body).not.toContain('launchInFlight')
     // Satisfaction is still `launchesToFire`'s call — the ready gate is an ADDITIONAL condition,
     // never a replacement for the dependency matrix.
@@ -102,21 +104,5 @@ describe('armed-launch delivery (source pins)', () => {
   it('stops reporting on a node that is no longer armed — no stale warning on a running session', () => {
     const body = launchEffect()
     expect(body).toMatch(/delivery\.clear\(id\)[\s\S]{0,120}?clearStallTimer\(id\)/)
-  })
-})
-
-describe('the open verbs report whether anything started (source pins)', () => {
-  it('open-terminal and open-agent both answer with `queued` + `queuedIds`', () => {
-    // Two separate reply sites, so both are pinned: an orchestrator that can only tell "opened"
-    // from "opened but not started" for ONE of the verbs has learned nothing.
-    expect(src.match(/queued: queuedIds\.length > 0/g)?.length).toBe(2)
-    expect(src.match(/if \(node\.data\.pendingLaunch\) queuedIds\.push\(node\.id\)/g)?.length).toBe(2)
-  })
-
-  it('the cross-project cold open reports queued:true, and the in-view branch reports false', () => {
-    // The whole `--project` branch is armed by `armForColdOpen`, and the active-target branch
-    // beside it is not — the two literals are what keep that difference in the reply.
-    expect(src).toContain('queued: true,')
-    expect(src).toContain('queued: false, queuedIds: []')
   })
 })

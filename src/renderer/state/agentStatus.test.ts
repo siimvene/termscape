@@ -19,6 +19,40 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
+describe('sessionEnded — an announced exit is its own fact, not an idle state', () => {
+  it('is set explicitly and withdrawn by the next state transition', () => {
+    const id = nid()
+    const s = useAgentStatus.getState()
+    s.setState(id, 'done', 'claude')
+    s.setState(id, undefined, 'claude')
+    useAgentStatus.getState().setSessionEnded(id, true)
+    expect(useAgentStatus.getState().byId[id]?.sessionEnded).toBe(true)
+    const same = useAgentStatus.getState().byId
+    useAgentStatus.getState().setSessionEnded(id, true)
+    expect(useAgentStatus.getState().byId).toBe(same)
+    useAgentStatus.getState().setState(id, 'working', 'claude', true)
+    expect(useAgentStatus.getState().byId[id]?.sessionEnded).toBeUndefined()
+  })
+
+  it('can be recorded for a node whose status entry was already cleared (a parked pane)', () => {
+    const id = nid()
+    useAgentStatus.getState().setSessionEnded(id, true)
+    expect(useAgentStatus.getState().byId[id]?.sessionEnded).toBe(true)
+    useAgentStatus.getState().setSessionEnded(id, false)
+    expect(useAgentStatus.getState().byId[id]?.sessionEnded).toBeUndefined()
+  })
+
+  it('Canvas records it on SessionEnd and withdraws it on SessionStart', () => {
+    // A store flag with no writer is the bug in a new place: the levers would type-check and stay
+    // protected forever. Pinned at source level, like the setState argument list above.
+    const src = readFileSync(resolve(__dirname, '../../..', 'src/renderer/canvas/Canvas.tsx'), 'utf8')
+    const end = src.slice(src.indexOf("if (e.sessionPhase === 'end') {"))
+    expect(end.slice(0, 600)).toMatch(/cs\.setSessionEnded\(e\.nodeId, true\)/)
+    const start = src.slice(src.indexOf("if (e.sessionPhase === 'start') {"), src.indexOf("if (e.sessionPhase === 'end') {"))
+    expect(start).toMatch(/cs\.setSessionEnded\(e\.nodeId, false\)/)
+  })
+})
+
 describe('done-holdoff race guard', () => {
   // Claude Code runs hooks in parallel: the last PostToolUse's curl can land AFTER the
   // Stop's curl. Without a holdoff that late "working" resurrects a finished turn.
@@ -271,7 +305,7 @@ describe('the verified evidence for a transition', () => {
     // argument list: nothing else in the suite would notice if the last argument disappeared.
     const src = readFileSync(resolve(__dirname, '../../..', 'src/renderer/canvas/Canvas.tsx'), 'utf8')
     expect(src).toMatch(
-      /cs\.setState\(\s*e\.nodeId,\s*e\.state,\s*e\.agentId,\s*e\.newTurn,\s*e\.pendingId,\s*e\.verified,\s*e\.errored\s*\)/
+      /cs\.setState\(\s*e\.nodeId,\s*e\.state,\s*e\.agentId,\s*e\.newTurn,\s*e\.pendingId,\s*e\.verified,\s*e\.errored,\s*e\.held\s*\)/
     )
   })
 
@@ -314,5 +348,88 @@ describe('the verified evidence for a transition', () => {
     } finally {
       delete (globalThis as unknown as { localStorage?: unknown }).localStorage
     }
+  })
+})
+
+describe('held permission request (structured answers)', () => {
+  const plan = { pendingId: 'n-1-1', toolName: 'ExitPlanMode' }
+  const question = { pendingId: 'n-2-2', toolName: 'AskUserQuestion' }
+
+  it('is kept on blocked AND on waiting (a held picker is broadcast as waiting), cleared on leaving', () => {
+    const s = useAgentStatus.getState()
+    const id = nid()
+    s.setState(id, 'blocked', 'claude', false, 'n-1-1', true, false, plan)
+    expect(useAgentStatus.getState().byId[id].held).toEqual(plan)
+    const q = nid()
+    s.setState(q, 'waiting', 'claude', false, undefined, true, false, question)
+    expect(useAgentStatus.getState().byId[q].held).toEqual(question)
+    expect(useAgentStatus.getState().byId[q].pendingId).toBeUndefined() // approve/deny stays off
+    s.setState(id, 'working', 'claude', false)
+    expect(useAgentStatus.getState().byId[id].held).toBeUndefined()
+  })
+
+  it('a NEW held request on a same-state re-assert retargets (breaks the in-place fast path)', () => {
+    const s = useAgentStatus.getState()
+    const id = nid()
+    s.setState(id, 'waiting', 'claude', false, undefined, true, false, question)
+    const again = { pendingId: 'n-3-3', toolName: 'AskUserQuestion' }
+    s.setState(id, 'waiting', 'claude', false, undefined, true, false, again)
+    expect(useAgentStatus.getState().byId[id].held).toEqual(again)
+    // A re-assert with no held info keeps the current one.
+    s.setState(id, 'waiting', 'claude', false)
+    expect(useAgentStatus.getState().byId[id].held).toEqual(again)
+  })
+})
+
+describe('onHookEvent — a per-node pulse for EVERY hook event, same-state ones included', () => {
+  it('a same-state event notifies no zustand subscriber (the in-place fast path) — which is why the pulse exists', () => {
+    const id = nid()
+    useAgentStatus.getState().setState(id, 'working', 'claude', true)
+    const sub = vi.fn()
+    const unsub = useAgentStatus.subscribe(sub)
+    useAgentStatus.getState().setState(id, 'working', 'claude')
+    expect(sub).not.toHaveBeenCalled()
+    unsub()
+  })
+
+  it('fires for transitions and same-state events of that node only, and unsubscribes', () => {
+    const id = nid()
+    const other = nid()
+    const cb = vi.fn()
+    const unsub = useAgentStatus.getState().onHookEvent(id, cb)
+    useAgentStatus.getState().setState(id, 'working', 'claude', true)
+    useAgentStatus.getState().setState(id, 'working', 'claude')
+    useAgentStatus.getState().setState(other, 'working', 'claude', true)
+    expect(cb).toHaveBeenCalledTimes(2)
+    unsub()
+    useAgentStatus.getState().setState(id, 'done', 'claude')
+    expect(cb).toHaveBeenCalledTimes(2)
+  })
+
+  it('a throwing listener neither aborts setState nor starves the next listener', () => {
+    const id = nid()
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const bad = useAgentStatus.getState().onHookEvent(id, () => {
+      throw new Error('boom')
+    })
+    const good = vi.fn()
+    const unsub = useAgentStatus.getState().onHookEvent(id, good)
+    expect(() => useAgentStatus.getState().setState(id, 'working', 'claude', true)).not.toThrow()
+    expect(good).toHaveBeenCalledOnce()
+    expect(useAgentStatus.getState().byId[id]?.state).toBe('working')
+    bad()
+    unsub()
+    warn.mockRestore()
+  })
+
+  it('sees the store already updated when it fires', () => {
+    const id = nid()
+    let seen: string | undefined
+    const unsub = useAgentStatus.getState().onHookEvent(id, () => {
+      seen = useAgentStatus.getState().byId[id]?.state
+    })
+    useAgentStatus.getState().setState(id, 'working', 'claude', true)
+    expect(seen).toBe('working')
+    unsub()
   })
 })

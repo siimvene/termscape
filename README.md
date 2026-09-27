@@ -40,7 +40,7 @@ hidden tabs.
 
 <div align="center">
   <a href="docs/assets/hero-tour.mp4">
-    <img src="docs/assets/hero-tour.webp" alt="nodeterm in 30 seconds — canvas, agents, kanban board, three surfaces" width="900" />
+    <img src="docs/assets/hero-tour.webp" alt="nodeterm in 30 seconds — the canvas, sessions that survive a restart, agents and the notch, the kanban board, dictation, the iPhone" width="900" />
   </a>
   <br/>
   <sub>▶ <a href="docs/assets/hero-tour.mp4">Watch the 30-second tour with sound</a></sub>
@@ -159,7 +159,7 @@ persistent tmux session, next to **sticky notes** (link one to feed an agent con
 map. Quit the app, even **restart the machine** — every session comes back.
 
 </td>
-<td><img src="docs/assets/canvas-tour.webp" alt="The canvas — terminals, agents, notes, editors and diffs as nodes; sessions survive a full restart" /></td>
+<td><img src="docs/assets/canvas-tour.webp" alt="The canvas — right-click to add Claude Code, a terminal, a sticky note, an editor and a diff; link the note to Claude; restart, and every session comes back" /></td>
 </tr>
 <tr>
 <td width="42%" valign="middle">
@@ -172,7 +172,7 @@ notifications. Click the ping, answer the permission prompt right in the node, a
 told the moment the turn is **done**. On a MacBook, agents live in the **notch** too.
 
 </td>
-<td><img src="docs/assets/agents-tour.webp" alt="Agent status — NEEDS YOU flip, notification, answering a permission prompt, subagent fan-out" /></td>
+<td><img src="docs/assets/agents-tour.webp" alt="Agent status — subagent fan-out with a context meter; a permission prompt lights the notch and posts a macOS notification; Go jumps to the node; ✓ Approve in its header" /></td>
 </tr>
 <tr>
 <td width="42%" valign="middle">
@@ -186,7 +186,7 @@ assign teammates. Toggle with `⌘⇧B`.
 <br/><sub>▶ <a href="docs/assets/kanban-launch.mp4">Watch the board video with sound</a></sub>
 
 </td>
-<td><img src="docs/assets/kanban-launch.webp" alt="The kanban board — live session cards, drag between columns, the card modal with a live Claude Code session" /></td>
+<td><img src="docs/assets/kanban-launch.webp" alt="The kanban board — ⌘⇧B turns the canvas into cards, drag one to Done while it keeps running, the card modal with the live Claude Code session and comments" /></td>
 </tr>
 <tr>
 <td width="42%" valign="middle">
@@ -198,18 +198,19 @@ live session continues in your pocket**, E2E encrypted **over the relay, not jus
 LAN**. The same canvas also runs self-hosted in any browser (Server Edition).
 
 </td>
-<td><img src="docs/assets/remote-tour.webp" alt="Pair your phone — scan the QR, the same live session continues on the iPhone" /></td>
+<td><img src="docs/assets/remote-tour.webp" alt="Pair your phone — scan the QR, every session is one tap away, the real Claude Code on the iPhone, answer its permission prompt from there" /></td>
 </tr>
 <tr>
 <td width="42%" valign="middle">
 
 ### Talk to your terminal
 
-Hold `⌘⌥` and say it. On-device **Whisper** transcribes locally — review the text,
-then **Send** (nothing auto-submits). Your voice never leaves the machine.
+Hold `⌘⌥`, say it, let go. On-device **Whisper** transcribes it locally and types the
+text into the terminal's prompt — **you** press Enter (nothing auto-submits). Your voice
+never leaves the machine.
 
 </td>
-<td><img src="docs/assets/dictation-tour.webp" alt="Dictation — hold ⌘⌥, speak, review, send into the terminal" /></td>
+<td><img src="docs/assets/dictation-tour.webp" alt="Dictation — hold ⌘⌥ and speak, let go, local Whisper types the words into Claude Code's prompt, you press Enter" /></td>
 </tr>
 </table>
 
@@ -382,6 +383,16 @@ These are the defaults — every one of them is remappable in **Settings → Key
 | `⌘⇧E` | File explorer |
 | `⌘,` | Settings · `⌘/` Shortcuts |
 | `Right-click` | Actions menu (empty space or node) |
+
+**Pasting screenshots on macOS:** in a terminal, **Cmd+V** saves the image and pastes its
+file path. **Ctrl+V** sends a control key to the foreground program. A local agent with
+clipboard-image support, such as Claude Code, may attach the image directly at its input
+prompt; shells and editors give that key other meanings. nodeterm does not detect this
+capability or retry with the other route. Use Cmd+V for SSH sessions: the image is uploaded
+and its remote path is pasted. In Server Edition, image paste uploads to the terminal host
+and depends on browser clipboard access; Ctrl+V does not transfer the browser's clipboard
+to the host. This distinction also appears in **Keyboard shortcuts → Pasting screenshots
+on macOS** and applies to both canvas and kanban terminals.
 
 ## 🏗 Architecture
 

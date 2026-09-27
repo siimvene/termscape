@@ -7,6 +7,7 @@ import { SshProjectManager, lastSshErrorLine } from './ssh-project'
 import { AskpassServer } from './ssh-askpass'
 import { AppSshAgent } from './ssh-agent'
 import { controlPathFor } from '../../core/remote-ssh/control-master'
+import { remoteCodexSocket } from '../../core/codex-accounts-core'
 import type { SshConnection } from '@shared/ssh'
 
 const conn: SshConnection = { host: 'h', user: 'u' }
@@ -156,6 +157,39 @@ describe('SshProjectManager', () => {
     }
   })
 
+  it('writePendingAnswer puts a structured decision on STDIN, never in the remote command', async () => {
+    const { mgr, run } = makeMgr()
+    await mgr.connect('p1', conn)
+    const json =
+      '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"it\'s $(rm -rf ~)"}}}'
+    expect(await mgr.writePendingAnswer('p1', 'node-1-2', json)).toBe(true)
+    const call = run.mock.calls.find((c) => (c[0] as string[]).join(' ').includes('.answer'))!
+    expect(call[1]).toBe(json)
+    expect((call[0] as string[]).join(' ')).not.toContain('hookSpecificOutput')
+    expect((call[0] as string[]).join(' ')).not.toContain('rm -rf')
+  })
+
+  it('readPendingRequest reads the held request over the master, bounded, and null on any failure', async () => {
+    const { mgr, run } = makeMgr()
+    expect(await mgr.readPendingRequest('p1', 'node-1-2')).toBeNull() // not connected
+    await mgr.connect('p1', conn)
+    const req = '{"hook_event_name":"PermissionRequest","tool_name":"ExitPlanMode","tool_input":{}}'
+    run.mockImplementation(async (args: string[]) =>
+      args.join(' ').includes('pending/node-1-2.json') ? { code: 0, stdout: req } : { code: 0, stdout: '' }
+    )
+    expect(await mgr.readPendingRequest('p1', 'node-1-2')).toBe(req)
+    const cmd = (run.mock.calls.at(-1)![0] as string[]).join(' ')
+    expect(cmd).toContain('head -c')
+    expect(cmd).toContain('exit 3') // a missing file is an answer, reported as null
+    run.mockImplementation(async () => ({ code: 3, stdout: '' }))
+    expect(await mgr.readPendingRequest('p1', 'node-1-2')).toBeNull()
+    run.mockImplementation(async () => { throw new Error('master down') })
+    expect(await mgr.readPendingRequest('p1', 'node-1-2')).toBeNull()
+    const before = run.mock.calls.length
+    expect(await mgr.readPendingRequest('p1', '../x')).toBeNull()
+    expect(run.mock.calls.length).toBe(before)
+  })
+
   it('writePendingAnswer refuses an invalid pendingId and a disconnected project (no run)', async () => {
     const { mgr, run } = makeMgr()
     // Not connected → false, no ssh command issued.
@@ -163,8 +197,9 @@ describe('SshProjectManager', () => {
     await mgr.connect('p1', conn)
     const before = run.mock.calls.length
     expect(await mgr.writePendingAnswer('p1', '../evil', 'allow')).toBe(false)
-    // @ts-expect-error, runtime guard against a bad decision value
+    // Content the hook script would not print is refused before any ssh (same bound as the script).
     expect(await mgr.writePendingAnswer('p1', 'ok-id', 'always')).toBe(false)
+    expect(await mgr.writePendingAnswer('p1', 'ok-id', '{"hookSpecificOutput":{"hookEventName":"PreToolUse"}}')).toBe(false)
     expect(run.mock.calls.length).toBe(before) // neither refusal touched ssh
   })
 
@@ -894,6 +929,34 @@ describe('SshProjectManager', () => {
       expect((await fs.readdir(dir)).filter((file) => file.endsWith('.part'))).toEqual([])
     })
 
+    it('keeps an open media file seekable after more than twenty later downloads', async () => {
+      const dir = await destDir()
+      const mgr = new SshProjectManager({
+        userDataDir: '/ud',
+        spawnMaster: vi.fn(() => ({ kill: vi.fn(), on: vi.fn() })),
+        run: vi.fn(async (args: string[]) => ({
+          code: args.at(-1)?.includes('test -d') ? 1 : 0,
+          stdout: args.at(-1)?.includes('wc -c') ? '4' : '/home/u'
+        })),
+        runScp: vi.fn(async (args: string[]) => {
+          await fs.writeFile(args.at(-1)!, 'data')
+          return { code: 0 }
+        }),
+        getHook: () => ({ port: 1, token: 't', version: '1' }),
+        onStatus: vi.fn()
+      })
+      await mgr.connect('p1', conn, '/srv/repo')
+      const first = await mgr.cacheMediaFile('p1', '/srv/first.mp3', dir)
+      expect(first.ok).toBe(true)
+      // Await the real pruner to make deletion observable, without timing sleeps.
+      for (let i = 0; i < 22; i++) {
+        const next = await mgr.cacheMediaFile('p1', `/srv/clip-${i}.mp4`, dir)
+        expect(next.ok).toBe(true)
+        if (next.ok) await (mgr as unknown as { pruneMediaCache(d: string, n: string): Promise<void> }).pruneMediaCache(dir, path.basename(next.localPath))
+      }
+      expect(first.ok && await fs.readFile(first.localPath, 'utf8')).toBe('data')
+    })
+
     it('does not replace a cache entry when checking it fails for a reason other than absence', async () => {
       const dir = await destDir()
       const runScp = vi.fn(async () => ({ code: 0 }))
@@ -1181,7 +1244,7 @@ describe('SshProjectManager', () => {
       expect(spawnMaster).toHaveBeenCalledTimes(1)
       expect(seq).toEqual(['agent', 'spawn']) // agent up BEFORE the rebuilt master, on this site too
       // The retried setup over the fresh master verified → the remote endpoint file is advertised.
-      expect(info.hookEndpointPath).toBe('/home/u/.nodeterm/hook-endpoint-p1.env')
+      expect(info.hookEndpointPath).toMatch(/^\/home\/u\/\.nodeterm\/hook-endpoint-p1-[a-f0-9]{16}\.env$/)
       expect(phases(statuses).slice(0, 2)).toEqual(['connecting', 'connected'])
     })
 
@@ -1230,7 +1293,7 @@ describe('SshProjectManager', () => {
       expect(spawnMaster).toHaveBeenCalledTimes(1)
       expect(checksAfterRespawn).toBeGreaterThanOrEqual(BIND_AT)
       // The retried setup over the (slow) fresh master verified, so the endpoint is not dropped.
-      expect(info.hookEndpointPath).toBe('/home/u/.nodeterm/hook-endpoint-p1.env')
+      expect(info.hookEndpointPath).toMatch(/^\/home\/u\/\.nodeterm\/hook-endpoint-p1-[a-f0-9]{16}\.env$/)
       expect(statuses).toContain('connected')
     })
 
@@ -1438,6 +1501,56 @@ describe('SshProjectManager', () => {
       expect(onTunnelVerified).toHaveBeenCalledWith('p1', controlPathFor('p1'), conn)
     })
 
+    it('invalidates a wrong-owner tunnel visibly and clears the warning after repair', async () => {
+      let wrongOwner = false
+      const mgr = makeVerifiedMgr(vi.fn(), () => wrongOwner ? '421' : '204')
+      const onStatus = (mgr as unknown as { r: { onStatus: ReturnType<typeof vi.fn> } }).r.onStatus
+      await mgr.connect('p1', conn, '/remote/cwd')
+      onStatus.mockClear()
+      wrongOwner = true
+      await mgr.connect('p1', conn, '/remote/cwd')
+      await mgr.connect('p1', conn, '/remote/cwd')
+      expect(onStatus.mock.calls.filter(([e]) => e.hookTunnelVerified === false)).toHaveLength(1)
+      wrongOwner = false
+      await mgr.connect('p1', conn, '/remote/cwd')
+      expect(onStatus).toHaveBeenCalledWith({ projectId: 'p1', status: 'connected', hookTunnelVerified: true })
+    })
+
+    it('ONE failed probe never raises the banner — neither when the repair heals it nor when the next probe does', async () => {
+      // Field report (Linux desktop → Mac on the same desk, no sleep): "Agent status and canvas
+      // control lost their verified connection" kept appearing. The probe is one `curl -m 5` over
+      // the shared master, and a single slow round trip used to put the banner up by itself.
+      let dead = 0
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const mgr = makeVerifiedMgr(vi.fn(), () => (dead-- > 0 ? '000' : '204'))
+      const onStatus = (mgr as unknown as { r: { onStatus: ReturnType<typeof vi.fn> } }).r.onStatus
+      await mgr.connect('p1', conn, '/remote/cwd')
+      // (a) probe fails once, the repair's own verify succeeds → healed silently.
+      dead = 1
+      await mgr.connect('p1', conn, '/remote/cwd')
+      // (b) probe AND repair fail once, the next tick's probe answers → still silent.
+      dead = 3 // the probe + both of setup()'s verify attempts
+      await mgr.connect('p1', conn, '/remote/cwd')
+      await mgr.connect('p1', conn, '/remote/cwd')
+      expect(onStatus.mock.calls.filter(([e]) => e.hookTunnelVerified !== undefined)).toEqual([])
+      // …but every failure is logged with its cause, the only field evidence there is.
+      expect(warn.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('hook tunnel probe failed'))).toEqual([
+        '[ssh-project] hook tunnel probe failed for p1 (#1): unexpected HTTP answer (exit 0, http 000)',
+        '[ssh-project] hook tunnel probe failed for p1 (#1): unexpected HTTP answer (exit 0, http 000)'
+      ])
+    })
+
+    it('TWO consecutive failed probes raise the banner, even while the repair is backing off', async () => {
+      const mgr = makeVerifiedMgr(vi.fn(), () => '000')
+      vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const onStatus = (mgr as unknown as { r: { onStatus: ReturnType<typeof vi.fn> } }).r.onStatus
+      await mgr.connect('p1', conn, '/remote/cwd') // establish fails verification → no spec
+      await mgr.connect('p1', conn, '/remote/cwd') // failure #1 → repair attempted, fails
+      expect(onStatus.mock.calls.filter(([e]) => e.hookTunnelVerified === false)).toHaveLength(0)
+      await mgr.connect('p1', conn, '/remote/cwd') // failure #2 → inside backoff, still reported
+      expect(onStatus.mock.calls.filter(([e]) => e.hookTunnelVerified === false)).toHaveLength(1)
+    })
+
     it('rebinds the forward on repair — the endpoint is re-advertised, not merely re-probed', async () => {
       // The whole failure is a master with no `-R`, so a repair that did not call `-O forward`
       // would leave every hook POST dying exactly as before while reporting success.
@@ -1493,7 +1606,7 @@ describe('SshProjectManager', () => {
       const res = await mgr.connect('p1', conn, '/remote/cwd')
       expect(res.controlPath).toBe(controlPathFor('p1'))
       // Everything AFTER the hook still ran: the connect result is complete, not truncated.
-      expect(res.hookEndpointPath).toBe('/home/u/.nodeterm/hook-endpoint-p1.env')
+      expect(res.hookEndpointPath).toMatch(/^\/home\/u\/\.nodeterm\/hook-endpoint-p1-[a-f0-9]{16}\.env$/)
       expect(res.remoteHome).toBe('/home/u')
     })
   })
@@ -2225,7 +2338,7 @@ describe('SshProjectManager', () => {
       await new Promise((r) => setImmediate(r))
       await mgr.disconnect('p1') // user tears the project down mid-setup
       const live = await mgr.connect('p1', conn) // fresh attempt, completes fully
-      expect(live.hookEndpointPath).toBe('/home/u/.nodeterm/hook-endpoint-p1.env')
+      expect(live.hookEndpointPath).toMatch(/^\/home\/u\/\.nodeterm\/hook-endpoint-p1-[a-f0-9]{16}\.env$/)
       released = true
       releaseFirstSetup!()
       await stale // settles without owning the entry
@@ -2234,7 +2347,7 @@ describe('SshProjectManager', () => {
       // which is the dead-RUNNING-badges failure). Status counts are not asserted: the live
       // attempt's claude probe legitimately re-pushes 'connected' on its own schedule.
       const reused = await mgr.connect('p1', conn)
-      expect(reused.hookEndpointPath).toBe('/home/u/.nodeterm/hook-endpoint-p1.env')
+      expect(reused.hookEndpointPath).toMatch(/^\/home\/u\/\.nodeterm\/hook-endpoint-p1-[a-f0-9]{16}\.env$/)
     })
 
     it('a publickey denial with NO passphrase ask gets the agent-only hint, ONE attempt, no retry', async () => {
@@ -2591,6 +2704,95 @@ describe('master watchdog', () => {
   })
 })
 
+describe('wake-from-sleep round trip (revalidateAll({ roundTrip: true }))', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  // A master whose TCP died in a sleep: the PROCESS still serves `-O check` (exit 0) until it is
+  // told `-O exit`; a real round trip hangs. Measured against a black-holed sshd connection.
+  function makeHalfDeadMgr(probeVerdict: 'answered' | 'timeout' | 'throws' | 'absent') {
+    vi.spyOn(fs, 'mkdir').mockResolvedValue(undefined as never)
+    vi.spyOn(fs, 'stat').mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }))
+    vi.spyOn(fs, 'rm').mockResolvedValue(undefined)
+    const statuses: string[] = []
+    let exited = false
+    const spawnMaster = vi.fn(() => {
+      exited = false
+      return { kill: vi.fn(), on: vi.fn() }
+    })
+    const run = vi.fn(async (args: string[]) => {
+      if (args.includes('-O') && args.includes('exit')) {
+        exited = true
+        return { code: 0, stdout: '' }
+      }
+      if (args.includes('-O') && args.includes('check')) return { code: exited ? 255 : 0, stdout: '' }
+      return { code: 0, stdout: '' }
+    })
+    const probe = vi.fn(async (_args: string[], _timeoutMs: number) => {
+      if (probeVerdict === 'throws') throw new Error('spawn failed')
+      return probeVerdict as 'answered' | 'timeout'
+    })
+    const mgr = new SshProjectManager({
+      userDataDir: '/ud',
+      spawnMaster,
+      run,
+      ...(probeVerdict === 'absent' ? {} : { probe }),
+      runScp: vi.fn(async () => ({ code: 0 })),
+      getHook: () => ({ port: 1, token: 't', version: '1' }),
+      onStatus: (e) => statuses.push(e.status)
+    })
+    const exitCalls = () => run.mock.calls.filter(([a]) => a.includes('-O') && a.includes('exit')).length
+    return { mgr, statuses, spawnMaster, probe, exitCalls }
+  }
+
+  it('a master that times out the round trip is ended and re-established', async () => {
+    const { mgr, statuses, spawnMaster, probe, exitCalls } = makeHalfDeadMgr('timeout')
+    await mgr.connect('p1', conn)
+    await mgr.revalidateAll({ roundTrip: true })
+    const [args, timeoutMs] = probe.mock.calls[0]
+    expect(args).toEqual(expect.arrayContaining(['ControlMaster=no', 'BatchMode=yes', 'true']))
+    expect(args).toContain(`ControlPath=${controlPathFor('p1')}`)
+    expect(timeoutMs).toBeGreaterThan(0)
+    // Ours, then connect()'s own dead-branch `-O exit` (its no-op-if-already-gone belt).
+    expect(exitCalls()).toBeGreaterThanOrEqual(1)
+    expect(spawnMaster).toHaveBeenCalledTimes(2)
+    expect(statuses).toContain('reconnecting')
+    expect(statuses.at(-1)).toBe('connected')
+  })
+
+  it('a master that answers is left alone', async () => {
+    const { mgr, statuses, spawnMaster, exitCalls } = makeHalfDeadMgr('answered')
+    await mgr.connect('p1', conn)
+    await mgr.revalidateAll({ roundTrip: true })
+    expect(exitCalls()).toBe(0)
+    expect(spawnMaster).toHaveBeenCalledTimes(1)
+    expect(statuses).not.toContain('reconnecting')
+  })
+
+  it('a probe that cannot run convicts nothing', async () => {
+    const { mgr, spawnMaster, exitCalls } = makeHalfDeadMgr('throws')
+    await mgr.connect('p1', conn)
+    await mgr.revalidateAll({ roundTrip: true })
+    expect(exitCalls()).toBe(0)
+    expect(spawnMaster).toHaveBeenCalledTimes(1)
+  })
+
+  it('the watchdog pass (no roundTrip) never probes — its cost stays one `-O check`', async () => {
+    const { mgr, probe, exitCalls } = makeHalfDeadMgr('timeout')
+    await mgr.connect('p1', conn)
+    await mgr.revalidateAll()
+    expect(probe).not.toHaveBeenCalled()
+    expect(exitCalls()).toBe(0)
+  })
+
+  it('without a probe runner the wake pass is the old `-O check` revalidate', async () => {
+    const { mgr, spawnMaster, exitCalls } = makeHalfDeadMgr('absent')
+    await mgr.connect('p1', conn)
+    await mgr.revalidateAll({ roundTrip: true })
+    expect(exitCalls()).toBe(0)
+    expect(spawnMaster).toHaveBeenCalledTimes(1)
+  })
+})
+
 describe('lastSshErrorLine', () => {
   it('picks the actionable last line, skipping debug noise', () => {
     const stderr = [
@@ -2856,6 +3058,34 @@ describe('SshProjectManager — remote Codex account lifecycle (Task 6.1, Proper
     await expect(
       cm.mgr.remoteCodexExposeThread(controlPath, undefined, 'thread1', ['acc1'])
     ).rejects.toThrow(/unavailable or ambiguous/)
+  })
+})
+
+describe('SshProjectManager.remoteCodexSwitchThread — the SSH leg of a running-node switch', () => {
+  it('exposes the thread to the target ON the host, resolving it across every host account', async () => {
+    const cm = await makeCodexMgr()
+    await cm.mgr.remoteCodexSwitchThread('p1', 'thread1', 'acc2', ['acc1', 'acc2'])
+    const expose = cm.runCalls.find((c) => c.cmd.includes('expose-thread'))!.cmd
+    // Target socket first, then the thread, then every catalog: system + both managed accounts.
+    expect(expose).toContain(`expose-thread '${remoteCodexSocket(cm.home, 'acc2')}' 'thread1'`)
+    for (const id of [undefined, 'acc1', 'acc2']) {
+      expect(expose).toContain(`'${remoteCodexSocket(cm.home, id)}'`)
+    }
+  })
+
+  it('refuses a bad id, an unconnected project, and passes the host refusal through', async () => {
+    const cm = await makeCodexMgr({
+      handler: (cmd) => (cmd.includes('expose-thread') ? { code: 69 } : undefined)
+    })
+    await expect(cm.mgr.remoteCodexSwitchThread('p1', 'bad id!', 'acc1', ['acc1'])).rejects.toThrow(
+      /Invalid Codex thread id/
+    )
+    await expect(cm.mgr.remoteCodexSwitchThread('nope', 'thread1', 'acc1', ['acc1'])).rejects.toThrow(
+      /not connected/
+    )
+    await expect(cm.mgr.remoteCodexSwitchThread('p1', 'thread1', 'acc1', ['acc1'])).rejects.toThrow(
+      /unavailable or ambiguous/
+    )
   })
 })
 

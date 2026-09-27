@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
-import { normalizeCodex, type NormalizedAgentEvent } from '@shared/agents/normalize'
+import { normalizeClaude, normalizeCodex, type NormalizedAgentEvent } from '@shared/agents/normalize'
 import { syntheticAnsweredEvent } from './agents/pending-approvals'
 import { WORKING_STALE_MS } from '../shared/agents/stale'
 import {
@@ -1229,6 +1229,49 @@ describe('recordAgentEvent enrichment (returned broadcast event)', () => {
     expect(out.pendingId).toBeUndefined() // suppressed — approve/deny on a question is wrong UX
   })
 
+  it('a held QUESTION keeps its `held` ticket for structured answers while pendingId stays stripped', () => {
+    // Real sequence: the picker's PreToolUse, then its PermissionRequest held by the managed hook.
+    const input = { questions: [{ question: 'Which theme?', options: [{ label: 'Dark' }, { label: 'Light' }] }] }
+    const pre = { hook_event_name: 'PreToolUse', session_id: 's', tool_name: 'AskUserQuestion', tool_use_id: 't1', tool_input: input }
+    recordRawToolEvent('e9', pre)
+    const first = normalizeClaude({ nodeId: 'e9', agentId: 'claude', payload: pre })
+    if (first) recordAgentEvent(first)
+    const perm = normalizeClaude({
+      nodeId: 'e9',
+      agentId: 'claude',
+      payload: { hook_event_name: 'PermissionRequest', session_id: 's', tool_name: 'AskUserQuestion', tool_input: input, nodeterm_pending_id: 'e9-1-1' }
+    })!
+    const out = recordAgentEvent(perm)
+    expect(out.askKind).toBe('question')
+    expect(out.pendingId).toBeUndefined() // no approve/deny on a picker — unchanged
+    // The question texts ride along (answer controls match their card by them).
+    expect(out.held).toEqual({ pendingId: 'e9-1-1', toolName: 'AskUserQuestion', questions: ['Which theme?'] })
+  })
+
+  it('a held question with NO PreToolUse stash is classified as an approval and keeps pendingId', () => {
+    // Why the header needs its own AskUserQuestion gate (renderer/lib/approveGate.ts).
+    const perm = normalizeClaude({
+      nodeId: 'e11',
+      agentId: 'claude',
+      payload: { hook_event_name: 'PermissionRequest', session_id: 's', tool_name: 'AskUserQuestion', tool_input: {}, nodeterm_pending_id: 'e11-1-1' }
+    })!
+    const out = recordAgentEvent(perm)
+    expect(out.pendingId).toBe('e11-1-1')
+    expect(out.held).toEqual({ pendingId: 'e11-1-1', toolName: 'AskUserQuestion' })
+  })
+
+  it('a held PLAN is an approval: keeps pendingId (header Approve works) and names ExitPlanMode', () => {
+    const perm = normalizeClaude({
+      nodeId: 'e10',
+      agentId: 'claude',
+      payload: { hook_event_name: 'PermissionRequest', session_id: 's', tool_name: 'ExitPlanMode', tool_input: { plan: 'p' }, nodeterm_pending_id: 'e10-1-1' }
+    })!
+    const out = recordAgentEvent(perm)
+    expect(out.askKind).toBe('approval')
+    expect(out.pendingId).toBe('e10-1-1')
+    expect(out.held).toEqual({ pendingId: 'e10-1-1', toolName: 'ExitPlanMode' })
+  })
+
   it('a genuine approval keeps its pendingId and gains askKind:approval', () => {
     const out = recordAgentEvent(ev({ nodeId: 'e2', state: 'blocked', pendingId: 'e2-1-1' }))
     expect(out.state).toBe('blocked')
@@ -2311,6 +2354,77 @@ describe('reduceEntry records whether the state transition was verified', () => 
     expect(b.state).toBeUndefined()
     expect(b.stateVerified).toBe(false)
     expect(b.verifiedAt).toBe(1000)
+  })
+
+  describe('idle rescue after a verified session start (resumed CLI idling at its prompt)', () => {
+    const started = (verified = true) =>
+      reduceEntry(
+        reduceEntry(undefined, ev({ sessionId: 'current', state: 'done', verified: true }), 1000),
+        ev({ sessionId: 'current', kind: 'session', sessionPhase: 'start', verified }),
+        2000
+      )
+
+    it('does not broadcast stale idle state proof to renderer consumers', () => {
+      _resetForTest()
+      recordAgentEvent(ev({ nodeId: 'idle-proof', sessionId: 'current', kind: 'session', sessionPhase: 'start', verified: true }))
+      const out = recordAgentEvent(ev({ nodeId: 'idle-proof', sessionId: 'old', state: 'done', idle: true, verified: true }))
+      expect(out.state).toBeUndefined()
+      expect(out.verified).toBeUndefined()
+      expect(out.sessionId).toBe('current')
+    })
+    it.each([
+      { sessionId: 'old' }, { sessionId: undefined }, { agentId: 'codex' }
+    ])('rejects foreign or missing idle identity %j without overwriting the current session', (identity) => {
+      const start = started()
+      const result = reduceEntry(start, ev({ sessionId: 'current', state: 'done', idle: true, verified: true, ...identity }), 3000)
+      expect(result).toEqual(start)
+      const valid = reduceEntry(result, ev({ sessionId: 'current', state: 'done', idle: true, verified: true }), 3100)
+      expect(valid.state).toBe('done')
+      expect(valid.stateVerified).toBe(true)
+    })
+    it('does not arm a session start with no session id', () => {
+      const start = reduceEntry(undefined, ev({ kind: 'session', sessionPhase: 'start', verified: true }), 1000)
+      const idle = reduceEntry(start, ev({ state: 'done', idle: true, verified: true }), 2000)
+      expect(start.sessionStarted).toBeUndefined()
+      expect(idle.state).toBeUndefined()
+      expect(idle.stateVerified).toBe(false)
+    })
+    it('does not accept an idle observation older than the start', () => {
+      const start = started()
+      expect(reduceEntry(start, ev({ sessionId: 'current', state: 'done', idle: true, verified: true }), 1999)).toEqual(start)
+    })
+    it('a verified idle_prompt commits a verified, NON-inferred done', () => {
+      const c = reduceEntry(started(), ev({ sessionId: 'current', state: 'done', idle: true, interrupted: true, verified: true }), 3000)
+      expect(c.state).toBe('done')
+      expect(c.stateVerified).toBe(true)
+      expect(c.idleInferred).toBeUndefined()
+      expect(c.sessionStarted).toBeUndefined()
+    })
+
+    it('an unverified idle_prompt is still ignored', () => {
+      const c = reduceEntry(started(), ev({ sessionId: 'current', state: 'done', idle: true, verified: false }), 3000)
+      expect(c.state).toBeUndefined()
+      expect(c.stateVerified).toBe(false)
+    })
+
+    it('an unverified session start does not arm the rescue', () => {
+      const c = reduceEntry(started(false), ev({ sessionId: 'current', state: 'done', idle: true, verified: true }), 3000)
+      expect(c.state).toBeUndefined()
+    })
+
+    it('a session END never arms the rescue', () => {
+      const a = reduceEntry(undefined, ev({ sessionId: 'current', state: 'done', verified: true }), 1000)
+      const b = reduceEntry(a, ev({ sessionId: 'current', kind: 'session', sessionPhase: 'end', verified: true }), 2000)
+      const c = reduceEntry(b, ev({ sessionId: 'current', state: 'done', idle: true, verified: true }), 3000)
+      expect(c.state).toBeUndefined()
+    })
+
+    it('any state commit after the start disarms it (a turn may hold an approval)', () => {
+      const b = reduceEntry(started(), ev({ sessionId: 'current', state: 'blocked', verified: true }), 2500)
+      expect(b.sessionStarted).toBeUndefined()
+      const c = reduceEntry(b, ev({ sessionId: 'current', state: 'done', idle: true, verified: true }), 3000)
+      expect(c.state).toBe('blocked')
+    })
   })
 
   it('a session boundary drops the proof with the state it was about', () => {

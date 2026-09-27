@@ -1,8 +1,10 @@
+import type { TextDeliveryResult } from '../shared/text-delivery'
 // The Electron-main-side client for the session host: one long-lived connection per app process,
 // auto-spawning the host on first use and restoring every live local attachment before allowing
 // ordinary traffic through a replacement connection.
 
 import net from 'net'
+import type { PaneOwner } from '../shared/agents/pane-owner-predicate'
 import { randomUUID } from 'crypto'
 // The REAL scheduler, immune to vi.useFakeTimers (which patches the global, not this module's
 // exports): requestOnSocket defers each frame's write by one genuine event-loop turn so queued
@@ -17,6 +19,7 @@ import {
 } from '../session-host/existing-host-state'
 import {
   SESSION_HOST_PROTOCOL_VERSION,
+  SESSION_HOST_FEATURES,
   LineFramer,
   encodeFrame,
   type SessionHostRequest,
@@ -24,6 +27,7 @@ import {
   type SessionHostFrame,
   type SessionHostSpawnOptions,
   type AttachResult,
+  type HelloResult,
   type HasSessionResult,
   type PaneCommandResult,
   type CaptureResult,
@@ -32,11 +36,18 @@ import {
   type ListSessionsResult
 } from '../session-host/protocol'
 import { resolveSessionHostScript, spawnSessionHost } from './session-host-launcher'
+import { latestClaimSize, type SizeClaim } from './pty-size'
+import { isTerminalReport } from './terminal-reports'
 import type { PreparedAgentLaunch } from './agent-launch'
 
 export interface SessionSubscriber {
   onData(data: string): void
   onExit(exitCode: number): void
+  /** The size the shared pty actually runs at, which may not be this subscriber's own claim: the
+   *  session follows its most recently active viewer (issue #914). Called whenever that may have
+   *  changed for this subscriber — including after its own resize, even when the answer is the
+   *  same, because its renderer has just fitted itself to its own size. Deduplicate downstream. */
+  onSize?(size: { cols: number; rows: number }): void
   /** A previously confirmed attachment failed to restore. This is not an exit: the host's
    * rejection is retained so the owning manager can retire only the affected generation. */
   onAttachError?(error: Error): void
@@ -97,7 +108,12 @@ type ClientSessionState = {
   protocolVersion?: 1 | 2
   entries: Map<SessionSubscriber, SubscriberEntry>
   pauseOwners: Set<SessionSubscriber>
-  sizeClaims: Map<SessionSubscriber, TerminalSize>
+  /** Each subscriber's vote, with when it was last active and whether it can adapt to a grid
+   *  that is not its own (see `latestClaimSize`). */
+  sizeClaims: Map<SessionSubscriber, SizeClaim>
+  /** What the HOST last said the pty runs at, on a connection that negotiated `geometry`. Null
+   *  until it has answered; never consulted on a connection that did not negotiate it. */
+  hostGeometry: TerminalSize | null
   bufferedData: BufferedFrame[]
   /** Attaches that have actually reached their request phase. Only these may own data arriving
    * before the correlated attach response; a merely queued replacement must not absorb bytes
@@ -122,6 +138,9 @@ function sleep(ms: number): Promise<void> {
 function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error))
 }
+
+/** Explicit host refusal: unlike a lost response, the host answered this request. */
+class SessionHostRequestRejectedError extends Error {}
 
 function isTransportUncertainty(value: unknown): boolean {
   const error = asError(value) as NodeJS.ErrnoException
@@ -250,6 +269,12 @@ function normalizeDimension(value: number, fallback: number): number {
 export class SessionHostClient {
   private socket: net.Socket | null = null
   private negotiatedProtocolVersion: 1 | 2 | null = null
+  /** The current connection negotiated the `geometry` feature, so the host pushes the pty's real
+   *  size. On a host that predates it, the size this client last requested IS the pty's size as
+   *  long as this is the host's only connection — the common case, and the one issue #914 is. */
+  private hostGeometryEvents = false
+  /** Monotonic activity clock for `SizeClaim.recency`. */
+  private claimClock = 0
   private nextId = 1
   private readonly pending = new Map<number, PendingEntry>()
   private readonly sessions = new Map<string, ClientSessionState>()
@@ -293,6 +318,7 @@ export class SessionHostClient {
       entries: new Map(),
       pauseOwners: new Set(),
       sizeClaims: new Map(),
+      hostGeometry: null,
       bufferedData: [],
       preAckEntries: new Set(),
       preAckExit: false,
@@ -336,19 +362,46 @@ export class SessionHostClient {
     return false
   }
 
+  /** The size this client asks the host for: its most recently active subscriber's, clamped to any
+   *  subscriber that cannot adapt (issue #914 — see `latestClaimSize`). */
   private effectiveSize(state: ClientSessionState): TerminalSize {
-    let cols = Number.POSITIVE_INFINITY
-    let rows = Number.POSITIVE_INFINITY
-    for (const claim of state.sizeClaims.values()) {
-      cols = Math.min(cols, claim.cols)
-      rows = Math.min(rows, claim.rows)
-    }
     // Every entry receives a claim before it enters the map. This fallback only protects a
     // teardown race from ever putting non-finite geometry on the wire.
-    return {
-      cols: Number.isFinite(cols) ? cols : 80,
-      rows: Number.isFinite(rows) ? rows : 24
+    return latestClaimSize(state.sizeClaims.values()) ?? { cols: 80, rows: 24 }
+  }
+
+  /** Mark `sub` as the most recently active viewer and re-negotiate if that moves the size. */
+  private touchClaim(state: ClientSessionState, sub: SessionSubscriber): void {
+    const claim = state.sizeClaims.get(sub)
+    if (!claim) return
+    const before = this.effectiveSize(state)
+    claim.recency = ++this.claimClock
+    if (!sameSize(before, this.effectiveSize(state))) this.queueReconcile(state)
+  }
+
+  /** Tell every attached subscriber the size the pty runs at. On a geometry-aware connection that
+   *  is the host's own answer; otherwise it is what this client last applied. */
+  private notifySize(state: ClientSessionState): void {
+    const size = this.hostGeometryEvents ? state.hostGeometry : state.appliedSize
+    if (!size) return
+    for (const entry of state.entries.values()) {
+      if (entry.phase !== 'attached') continue
+      try {
+        entry.sub.onSize?.({ cols: size.cols, rows: size.rows })
+      } catch {
+        // One subscriber must not stop its co-attached neighbours from learning the size.
+      }
     }
+  }
+
+  /** Record a host-reported size, ignoring anything that is not a positive integer grid. */
+  private recordHostGeometry(state: ClientSessionState, geometry: unknown): boolean {
+    if (!this.hostGeometryEvents || !geometry || typeof geometry !== 'object') return false
+    const { cols, rows } = geometry as { cols?: unknown; rows?: unknown }
+    if (!Number.isInteger(cols) || !Number.isInteger(rows)) return false
+    if ((cols as number) <= 0 || (rows as number) <= 0) return false
+    state.hostGeometry = { cols: cols as number, rows: rows as number }
+    return true
   }
 
   private async ensureConnected(): Promise<void> {
@@ -484,6 +537,7 @@ export class SessionHostClient {
       const framer = new LineFramer()
       const helloId = this.nextId++
       let protocolVersion: 1 | 2 | null = null
+      let geometryEvents = false
       const finish = (ok: boolean, trailing: SessionHostFrame[] = []): void => {
         if (settled) return
         settled = true
@@ -497,7 +551,7 @@ export class SessionHostClient {
             failHandshake(new Error('session-host hello did not negotiate a protocol version'))
             return
           }
-          this.attachSocket(socket, protocolVersion)
+          this.attachSocket(socket, protocolVersion, geometryEvents)
           for (const frame of trailing) this.handleFrame(socket, frame)
         } else {
           try {
@@ -539,7 +593,8 @@ export class SessionHostClient {
               id: helloId,
               cmd: 'hello',
               token,
-              protocolVersion: SESSION_HOST_PROTOCOL_VERSION
+              protocolVersion: SESSION_HOST_PROTOCOL_VERSION,
+              features: [...SESSION_HOST_FEATURES]
             }),
             (error) => {
               if (error) failHandshake(asError(error))
@@ -590,6 +645,8 @@ export class SessionHostClient {
               return
             }
             protocolVersion = negotiated
+            const features = (frame.result as HelloResult | undefined)?.features
+            geometryEvents = Array.isArray(features) && features.includes('geometry')
             finish(true, frames.slice(index + 1))
           } else {
             failHandshake(new Error(`session-host hello rejected: ${frame.error}`))
@@ -609,9 +666,10 @@ export class SessionHostClient {
     })
   }
 
-  private attachSocket(socket: net.Socket, protocolVersion: 1 | 2): void {
+  private attachSocket(socket: net.Socket, protocolVersion: 1 | 2, geometryEvents: boolean): void {
     this.socket = socket
     this.negotiatedProtocolVersion = protocolVersion
+    this.hostGeometryEvents = geometryEvents
     this.everConnected = true
     const framer = new LineFramer()
     socket.on('data', (chunk: Buffer) => {
@@ -639,7 +697,10 @@ export class SessionHostClient {
     if (wasCurrent) {
       this.socket = null
       this.negotiatedProtocolVersion = null
+      this.hostGeometryEvents = false
       for (const state of this.sessions.values()) {
+        // The next connection re-learns the size from its own attach replies.
+        state.hostGeometry = null
         if (state.appliedSocket !== socket) continue
         state.appliedSocket = null
         state.appliedAttached = false
@@ -714,6 +775,8 @@ export class SessionHostClient {
       }
       if (frame.type === 'data') {
         this.deliverData(state, frame.data)
+      } else if (frame.type === 'geometry') {
+        if (this.recordHostGeometry(state, frame)) this.notifySize(state)
       } else {
         this.handleExit(state, frame.exitCode)
       }
@@ -725,7 +788,7 @@ export class SessionHostClient {
     this.pending.delete(frame.id)
     if (entry.timer) clearTimeout(entry.timer)
     if (frame.ok) entry.resolve(frame.result)
-    else entry.reject(new Error(frame.error))
+    else entry.reject(new SessionHostRequestRejectedError(frame.error))
   }
 
   private deliverData(state: ClientSessionState, data: string): void {
@@ -806,7 +869,8 @@ export class SessionHostClient {
 
   private async request<T>(
     request: SessionHostRequestBody,
-    onSuccess?: (result: T, socket: net.Socket) => void
+    onSuccess?: (result: T, socket: net.Socket) => void,
+    onSent?: () => void
   ): Promise<T> {
     // A peer-initiated close races the client's own 'close' event: a cached socket can look live
     // here while the peer already hung up, and a frame written into that gap fails (EPIPE) for
@@ -829,7 +893,7 @@ export class SessionHostClient {
       const socket = this.socket
       if (!socket) throw new Error('session-host: not connected')
       try {
-        return await this.requestOnSocket(socket, request, onSuccess)
+        return await this.requestOnSocket(socket, request, onSuccess, onSent)
       } catch (error) {
         if (!(error instanceof SessionHostRequestNotDeliveredError)) throw error
         if (attempt + 1 >= SESSION_HOST_RESEND_ATTEMPTS) throw error.original
@@ -843,7 +907,8 @@ export class SessionHostClient {
   private requestOnSocket<T>(
     socket: net.Socket,
     request: SessionHostRequestBody,
-    onSuccess?: (result: T, socket: net.Socket) => void
+    onSuccess?: (result: T, socket: net.Socket) => void,
+    onSent?: () => void
   ): Promise<T> {
     if (this.socket !== socket || socket.destroyed) {
       return Promise.reject(
@@ -891,6 +956,7 @@ export class SessionHostClient {
           return
         }
         pending.sent = true
+        onSent?.()
         // Was this frame handed to the kernel ALONE? Node writes a chunk straight through only when
         // nothing is buffered or in flight (writableLength 0, not corked); anything written while
         // another write is in flight is queued and later flushed together with its neighbours as
@@ -993,6 +1059,7 @@ export class SessionHostClient {
             state.protocolVersion = protocolVersion
             state.generation = result.generation ?? expectedGeneration
             if (state.generation) this.sessionGenerations.set(state.name, state.generation)
+            this.recordHostGeometry(state, result.geometry)
             this.applyAttachment(state, replaySocket, paused, size)
             if (result.screen && state.appliedSocket === replaySocket) {
               this.deliverData(state, RECONNECT_REPAINT_PREFIX + result.screen)
@@ -1102,6 +1169,7 @@ export class SessionHostClient {
       state.releasePending = false
       this.flushData(state)
     }
+    this.notifySize(state)
   }
 
   private async reconcileState(state: ClientSessionState): Promise<void> {
@@ -1197,7 +1265,8 @@ export class SessionHostClient {
       phase: 'attaching'
     }
     state.entries.set(sub, entry)
-    state.sizeClaims.set(sub, initialSize)
+    // A new viewer is the most recently active one, exactly as a freshly attached tmux client is.
+    state.sizeClaims.set(sub, { ...initialSize, recency: ++this.claimClock })
 
     return this.enqueueState(state, async () => {
       if (this.sessions.get(name) !== state || state.entries.get(sub) !== entry) {
@@ -1292,6 +1361,7 @@ export class SessionHostClient {
         state.protocolVersion = protocolVersion
         state.generation = result.generation ?? expectedGeneration
         if (state.generation) this.sessionGenerations.set(name, state.generation)
+        this.recordHostGeometry(state, result.geometry)
         if (replacementToken && result.fresh) {
           if (this.replacementTokens.get(name) === replacementToken) {
             this.replacementTokens.delete(name)
@@ -1420,6 +1490,10 @@ export class SessionHostClient {
     const state = this.sessions.get(name)
     const entry = state?.entries.get(sub)
     if (!state || !entry) return
+    // Typing makes a viewer the active one, as it does a tmux client. An emulator's automatic
+    // answer to a query does not: every attached xterm answers, and counting those would hand the
+    // session to whichever viewer answered last.
+    if (!isTerminalReport(data)) this.touchClaim(state, sub)
     void this.enqueueState(state, async () => {
       if (this.sessions.get(name) !== state || state.entries.get(sub) !== entry) return
       try {
@@ -1431,14 +1505,34 @@ export class SessionHostClient {
     })
   }
 
-  resize(name: string, sub: SessionSubscriber, cols: number, rows: number): void {
+  /**
+   * Update `sub`'s claim. A claim that actually CHANGES makes `sub` the most recently active viewer
+   * (a phone dismissing its keyboard is the case issue #914 is about); re-reporting the same size
+   * does not, or every re-fit would steal the session. `bounding` marks a viewer that cannot adapt
+   * to any grid but its own, which caps the size for everyone (see `latestClaimSize`).
+   */
+  resize(
+    name: string,
+    sub: SessionSubscriber,
+    cols: number,
+    rows: number,
+    bounding = false
+  ): void {
     const state = this.sessions.get(name)
     if (!state || !state.entries.has(sub)) return
-    const previous = state.sizeClaims.get(sub) ?? { cols: 80, rows: 24 }
-    state.sizeClaims.set(sub, {
+    const previous = state.sizeClaims.get(sub) ?? { cols: 80, rows: 24, recency: 0 }
+    const next: SizeClaim = {
       cols: normalizeDimension(cols, previous.cols),
-      rows: normalizeDimension(rows, previous.rows)
-    })
+      rows: normalizeDimension(rows, previous.rows),
+      recency: previous.recency,
+      bounding
+    }
+    if (next.cols !== previous.cols || next.rows !== previous.rows) {
+      next.recency = ++this.claimClock
+    }
+    state.sizeClaims.set(sub, next)
+    // Always reconcile, even for an unchanged claim: it ends in `notifySize`, which is how a view
+    // that just fitted itself to its own size learns the pty is running at someone else's.
     this.queueReconcile(state)
   }
 
@@ -1459,12 +1553,16 @@ export class SessionHostClient {
     }
   }
 
-  async sendKeys(name: string, text: string, enter: boolean): Promise<boolean> {
+  async sendKeys(name: string, text: string, enter: boolean): Promise<TextDeliveryResult> {
+    let sent = false
     try {
-      await this.request({ cmd: 'sendKeys', name, text, enter })
-      return true
-    } catch {
-      return false
+      const result = await this.request<{ delivery?: TextDeliveryResult } | undefined>({ cmd: 'sendKeysV2', name, text, enter }, undefined, () => { sent = true })
+      // A malformed success cannot prove submission; never retry a possibly accepted paste.
+      return result?.delivery === true || result?.delivery === false ? result.delivery : 'pasted-not-submitted'
+    } catch (error) {
+      // A frame handed to the socket may already have pasted. A lost reply is not a
+      // pre-input refusal: surface uncertainty and never invite an automatic resend.
+      return sent && !(error instanceof SessionHostRequestRejectedError) ? 'pasted-not-submitted' : false
     }
   }
 
@@ -1475,6 +1573,24 @@ export class SessionHostClient {
     } catch {
       return null
     }
+  }
+
+  async messageOwner(name: string): Promise<PaneOwner | null> {
+    try {
+      return await this.request<PaneOwner | null>({ cmd: 'messageOwnerV1', name })
+    } catch { return null } // Older live hosts refuse; never replace them or use name-only input.
+  }
+
+  async messagePasteReady(name: string): Promise<boolean> {
+    try {
+      return await this.request<boolean>({ cmd: 'messagePasteReadyV1', name }) === true
+    } catch { return false }
+  }
+
+  async messageEnvelope(name: string, envelope: string, expected: PaneOwner): Promise<boolean> {
+    try {
+      return await this.request<boolean>({ cmd: 'messageEnvelopeV1', name, envelope, expected }) === true
+    } catch { return false }
   }
 
   async capture(name: string, full: boolean): Promise<string> {

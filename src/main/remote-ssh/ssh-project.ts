@@ -14,7 +14,17 @@ import {
   sshHostKey,
   type SshConnection
 } from '../../shared/ssh'
-import type { DownloadResult, SshPassphraseRequest, SshProjectStatusEvent } from '../../shared/types'
+import type {
+  ClaudeSessionCopyResult,
+  DownloadResult,
+  SshPassphraseRequest,
+  SshProjectStatusEvent
+} from '../../shared/types'
+import {
+  parseRemoteSessionCopy,
+  remoteClaudeConfigDir,
+  remoteSessionCopyCommand
+} from '../../core/remote-claude-session-copy'
 import { candidateName, safeDownloadBasename } from '../../core/download-name'
 import { removeAtomic, renameAtomic } from '../../core/fs-atomic'
 import { findExecutableSync, shellPathNow } from '../../core/exec-path'
@@ -33,6 +43,7 @@ import {
   mkDirArgs,
   exitMasterArgs,
   checkMasterArgs,
+  masterRoundTripArgs,
   remoteTmuxKillArgs,
   remoteTmuxKillEverySocketArgs,
   childArgs,
@@ -46,6 +57,7 @@ import { RemoteHooks } from './remote-hooks'
 import {
   recordTunnelRepair,
   shouldAttemptTunnelRepair,
+  shouldReportTunnelLost,
   type TunnelRepairState
 } from './tunnel-repair'
 
@@ -62,6 +74,7 @@ import { appSshAgent } from './ssh-agent'
 import { probeAgentSockToPin } from '../../core/remote-ssh/agent-probe'
 import { sessionName } from '../../core/tmux-naming'
 import { remoteAtomicWrite } from '../remote-atomic-write'
+import { isBoundedAnswerContent, PENDING_REQUEST_MAX_BYTES } from '../../core/agents/permission-decision'
 import { buildCodexLauncherScript } from '../../core/codex-identity-proxy'
 import {
   ACCOUNT_ID_RE,
@@ -93,6 +106,12 @@ interface Runners {
   }
   /** Run a one-shot ssh, resolving its stdout + exit code; optional stdin written to the child. */
   run: (args: string[], stdin?: string) => Promise<{ code: number; stdout: string }>
+  /** Run a one-shot ssh with a hard timeout, OUTSIDE the per-master child gate, and say only
+   *  whether it finished in time. Used by the wake-from-sleep liveness probe: after a sleep the
+   *  gate is often full of children hung on the dead master, and a probe queued behind them would
+   *  measure the queue, not the master. Optional: without it the wake pass falls back to the
+   *  `-O check`-only revalidate it did before. */
+  probe?: (args: string[], timeoutMs: number) => Promise<'answered' | 'timeout'>
   /** Run a one-shot scp (file upload over the master); resolves its exit code. */
   runScp: (args: string[]) => Promise<{ code: number }>
   /** Live loopback hook-server coordinates (injected so the manager stays testable). */
@@ -207,6 +226,12 @@ const MASTER_STDERR_CAP = 8 * 1024
  *  per connected project, no new TCP/auth, so this can afford to be brisk; 45s bounds how
  *  long exec polls can churn direct-fallback connections after an unnoticed master death. */
 const MASTER_WATCHDOG_MS = 45_000
+
+/** Budget for the wake-from-sleep round trip (`dropMasterIfHalfDead`). A healthy master answers a
+ *  mux'd `true` in a couple of RTTs plus the remote shell's startup; a half-dead one never
+ *  answers. Generous on purpose: a false conviction costs every terminal of the project a
+ *  reconnect, a late one only a few more seconds of frozen screen — against ~74 s without it. */
+const WAKE_ROUND_TRIP_TIMEOUT_MS = 10_000
 
 /** How long connect() waits for `-O check` to answer when nothing is blocking on a human.
  *
@@ -443,6 +468,20 @@ export class SshProjectManager {
   /** Consecutive failed tunnel repairs per project, so a host that can never forward is not
    *  re-installed on every watchdog tick. See `tunnel-repair.ts` for why the first one is free. */
   private tunnelRepair = new Map<string, TunnelRepairState>()
+  private lostHookTunnels = new Set<string>()
+  /** Consecutive failed liveness probes per project — the banner waits for a second one
+   *  (`shouldReportTunnelLost`); a single slow probe is not a lost tunnel. */
+  private tunnelProbeFailures = new Map<string, number>()
+
+  private hookTunnelHealth(projectId: string, verified: boolean): void {
+    if (verified) {
+      if (!this.lostHookTunnels.delete(projectId)) return
+    } else {
+      if (this.lostHookTunnels.has(projectId)) return
+      this.lostHookTunnels.add(projectId)
+    }
+    this.emitStatus({ projectId, status: 'connected', hookTunnelVerified: verified })
+  }
 
   /**
    * Re-verify a REUSED master's reverse hook tunnel, and rebuild it if it stopped answering
@@ -470,21 +509,40 @@ export class SshProjectManager {
       const hook = this.r.getHook()
       // No hook server yet ⇒ nothing to point at, and `setup()` would refuse anyway.
       if (!hook?.port || !hook.token) return
-      if (await this.remoteHooks.tunnelAlive(projectId, existing.conn, existing.controlPath, hook.token)) {
+      const probe = await this.remoteHooks.tunnelAlive(projectId, existing.conn, existing.controlPath, hook.token)
+      if (this.conns.get(projectId) !== existing) return
+      if (probe.alive) {
         this.tunnelRepair.delete(projectId)
+        this.tunnelProbeFailures.delete(projectId)
+        this.hookTunnelHealth(projectId, true)
         return
       }
+      const failures = (this.tunnelProbeFailures.get(projectId) ?? 0) + 1
+      this.tunnelProbeFailures.set(projectId, failures)
+      // Logged on every failure, not only the reported ones: this line is the only field evidence
+      // of WHY a tunnel stopped answering (dead listener vs slow master vs refused ssh).
+      console.warn(`[ssh-project] hook tunnel probe failed for ${projectId} (#${failures}): ${probe.detail}`)
       const now = Date.now()
-      if (!shouldAttemptTunnelRepair(this.tunnelRepair.get(projectId), now)) return
+      if (!shouldAttemptTunnelRepair(this.tunnelRepair.get(projectId), now)) {
+        if (shouldReportTunnelLost(failures)) this.hookTunnelHealth(projectId, false)
+        return
+      }
       const res = await this.remoteHooks.setup(projectId, existing.conn, existing.controlPath, hook)
       this.tunnelRepair.set(projectId, recordTunnelRepair(this.tunnelRepair.get(projectId), !!res, now))
-      if (!res) return
+      if (!res) {
+        if (this.conns.get(projectId) === existing && shouldReportTunnelLost(failures)) {
+          this.hookTunnelHealth(projectId, false)
+        }
+        return
+      }
       // Ownership re-check: `setup()` is several round-trips, and a disconnect + reconnect inside
       // that window means this entry is no longer the live one — the same rule the establish path
       // applies before rebuilding a master. Writing the endpoint onto a superseded entry would
       // point sessions at a socket belonging to a connection nobody holds.
       if (this.conns.get(projectId) !== existing) return
       existing.hookEndpointPath = res.endpointPath
+      this.tunnelProbeFailures.delete(projectId)
+      this.hookTunnelHealth(projectId, true)
       // Same contract as the establish path: hook events lost while the tunnel was down are gone
       // for good, so the working agents need a resync. Fire-and-forget behind a catch — a repair
       // job must never surface to the user as a dead SSH project.
@@ -871,6 +929,9 @@ export class SshProjectManager {
           continue
         }
         const hookEndpointPath = res?.endpointPath
+        // A fresh establish starts a fresh probe streak: a failure before this reconnect and one
+        // after it are not two opinions about the same tunnel.
+        if (res) this.tunnelProbeFailures.delete(projectId)
         // Resolve the remote $HOME once and retain it (the hook setup above also learns it but
         // doesn't surface it). Phase 2b uses it to jail remote transcript reads. Fail-open: an
         // unresolved home just disables the remote context meter / subagent transcript / search.
@@ -958,6 +1019,7 @@ export class SshProjectManager {
           entry.codexRelayRuntimePath = codexRuntime?.runtime
           entry.codexCliPath = codexRuntime?.codex
           this.emitStatus({ projectId, status: 'connected' })
+          if (hookEndpointPath) this.hookTunnelHealth(projectId, true)
           // The tunnel is live again on a master we just established (the reuse branch returned long
           // before this line), so this is exactly the moment the hook events lost while it was down
           // can be reconstructed from the host.
@@ -1267,6 +1329,10 @@ export class SshProjectManager {
     throw new Error('Could not reserve a download destination.')
   }
 
+  // URLs remain allowlisted until quit, so their cache files must live just as long.
+  private readonly retainedMedia = new Set<string>()
+  private readonly mediaPrunes = new Map<string, Promise<void>>()
+
   /**
    * Pull a remote FILE into the local media cache (for nt-media:// playback) and resolve its
    * cached absolute path. The entry is keyed by (host, remote path), see remoteMediaCacheName ,
@@ -1294,6 +1360,10 @@ export class SshProjectManager {
         childArgs(c.conn, c.controlPath, `wc -c < ${quoteRemotePath(remotePath)}`)
       )
       const remoteSize = sizeProbe.code === 0 ? parseInt(sizeProbe.stdout.trim(), 10) : NaN
+      // Pin before reading. A prune already in flight must settle before stat/reuse, or it
+      // could unlink the file just after we hand its URL to the player.
+      this.retainedMedia.add(path.basename(dest))
+      await this.mediaPrunes.get(dest)
       let cachedSize = -1
       try {
         cachedSize = (await fs.stat(dest)).size
@@ -1332,17 +1402,21 @@ export class SshProjectManager {
     }
   }
 
-  /** Best-effort, bounded cache: keep the newest MEDIA_CACHE_KEEP entries. An evicted entry that
-   *  is still playing in an open node stops being seekable, acceptable for a 20-deep cache of a
-   *  convenience copy; the node re-fetches on next open. */
+  /** The cap is soft for this run: an open player's next seek must still find its file.
+   * Prior-run entries are eligible again after restart. */
   private async pruneMediaCache(cacheDir: string, except: string): Promise<void> {
     try {
       const names = (await fs.readdir(cacheDir)).filter((n) => !n.endsWith('.part'))
       const entries = await Promise.all(
         names.map(async (n) => ({ name: n, mtimeMs: (await fs.stat(path.join(cacheDir, n))).mtimeMs }))
       )
-      for (const n of mediaCachePruneList(entries, except)) {
-        await fs.rm(path.join(cacheDir, n), { force: true }).catch(() => {})
+      for (const n of mediaCachePruneList(entries, except, undefined, this.retainedMedia)) {
+        if (this.retainedMedia.has(n)) continue
+        const file = path.join(cacheDir, n)
+        if (this.mediaPrunes.has(file)) continue
+        const removal = fs.rm(file, { force: true }).catch(() => {})
+        this.mediaPrunes.set(file, removal)
+        try { await removal } finally { this.mediaPrunes.delete(file) }
       }
     } catch {
       // pruning is best-effort, a fat cache is a nuisance, not a fault
@@ -1404,6 +1478,26 @@ export class SshProjectManager {
    * SshFs ops take). Returns `undefined` when the project isn't connected, so the `sshFs:*` IPC
    * handlers can fail open (empty result) rather than throw.
    */
+  private readonly connectionKeys = new WeakMap<object, string>()
+  private nextConnectionKey = 0
+
+  /** A reused control socket path is not a connection generation. New Conn objects invalidate
+   * in-flight metrics/discovery even when reconnect uses the same host, project and socket. */
+  connectionKeyFor(projectId: string): string | undefined {
+    const connection = this.conns.get(projectId)
+    if (!connection) return undefined
+    let key = this.connectionKeys.get(connection)
+    if (!key) { key = String(++this.nextConnectionKey); this.connectionKeys.set(connection, key) }
+    return key
+  }
+
+  connectionKeyForControlPath(controlPath: string): string | undefined {
+    for (const [projectId, connection] of this.conns) {
+      if (connection.controlPath === controlPath) return this.connectionKeyFor(projectId)
+    }
+    return undefined
+  }
+
   refForProject(
     projectId: string
   ): { conn: SshConnection; controlPath: string; remoteCwd?: string } | undefined {
@@ -1599,7 +1693,7 @@ export class SshProjectManager {
    * 'connected' flush respawns the dead nodes. Failures just leave the normal status-event
    * error path in charge (connect reports it before throwing).
    */
-  async revalidateAll(): Promise<void> {
+  async revalidateAll(opts?: { roundTrip?: boolean }): Promise<void> {
     // Per project CONCURRENTLY, not serially: a re-establish can park on the askpass passphrase
     // prompt for up to PROMPT_WAIT_MS (5 min), and a serial pass wedged EVERY other project's
     // check behind it for that whole window - the direct-fallback churn the watchdog exists to
@@ -1614,6 +1708,7 @@ export class SshProjectManager {
         // established for the NEW endpoint, silently reverting the project to the old host.
         const e = this.conns.get(projectId)
         if (!e) return // disconnected while the pass was being set up
+        if (opts?.roundTrip) await this.dropMasterIfHalfDead(projectId, e)
         try {
           await this.connect(projectId, e.conn, e.remoteCwd)
         } catch {
@@ -1621,6 +1716,42 @@ export class SshProjectManager {
         }
       })
     )
+  }
+
+  /**
+   * Wake-from-sleep only: end a master that answers `-O check` but can no longer reach sshd.
+   *
+   * The reuse branch of `connect()` trusts `-O check`, and after a sleep that is exactly the wrong
+   * witness — the master PROCESS is alive locally while its TCP is gone (measured: `-O check` exit
+   * 0 on a black-holed master, a mux'd command hanging until ServerAlive gave up ~74 s later). So
+   * the wake pass was a no-op, and for that minute+ every remote terminal kept its last screen
+   * while keys and the wheel went nowhere. Here a real round trip is timed instead; on a TIMEOUT
+   * the master is sent `-O exit`, which the process serves locally and at once (measured: 5 ms,
+   * every mux'd terminal client exiting 255 in the same instant). Those 255s feed the renderer's
+   * SshReconnector, and the `connect()` that follows in `revalidateAll` finds the check failing
+   * and re-establishes, so the terminals respawn onto a fresh master seconds after wake.
+   *
+   * Only a timeout convicts. A probe that finished — with any exit code — reached a verdict
+   * without hanging, so the master is not the half-dead kind this exists for; a fast failure
+   * (socket already gone, master already dead) is `connect()`'s normal job. Skipped while a
+   * connect is in flight for the project: that attempt owns the master and may be mid-handshake.
+   */
+  private async dropMasterIfHalfDead(projectId: string, e: Conn): Promise<void> {
+    if (!this.r.probe || this.inFlight.has(projectId)) return
+    let verdict: 'answered' | 'timeout'
+    try {
+      verdict = await this.r.probe(masterRoundTripArgs(e.conn, e.controlPath), WAKE_ROUND_TRIP_TIMEOUT_MS)
+    } catch {
+      return // a probe that could not run proves nothing either way
+    }
+    if (verdict !== 'timeout') return
+    // Re-check ownership: a disconnect or endpoint change during the probe means this entry's
+    // master is no longer ours to end.
+    if (this.conns.get(projectId) !== e || this.inFlight.has(projectId)) return
+    console.warn(
+      `[ssh-project] master for ${sshHostKey(e.conn)} did not answer a round trip after wake; ending it so terminals reconnect`
+    )
+    await this.r.run(exitMasterArgs(e.conn, e.controlPath)).catch(() => {})
   }
 
   /** The connection's cached remote `--permission-mode auto` capability (undefined = not
@@ -1754,24 +1885,26 @@ export class SshProjectManager {
   }
 
   /**
-   * Deterministic hook-reply approvals (docs/hook-reply-approvals.md): write the one-line answer
-   * file for a held REMOTE permission hook, on the project's host over its ControlMaster (atomic
-   * tmp+mv, 0600 via umask). The hook is polling `~/.nodeterm/pending/<pendingId>.answer` on that
-   * host. `pendingId` is validated by the caller (main) before it reaches here; this method also
-   * refuses anything but the safe charset as defense-in-depth, since it interpolates into a remote
-   * shell command. No-ops (false) when the project isn't connected or the write fails.
+   * Deterministic hook-reply approvals (docs/hook-reply-approvals.md): write the answer file for a
+   * held REMOTE permission hook, on the project's host over its ControlMaster (atomic tmp+mv, 0600
+   * via umask). The hook is polling `~/.nodeterm/pending/<pendingId>.answer` on that host.
+   * `content` is a legacy word or a core-built JSON decision; it travels on STDIN, never in the
+   * remote command line (argv on both ends — a structured answer carries user text), and anything
+   * the hook script would not print is refused here too (`isBoundedAnswerContent`). `pendingId` is
+   * validated by the caller (main) before it reaches here; this method also refuses anything but the
+   * safe charset as defense-in-depth, since it interpolates into a remote shell command. No-ops
+   * (false) when the project isn't connected or the write fails.
    */
   async writePendingAnswer(
     projectId: string,
     pendingId: string,
-    decision: 'allow' | 'deny'
+    content: string
   ): Promise<boolean> {
     const c = this.conns.get(projectId)
     if (!c) return false
     if (!/^[A-Za-z0-9_-]+$/.test(pendingId)) return false
-    if (decision !== 'allow' && decision !== 'deny') return false
-    const dir = c.remoteHome ? `${c.remoteHome}/.nodeterm/pending` : '~/.nodeterm/pending'
-    const file = `${dir}/${pendingId}.answer`
+    if (typeof content !== 'string' || !isBoundedAnswerContent(content)) return false
+    const file = `${this.pendingDirFor(c)}/${pendingId}.answer`
     const { code } = await this.r
       .run(
         childArgs(
@@ -1779,10 +1912,34 @@ export class SshProjectManager {
           c.controlPath,
           remoteAtomicWrite(file, { restrictPermissions: true }).command
         ),
-        decision
+        content
       )
       .catch(() => ({ code: 1, stdout: '' }))
     return code === 0
+  }
+
+  /**
+   * Read the request file a held REMOTE permission hook wrote (`<pendingId>.json`, the raw
+   * PermissionRequest payload) — the source of truth a structured answer is validated against.
+   * Bounded (`head -c`), and null for every failure: not connected, the file is gone (the hold
+   * ended — `exit 3`), a dead master, an over-long file. The caller then refuses a structured
+   * answer and keeps the legacy words working exactly as before.
+   */
+  async readPendingRequest(projectId: string, pendingId: string): Promise<string | null> {
+    const c = this.conns.get(projectId)
+    if (!c) return null
+    if (!/^[A-Za-z0-9_-]+$/.test(pendingId)) return null
+    const f = quoteRemotePath(`${this.pendingDirFor(c)}/${pendingId}.json`)
+    const cmd = `if [ -f ${f} ]; then head -c ${PENDING_REQUEST_MAX_BYTES + 1} ${f}; else exit 3; fi`
+    const { code, stdout } = await this.r
+      .run(childArgs(c.conn, c.controlPath, cmd))
+      .catch(() => ({ code: 1, stdout: '' }))
+    if (code !== 0 || typeof stdout !== 'string' || Buffer.byteLength(stdout, 'utf8') > PENDING_REQUEST_MAX_BYTES) return null
+    return stdout
+  }
+
+  private pendingDirFor(c: { remoteHome?: string }): string {
+    return c.remoteHome ? `${c.remoteHome}/.nodeterm/pending` : '~/.nodeterm/pending'
   }
 
   /**
@@ -1883,6 +2040,33 @@ export class SshProjectManager {
     try {
       const parsed = JSON.parse(result.stdout) as { email?: unknown }
       return { email: typeof parsed.email === 'string' ? parsed.email : null }
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Has this managed remote account completed its device login? The same gate the local waitLogin
+   * uses — a REAL `auth.json`, never a symlink (shared assets are symlinked in from the system home;
+   * a credential riding the system login is not this account's). `null` = could not ask (not
+   * connected, unsafe `$HOME`, failed ssh), which a poll treats as "not yet", never as "yes".
+   */
+  async remoteCodexAuthPresent(projectId: string, accountId: string): Promise<boolean | null> {
+    assertCodexAccountId(accountId)
+    const c = this.conns.get(projectId)
+    if (!c || !isSafeRemoteHome(c.remoteHome)) return null
+    const auth = `${remoteCodexHome(c.remoteHome as string, accountId)}/auth.json`
+    try {
+      const { code, stdout } = await this.r.run(
+        childArgs(
+          c.conn,
+          c.controlPath,
+          `if test -f ${posixQuote(auth)} && test ! -L ${posixQuote(auth)}; then echo yes; else echo no; fi`
+        )
+      )
+      if (code !== 0) return null
+      const answer = stdout.trim().split('\n').pop()
+      return answer === 'yes' ? true : answer === 'no' ? false : null
     } catch {
       return null
     }
@@ -2027,6 +2211,27 @@ export class SshProjectManager {
     if ((await this.r.run(childArgs(c.conn, c.controlPath, command))).code !== 0) {
       throw new Error('SSH Codex session is unavailable or ambiguous')
     }
+  }
+
+  /**
+   * The SSH leg of a running Codex node's account SWITCH: expose the node's conversation to
+   * `targetAccountId` ON THE HOST (`remoteCodexExposeThread` — hardlink the one authoritative
+   * rollout into the target home, verify the target's app-server discovers it, roll the link back
+   * if not). `hostAccountIds` are every managed account on this host: the thread is resolved
+   * across all of their catalogs, and more than one distinct rollout is refused as ambiguous.
+   * Throws when the host is not connected or cannot run the relay.
+   */
+  async remoteCodexSwitchThread(
+    projectId: string,
+    threadId: string,
+    targetAccountId: string | undefined,
+    hostAccountIds: string[]
+  ): Promise<void> {
+    if (targetAccountId) assertCodexAccountId(targetAccountId)
+    if (!ACCOUNT_ID_RE.test(threadId)) throw new Error('Invalid Codex thread id')
+    const c = this.conns.get(projectId)
+    if (!c) throw new Error('The SSH project is not connected')
+    await this.remoteCodexExposeThread(c.controlPath, targetAccountId, threadId, hostAccountIds)
   }
 
   /**
@@ -2198,6 +2403,44 @@ export class SshProjectManager {
   }
 
   /**
+   * The SSH leg of "Switch Claude account": copy a conversation between two account dirs ON THE
+   * HOST (`remote-claude-session-copy.ts` builds the script; it runs over this project's master).
+   * Refuses an account pinned to another host — its dir would name a path on a machine this
+   * connection does not reach — and a connection whose `$HOME` never resolved (the account dirs are
+   * absolute paths under it). A cut stream or failed ssh parses as `failed`, never as success.
+   */
+  async remoteClaudeSessionCopy(
+    projectId: string,
+    sessionId: string,
+    source: { id?: string; host?: string },
+    target: { id?: string; host?: string }
+  ): Promise<ClaudeSessionCopyResult> {
+    const c = this.conns.get(projectId)
+    if (!c || !c.remoteHome) return { ok: false, reason: 'failed' }
+    const here = sshHostKey(c.conn)
+    if ((source.id && source.host !== here) || (target.id && target.host !== here))
+      return { ok: false, reason: 'unknown-account' }
+    let cmd: string | null
+    try {
+      cmd = remoteSessionCopyCommand({
+        sessionId,
+        sourceConfigDir: remoteClaudeConfigDir(c.remoteHome, source.id),
+        targetConfigDir: remoteClaudeConfigDir(c.remoteHome, target.id),
+        tempId: randomUUID()
+      })
+    } catch {
+      return { ok: false, reason: 'bad-request' } // an account id outside the alphabet
+    }
+    if (!cmd) return { ok: false, reason: 'bad-request' }
+    try {
+      const { code, stdout } = await this.r.run(childArgs(c.conn, c.controlPath, cmd))
+      return code === 0 ? parseRemoteSessionCopy(stdout) : { ok: false, reason: 'failed' }
+    } catch {
+      return { ok: false, reason: 'failed' }
+    }
+  }
+
+  /**
    * Best-effort `claude --version` ON THE REMOTE HOST. Null when it can't be determined.
    *
    * An ssh EXEC channel gets a non-interactive, non-login shell, whose rc file usually bails out
@@ -2295,6 +2538,7 @@ export class SshProjectManager {
     }
     // Cancel the reverse hook tunnel (over the still-live master) BEFORE tearing the master down.
     await this.remoteHooks.teardown(projectId, c.conn, c.controlPath)
+    this.tunnelProbeFailures.delete(projectId)
     void this.r.run(exitMasterArgs(c.conn, c.controlPath))
     c.master.kill()
     this.conns.delete(projectId)
@@ -2568,6 +2812,17 @@ export function initSshProject(
           }
         })
       ),
+    // Deliberately NOT through `sshChildGate`: after a sleep the gate is typically full of children
+    // hung on the very master this probes, and queueing behind them would time the queue.
+    probe: (args, timeoutMs) =>
+      new Promise((resolve) => {
+        execFile(
+          ssh,
+          args,
+          { timeout: timeoutMs, env: { ...process.env, ...appSshAgent.env() } },
+          (err) => resolve(err && (err as { killed?: boolean }).killed ? 'timeout' : 'answered')
+        )
+      }),
     runScp: (args) =>
       new Promise((resolve) => {
         // Same reason as `run`: scp re-authenticates when the master socket is gone.

@@ -32,6 +32,12 @@ export const IPC = {
   /** The foreground command of a node's tmux pane (`#{pane_current_command}`) — how the in-place
    *  agent restart sees that the CLI has exited and a shell owns the pane again. */
   ptyPaneCommand: 'pty:pane-command',
+  /** Kernel truth about a node's tmux pane: its root pid, tty, tmux pane id, and the full argv of
+   *  its FOREGROUND process group (`PaneOwner`). The name-only `ptyPaneCommand` above cannot tell
+   *  an agent from anything else — an npm-installed CLI reports as `node`, and an agent reached
+   *  over an interactive `ssh` reports as `ssh` — so the hibernation exit asks this instead before
+   *  it types `/exit` into a pane. null when the pane cannot be read. */
+  ptyPaneOwner: 'pty:pane-owner',
   /** Renderer → core: SIGTERM the non-shell foreground process group in this node's pane.
    *  Model switching uses this instead of typing an exit slash-command into an agent composer. */
   ptyTerminateForeground: 'pty:terminate-foreground',
@@ -62,6 +68,7 @@ export const IPC = {
   claudeAccountsPeerList: 'claude-accounts:peer-list',
   claudeAccountsLink: 'claude-accounts:link',
   claudeAccountsSetSkillSharing: 'claude-accounts:set-skill-sharing',
+  claudeAccountsCopySession: 'claude-accounts:copy-session',
   // Machine-scoped managed Codex accounts (S6). Add/device-login/removal, plus the three-phase,
   // owner-authorized account switch (resume the SAME conversation id, never fork) and the
   // source-side leg of moving an idle conversation to an SSH account. See main/codex-accounts.ts.
@@ -75,6 +82,7 @@ export const IPC = {
   codexAccountsCommitSwitch: 'codex-accounts:commit-switch',
   codexAccountsFinishSwitch: 'codex-accounts:finish-switch',
   codexAccountsRollbackSwitch: 'codex-accounts:rollback-switch',
+  codexAccountsSwitchThreadRemote: 'codex-accounts:switch-thread-remote',
   codexAccountsTransferThreadToSsh: 'codex-accounts:transfer-thread-to-ssh',
   // Managed pi accounts (local-only in v1): add / wait-login / cancel-wait / remove. The lifecycle is
   // core (src/core/pi-accounts-service.ts), bound through ipcMain on desktop (never the
@@ -88,6 +96,7 @@ export const IPC = {
   grokTakenSessionIds: 'grok-cli:taken-session-ids',
   /** Can a node on this machine get a managed Codex identity? See core/codex-identity-caps.ts. */
   codexIdentityCaps: 'codex-identity:caps',
+  codexCliCaps: 'codex-cli:caps',
   /** main/server → renderer: a Codex node's identity mode changed ('shared' | 'plain'). The
    *  'plain' events are what make the launcher's fallback visible instead of silent. */
   codexIdentity: 'codex-identity:event',
@@ -161,6 +170,7 @@ export const IPC = {
   agentStatus: 'agent:status',
   /** Read-only current status replay for clients that connected after the live event was emitted. */
   agentStatusSnapshot: 'agent:status-snapshot',
+  agentSubagentSnapshot: 'agent:subagent-snapshot',
   /** Renderer → main/server: answer a held Claude permission hook (deterministic approvals).
    *  Payload: `{ nodeId, pendingId, decision: 'allow'|'deny' }`; resolves boolean. See
    *  docs/hook-reply-approvals.md. */
@@ -260,6 +270,8 @@ export const IPC = {
   appUpdateProgress: 'app:update-progress',
   appUpdateError: 'app:update-error',
   appUpdateNotAvailable: 'app:update-not-available',
+  /** This build has no update channel at all (issue #814) — distinct from "up to date". */
+  appUpdateNoChannel: 'app:update-no-channel',
   appCheckForUpdates: 'app:check-for-updates',
   appGetVersion: 'app:get-version',
   appUserDataDir: 'app:user-data-dir',
@@ -297,6 +309,10 @@ export const IPC = {
   /** The scoped machine's RAM (available/total) — the cheap read behind the system-resource
    *  pill. Safe to poll locally; NOT polled for an SSH scope. */
   sessionMemoryHost: 'session-memory:host',
+  // Canvas wallpaper (core/wallpaper.ts): macOS stills, cached image reads, image import.
+  wallpaperListStills: 'wallpaper:list-stills',
+  wallpaperLoad: 'wallpaper:load',
+  wallpaperImport: 'wallpaper:import',
   // Trigger nodes (issue #493): machine-local arm/disarm + the card's status/run-now.
   triggersArm: 'triggers:arm',
   triggersDisarm: 'triggers:disarm',
@@ -579,6 +595,7 @@ export const IPC = {
   remoteHostPeerPending: 'remote:host:peer-pending',
   remoteHostPeerPendingCleared: 'remote:host:peer-pending-cleared',
   remoteHostApprove: 'remote:host:approve',
+  remotePhoneApprove: 'remote:phone:approve',
   remoteHostReject: 'remote:host:reject',
   // Host canvas mirror: renderer pushes its serialized active-project canvas to main;
   // main pushes a client's mutation back to the host renderer to apply.

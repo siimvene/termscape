@@ -52,7 +52,14 @@ paths:
   right-click; nothing running is interrupted), restart-agent
   (single agent node — the in-place CLI restart in `.claude/rules/terminal.md`; absent for a CLI we cannot quit + resume,
   disabled with a hint while the session is busy or has no id yet), delete. Actions live
-  in `Canvas.tsx`, operate on `targetIds`. The non-destructive rows are user-hideable from
+  in `Canvas.tsx`, operate on `targetIds`. **Conversation actions are grouped** so an agent node's
+  menu fits on screen: **Transfer conversation ▸** holds one row per target (a model-capable target
+  nests its gateway models one level further), and **Restart ▸** holds the restart variants —
+  restart, restart + fresh shell, restart on subscription, then Reopen as. Switch model ▸ and Switch
+  account ▸ stay first-level rows beside it (everyday choices, not recovery restarts).
+  `ContextMenu` renders submenus to any depth (`MenuRows` is recursive); a flyout that hosts a
+  submenu drops its scroll (`.ctx-submenu--host` — `overflow: auto` would clip the
+  nested flyout) and `useSubmenuFlip` lifts a flyout that would run off the bottom. The non-destructive rows are user-hideable from
   **Settings → Appearance** ("Node menu items" / "Terminal header buttons"), stored as HIDDEN
   lists in `settings.hiddenNodeMenuItems` / `settings.hiddenHeaderButtons` (empty = everything
   shows). `lib/ui-visibility.ts` owns the two inventories and `isHidden`, which only answers for
@@ -147,6 +154,18 @@ paths:
       here (they are bottom-anchored and this model has no top/bottom axis); the fork's old
       `solveFreeRegion` reserved them on every edge, but that is `fitAll`'s job now — the reported
       regression was the sidebar, which is horizontal and fully expressible without it.
+    - **Maximize also reserves persistent chrome (upstream #711, v0.3.16,
+      `renderer/lib/maximizeInsets.ts`).** Maximize also measures `.controls-cluster` and `.dock`
+      (#711): their screen rectangles reserve top/bottom space with an 8px gap, consuming the
+      existing 24px margin first. Chrome outside the horizontally usable area contributes nothing.
+      Menus and hover peeks never reserve a band. Both focus zoom branches use these same vertical
+      insets; refitting observes the persistent chrome as well as pinned panels and compares all
+      four insets. Zone snap retains its side-only policy. `nodeFocus.policy.test.ts` exercises this
+      shared Canvas decision for ordinary, maximized and restored nodes in both zoom modes. Upstream
+      routes focus through `viewportForNodeFocus`, which passes `measureMaximizeInsets(box)` to
+      `viewportForRect` **only for maximized nodes**; that gate is NOT adopted here (merge of
+      v0.3.16): an ordinary node still gets the pinned side insets, per the rule above. With no
+      pinned panels or overlapping persistent controls, `insets` is zero.
   - **`settings.focusZoomToNode`** (Behavior, default ON) is the rescale escape hatch: off, the camera
     keeps the zoom `getZoom()` reports and only pans, and that zoom is passed **unclamped** (it is one
     the canvas already shows; re-clamping it to the framing range would rescale the view the option

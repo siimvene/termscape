@@ -46,3 +46,4 @@ build/icon.icns
 /hero-tour.mp4
 nodeterm.worktrees/
 .pnpm-store/
+/videos/*

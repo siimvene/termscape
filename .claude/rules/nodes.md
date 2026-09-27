@@ -26,7 +26,21 @@ paths:
   click-to-rename title, ✦ AI-name, ×. Body has a **hover guard** overlay: dwell
   `settings.panHoverDelay` (default 600 ms) before the terminal takes focus — before that,
   drag = move node, scroll = pan canvas. **Cmd/Ctrl+M** (while hovered) toggles a markdown
-  render of the captured output. Tag chips via `NodeTags`.
+  render of the captured output — `nodes/TerminalMarkdownView.tsx`, which takes a node id + a
+  `capture` function (no React Flow context, so the kanban card modal can reuse it) and owns the
+  lifecycle: capture on mount + a ↻ refresh, a request token that drops stale/late answers, an
+  explicit empty state ('' is an answer; a rejected capture is a failure, not empty), only the
+  LAST `MD_OUTPUT_MAX_LINES` (5000) lines rendered and announced when cut, scrolled to the latest
+  output. Entering the view (output or ChatPanel) blurs the xterm; leaving it restores focus
+  only if the terminal had it on entry AND focus is now nowhere or still inside this node
+  (`terminal/useMdModeFocus.ts`). While the view is open, every "take the keyboard" path (hover
+  dwell, click, sidebar/notification jump) goes through `focusXtermUnlessCovered` and leaves the
+  hidden xterm unfocused — the overlay sits inside the node body, so a dwell over it used to route
+  keystrokes into a pane nobody could see. The body's file DROP / file PASTE handlers (which focus
+  the xterm and paste paths into it) are the other way in, and they stand aside while covered
+  (`terminalOwnsFileInput`): a screenshot pasted into the ChatPanel composer used to be caught in
+  the capture phase and typed as a path into the hidden pane. Both are source-pinned in
+  `useMdModeFocus.test.tsx`. Tag chips via `NodeTags`.
   **Selection + copy is tmux's** (its mouse is on — see `.claude/rules/terminal.md`): drag to select, wheel to
   scroll tmux's history. A drag copies via copy-mode, and tmux emits **OSC 52** to the client, whose
   handler writes the **system clipboard** — the one copy path on every platform *and* over SSH (no
@@ -38,8 +52,8 @@ paths:
   fall through would reach the pty as `\x03` (SIGINT). Ctrl+Insert exists because Chromium reserves
   Ctrl+Shift+C for the inspector and a page cannot `preventDefault()` it — which is where Server
   Edition users land. Plain **Ctrl+C** is never intercepted.
-  **PASTE is the platform's, never ours** (`isPasteShortcut` → the `'native'` action): we own no
-  paste path — ⌘V on mac reaches the Edit menu's `{role:'paste'}`, whose `paste` event xterm frames
+  **Text paste uses the platform event** (`isPasteShortcut` → the `'native'` action): ⌘V on
+  mac reaches the Edit menu's `{role:'paste'}`, whose `paste` event xterm frames
   as a bracketed paste. All the terminal does is stop CANCELLING the chord, and that is a
   **Windows-only** claim: xterm's keymap turns Ctrl+V into `\x16` with `cancel`, which suppressed
   Chromium's paste command *and* the Ctrl+V accelerator behind it, so Ctrl+V pasted nothing at all
@@ -49,6 +63,13 @@ paths:
   key nor a cancel for them, so the platform already pastes. To select in **xterm** instead of tmux
   (or inside an app that grabs the mouse, like vim/htop), hold **Option** (mac —
   xterm's `macOptionClickForcesSelection`) or **Shift** (Linux/Windows) while dragging.
+  **Screenshot paste (#712):** the capture handler in both TerminalNode and ModalTerminal
+  owns files/images: save/upload, then paste the path, suppressing accompanying text. A
+  macOS Ctrl+V may instead let a local foreground agent read its own system clipboard.
+  Configured agent identity proves neither foreground state nor clipboard support, and a
+  PTY write has no image receipt. Never synthesize that key or fall back between routes.
+  The macOS shortcuts reference explains both keys; its Server Edition copy explicitly
+  says Ctrl+V cannot transfer the viewer's clipboard to the host. SSH keeps remote uploads.
   **Copying now says so**: the OSC 52 handler floats a transient `Copied N lines` pill over the
   terminal's BOTTOM-RIGHT corner (`.term-copy-pill`, the same class on the canvas node and the
   kanban card modal — one session seen twice must not speak in two voices; bottom-right because
@@ -81,6 +102,25 @@ paths:
   have no remote fs API with which to verify a token; relay tabs do have a core-bound, jailed fs
   API and therefore support file links. Windows existence matching is case-insensitive and accepts
   both separators; UNC tokens are refused whole before they can be reinterpreted as cwd-relative.
+  **Right-click on a link** opens a link menu (pure `terminal/link-menu.ts`; the listener is
+  `installLinkContextMenu`, beside the Cmd+click fallback and sharing its `linkAtCell` hit-test):
+  Open / Reveal in Explorer / Download / Copy path for a file, Open in browser / canvas browser /
+  Copy link for a URL. The gates are the Explorer's, reused not restated — Download only where
+  `downloadRoute` ≠ `none` (SSH project → scp to this machine, Server Edition → HTTP), never on a
+  desktop LOCAL project; the OS reveal only under `canUseLocalShell`. **The decision is made on the
+  right PRESS, not on `contextmenu`:** tmux 3.x binds `MouseDown3Pane` to its own `display-menu`, so
+  the press is what must be swallowed; a right-click OFF a link stays byte-identical (tmux menu,
+  agent TUI, node menu). A path-shaped token that turns out not to exist still gets a menu ("Not
+  found" + Copy path) — its press was already swallowed, and a silent swallow reads as broken.
+  Downloads report in a `DownloadStrip` floated over the terminal, not in a drawer that may be
+  shut. The kanban card modal gets URL rows only (no file links there) and no "Open in canvas
+  browser" (the node would land under the board).
+  **Home-relative `~/x` tokens** (Claude Code prints its plan file as `~/.claude/plans/<name>.md`)
+  stay `~`-rooted all the way to the fs call and are expanded by the core that OWNS the filesystem
+  — `expandHomePath` in `core/fs-handlers.ts` for desktop/Server Edition, the remote shell for
+  `sshFs` — because the renderer does not know that home. A `~` after a path character (`a~/x`)
+  or `~user/x` is not a home path and yields no link. The relay's jailed `fs.*` calls fs-ops
+  directly and does not expand, so a relay tab's `~` token fails closed (no link).
 - **Agent** (`createAgentNode(agentId, …)`) — a terminal preset that runs an agent CLI as its
   `initialCommand` (runs once on open via `transport.write`, then cleared), with `data.agentId`
   set. Builtins (`claude`/`codex`/`gemini`) come from `AGENT_CONFIG` (clay color etc.).
@@ -134,6 +174,18 @@ paths:
 - **browser** (`BrowserNode.tsx`) — a navigable Chromium browser wrapping the shared
   `BrowserSurface` (webview + toolbar); the last top-level URL persists to `data.url`, and the same
   surface backs the kanban card modal's browser popup.
+  **Page zoom is owned by the GUEST boundary, not the canvas DOM** (`@shared/webview-zoom` +
+  `main/webview-zoom.ts`, 2026-09-20). Measured on Electron 42.10.1 with a physical wheel injection:
+  Ctrl+wheel over the page arrived in its OOPIF with `ctrl=true`, the host received NO `wheel`
+  event, and Electron left the factor at 1 until the guest `WebContents`'s `zoom-changed` handler
+  called `setZoomLevel` (one level produced 1.2). So `.browser-node__view` / the web node body KEEP
+  `nowheel` — it prevents React Flow from taking a wheel packet over the page, and removing it
+  cannot make an OOPIF event bubble. Main's one `web-contents-created` listener installs wheel and
+  Cmd/Ctrl +/-/0 zoom only for `getType() === 'webview'`; the shared `WebviewZoomControls` calls the
+  same 50%–300% policy for `WebNode` and `BrowserSurface`, which also covers the card modal. The app
+  does NOT persist zoom in `project.json`: Electron propagates a zoom level by origin, so a per-node
+  persisted value would make two nodes for one origin fight. Desktop: full; Server Edition:
+  controls hidden (no Electron guest); Mobile: N/A (no canvas).
 - **files** (`FilesNode.tsx`) — a file-manager node: one directory listing (`data.cwd`, persisted)
   pinned beside the terminals working in it. Adds no new IPC (runs on `FsApi`). Deep reference:
   `.claude/rules/files-node.md`.
@@ -208,7 +260,35 @@ there by design; the rest of each edge is a ~12px band.
 
 Monaco is wired in `renderer/editor/monaco-setup.ts` (language workers bundled via Vite
 `?worker` — no CDN; CSP `worker-src` allows them). Markdown rendering is shared in
-`renderer/lib/markdown.ts` (`marked` + DOMPurify sanitize).
+`renderer/lib/markdown.ts` (`marked` + DOMPurify sanitize). Terminal OUTPUT (the ⌘M output view)
+goes through `renderer/lib/terminalOutputMarkdown.ts` instead: a private `Marked` instance with
+`breaks` on (output is line-oriented — without it `ls -l` joined into one paragraph) that renders
+raw-HTML tokens as escaped TEXT (a program's `<stdin>` is not markup; parsed as HTML, DOMPurify
+stripped it) and trims capture-pane's trailing padding. The escape is on the `html` token, never a
+global pre-escape of `<`, which would double-escape code spans/fences.
+
+**A link in rendered markdown must never navigate the app window.** DOMPurify keeps an anchor's
+href as written, and agents write relative links constantly (`[pty-manager.ts](src/core/pty-manager.ts:4100)`).
+A click resolved it against the app document: on the desktop another `file://` path, which the old
+`will-navigate` guard ALLOWED ("any `file://` is ours"), so the main window navigated to a file that
+does not exist and the whole canvas was gone until a reload; in the Server Edition any `<a href>`
+click, relative or http(s), navigated the app's own tab away. Two layers now:
+- **Renderer, every surface** — ONE delegated, document-level click listener installed at boot
+  (`renderer/lib/markdownLinks.ts`, from `boot.tsx`), scoped by `RENDERED_MARKDOWN_CONTAINERS`
+  (`.term-md__content` — terminal ⌘M view + editor Preview, `.term-chat__text` — ChatPanel,
+  `.sticky-node__md` — sticky notes on canvas AND in the kanban card modal). http/https/mailto →
+  `shell.openExternal` (system browser / a new browser tab); `#fragment` and empty href → swallowed;
+  anything else → swallowed + an error toast (`nodeterm:toast` — the only kind Canvas renders).
+  Local links deliberately do NOT open a file: resolving one needs the owning node's cwd AND its
+  filesystem dialect (session source, core platform, SSH/relay — TerminalNode's `pathConvention`),
+  which a document-level handler cannot see; a wrong guess opens the wrong file on the wrong machine.
+  **A new markdown surface must render inside a listed container** — `markdownLinks.test.ts` fails
+  on a component that pipes `renderMarkdown` into `dangerouslySetInnerHTML` outside the list, and on
+  a listed class nothing renders any more.
+- **Main, desktop backstop** — `decideMainFrameNavigation` (`main/navigation-guard.ts`) allows a
+  main-frame navigation ONLY to the entry document itself (scheme + host + decoded pathname; hash
+  and query ignored, so reload and dev HMR work); a safe external scheme goes to the OS; everything
+  else — any other `file://` path, any other dev-server path — is blocked.
 
 ### Webview keep-alive across project switches (browser/web nodes)
 
@@ -267,6 +347,20 @@ the wire never see any of it):
   every returning page until the fallback; live→ghost never did). A genuinely deleted node's entry
   is dropped at the deletion funnels (handleNodesChange's `remove`, `deleteNodes`, the peer-mutation
   remove, project deletion/prune), with the next retire as backstop — never by the merge.
+- **The minimap must exclude ghosts from BOTH its node list and its bounds lookup** (#850/#786).
+  React Flow's MiniMap ignores CSS `display:none`; setting `hidden` on the real node instead
+  unmounts the guest. `canvas/VisibleMiniMap.tsx` projects the live flow store into a provider
+  scoped to the map, preserving internal absolute positions, measured sizes and the original
+  panZoom instance. Only the map's node collections are filtered; persistence and pool lifecycle
+  are untouched. The real MiniMap regression tests cover ghost/live transitions, empty bounds,
+  removals, grouped geometry and camera interaction. When upgrading React Flow, keep those
+  tests: the projection deliberately mirrors the state fields consumed by MiniMap.
+  **A pan/zoom frame takes a transform-only fast path**: when `transform` changed and the node
+  collections did not, only the camera fields are copied and a full re-projection follows
+  `MINIMAP_FULL_SYNC_DEBOUNCE_MS` after the move settles (rebuilding them per frame re-rendered
+  every rectangle; measured 402 forced layouts per 20 s pan vs 1 with the map hidden). Identity
+  checks alone cannot replace the full path: xyflow's `updateNodeInternals` mutates `nodeLookup`
+  IN PLACE and then calls `set({})`, so any update that leaves `transform` alone syncs fully.
 - **Memory bounds** (same posture as park/WebGL: a lever must not end live work): a ghost is
   hidden, so the existing Browser Memory Saver discards its guest after `BROWSER_DISCARD_MS`
   unless loading/audible/agent-driven — `onGuestDiscarded` then drops the entry (a husk would hold
@@ -370,3 +464,14 @@ or browser nodes means adding the draw and the set together, in one change.
   attaches to tmux sessions over the transport protocol and carries no per-node icon concept;
   surfacing one means extending that protocol (follow-up in the iOS repo).
 
+## Media playback lifetime (#680)
+
+Audio routes through `isMediaFile` to the existing persisted `video` kind and native audio controls.
+Legacy audio editor nodes migrate on load. Desktop uses the existing local/SSH allowlist; Server
+and relay retain their explicit media transport degradation. Native mobile does not consume these
+React nodes; its own player/IME behavior requires a separate device check.
+
+Remote cache entries requested in this run are retained until exit, including cache hits; pruning
+waits are coordinated with a concurrent cache reader. The 20-entry cap is soft for retained files,
+so disk use may grow in a long run; prior-run entries are eligible again after restart. `mediaRange`
+handles suffix ranges and rejects unsatisfiable ones without weakening the serve-time path jail.

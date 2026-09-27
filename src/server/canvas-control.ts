@@ -27,7 +27,8 @@ import { codexIdentityCaps } from '../core/codex-identity-caps'
 import { codexThreadIdentityRoot } from '../core/codex-identity-proxy'
 import { claudeCliCaps, type ClaudeCliCaps } from '../core/claude-cli'
 import { grokCliCaps } from '../core/grok-cli'
-import type { GrokCliCaps } from '../shared/types'
+import { codexCliCaps } from '../core/codex-cli'
+import type { CodexCliCaps, GrokCliCaps } from '../shared/types'
 import { installHooksIntoLocalAccounts } from '../core/claude-accounts-service'
 import { installPiExtensionIntoLocalAccounts } from '../core/pi-accounts-service'
 import { platform } from '../core/platform'
@@ -52,6 +53,7 @@ export interface ServerCanvasControlDeps {
   cliCaps?: () => Promise<ClaudeCliCaps>
   /** grok's own `--session-id` probe; defaults to the real one. See HeadlessNodeFactoryDeps. */
   grokCaps?: () => Promise<GrokCliCaps>
+  codexCaps?: () => Promise<CodexCliCaps>
   /** Test seam for the boot-populated shared Codex capability answer. */
   codexSharedIdentity?: () => Promise<boolean>
   /**
@@ -192,6 +194,10 @@ export async function initServerCanvasControl(
     cliCaps: deps.cliCaps ?? claudeCliCaps,
     // grok answers with its own probe — see HeadlessNodeFactoryDeps.grokCaps.
     grokCaps: deps.grokCaps ?? grokCliCaps,
+    // …and so does codex, for the same reason: its `--ask-for-approval` vocabulary is its own and
+    // it MOVED (see HeadlessNodeFactoryDeps.codexCaps). The Server Edition runs its Codex sessions
+    // on this host's `codex`, so this probe is the right authority for them.
+    codexCaps: deps.codexCaps ?? codexCliCaps,
     codexSharedIdentity:
       deps.codexSharedIdentity ?? (() => codexIdentityCaps().then((caps) => caps.shared)),
     stateOf: nodeState,
@@ -212,7 +218,8 @@ export async function initServerCanvasControl(
     // separate paste from Enter so a fresh TUI cannot swallow the first submit keystroke.
     sendEnvelope: (nodeId, envelope) =>
       sendSettledEnvelope(deps.ptyManager, nodeId, envelope),
-    hasLiveSession: (nodeId) => deps.ptyManager.hasLiveSession(nodeId),
+    // Attached OR released-but-running: see AgentMessagingDeps.hasLiveSession.
+    hasLiveSession: (nodeId) => deps.ptyManager.sessionExists(nodeId),
     mirrorEntry,
     projects: () => deps.workspaceStore.persistedCanvases(),
     isRemoteNode: () => false,

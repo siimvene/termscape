@@ -18,6 +18,7 @@ paths:
   - "src/renderer/state/systemCodexAccount.ts"
   - "src/shared/agents/account-*.ts"
   - "src/renderer/components/settings/sections/AccountsSection*.tsx"
+  - "src/core/remote-account-env*.ts"
 ---
 # Managed Claude/Codex accounts, account switch, usage indicator scope, remote usage
 
@@ -53,7 +54,8 @@ paths:
   --version`, `isSupportedClaudeVersion`).
   - **`data.accountId` (terminal nodes)** — resolved **once at node creation**
     (`resolveNewNodeAccount`: explicit submenu pick → `project.defaultAccountId` → system default
-    `~/.claude`), then **immutable** and **persisted** (serializers). `undefined` = system default
+    `~/.claude`), then **persisted** (serializers) and changed ONLY by an explicit **account switch**
+    (below). `undefined` = system default
     = **bit-for-bit legacy behavior** (no env touched). Inherited by **Branch** (the
     terminal→chat fork it also fed is gone — the SDK chat node was removed 2026-07). Two #419
     rules inside the resolver: the submenu's **System row passes `null`** (an EXPLICIT system
@@ -61,6 +63,35 @@ paths:
     the project-default account), and validation runs against `accountsForProject`, not the raw
     list, so a **pending** account or one **pinned to another machine's host** is never stamped
     onto a node it cannot run on (both used to reach the missing-dir fallback at spawn).
+  - **Switch Claude account (running node)** — node right-click → *Switch Claude
+    account ▸* moves the conversation onto another account **already logged in** on this machine,
+    with no `/login` in the pane. It works because a transcript carries **no account identity**
+    (measured on 2.1.280: under a config dir lacking the file `--resume` says "No conversation found";
+    with the file copied into `<configDir>/projects/<encoded cwd>/<id>.jsonl` only the login is
+    missing). Choreography = "Restart agent and shell" with a `beforeRecycle` step
+    (`agent-restart.ts`): exit the CLI (refused while working/blocked) → core
+    `claudeAccounts.copySession` (`core/claude-session-copy.ts`) → rebind `accountId` → recycle, whose
+    respawn gets the new `CLAUDE_CONFIG_DIR` and whose cold restore resumes the same id. Two rules:
+    the copy runs **after** the exit, so the source is final and a target that is a byte-**prefix**
+    of it is just an older copy (A→B→A) and may be replaced, while a **diverged** target is never
+    overwritten; and the rebind is **returned** by `beforeRecycle` and merged into the closure's own
+    `updateNodeData`, never set by a separate Canvas `setNodes` in the same tick (React Flow's update
+    queue rebuilds the node from the store's copy and can drop it). Builtin `claude` only (the
+    `boundAccountId` rule below). **SSH nodes** switch between the accounts pinned to THEIR host (and
+    the host's own `~/.claude`): the copy runs ON the host as one generated `sh` script over the
+    project's master (`core/remote-claude-session-copy.ts`, tested under a real `/bin/sh`; same
+    prefix/diverged rule, via `head -c | cmp`), and `SshProjectManager.remoteClaudeSessionCopy`
+    refuses an account pinned to another host. An SSH ctx with no remote leg (Server Edition) is
+    refused, never answered from the local disk. Relay tabs: shown disabled.
+    **Two more surfaces, one choreography** (`runClaudeAccountSwitch` returns a
+    `ClaudeSwitchOutcome` instead of announcing it): the **kanban card** right-click menu gets the
+    node's rows from the SAME builder the canvas node menu uses (`accountSwitchRows` → KanbanView's
+    `accountMenuItems`), and the **usage popover** puts "⇄ Move N sessions" on each account row —
+    every Claude session on this canvas running on that account, on the popover's machine
+    (`bulkSwitchCandidates`), is moved to the picked account ONE AT A TIME (N parallel copies +
+    recycles on one host is a load spike), busy ones skipped and counted, one summary line
+    (`summarizeBulkSwitch`). The cross-project board (GlobalKanbanView) does not offer it:
+    its cards belong to other projects' canvases, whose nodes have no restart closure mounted.
   - **`boundAccountId(accountId, agentId)` (`shared/agents/account-binding.ts`) is the ONE rule for
     whether a node is account-bound at all**, and it feeds `data.accountId` *and* the account color
     from a single decision — split them and a node carries an account it is not painted for, or is
@@ -282,7 +313,7 @@ paths:
     picks the account dir's `projects/`, composite cache key includes `accountId`); the same
     threading runs through the session-name poll, restart handoff, and `ChatPanel` (the ⌘M
     transcript view, `chat.readTranscript`). The **usage indicator** is per account (`claude-usage.ts`: scoped Keychain
-    service first, legacy unscoped fallback; popover lists a row per account with **System**
+    service only for managed accounts, then their credentials file; popover lists a row per account with **System**
     first). **Remote (SSH host) accounts are included** — see **Remote usage** below.
   - **Pickers** — New Claude exposes an account **submenu** (pane menu; flat entries in
     the dock; palette commands; TabBar sets the **per-project default**). A **local** project
@@ -295,6 +326,47 @@ paths:
     correct (their credentials aren't on the host) but read as "multi-account is broken on SSH".
   - **Remote accounts** — selection + login + env injection, plus **usage** (below); no
     per-account transcript readers beyond env.
+  - **Settings → Accounts is ONE machine-grouped surface for BOTH providers** (2026-09): a panel
+    per machine (this one, then each saved SSH server ∪ the active project's server — a saved server
+    with no accounts and no connection is folded into a footnote count), each holding a Claude and a
+    Codex block with the SAME row, system row and Add button (`groupAccountsByMachine`). A remote
+    machine's Add / Retry / Remove act ON that host over a **connected** project only — a
+    disconnected host's Add is disabled and its Remove only forgets the record (the dialog says so);
+    a remote id never reaches a LOCAL remove. Codex gained the remote lifecycle this needed:
+    `codexAccounts.add/waitLogin/identity/remove` take an SSH `ctx` (desktop `src/main/codex-accounts.ts`
+    → the `SshProjectManager.remoteCodex*` legs; the credential is written on the host by
+    `codex login --device-auth` — the default browser flow calls back to the HOST's localhost), and
+    `systemIdentity({projectId})` now asks the host instead of answering `null`.
+    **Fork (Termscape): Pi is the third provider on this surface, LOCAL-ONLY.** The local machine
+    panel carries a Pi block beside Claude and Codex; a remote machine's panel never offers, adds or
+    binds a Pi account (`boundAccountId(id, 'pi', { ssh })` drops the binding on SSH nodes, and the
+    remote spawn skips the pi scope). Carry this into any further provider-keyed generalization of
+    the surface. Detail: `.claude/rules/agents-pi.md`.
+  - **The remote spawn scopes the account BY PROVIDER** (`core/remote-account-env.ts`). It used to
+    hand every `accountId` to Claude's `CLAUDE_CONFIG_DIR`, so a node bound to a managed Codex account
+    on an SSH host got a Claude dir that does not exist and NO `CODEX_HOME` — its codex silently ran
+    as the host's system login (`remoteCodexTmuxEnvArgs` existed with no caller). The system Codex
+    account is left to the host's own env (a remote `CODEX_HOME` of the user's — a snap remap — must
+    win).
+  - **Switch Codex account on an SSH node** (2026-09) does NOT use the local three-phase reservation
+    (it plans rollouts in LOCAL homes). It is one host-side exposure —
+    `codexAccounts.switchThreadRemote` → `SshProjectManager.remoteCodexSwitchThread` →
+    `remoteCodexExposeThread` (relay `expose-thread`): resolve the thread across every account
+    catalog on the host, hardlink the one authoritative rollout into the target home, verify the
+    target's app-server discovers it, roll the link back if not; an ambiguous thread is refused.
+    Then the usual still-eligible check and a restart-shell recycle, with the rebind riding
+    `beforeRecycle` (never a separate setNodes). A hardlink, not a copy: both accounts see ONE file,
+    so there is no diverged-copy case. Needs the relay runtime on the host (node + codex + curl);
+    without it the switch fails with a notice and nothing changes. `planCodexAccountSwitch` now
+    refuses a target on another machine than the node (`hostKey`) — the switch never crosses
+    machines (moving a local conversation to a host is `transferThreadToSsh`, a separate flow).
+  - **Remote Codex safety (#736):** `spawnNew` requires managed SSH Codex accounts (including custom
+    Codex harnesses and known agent-less login terminals) to have a safe id in the saved Codex account
+    list and a safe resolved `remoteHome`. `remoteAccountScopeEnvArgs` then supplies the private
+    `CODEX_HOME` and account marker. An unresolved or unsafe home must refuse before env staging/spawn,
+    not fall back to the host's system login. System Codex retains the host environment even before
+    home discovery during early attach. Never guess HOME/CODEX_HOME. Desktop and Server share this
+    core gate; Desktop supports the remote lifecycle, while Server account management remains unavailable.
   - **Switch account (running node)** — the node context menu's **Switch account** submenu moves an
     already-running Claude session onto another local account (or back to the system `~/.claude`).
     Because `data.accountId` is immutable at creation, this is a **copy-then-flip cold restore**,
@@ -316,10 +388,28 @@ paths:
     defense-in-depth regex in the renderer — a forged id interpolated into a path must never
     traverse. Server Edition switches accounts too (no remote leg — the server runs ON the host).
 
+- **Active Claude organization** (#552) — local Desktop and Server usage snapshots carry optional
+  `organization` metadata from the SAME account's `.claude.json` (system, managed or linked).
+  Read it even if Keychain/file credentials already have an email; unreadable/missing metadata
+  preserves the email and usage. A known email mismatch drops metadata. Managed usage cannot use
+  an unscoped Keychain token: a matching email alone does not prove it belongs to the same org.
+  The popover names the org beneath the email; internal type/tier/id remain tooltip details.
+  Refresh re-reads metadata together with usage; normal cache/poll intervals still apply.
+  SSH's existing shell reader does not supply organization metadata and keeps its email-only
+  fallback. Mobile's usage mirror currently omits it; displaying orgs there needs a follow-up
+  mirror/iOS protocol change. No organization picker, credential writes or switching are added.
+
+- **Bottom chrome shares a measured width budget** (issue #853). `CanvasPills` observes the canvas
+  wrapper and actual dock, bounds the left row with an 8px gap, and uses a row above the dock when
+  fewer than 200 CSS pixels remain. Rects are converted back through UI scale. Usage summary text
+  ellipsizes; refresh never shrinks. Do not clip the whole row or give it a stacking context:
+  usage/RAM popovers must escape independently above the sidebar and board. Desktop and Server
+  share this renderer. The real-browser regression is `scripts/usage-layout.test.ts` (`CHROME_BIN`).
+
 - **The usage indicator is scoped to the ACTIVE project** (`renderer/lib/usageScope.ts`, pure +
   unit-tested) — it describes **the machine that project runs on**, and nothing else. A local
   project shows this machine (system + managed local accounts + the billing providers, whose
-  credentials are all local); an **SSH project shows only that host's Claude accounts** — no local
+  credentials are all local); an **SSH project shows that host's Claude and Codex accounts** — no local
   Claude, no local providers, no other host. Without this the panel showed every source at once:
   each addition was individually reasonable and the sum was unreadable, numbers from three
   machines sharing one line with nothing saying which was which. Deliberately NOT narrowed to the
@@ -332,6 +422,13 @@ paths:
   every canvas edit. ⟳ refreshes only what is on screen, and `usage.remote({hostKey})` reads only
   that host (cache eviction still runs against the FULL target list, so switching between two SSH
   projects doesn't throw each host's cache away).
+
+- **Grok billing failures** retain per-view HTTP status or a safe timeout/network/invalid-response category in `ProviderUsage.diagnostics`. The default view still runs after a credits failure; recovered limits keep their diagnostic. Only two successful empty views imply no quota. Never include raw exceptions, URLs or response bodies, or refresh/write credentials. Desktop and Server share the core reader and popover; provider-only errors must keep the pill visible.
+
+- **Usage failure readouts** — an empty Claude snapshot with `status: error` says "Could not
+  read usage." in both the single-account and multi-account popovers, including beside healthy
+  provider rows. Nonempty snapshots retain their last-known bars on error; no error-specific
+  authentication advice is inferred from the status.
 
 - **Remote usage** (SSH hosts, `src/core/usage/remote-claude-usage.ts`) — the source behind the
   SSH scope above. v1 excluded remote accounts, which left a user whose Claude only ever runs on a
@@ -366,6 +463,18 @@ paths:
   slice pushed to a host still drops `usage` (a host reading its own numbers back off us is
   pointless), and no keychain leg exists remotely (a headless macOS host would hang on the prompt,
   so a mac host reports nothing).
+- **Codex SSH usage** (`core/usage/remote-codex-usage.ts`) uses host-side Node JSON parsing
+  and curl, reusing the local Codex quota mapper. Read only `tokens.access_token` and
+  `tokens.account_id`; pass headers through stdin, disable curl config/redirects, and return
+  only sanitized quota fields. Never download credentials, refresh tokens, or launch a remote
+  app-server just to refresh usage. The host needs Node and curl; missing tools/transport or
+  malformed responses are errors, not proof of a logged-out account. System reads use the
+  host login environment's `CODEX_HOME`; managed reads use the validated account's remote
+  home. Cache identity includes provider, host, account and connection/home identity.
+  Remote Codex rows obey the Codex visibility setting and carry no Claude default-account
+  or bulk-move actions. Desktop supports SSH reads; Server Edition keeps its local core
+  readers and absent SSH dependency. The private mobile reader is separate. Device checks:
+  `docs/codex-ssh-metrics.md`.
 - **Codex usage in the agent-status mirror (the phone's Codex rows, 2026-09-06).** The mirror's
   `usage` block carries Codex rows (`agentId:'codex'`, the un-owned system row + one per managed
   local account) next to the Claude rows; `src/server/peer-status-bridge.ts` forwards them
@@ -450,8 +559,9 @@ paths:
   resolve a linked id with no per-caller branch. Transcript jails accept `<linkedDir>/projects/**`
   **from settings only**, never a POST-named dir. **Removing a linked account only forgets the
   record** — the `rm -rf` names `accountConfigDir(userData, id)` directly, so it cannot reach outside
-  the managed root. The hook installer writes `settings.json` THROUGH a symlink (`writeFileSync`, not
-  `renameAtomic`, which would replace the link; pinned by `claude-accounts-link-symlink.test.ts`).
+  the managed root. The hook installer resolves `settings.json` symlinks and atomically updates their
+  target (without replacing the link; pinned by `claude-accounts-link-symlink.test.ts` — a
+  `renameAtomic` over the link itself would be the regression, it replaces the link).
 - **Observed account** (`ObservedClaudeAccount`, `NormalizedAgentEvent.account`) — which account a
   session is ACTUALLY on, derived by the hook server from the payload's `transcript_path`
   (`configDirFromTranscriptPath` walks up to the LAST `projects` segment).

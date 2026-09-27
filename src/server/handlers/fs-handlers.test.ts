@@ -3,7 +3,7 @@ import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import { ServerPlatform } from '../platform-server'
-import { registerFsHandlers } from '../../core/fs-handlers'
+import { expandHomePath, registerFsHandlers } from '../../core/fs-handlers'
 import { appImagesDir, projectImagesDir } from '../../core/canvas-images'
 import { IPC } from '../../shared/ipc'
 
@@ -47,6 +47,31 @@ describe('server fs handlers', () => {
     expect(await call(IPC.fsExists, nested)).toBe(false)
     expect(await call(IPC.fsMkdir, nested)).toBe(true)
     expect(await call(IPC.fsExists, nested)).toBe(true)
+  })
+  // Terminal output names home-relative paths (Claude Code's plan footer prints
+  // `~/.claude/plans/<name>.md`) and the renderer cannot resolve them — it does not know this
+  // core's home. The handlers expand them here. os.homedir() honours $HOME on POSIX only.
+  it.skipIf(process.platform === 'win32')('expands a leading ~/ against this core\'s home', async () => {
+    const prev = process.env.HOME
+    process.env.HOME = dir
+    try {
+      fs.mkdirSync(path.join(dir, '.claude/plans'), { recursive: true })
+      fs.writeFileSync(path.join(dir, '.claude/plans/p.md'), '# Plan')
+      const entries = (await call(IPC.fsList, '~/.claude/plans')) as Array<{ name: string }>
+      expect(entries.map((e) => e.name)).toEqual(['p.md'])
+      expect(await call(IPC.fsRead, '~/.claude/plans/p.md')).toBe('# Plan')
+      expect(await call(IPC.fsExists, '~')).toBe(true)
+      expect(await call(IPC.fsWrite, '~/.claude/plans/p.md', 'edited')).toBe(true)
+      expect(fs.readFileSync(path.join(dir, '.claude/plans/p.md'), 'utf8')).toBe('edited')
+    } finally {
+      process.env.HOME = prev
+    }
+  })
+  it('leaves ~user and mid-path tildes literal', () => {
+    expect(expandHomePath('~alice/x', '/h')).toBe('~alice/x')
+    expect(expandHomePath('/a/~/x', '/h')).toBe('/a/~/x')
+    expect(expandHomePath('~', '/h')).toBe('/h')
+    expect(expandHomePath('~/a/b', '/h')).toBe(path.join('/h', 'a/b'))
   })
   // The canvas-image write directory is derived HERE, from this shell's own project registry —
   // the renderer sends a projectId and never names a path. These pin the injection itself: it is

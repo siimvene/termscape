@@ -526,6 +526,36 @@ export function normalizeTerminalShortcutPolicy(v: unknown): TerminalShortcutPol
   return v === 'terminal-first' ? 'terminal-first' : 'app-first'
 }
 
+/**
+ * PURE. Does the user's `terminalShortcutPolicy` mean this window must stop claiming chords right
+ * now? The composition `index.ts` hands to `installKeydownIntercepts`' 5th parameter, exported so
+ * it can be pressed instead of living untested inside a closure in a 5000-line file. It lives in
+ * `shared` because it has TWO consumers: the desktop intercept (`main/keydown-intercept.ts`, which
+ * re-exports it) and the Server Edition's browser-side ⌘M listener
+ * (`renderer/bridge/markdown-toggle-key.ts`, which feeds it focus read straight from the DOM).
+ *
+ * **Both halves are refusals and both matter.** `app-first` is the shipped default, so it must be
+ * false whatever the mirror reports — that is the byte-identical guarantee of this feature: a user
+ * who never touched the setting sees exactly the pre-feature intercepts, even though their
+ * renderer is reporting terminal focus all day. And in MAIN, `terminalFocused` is a MIRROR of the
+ * renderer's `document.activeElement`, which is why `false` is its reset value everywhere main
+ * keeps it: a page that died mid-report, a window that never had one, a reload — all resolve to
+ * "intercepts on", never to "intercepts off with nothing alive to turn them back on". That
+ * fail-safe reasoning is about main's mirror only: the browser consumer has no mirror and passes
+ * LIVE DOM focus (`isTerminalTarget(document.activeElement)`) read on the very keystroke.
+ *
+ * Why the policy is read here rather than the intercepts simply being uninstalled under
+ * `terminal-first`: the policy is a live setting and the focus changes per keystroke, so there is
+ * nothing static to install against — and an app-first user's window must not be a different
+ * window from a terminal-first user's.
+ */
+export function policyStandsDown(
+  policy: TerminalShortcutPolicy,
+  terminalFocused: boolean
+): boolean {
+  return policy === 'terminal-first' && terminalFocused
+}
+
 /** `typing` and `terminal` are expected to be DISJOINT — xterm's hidden textarea is a terminal,
  *  not a typing surface, so a caller classifying focus must not report both. If one does anyway,
  *  `typing` wins (it is checked first) and every terminal-scope command becomes unreachable. */

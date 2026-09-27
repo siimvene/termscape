@@ -3,6 +3,7 @@ import type { ProjectKanban } from '@shared/types'
 import { AGENT_CONFIG, BUILTIN_AGENT_IDS, type AgentId } from '@shared/agents/config'
 import { useProjects } from '../../state/projects'
 import { useSettings } from '../../state/settings'
+import { useBoardWallpaperStyle } from '../../state/wallpaper'
 import {
   addColumn, assignNode, assignedTo, boardLabels, cardMatchesLabelFilter, cardMeta, columnForNode,
   deleteColumn, labelsForCard, moveColumn,
@@ -290,6 +291,7 @@ const Swimlane = memo(function Swimlane({
 export const GlobalKanbanView = memo(function GlobalKanbanView() {
   // Same rule as the per-project board: the canvas is covered but mounted underneath.
   useEffect(() => markCanvasCovered(document.documentElement), [])
+  const boardStyle = useBoardWallpaperStyle()
   const projects = useProjects(s => s.projects.filter(p => !p.closed))
   const { api } = useSession()
   const modalRef = useRef<string | null>(null)
@@ -367,7 +369,7 @@ export const GlobalKanbanView = memo(function GlobalKanbanView() {
 
   if (projects.length === 0) {
     return (
-      <div className="kanban-overlay global-kanban">
+      <div className="kanban-overlay global-kanban" style={boardStyle}>
         <div className="kanban-header"><span className="kanban-header__name">All Projects — Kanban</span></div>
         <div className="kanban-empty">No projects yet. Create a project to see its swimlane.</div>
       </div>
@@ -375,7 +377,7 @@ export const GlobalKanbanView = memo(function GlobalKanbanView() {
   }
 
   return (
-    <div className="kanban-overlay global-kanban" ref={containerRef}>
+    <div className="kanban-overlay global-kanban" ref={containerRef} style={boardStyle}>
       <div className="kanban-header">
         <span className="kanban-header__name">All Projects</span>
         <span className="kanban-swimlane__hint">{projects.length} projects — {mod}+1..{Math.min(9, projects.length)} to jump</span>

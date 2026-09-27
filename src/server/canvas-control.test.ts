@@ -192,11 +192,13 @@ describe('initServerCanvasControl', () => {
     const sendText = vi.fn(async (_nodeId: string, _text: string) => true)
     const pty = {
       createHeadless: vi.fn(async () => ({ sessionId: 'unused', fresh: true })),
+      paneCommand: vi.fn(async () => 'bash'),
       sendText,
       destroySession: vi.fn(async () => undefined),
       paneOwner,
       sendEnvelope,
-      hasLiveSession: () => true
+      hasLiveSession: () => true,
+      sessionExists: async () => true
     } as unknown as PtyManager
     const settings = (): Settings => ({ ...DEFAULT_SETTINGS })
 
@@ -317,6 +319,7 @@ describe('initServerCanvasControl', () => {
     const legacySendEnvelope = vi.fn(async () => true)
     const pty = {
       createHeadless: vi.fn(async () => ({ sessionId: 'unused', fresh: true })),
+      paneCommand: vi.fn(async () => 'bash'),
       captureSession: vi.fn(async () =>
         pasted ? `Claude composer\n${pasted.split('\n').at(-1)}` : 'Claude composer'),
       sendText: vi.fn(async (nodeId: string, text: string, opts?: { enter?: boolean }) => {
@@ -343,7 +346,8 @@ describe('initServerCanvasControl', () => {
         pids: [200]
       })),
       sendEnvelope: legacySendEnvelope,
-      hasLiveSession: () => true
+      hasLiveSession: () => true,
+      sessionExists: async () => true
     } as unknown as PtyManager
 
     runtime = await initServerCanvasControl({
@@ -426,11 +430,13 @@ describe('initServerCanvasControl', () => {
     } as unknown as WorkspaceStore
     const pty = {
       createHeadless: vi.fn(async () => ({ sessionId: 'unused', fresh: true })),
+      paneCommand: vi.fn(async () => 'bash'),
       sendText: vi.fn(async () => true),
       destroySession: vi.fn(async () => undefined),
       paneOwner: vi.fn(async () => null),
       sendEnvelope: vi.fn(async () => true),
-      hasLiveSession: () => true
+      hasLiveSession: () => true,
+      sessionExists: async () => true
     } as unknown as PtyManager
 
     runtime = await initServerCanvasControl({

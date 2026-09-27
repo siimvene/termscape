@@ -39,7 +39,10 @@ export const HIDEABLE_HEADER_BUTTONS: readonly HideableRow[] = [
   { id: 'ai-name', label: 'Name with AI' },
   { id: 'comments', label: 'Comments' },
   { id: 'hide-fanout', label: 'Hide cards & connections' },
-  { id: 'tidy-fanout', label: 'Tidy subagent cards' }
+  { id: 'tidy-fanout', label: 'Tidy subagent cards' },
+  // Not in the header proper but the label row right under it (`lib/mdViewHint.ts`); it is the
+  // same kind of quiet per-node affordance, so it lives in the same Settings list.
+  { id: 'md-hint', label: 'Markdown / chat view hint' }
 ]
 
 /** Every id the user may hide — the guard that makes everything else unhideable. */

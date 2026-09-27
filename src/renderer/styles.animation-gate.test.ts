@@ -31,6 +31,8 @@ const PLAY_STATE = 'animation-play-state: var(--nt-anim-state)'
  */
 const STATIC_WHEN_IDLE: Record<string, string> = {
   'nt-unread-glow': 'rests at opacity 0; pausing could hide the "finished while you were away" glow',
+  // Bounded (4 cycles) since the CPU/GPU pass, so the infinite scan no longer sees it; the entry
+  // stays because its idle and Reduce Motion rules still hold it lit mid-pulse.
   'nt-working-glow': 'held lit rather than frozen mid-cycle, alongside its two siblings',
   'nt-attention-glow': 'held lit rather than frozen mid-cycle, alongside its two siblings'
 }
@@ -39,6 +41,20 @@ function readStyles(): string {
   // Normalized per the repo's line-endings rule: `.gitattributes` only applies on re-checkout, so
   // a tree cloned before it still has CRLF working files and every `\n` slice below would miss.
   return fs.readFileSync(STYLES, 'utf8').replace(/\r\n/g, '\n')
+}
+
+/** The body of the first rule whose selector is exactly `sel` (up to its closing brace). */
+function ruleBody(css: string, sel: string): string {
+  const i = css.indexOf(sel + ' {')
+  expect(i, `no rule for ${sel}`).toBeGreaterThanOrEqual(0)
+  return css.slice(i, css.indexOf('}', i))
+}
+
+/** The body of `@keyframes name`, up to its closing brace at column 0. */
+function keyframesBody(css: string, name: string): string {
+  const i = css.indexOf(`@keyframes ${name}`)
+  expect(i, `no @keyframes ${name}`).toBeGreaterThanOrEqual(0)
+  return css.slice(i, css.indexOf('\n}', i))
 }
 
 /** Every `animation:` shorthand in the file that runs forever, with its line number. */
@@ -99,6 +115,19 @@ describe('idle-window animation gate', () => {
       expect(selector, `${keyframe} is allowlisted (${reason}) but nothing sets animation: none`)
         .not.toBeNull()
     }
+  })
+
+  it('the working glow is bounded and rests at the static-lit opacity', () => {
+    // An infinite pulse kept the compositor at display rate for a whole agent turn while the
+    // window was focused (measured +3 points CPU, ~25 style recalcs/s per visible working node).
+    // Four cycles keep the "it just started working" signal; the rest is the idle gate's 0.7.
+    const rule = ruleBody(css, '.react-flow__node:has(.term-node.working)::after')
+    expect(rule).toMatch(/animation:\s*nt-working-glow\s+2\.6s\s+ease-in-out\s+4\b/)
+    expect(rule).not.toMatch(/infinite/)
+    expect(rule).toMatch(/opacity:\s*0\.7/)
+    const kf = keyframesBody(css, 'nt-working-glow')
+    // Starts and ends at the resting value, so the settle is seamless.
+    expect(kf).toMatch(/0%,\s*100%\s*\{\s*opacity:\s*0\.7/)
   })
 
   it('never pauses the notch HUD, whose window is never focused', () => {

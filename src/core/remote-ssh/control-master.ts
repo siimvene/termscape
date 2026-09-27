@@ -223,6 +223,32 @@ export function childArgs(conn: SshConnection, controlPath: string, remote?: str
 export function checkMasterArgs(conn: SshConnection, controlPath: string): string[] {
   return ['-O', 'check', '-o', `ControlPath=${controlPath}`, ...portArgs(conn), target(conn)]
 }
+/**
+ * A real round trip over the master: open one session channel and run `true`. This is the
+ * liveness question `-O check` cannot answer. `-O check` is served by the master PROCESS over the
+ * local control socket, so it says "Master running" for a master whose TCP died under a sleep:
+ * measured against a black-holed connection, `-O check` exited 0 while a mux'd command hung until
+ * ServerAlive gave up ~74 s later. A channel open has to reach sshd and come back, so a
+ * half-dead master cannot answer it. The caller bounds it with a timeout; a TIMEOUT is the only
+ * verdict that means dead (see `SshProjectManager.revalidateAll`).
+ *
+ * `ControlMaster=no`: if the socket is gone this must not become a fresh master (which would
+ * answer on the new connection and say nothing about the old one). `BatchMode=yes`: if ssh falls
+ * back to a direct connection it must never park on a prompt with no one to answer it.
+ */
+export function masterRoundTripArgs(conn: SshConnection, controlPath: string): string[] {
+  return [
+    '-o',
+    'ControlMaster=no',
+    '-o',
+    `ControlPath=${controlPath}`,
+    '-o',
+    'BatchMode=yes',
+    ...portArgs(conn),
+    target(conn),
+    'true'
+  ]
+}
 export function exitMasterArgs(conn: SshConnection, controlPath: string): string[] {
   return ['-O', 'exit', '-o', `ControlPath=${controlPath}`, ...portArgs(conn), target(conn)]
 }

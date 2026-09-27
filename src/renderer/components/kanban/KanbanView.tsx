@@ -5,6 +5,7 @@ import { AGENT_CONFIG, BUILTIN_AGENT_IDS, type AgentId } from '@shared/agents/co
 import { useViewMode } from '../../state/viewMode'
 import { useProjects } from '../../state/projects'
 import { useSettings } from '../../state/settings'
+import { useBoardWallpaperStyle } from '../../state/wallpaper'
 import {
   addColumn, assignNode, assignedTo, boardLabels, cardMatchesLabelFilter, cardMeta, columnForNode,
   deleteColumn, labelsForCard, moveColumn,
@@ -98,6 +99,12 @@ export interface KanbanViewProps {
   onBrowserNav: (nodeId: string, patch: { url?: string; title?: string }) => void
   /** Set (or clear, with `undefined`) a node's icon — the card modal's icon button. */
   onSetIcon: (nodeId: string, icon: NodeIcon | undefined) => void
+  /**
+   * The node's "Switch Claude/Codex account ▸" rows — the SAME builder the canvas node menu uses
+   * (`accountSwitchRows` in Canvas), so a card offers exactly what its node does. Optional: a board
+   * with no canvas behind it (a test, a future read-only view) simply shows no rows.
+   */
+  accountMenuItems?: (nodeId: string) => MenuItem[]
 }
 
 type Drag =
@@ -135,7 +142,7 @@ function useCanvasCovered(): void {
 
 export const KanbanView = memo(function KanbanView({
   board, sessions, onChange, onOpenNode, onCreateNode, onRenameNode, onEditSticky, onDeleteNode,
-  onModalNodeChange, onBrowserNav, onSetIcon
+  onModalNodeChange, onBrowserNav, onSetIcon, accountMenuItems
 }: KanbanViewProps) {
   useCanvasCovered()
   const { api } = useSession()
@@ -253,6 +260,7 @@ export const KanbanView = memo(function KanbanView({
   }, [github, modalIssue])
   const customAgents = useSettings((s) => s.settings.customAgents)
   const disabledAgents = useSettings((s) => s.settings.disabledAgents)
+  const boardStyle = useBoardWallpaperStyle()
   // "+ New" menu entries: the builtin agents, the user's custom agents, then terminal + sticky
   // (same universe as the dock's add menu, minus canvas-only kinds). Memoized — a fresh array
   // (with fresh icon elements) per render would re-render every memoized column.
@@ -542,13 +550,14 @@ export const KanbanView = memo(function KanbanView({
       ...(moveTargets.length
         ? ([{ type: 'submenu', label: 'Move to', icon: <IconSwitch />, children: moveTargets }] as MenuItem[])
         : []),
+      ...(accountMenuItems?.(nodeId) ?? []),
       { type: 'separator' },
       { label: 'Delete', icon: <IconTrash />, danger: true, onClick: () => onDeleteNode(nodeId) }
     ]
   }
 
   return (
-    <div className="kanban-overlay">
+    <div className="kanban-overlay" style={boardStyle}>
       {/* Title strip: names the board's project AND pushes the columns below the top-right
           controls cluster, so column headers never sit under its icons. */}
       <div className="kanban-header">

@@ -4,6 +4,7 @@ paths:
   - "src/renderer/lib/windowActivity.ts"
   - "src/renderer/lib/canvasCovered.ts"
   - "src/renderer/styles.animation-gate.test.ts"
+  - "src/renderer/canvas/camera-moving.test.ts"
 ---
 # Idle energy: an animation is a frame loop, not a decoration
 
@@ -47,3 +48,26 @@ with no board — and one attribute with two owners races):
 - **Specificity is the quiet failure, twice already:** the glows carry their own `animation:` shorthand
   (which RESETS `animation-play-state`), so every gate must name them explicitly. Verify the COMPUTED
   `animation-play-state` on a real element, never the presence of the declaration.
+
+**The working glow is BOUNDED; the unread and attention glows are not.** The idle gate only helps an
+unfocused window, and an agent mid-turn in a FOCUSED one kept `nt-working-glow` looping for the
+whole turn — MEASURED (production build, M2, focused): one visible working node cost **+3 points
+total CPU and ~25 style recalcs/s** for as long as it ran. It now runs 4 cycles of 2.6 s (~10 s) and
+rests at `opacity: 0.7`, the same static-lit value the idle gate and Reduce Motion already hold it
+at; the keyframes start and end at 0.7, so the settle is seamless. A new turn re-adds `.working`,
+which restarts the pulse — and so does anything else that re-applies the animation: a window
+refocus (the idle gate sets `animation: none`, so lifting it starts the shorthand afresh) and a node
+remount (a project switch, a park re-adopt) each replay the four pulses. Still bounded every time. Unread and attention stay infinite on purpose — they exist to pull the
+eye, and the idle gate covers the unfocused case. `styles.animation-gate.test.ts` pins the bounded
+shorthand, the resting opacity and the keyframe endpoints.
+
+**A camera move freezes the viewport's raster scale, and only for the move.** `onCanvasMoveStart`
+adds `canvas-camera-moving` to the flow wrapper in EVERY appearance (before the glass-only
+early-return — it is not a glass feature), and `.canvas-camera-moving .react-flow__viewport` sets
+`will-change: transform`, so the compositor scales the already-rastered layer instead of
+re-rasterising every node's DOM at each intermediate zoom. MEASURED (12 WebGL terminals, 60 Hz
+synthetic wheel zoom, M2, production build): **41–48% → 30–36%** total CPU, GPU process **22% →
+15%**. It MUST stay transient: `onCanvasMoveEnd` removes the class 150 ms after the move settles so
+text re-rasters sharp at the final scale — a permanent `will-change` on the viewport leaves every
+terminal blurry after a zoom. `canvas/camera-moving.test.ts` pins both halves (the rule is scoped
+to the class, and no bare `.react-flow__viewport` rule carries `will-change`).

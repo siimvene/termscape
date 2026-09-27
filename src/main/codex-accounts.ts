@@ -43,14 +43,19 @@ import {
   ensureCodexAccountDaemon,
   isCodexAccountRemoving,
   localCodexSocket,
-  migrateManagedCodexHomes
+  migrateManagedCodexHomes,
+  NEW_CODEX_ACCOUNT_LABEL
 } from '../core/codex-accounts-service'
+import type { CodexAccount } from '../shared/codex-account'
 import { readCodexThreadAt } from '../core/codex-session-name'
 import { ensureCodexRelayRoot } from './codex-relay-daemon'
 import { platform } from '../core/platform'
 import type { SshProjectManager } from './remote-ssh/ssh-project'
 
 const SWITCH_RESERVATION_TTL_MS = 60_000
+/** The SSH login wait's cadence and budget — core's local wait uses the same 2 s / 5 min. */
+const REMOTE_LOGIN_POLL_MS = 2000
+const REMOTE_LOGIN_TIMEOUT_MS = 5 * 60 * 1000
 /** A threadId that could reach the filesystem as a path component. Same shape as ACCOUNT_ID_RE. */
 const SAFE_THREAD_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 
@@ -112,8 +117,8 @@ function isSwitchReserved(accountId: string): boolean {
  *    deployment can create, log into, identify and remove managed Codex accounts exactly as it
  *    already does managed Claude accounts. It deliberately does NOT get the switch verbs (no
  *    WebContents-shaped owner identity or lifecycle on that seam) or the SSH transfer leg (no SSH
- *    projects). Managed Codex logins **on an SSH host driven from the desktop** remain PR 6's work:
- *    the host runs the relay + import, not its own copy of the switch protocol.
+ *    projects). Managed Codex logins **on an SSH host driven from the desktop** are this file's
+ *    SSH legs (a `{ projectId }` ctx on the parity verbs, wrapped around core's table below).
  *  - **Mobile (phone)** — never originates an add/switch/copy; it drives via relay→IPC and reads
  *    state. No mint here.
  *
@@ -132,13 +137,213 @@ export function initCodexAccounts(
   // Synchronous, BEFORE renderer hydration / PTY restore — see core's `migrateManagedCodexHomes`.
   migrateManagedCodexHomes()
 
-  // The shared five. `ipcMain.handle`, not `platform().handle` — the file header explains why. The
-  // event is stripped exactly as the seam would strip it: none of the five reads a sender.
-  for (const [channel, fn] of Object.entries(
-    codexAccountsHandlers({ isSwitchReserved, settings })
-  )) {
+  /**
+   * The SSH leg of every account verb (upstream 3886f9a9): a `{ projectId }` ctx names a CONNECTED
+   * SSH project, and the account's home lives on that host. Resolved here, once, so each handler
+   * either takes the remote path or core's local one — never both, and never the local one for a
+   * ctx it could not resolve (that would mint, poll or delete a home on the wrong machine).
+   *
+   * Fork shape: the LOCAL legs are core's shared `codexAccountsHandlers` (both shells serve them,
+   * and the SHELL owns row membership through `settings.mutate`). The SSH legs need the desktop's
+   * SshProjectManager, which core cannot reach, so they wrap core's table here instead of forking
+   * it: a ctx with a projectId takes the remote path below, everything else falls through to core
+   * unchanged. The remote add registers its row (pinned to the host) on the same store chain, so
+   * the "a snapshot can neither add nor drop a row, nor rewrite its host" guarantee holds for SSH
+   * accounts too.
+   */
+  const remoteFor = (ctx?: { projectId?: string }): { mgr: SshProjectManager; projectId: string } | null => {
+    const projectId = typeof ctx?.projectId === 'string' && ctx.projectId ? ctx.projectId : undefined
+    if (!projectId) return null
+    const mgr = getSshManager?.()
+    if (!mgr) throw new Error('SSH is not available in this build')
+    return { mgr, projectId }
+  }
+  // The two READS fail closed to `null` when a remote ctx cannot be served (no SSH manager): an
+  // unknown identity is an answer, and it must never be THIS machine's.
+  const remoteForRead = (ctx?: { projectId?: string }): ReturnType<typeof remoteFor> | 'unservable' => {
+    try {
+      return remoteFor(ctx)
+    } catch {
+      return 'unservable'
+    }
+  }
+  // Remote login waits, per id — a SET, the same ownership-checked shape core uses for local waits,
+  // so a cancel/remove reaches every poll and each poll removes only itself.
+  const remoteWaiters = new Map<string, Set<{ cancelled: boolean }>>()
+  const cancelRemoteWaiters = (id: string): void => {
+    for (const w of remoteWaiters.get(id) ?? []) w.cancelled = true
+  }
+
+  const core = codexAccountsHandlers({ isSwitchReserved, settings })
+  const handlers: Record<string, (...args: any[]) => unknown> = {
+    ...core,
+
+    [IPC.codexAccountsAdd]: async (ctx?: { projectId?: string; host?: string }) => {
+      const remote = remoteFor(ctx)
+      if (!remote) return core[IPC.codexAccountsAdd]()
+      const id = randomUUID()
+      // Creates the isolated home ON the host (umask 077, shared non-secret assets symlinked in).
+      // The credential is written there by the device login the renderer opens next — it never
+      // travels. Throws with the failed phase, which the Settings row shows.
+      const res = await remote.mgr.remoteCodexAccountAdd(remote.projectId, id)
+      if (!res) throw new Error('The SSH project is not connected')
+      const host = remote.mgr.hostKeyFor(remote.projectId) ?? ctx?.host
+      const rollback = async (): Promise<void> => {
+        const torndown = await remote.mgr
+          .remoteCodexAccountRemove(remote.projectId, id)
+          .catch(() => false)
+        if (!torndown) {
+          console.error(
+            `[codex-accounts] rollback of remote add ${id} did not confirm teardown; a Codex home may remain on the host`
+          )
+        }
+      }
+      if (!host) {
+        // A row without its host would be read as a LOCAL account (wrong env, wrong removal).
+        await rollback()
+        throw new Error('Could not identify the SSH host for this Codex account')
+      }
+      const account: CodexAccount = { id, label: NEW_CODEX_ACCOUNT_LABEL, pending: true, host }
+      try {
+        await settings.mutate((s) =>
+          s.codexAccounts.some((a) => a.id === id)
+            ? s
+            : { ...s, codexAccounts: [...s.codexAccounts, account] }
+        )
+      } catch (error) {
+        await rollback()
+        throw error
+      }
+      return { id, home: res.home, account }
+    },
+
+    [IPC.codexAccountsWaitLogin]: async (id: string, ctx?: { projectId?: string }) => {
+      const remote = remoteFor(ctx)
+      if (!remote) return core[IPC.codexAccountsWaitLogin](id)
+      assertCodexAccountId(id)
+      const waiter = { cancelled: false }
+      const live = remoteWaiters.get(id) ?? new Set()
+      live.add(waiter)
+      remoteWaiters.set(id, live)
+      const deadline = Date.now() + REMOTE_LOGIN_TIMEOUT_MS
+      try {
+        while (!waiter.cancelled && Date.now() < deadline) {
+          // Same gate as locally (a real, non-symlink auth.json), asked ON the host. The email comes
+          // from the account's own app-server; a host that cannot run one (no node/curl for the
+          // relay) still completes the login, just without an email to name the row by.
+          if (await remote.mgr.remoteCodexAuthPresent(remote.projectId, id)) {
+            const identity = await remote.mgr
+              .remoteCodexAccountIdentity(remote.projectId, id)
+              .catch(() => null)
+            return identity ?? { email: null }
+          }
+          await new Promise((resolve) => setTimeout(resolve, REMOTE_LOGIN_POLL_MS))
+        }
+        return null
+      } finally {
+        const set = remoteWaiters.get(id)
+        set?.delete(waiter)
+        if (set && set.size === 0) remoteWaiters.delete(id)
+      }
+    },
+
+    [IPC.codexAccountsCancelWait]: (id: string) => {
+      core[IPC.codexAccountsCancelWait](id) // validates the id
+      cancelRemoteWaiters(id)
+    },
+
+    [IPC.codexAccountsIdentity]: async (id: string, ctx?: { projectId?: string }) => {
+      const remote = remoteForRead(ctx)
+      if (remote === 'unservable') return null
+      if (!remote) return core[IPC.codexAccountsIdentity](id)
+      // `remoteCodexAccountIdentity` refuses (null) a home with no REAL auth.json of its own, so a
+      // not-yet-logged-in remote account never reports the host's system identity.
+      return remote.mgr.remoteCodexAccountIdentity(remote.projectId, id).catch(() => null)
+    },
+
+    // No ctx ⇒ this machine's system identity. A `{ projectId }` ctx asks the connected HOST's own
+    // `~/.codex`, through its app-server. Every failure is `null` — a remote machine panel shows no
+    // email rather than borrowing this machine's login (§5 "system-account discovery must not
+    // fabricate").
+    [IPC.codexAccountsSystemIdentity]: async (ctx?: { projectId?: string }) => {
+      const remote = remoteForRead(ctx)
+      if (remote === 'unservable') return null
+      if (!remote) return core[IPC.codexAccountsSystemIdentity]()
+      return remote.mgr.remoteCodexAccountIdentity(remote.projectId, undefined).catch(() => null)
+    },
+
+    [IPC.codexAccountsRemove]: async (id: string, ctx?: { projectId?: string }) => {
+      const remote = remoteFor(ctx)
+      if (!remote) return core[IPC.codexAccountsRemove](id)
+      assertCodexAccountId(id)
+      // The ctx's project must be the row's own host: a mismatch means the renderer routed us at
+      // the wrong machine, and a LOCAL row must never be "removed" on a remote host (its local home
+      // would survive with no row pointing at it).
+      const onDisk = await settings.readAccountsFromDisk()
+      const row = onDisk.codexAccounts.find((a) => a.id === id)
+      const ctxHost = remote.mgr.hostKeyFor(remote.projectId)
+      if (row && !row.host) throw new Error('Account is local but its project is remote; refusing to remove.')
+      if (row?.host && ctxHost && ctxHost !== row.host) {
+        throw new Error('Account host does not match its project; refusing to remove.')
+      }
+      cancelRemoteWaiters(id)
+      // Stops the account's app-server and deletes its home ON the host (credential included).
+      // Home-then-row, like core: a failed teardown leaves the row visible and retryable.
+      if (!(await remote.mgr.remoteCodexAccountRemove(remote.projectId, id))) {
+        throw new Error('Could not remove the Codex account on the SSH host — is it connected?')
+      }
+      await settings.mutate((s) =>
+        s.codexAccounts.some((a) => a.id === id)
+          ? { ...s, codexAccounts: s.codexAccounts.filter((a) => a.id !== id) }
+          : s
+      )
+    }
+  }
+
+  // `ipcMain.handle`, not `platform().handle` — the file header explains why. The event is stripped
+  // exactly as the seam would strip it: none of the parity verbs reads a sender.
+  for (const [channel, fn] of Object.entries(handlers)) {
     ipcMain.handle(channel, (_event, ...args: any[]) => fn(...args))
   }
+
+  // ---- The SSH switch: one host-side exposure --------------------------------------------------
+  // A node on an SSH host keeps its conversation in that host's account homes, so the three-phase
+  // LOCAL reservation below has nothing to plan. The host primitive is already atomic and
+  // self-verifying (hardlink + discover-or-roll-back), and the credentials never move: only the
+  // rollout's directory entry does. Refused while this build is removing either account.
+  ipcMain.handle(
+    IPC.codexAccountsSwitchThreadRemote,
+    async (
+      _event,
+      threadId: string,
+      targetAccountId: string | undefined,
+      hostAccountIds: unknown,
+      ctx?: { projectId?: string }
+    ) => {
+      if (typeof threadId !== 'string' || !SAFE_THREAD_ID.test(threadId)) {
+        throw new Error('Invalid Codex account switch request')
+      }
+      if (targetAccountId) assertCodexAccountId(targetAccountId)
+      if (!Array.isArray(hostAccountIds) || hostAccountIds.some((id) => typeof id !== 'string')) {
+        throw new Error('Invalid Codex account switch request')
+      }
+      for (const id of hostAccountIds as string[]) assertCodexAccountId(id)
+      if (targetAccountId && !(hostAccountIds as string[]).includes(targetAccountId)) {
+        throw new Error('The target Codex account is not on this host')
+      }
+      if (targetAccountId && isCodexAccountRemoving(targetAccountId)) {
+        throw new Error('Codex account removal is in progress')
+      }
+      const remote = remoteFor(ctx)
+      if (!remote) throw new Error('An SSH project is required for a remote Codex switch')
+      await remote.mgr.remoteCodexSwitchThread(
+        remote.projectId,
+        threadId,
+        targetAccountId,
+        hostAccountIds as string[]
+      )
+    }
+  )
 
   // ---- The three-phase, owner-authorized, TTL-bounded switch (§4.1 / Properties 5, 10) ----------
   // DESKTOP ONLY. Owner authorization is `event.sender`, a live WebContents.

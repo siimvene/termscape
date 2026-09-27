@@ -62,6 +62,14 @@ Windows builds carry clang/lld ThinLTO in `process.config` and node-gyp 12 copie
 addon where `link.exe` rejects `/opt:lldltojobs` with `LNK1117` — gyp overrides, not a reason to
 reject a Node version `package.json` allows. `.github/workflows/win-package-smoke.yml` is a
 **workflow_dispatch-only** packaging smoke on windows-latest — build only, never publishes.
+Windows installer safety (#829): `build/installer.nsh` overrides NSIS's process-killing check.
+A running app or session host blocks install/uninstall, and a failed process query blocks too.
+Never restore automatic host termination: quitting the app preserves those live sessions.
+Update preparation must keep saved canvas nodes: exit programs normally, quit, then have the user
+verify and stop any remaining host. Never recommend **End session** (it deletes nodes). Cold agent
+resume depends on supported, saved conversation history; it does not preserve running tasks.
+See `docs/windows-session-host.md` for the user-controlled preparation/recovery steps and limits.
+
 **Follow-ups, in order:** code signing, then Windows auto-update wiring (electron-updater NSIS leg
 + `latest.yml` on the nodeterm.dev feed — blocked on signing: an unsigned auto-update is a
 downgrade in trust), and the fork's PE-identity polish (electron-builder leaves `OriginalFilename`

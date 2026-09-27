@@ -24,6 +24,11 @@ import {
 import { decideControlConfirm, isWaivableVerb } from '../shared/control-confirm'
 import { DEFAULT_SETTINGS } from '../shared/types'
 import { serverSettingsControl } from '../server/settings-control'
+import {
+  REPORT_CAP_PER_DAY,
+  REPORT_CAP_PER_RUN,
+  REPORT_LABEL
+} from '../core/github/report-issue-core'
 import { STRICT_CONTROL_VERBS } from '../core/agents/node-identity-policy'
 import { BROWSER_ACTION_KEYS } from '../core/browser-verb'
 import { BROWSER_RETRYABLE, BROWSER_OUTCOME_LABEL } from '../core/browser-outcomes'
@@ -451,9 +456,10 @@ describe('parseControlRequest', () => {
       // nodes cannot act on the answer.
       expect(body).toContain('queued')
       expect(body).toContain('queuedIds')
-      // The consequence is the whole point of the field: an armed node has no process, so an
+      // The consequence is the whole point of the field: an armed node has no delivered agent launch, so an
       // orchestrator must not route work to it. Without this sentence the flag reads as trivia.
-      expect(body.toLowerCase()).toContain('no process')
+      expect(body.toLowerCase()).toContain('launch has not been delivered')
+      expect(body).toContain('deliveredIds')
       // And the three ways a node ends up armed must all be named, or a caller learns the third
       // one by reporting a --project session as started when it has not begun.
       expect(body).toContain('--after')
@@ -600,6 +606,34 @@ describe('parseControlRequest', () => {
       expect(lower).toMatch(/no set-cookie|writes are not|cannot set|no cookie-write/)
       // Server Edition has no browser control.
       expect(lower).toContain('server edition')
+    }
+  })
+
+  it('both bodies teach WHEN to file a report, with the caps rendered from the real constants', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      expect(body).toContain('`report-issue --kind <code> --title <one line> --body <text> [--dry-run]`')
+      // The caps are RENDERED, so tuning either constant without moving the prose reddens here —
+      // an agent that believes a stale limit retries into a refusal it was told would not happen.
+      expect(body).toContain(`${REPORT_CAP_PER_RUN} reports per nodeterm run`)
+      expect(body).toContain(`${REPORT_CAP_PER_DAY} per day`)
+      expect(body).toContain(`\`${REPORT_LABEL}\``)
+      // The load-bearing half is WHEN, not the flags: the three non-cases must be named, or an
+      // agent files its own mistakes into a public tracker.
+      expect(body).toMatch(/DO NOT FILE for your own mistakes/)
+      expect(body).toMatch(/for a failing\s+test/)
+      expect(body).toMatch(/FILE WHEN the thing you could not do is a gap in the product/)
+      // Duplicate suppression is automatic; telling an agent to check first would have it burn a
+      // turn searching and then file anyway when the search came back empty.
+      expect(body).toMatch(/Do not check first and do not search for duplicates/)
+      expect(body).toMatch(/Keep `--kind` STABLE/)
+      // Default-off, and the refusal names are the agent's whole vocabulary for giving up.
+      expect(body).toMatch(/Off by\s+default/)
+      for (const refusal of ['report-disabled', 'report-no-repo', 'report-scope-missing', 'report-cap-run', 'report-cap-day']) {
+        expect(body, `refusal ${refusal} documented`).toContain(`\`${refusal}\``)
+      }
+      // The no-repo refusal must not read as an invitation to find another repository.
+      expect(body).toMatch(/do NOT file it somewhere\s+else/)
+      expect(body).toMatch(/Server Edition refuses this verb by name/)
     }
   })
 
@@ -996,5 +1030,38 @@ describe('the --project clause tells the truth about travel (review #363 I-1 + M
       ...sets.storedNode
     ])
     for (const v of answered) expect(offScreenDisposition(v).kind, v).not.toBe('refuse')
+  })
+})
+
+describe('link project boundary guidance', () => {
+  it('explains the scoped refusal in both generated agent instructions', () => {
+    for (const body of [buildCanvasControlInstructions('/shim'), buildCanvasSkillBody('/shim')]) {
+      expect(body).toContain('node not found in this project; cross-project linking is not supported')
+      expect(body).toContain('This does not reveal whether the id exists in another project.')
+    }
+  })
+})
+
+describe('trigger wording does not claim in-process subagent requests (issue #917)', () => {
+  const bodies: [string, string][] = [
+    ['skill', buildCanvasSkillBody('/x/shim.sh')],
+    ['instructions', buildCanvasControlInstructions('/x/shim.sh')]
+  ]
+
+  it('both bodies route on visible canvas work, and say background subagents are not it', () => {
+    for (const [name, body] of bodies) {
+      // "subagents" / "delegate to other agents" also describe Claude Code's own Agent tool, so a
+      // request for background subagents was routed into opening canvas nodes instead.
+      expect(body, name).not.toMatch(/subagents\/agents/)
+      expect(body, name).not.toMatch(/delegate parts of a task/)
+      expect(body, name).toMatch(/separate, visible canvas sessions or\s+worktrees/)
+      expect(body, name).toMatch(/in-process/)
+    }
+  })
+
+  it('the orchestration recipe leaves the fan-out size to step 0', () => {
+    const skill = buildCanvasSkillBody('/x/shim.sh')
+    expect(skill).not.toMatch(/2–5 independent workstreams/)
+    expect(skill).toMatch(/independent workstreams step 0 identified/)
   })
 })

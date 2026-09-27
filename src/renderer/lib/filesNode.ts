@@ -16,9 +16,10 @@
  * the filesystem-owning CORE, not the viewer, which is the rule `terminal/file-links.ts` already
  * implements and the one to copy.
  */
-import { isVideoFile } from '../state/workspace'
+import { isMediaFile } from '../state/workspace'
 import { opensInEditor } from './openTarget'
 import { folderTitle } from './explorerCreate'
+import { isDownloadablePath, type DownloadRoute } from './download'
 
 export { folderTitle, parentDir } from './explorerCreate'
 
@@ -188,6 +189,39 @@ export function filterEntries<T extends { name: string }>(entries: T[], query: s
  */
 export function fileOpenTarget(path: string, opts: { remote?: boolean } = {}): 'canvas' | 'os' {
   if (opts.remote) return 'canvas'
-  if (isVideoFile(path)) return 'canvas'
+  if (isMediaFile(path)) return 'canvas'
   return opensInEditor(path) ? 'canvas' : 'os'
+}
+
+/** One Download row in a files node's context menu. `pickFolder` = ask for a destination first
+ *  ("Download to…"), which only the desktop scp route can honour. */
+export interface DownloadMenuEntry {
+  label: string
+  pickFolder: boolean
+}
+
+/**
+ * The Download rows a files node's context menu offers for `path`. Where the route is `none`
+ * (a desktop local project — the file is already here — or a relay tab) there are none, and so
+ * for a path that cannot name a download: the node can stand on `/`, and a "Download this folder"
+ * there would stream the whole server filesystem.
+ *
+ * `here` = the menu was opened on empty space, so `path` is the folder being shown rather than a
+ * row in it — named as such, because "Download folder" over a blank area does not say which one.
+ * An HTTP folder download arrives as a `.tar.gz` (the server archives it on the fly) and the label
+ * says so; scp brings a folder down AS a folder.
+ */
+export function downloadMenuEntries(
+  route: DownloadRoute,
+  path: string,
+  { dir, here }: { dir: boolean; here: boolean }
+): DownloadMenuEntry[] {
+  if (route === 'none' || !isDownloadablePath(path)) return []
+  const what = dir ? (here ? 'Download this folder' : 'Download folder') : 'Download'
+  const entries: DownloadMenuEntry[] = [
+    { label: dir && route === 'http' ? `${what} (.tar.gz)` : what, pickFolder: false }
+  ]
+  // The browser has no native folder picker, and where its downloads land is a browser setting.
+  if (route === 'scp') entries.push({ label: 'Download to…', pickFolder: true })
+  return entries
 }

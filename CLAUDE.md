@@ -39,7 +39,7 @@ file has been opened yet. A rule you did not load is an invariant you will viola
 | `.claude/rules/terminal.md` | Terminal sessions: tmux continuity, PTY lifecycle, cold restore, xterm seeding, TerminalNode |
 | `.claude/rules/nodes.md` | Node kinds (incl. trigger), node icons, group frames, editor/diff/video/web/browser nodes, resize hit-area, webview keep-alive |
 | `.claude/rules/agents.md` | Agent support: registry + capabilities, hooks, permission mode, transcripts, subagent/workflow viz, adding a new agent |
-| `.claude/rules/agents-canvas-control.md` | Canvas control (nodeterm.sh shim, verbs, fan-in, --after, verify panel) and Context Link |
+| `.claude/rules/agents-canvas-control.md` | Canvas control (nodeterm.sh shim, verbs, fan-in, --after, verify panel), Context Link, agent messaging (scope publication, Windows delivery) |
 | `.claude/rules/agents-accounts-usage.md` | Managed Claude/Codex accounts, account switch, usage indicator scope, remote usage |
 | `.claude/rules/agents-grok.md` | Grok agent per-CLI deep reference: capabilities, hook-directory dialect, subagent-card keying |
 | `.claude/rules/agents-codex.md` | Codex shared-thread node identity: tool-shell recovery, the exported HMAC record |
@@ -54,6 +54,8 @@ file has been opened yet. A rule you did not load is an invariant you will viola
 | `.claude/rules/canvas-idle-energy.md` | Idle-energy animation frame-loop gate (styles.css `--nt-anim-state`, window/board attributes) |
 | `.claude/rules/window-behavior.md` | Main-process window behavior: geometry restore + window-raise policy |
 | `.claude/rules/node-colors.md` | Node colors: one palette (system + agent sections), swatches, `color --color` boundary |
+| `.claude/rules/semantic-colours.md` | Semantic colour tokens: the `--sys-*` palette, state/git ROLE tokens, `palette.ts`, the git status table, minimap strokes |
+| `.claude/rules/appearance-wallpaper-glass.md` | Desktop wallpaper + Liquid Glass appearance (Settings → Appearance): painting, glass chrome, contrast, traps |
 | `.claude/rules/files-node.md` | The `files` node (file-manager node) |
 | `.claude/rules/relay.md` | Remote access (phone relay): free, not Pro |
 | `.claude/rules/speech.md` | Speech / dictation (desktop + server) |
@@ -343,8 +345,8 @@ the target BEFORE both complete paths are quoted, then the shell preserves the w
 while cleaning that exact temp. The temp leaf must stay independent of the target leaf — appending
 `.uuid.tmp` to a valid `NAME_MAX` target makes the write impossible. It currently protects
 filesystem API writes, tmux.conf, the private hook endpoint, node
-tokens, agent status and pending answers; generated hook scripts/config merges still use their
-existing direct writes and must not be described as atomic. Upload directories use UUIDs across app
+tokens, agent status and pending answers; some generated hook scripts/config merges still use direct writes; only the guarded shared
+Claude/Gemini settings transactions stage and rename here. Do not generalize that claim to every installer. Upload directories use UUIDs across app
 processes. Downloads and media-cache copies use hidden UUID `.part` names; user-visible downloads
 also hold an exclusive candidate lock until the rename and cleanup finish. Never simplify any of
 those back to `<target>.tmp` / `<target>.part` or a read-only "does the destination exist?" check —

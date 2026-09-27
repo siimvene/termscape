@@ -53,8 +53,8 @@ reads as disarmed until armed on this machine). A node's `data`
 carries `title, color, group, tags, collapsed, expandedHeight, shell, cwd, text,
 initialCommand, filePath, diffStaged`, `icon` (a user-chosen emoji or picture — see **Node icons**
 below), `agentId` (which agent CLI a terminal node runs —
-persisted), and `accountId` (which managed Claude account a terminal node runs under — immutable,
-resolved at creation, persisted; see **Managed Claude accounts** in `.claude/rules/agents-accounts-usage.md`). `nodeStatesToFlow` defaults a
+persisted), and `accountId` (which managed Claude account a terminal node runs under — resolved
+at creation, changed ONLY by the explicit account-switch actions, persisted; see **Managed Claude accounts** in `.claude/rules/agents-accounts-usage.md`). `nodeStatesToFlow` defaults a
 missing `kind` to `terminal` for backward compat and migrates the legacy `tags:['claude']` marker
 to `data.agentId = 'claude'`. The SDK **chat node** was removed (2026-07); `nodeStatesToFlow` also
 migrates a persisted `chat` node into a **sticky tombstone** in place, reading its legacy
@@ -201,5 +201,7 @@ Persistence has two layers:
   stale own mirror from a phone append, so the copy names the project FILE and asserts no source.
 - **Live terminal sessions** (tmux): terminals continue where they left off across node
   remounts *and* full app restarts, including running processes. See `.claude/rules/terminal.md`.
+
+**Autosave does no unchanged work** (`WorkspaceStore.save`): the parse of each `lastWritten` value is cached per raw string, and `workspace.json` is not rewritten when its bytes equal the store's last write AND the file still has the size+mtime+inode that write left — so another instance's rewrite is still answered (the inode catches a same-size rewrite on a coarse-mtime filesystem: every writer publishes by rename), a store's first save and a v2 migration always write, and every other index writer of ours clears the record.
 
 `settings.json` is a separate store (`core/settings-store.ts`, `state/settings.ts`).

@@ -6,7 +6,7 @@ import { IPC } from '../shared/ipc'
 import { platform } from './platform'
 import {
   DEFAULT_PROJECT_ID, EMPTY_WORKSPACE,
-  type BridgeLink, type CanvasNodeState, type KanbanColumn, type Project, type Workspace,
+  type BridgeLink, type CanvasNodeState, type KanbanColumn, type KanbanLabel, type Project, type Workspace, type WorkspaceSaveOptions,
   type WorkspaceV1
 } from '../shared/types'
 import {
@@ -33,7 +33,8 @@ import {
   sanitizeLayouts
 } from '../shared/canvas-layout'
 import { appendProjectNode, remoteNodeInput, removeProjectNode, type RemoteNodeInput } from './project-node-append'
-import { ensureProjectBoard, setProjectCardColumn } from './project-kanban-write'
+import { editProjectCardLabels, ensureProjectBoard, setProjectCardColumn, type CardLabelEdit } from './project-kanban-write'
+import { boardLabels, cardMeta } from '../shared/kanban-labels'
 
 /** Checked remote read: `absent` (no file — safe to push our cache) is NOT `error` (connection
  *  down / ssh failure — a failed read is never evidence of absence, so nothing may be pushed). */
@@ -129,6 +130,16 @@ export class WorkspaceStore {
    *  never match isSelfWrite, so every fs event on it read as an external change forever — endless
    *  spurious reloads and conflict bars (field bug 2026-08-10). */
   private lastWritten = new Map<string, string>()
+  /** `lastWritten`'s bytes, parsed once. `save()` compares every folder project's candidate against
+   *  its last write on EVERY autosave; re-parsing each file each time was pure waste. Keyed by the
+   *  raw string, so any `lastWritten.set` elsewhere invalidates it by construction. */
+  private lastWrittenParsed = new Map<string, { raw: string; parsed: ProjectFileV1 }>()
+  /** The index bytes we last wrote and the file's size/mtime/inode right after, so an unchanged
+   *  index is not rewritten on every autosave — but one another writer changed on disk still is.
+   *  The inode is what catches a same-size rewrite on a coarse-mtime filesystem: every writer
+   *  publishes by rename, so any rewrite is a new inode. Any other index write of ours clears it, so
+   *  it only ever describes the last write `save()` made. */
+  private lastIndexWrite: { json: string; size: number; mtimeMs: number; ino: number } | null = null
   /** project id -> rev of the last written/loaded file. */
   private revs = new Map<string, number>()
   /** Entries whose one-time exec migration could NOT run (their project file was unreadable at load).
@@ -205,7 +216,8 @@ export class WorkspaceStore {
 
   registerIpc(): void {
     platform().handle(IPC.workspaceLoad, () => this.load())
-    platform().handle(IPC.workspaceSave, (workspace: Workspace) => this.save(workspace))
+    platform().handle(IPC.workspaceSave, (workspace: Workspace, opts?: WorkspaceSaveOptions) =>
+      this.save(workspace, { localOnly: opts?.localOnly === true }))
     platform().handle(IPC.workspaceProbeFolder, (folder: string) => this.probeFolder(folder))
     platform().handle(IPC.workspaceProjectFileState, (cwd: unknown) =>
       typeof cwd === 'string' && cwd ? this.projectFileState(cwd) : 'unreadable')
@@ -497,6 +509,7 @@ export class WorkspaceStore {
     // next boot reads the old index and repairs again (harmlessly, but forever).
     if (!repaired || !sideline) return
     try {
+      this.lastIndexWrite = null
       await writeAtomic(this.indexPath, JSON.stringify(this.index))
     } catch { /* the next save writes it anyway */ }
   }
@@ -833,6 +846,7 @@ export class WorkspaceStore {
     const index = this.index
     if (!index) return
     this.applySettingsToIndex(index)
+    this.lastIndexWrite = null
     await writeAtomic(this.indexPath, JSON.stringify(index))
   }
 
@@ -952,13 +966,34 @@ export class WorkspaceStore {
    *  projects went blank after tab switching" wipe. */
   private saveChain: Promise<unknown> = Promise.resolve()
 
-  save(workspace: Workspace): Promise<void> {
-    const run = this.saveChain.then(() => this.saveNow(workspace))
+  /**
+   * `localOnly` makes the save durable on THIS machine only: every local file and the index (which
+   * carries each SSH project's cache) are written, but no SSH project is read, reconciled or
+   * mirrored — a changed, already-reconciled entry is marked `unmirrored` instead, so the next
+   * ordinary save pushes it. It exists for the launch write-ahead barrier (`commitLaunchAttempt`):
+   * that save must be on disk before a command is typed, and waiting on two SSH round trips per
+   * save made every new agent node on an SSH project sit on QUEUED for seconds. It still runs on
+   * the FIFO chain, so ordering against every other save is unchanged.
+   */
+  save(workspace: Workspace, opts: WorkspaceSaveOptions = {}): Promise<void> {
+    const run = this.saveChain.then(() => this.saveNow(workspace, opts.localOnly === true))
     this.saveChain = run.catch(() => {})
     return run
   }
 
-  private async saveNow(workspace: Workspace): Promise<void> {
+  /** The parse of `lastWritten.get(file)`, cached per raw string (see `lastWrittenParsed`). Throws
+   *  exactly where the inline `JSON.parse` it replaces did. */
+  private parsedLastWritten(file: string): ProjectFileV1 | null {
+    const raw = this.lastWritten.get(file)
+    if (!raw) return null
+    const hit = this.lastWrittenParsed.get(file)
+    if (hit && hit.raw === raw) return hit.parsed
+    const parsed = JSON.parse(raw) as ProjectFileV1
+    this.lastWrittenParsed.set(file, { raw, parsed })
+    return parsed
+  }
+
+  private async saveNow(workspace: Workspace, localOnly = false): Promise<void> {
     if (!workspace.projects.length && !this.index) {
       // A store that never read the index may not replace a populated one with "no projects":
       // that is the boot-save wipe — load() failed transiently, the renderer hydrated zero
@@ -1048,8 +1083,7 @@ export class WorkspaceStore {
     for (const [cwd, candidate] of files) {
       const projectId = projectIdForCwd.get(cwd) ?? cwd
       const file = projectFilePath(cwd)
-      const prev = this.lastWritten.get(file)
-      const prevParsed = prev ? (JSON.parse(prev) as ProjectFileV1) : null
+      const prevParsed = this.parsedLastWritten(file)
       if (prevParsed && sameProjectContent(prevParsed, candidate)) continue
       if (!prevParsed && candidate.nodes.length === 0 && !(await this.emptyOrAbsentOnDisk(file))) {
         // The local twin of the SSH "never blind-write a file we have not read" rule: an empty
@@ -1089,6 +1123,12 @@ export class WorkspaceStore {
       // Without that record the re-read would hand every just-deleted node straight back on the very
       // write that was supposed to remove it, and no node on an ssh project could ever be closed.
       this.recordLocalDeletions(e.id, previousCache?.nodes, e.cache.nodes)
+      if (localOnly) {
+        // No network. An unreconciled entry is left for the next ordinary save to LOOK first (the
+        // never-blind-write rule is untouched); a reconciled one that changed now owes its mirror.
+        if (changedSinceLoad && this.reconciled.has(e.id)) this.unmirrored.add(e.id)
+        continue
+      }
       if (!this.reconciled.has(e.id)) {
         // Never blind-write a remote file we have not read yet: the first mirror of a fresh or
         // re-added project must LOOK first — an existing lineage on the server may win (adopted,
@@ -1126,8 +1166,29 @@ export class WorkspaceStore {
       this.pendingV2Backup = null
     }
 
-    // Compact index, atomic — same reasoning as the old single-file store.
-    await writeAtomic(this.indexPath, JSON.stringify(index))
+    // Compact index, atomic — same reasoning as the old single-file store. Skipped when the bytes
+    // equal our last write AND the file still has the size/mtime/inode that write left (another
+    // instance sharing this userData rewrote it otherwise). A migration always writes: the v3 flip
+    // is the point of that save.
+    const indexJson = JSON.stringify(index)
+    const last = this.lastIndexWrite
+    const onDisk = !migrating && last?.json === indexJson
+      ? await fs.stat(this.indexPath).catch(() => null)
+      : null
+    const unchanged =
+      !!onDisk &&
+      !!last &&
+      onDisk.size === last.size &&
+      onDisk.mtimeMs === last.mtimeMs &&
+      onDisk.ino === last.ino
+    if (!unchanged) {
+      this.lastIndexWrite = null
+      await writeAtomic(this.indexPath, indexJson)
+      const st = await fs.stat(this.indexPath).catch(() => null)
+      this.lastIndexWrite = st
+        ? { json: indexJson, size: st.size, mtimeMs: st.mtimeMs, ino: st.ino }
+        : null
+    }
     await this.sweepRemovedDataFiles(previousIndex, index)
     this.index = index
 
@@ -1209,6 +1270,7 @@ export class WorkspaceStore {
       const file = inlineFilePath(e.id)
       await fs.rm(file, { force: true }).catch(() => undefined)
       this.lastWritten.delete(file)
+      this.lastWrittenParsed.delete(file)
       this.revs.delete(e.id)
     }
   }
@@ -1318,6 +1380,7 @@ export class WorkspaceStore {
     // Persist the index only when the reconcile moved something — a quiet poll must not churn
     // workspace.json every tick.
     if (adopted || e.cache?.rev !== revBefore) {
+      this.lastIndexWrite = null
       await writeAtomic(this.indexPath, JSON.stringify(this.index))
     }
     return adopted
@@ -1786,7 +1849,48 @@ export class WorkspaceStore {
   }
 
   /**
-   * The one read-modify-write behind both kanban verbs, for BOTH kinds of ref project.
+   * Add / remove / create board labels on one session card — the host side of the relay
+   * `projects.editCardLabels` verb, i.e. the phone's long-press label sheet.
+   *
+   * There is ONE label model (the per-project palette in `kanban.labels` + per-card ids in
+   * `kanban.meta[].labels`, the same one the canvas node's "+ Label" row and the kanban card edit),
+   * and this writes into it through the same shared transforms and the same `kanbanWriteNow`
+   * read-modify-write as `setRemoteCardColumn` — so the change is announced to the renderer and the
+   * canvas node + kanban card adopt it live, local and SSH projects alike.
+   *
+   * Answers the palette and this card's label ids AS THEY NOW STAND, whether or not this call
+   * changed them (`edited` says which): a refused `add` (the phone's palette is stale) comes back as
+   * `edited: false` with the current palette, so the sheet can redraw instead of guessing. Null =
+   * the project is unknown or has no readable project file.
+   */
+  editRemoteCardLabels(
+    projectId: string,
+    nodeId: string,
+    edit: CardLabelEdit,
+    now = new Date()
+  ): Promise<{ edited: boolean; labels: KanbanLabel[]; cardLabelIds: string[] } | null> {
+    const run = this.saveChain.then(() =>
+      this.kanbanWriteNow(projectId, (raw) => editProjectCardLabels(raw, nodeId, edit, now))
+    )
+    this.saveChain = run.catch(() => {})
+    return run.then((res) => {
+      if (!res) return null
+      const k = res.file.kanban
+      if (!k || typeof k !== 'object') return { edited: res.written, labels: [], cardLabelIds: [] }
+      const labels = boardLabels(k)
+      const known = new Set(labels.map((l) => l.id))
+      const ids = cardMeta(k, nodeId)?.labels
+      return {
+        edited: res.written,
+        labels,
+        // Dangling ids (a label deleted elsewhere) are dropped exactly as every desktop reader drops them.
+        cardLabelIds: Array.isArray(ids) ? ids.filter((id) => known.has(id)) : []
+      }
+    })
+  }
+
+  /**
+   * The one read-modify-write behind every kanban verb, for BOTH kinds of ref project.
    *
    * Queued on `saveChain` by its callers for the same reason `appendRemoteNode` is: this rewrites
    * the very file a save rewrites whole, and off the chain a save that read the file first lands

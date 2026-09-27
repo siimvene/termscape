@@ -7,6 +7,9 @@
 // the wiring by reading the call site. A source read is a weak test in general, but it is the only
 // thing standing between a one-character deletion and a silently reintroduced bug — which is
 // exactly the shape that survived the whole suite once on this branch already.
+import { act } from 'react'
+import { createRoot } from 'react-dom/client'
+import { CanvasPills } from '../components/CanvasPills'
 import fs from 'fs'
 import path from 'path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -54,8 +57,17 @@ describe('the canvas pill cluster is fit-view chrome', () => {
     expect(chromeObstacles(VIEWPORT)).toEqual([])
   })
 
-  it('is what Canvas actually renders', () => {
-    expect(CANVAS_SRC).toContain('<div className="canvas-pills" data-canvas-chrome>')
+  it('the production cluster opts into fit-view obstacles', () => {
+    const host = document.createElement('div')
+    document.body.append(host)
+    const root = createRoot(host)
+    try {
+      act(() => root.render(<CanvasPills><button>Usage</button></CanvasPills>))
+      measured(host.querySelector('.canvas-pills')!, PILLS)
+      expect(chromeObstacles(VIEWPORT)).toHaveLength(1)
+    } finally {
+      act(() => root.unmount())
+    }
   })
 })
 
@@ -205,14 +217,15 @@ describe('breadcrumb wiring the CLAUDE.md bullet calls load-bearing', () => {
   })
 
   it('frames the node inside the pinned-chrome-free region, keep-zoom preserved', () => {
-    // frameNode reduces the pane by the pinned insets and centres the node in the remainder, via
-    // viewportForRect(..., insets). It never solves the chrome around the node itself; the flat
-    // free-rect solve stays in fitAll (which fits EVERY node and would tuck them under the dock).
+    // frameNode hands the node to upstream's shared focus policy (`viewportForNodeFocus`), which
+    // reduces the pane by the insets and centres the node in the remainder via viewportForRect. It
+    // never solves the chrome around the node itself; the flat free-rect solve stays in fitAll
+    // (which fits EVERY node and would tuck them under the dock).
     const frame = CANVAS_SRC.slice(
       CANVAS_SRC.indexOf('const frameNode = useCallback'),
       CANVAS_SRC.indexOf('const goToNode = useCallback')
     )
-    expect(frame).toContain('viewportForRect(rect, box.width, box.height, keepZoom, insets)')
+    expect(frame).toContain('viewportForNodeFocus(node, rect, box, keepZoom)')
     expect(frame).not.toContain('solveFitFrame')
     expect(frame).toContain('settings.focusZoomToNode ? undefined : getZoom()')
   })
@@ -221,16 +234,15 @@ describe('breadcrumb wiring the CLAUDE.md bullet calls load-bearing', () => {
     // REWRITTEN from "insets that framing ONLY for a maximized node". The v0.3.7 merge (de3007ef,
     // adopting upstream 1c248da7 "centre in the whole pane") made a non-maximized node centre in
     // the WHOLE pane (insets = NO_INSETS), landing it half behind the pinned sessions sidebar — the
-    // reported regression. The insets are now measurePinnedInsets(box) unconditionally. That does
-    // NOT walk back the "put the node where the eye is" concern: measurePinnedInsets counts only
-    // PINNED panels, so an unpinned hover-peek sidebar is 0 insets and the node still centres in the
-    // whole pane; a maximized node still lands where its placement (these same insets) put it (#743).
-    const frame = CANVAS_SRC.slice(
-      CANVAS_SRC.indexOf('const frameNode = useCallback'),
-      CANVAS_SRC.indexOf('const goToNode = useCallback')
-    )
-    expect(frame).toContain('const insets = measurePinnedInsets(box)')
-    expect(frame).not.toContain('isMaximized(node) ? measurePinnedInsets(box) : NO_INSETS')
+    // reported regression. Upstream v0.3.16 moved the policy into `viewportForNodeFocus`
+    // (lib/nodeFocus) with the same NO_INSETS branch; the fork carries its rule there: an ordinary
+    // node gets measurePinnedInsets(box) (only PINNED panels, so an unpinned hover-peek sidebar is
+    // 0 insets and the node still centres in the whole pane); a maximized node gets
+    // measureMaximizeInsets(box), the reservation its own placement used (#743).
+    const FOCUS_SRC = fs.readFileSync(path.join(__dirname, '../lib/nodeFocus.ts'), 'utf8')
+    const policy = FOCUS_SRC.slice(FOCUS_SRC.indexOf('export function viewportForNodeFocus'))
+    expect(policy).toContain('isMaximized(node) ? measureMaximizeInsets(box) : measurePinnedInsets(box)')
+    expect(policy).not.toContain(': NO_INSETS')
   })
 
   it('the resume card slot is spent only on a card that can render, and only when opted in', () => {

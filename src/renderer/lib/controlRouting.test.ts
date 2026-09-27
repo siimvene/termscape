@@ -12,6 +12,7 @@ import {
   controlVerbSetsForTests,
   storedNodeListing,
   sourceIsControlCapable,
+  controlListingText,
   answerBrowserResolve,
   type ControlProject,
   type BrowserResolveProject
@@ -453,4 +454,33 @@ describe('the off-screen disposition table (the verbs that used to travel)', () 
     // NOT re-exported here; see the needsLiveCanvas describe above and the CONTROL merge notes.)
     for (const v of all) expect(needsLiveCanvas(v), v).toBe(false)
   })
+})
+
+
+it('lists held, failed and unconfirmed launches without claiming an agent is healthy', () => {
+  const nodes = [
+    { id: 'queued', pendingLaunch: { command: 'claude' } },
+    { id: 'failed', pendingLaunch: { command: 'codex' } },
+    { id: 'stalled', pendingLaunch: { command: 'claude' } },
+    { id: 'dead', agentId: 'claude' },
+    { id: 'unknown', agentId: 'codex' },
+    { id: 'errored', agentId: 'claude' },
+    { id: 'shell' }
+  ]
+  const rows = storedNodeListing(nodes, {
+    dead: { dropped: true, state: 'done' },
+    errored: { state: 'done', lastTurnError: { at: 1 } }
+  }, {
+    failed: { kind: 'failed', attempts: 5, at: 1 },
+    stalled: { kind: 'stalled', since: 1 }
+  })
+  expect(rows.map((r) => r.launchState)).toEqual(['queued', 'failed', 'stalled', 'dropped', 'unconfirmed', undefined, undefined])
+  const text = controlListingText(rows)
+  expect(text).toContain('queued [terminal]  — QUEUED')
+  expect(text).toContain('failed [terminal]  — LAUNCH FAILED')
+  expect(text).toContain('stalled [terminal]  — QUEUED (terminal not ready)')
+  expect(text).toContain('dead [terminal]  — DROPPED')
+  expect(text).toContain('unknown [terminal]  — AGENT STATUS UNCONFIRMED')
+  expect(text).toContain('errored [terminal]  — LAST TURN ERRORED')
+  expect(text).not.toContain('RUNNING')
 })

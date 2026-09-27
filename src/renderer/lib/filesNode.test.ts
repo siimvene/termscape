@@ -4,6 +4,7 @@ import {
   childPath,
   classifyEmptyListing,
   displacedFilesPatch,
+  downloadMenuEntries,
   fileOpenTarget,
   filterEntries,
   folderTitle,
@@ -198,5 +199,35 @@ describe('displacedFilesPatch', () => {
   it('refuses to write anything when there is no fallback directory', () => {
     expect(displacedFilesPatch({}, undefined)).toBeNull()
     expect(displacedFilesPatch({ titleAuto: false }, '')).toBeNull()
+  })
+})
+
+describe('downloadMenuEntries', () => {
+  const labels = (...a: Parameters<typeof downloadMenuEntries>) => downloadMenuEntries(...a).map((e) => e.label)
+
+  it('offers nothing where the listing cannot be downloaded from (desktop local, relay)', () => {
+    expect(downloadMenuEntries('none', '/srv/app/a.txt', { dir: false, here: false })).toEqual([])
+  })
+
+  it('offers nothing for the filesystem root — the HTTP route would tar the whole server', () => {
+    expect(downloadMenuEntries('http', '/', { dir: true, here: true })).toEqual([])
+    expect(downloadMenuEntries('scp', '/', { dir: true, here: true })).toEqual([])
+  })
+
+  it('offers Download and Download to… for a file on an SSH host', () => {
+    expect(labels('scp', '/srv/app/a.txt', { dir: false, here: false })).toEqual(['Download', 'Download to…'])
+    expect(downloadMenuEntries('scp', '/srv/app/a.txt', { dir: false, here: false })[1].pickFolder).toBe(true)
+  })
+
+  it('says a folder arrives as a .tar.gz in the browser, and offers no folder picker there', () => {
+    expect(labels('http', '/srv/app/src', { dir: true, here: false })).toEqual(['Download folder (.tar.gz)'])
+  })
+
+  it('names the folder being shown when the menu was opened on empty space', () => {
+    expect(labels('scp', '/srv/app/src', { dir: true, here: true })).toEqual([
+      'Download this folder',
+      'Download to…'
+    ])
+    expect(labels('http', '/srv/app/src', { dir: true, here: true })).toEqual(['Download this folder (.tar.gz)'])
   })
 })

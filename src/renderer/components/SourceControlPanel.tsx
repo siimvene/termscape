@@ -10,6 +10,7 @@ import { useProjects } from '../state/projects'
 import { useSettings } from '../state/settings'
 import { useSshConn } from '../state/sshConn'
 import { useScmDraft } from '../state/scmDraft'
+import { readBranchStatus } from '../state/gitBranches'
 import { useScmCache } from '../state/scmCache'
 import { useSession } from '../session/session'
 import { GitHistoryPanel } from './git-history/GitHistoryPanel'
@@ -20,6 +21,7 @@ import { defaultScmScope, type ScmScope } from '@shared/scm-scope'
 import { chipFor, effectiveBindings } from '../lib/keybindingOverrides'
 import { matchesShortcut } from '@shared/shortcut'
 import { isMacPlatform } from '@shared/platform-utils'
+import { gitStatusColor } from '../lib/gitStatusColors'
 
 export interface SourceControlPanelProps {
   onClose: () => void
@@ -42,14 +44,6 @@ const AUTO_FETCH_MS = 180_000
 
 /** Which physical modifier the registry's abstract `Cmd` resolves to for the commit chord. */
 const isMac = isMacPlatform()
-
-const STATUS_COLOR: Record<string, string> = {
-  M: '#ffd60a',
-  A: '#32d74b',
-  D: '#ff453a',
-  R: '#bf5af2',
-  U: '#6ac4dc'
-}
 
 function DiffStat({ added, deleted }: { added: number; deleted: number }) {
   if (!added && !deleted) return null
@@ -166,11 +160,12 @@ export function SourceControlPanel({
     })
 
   const refresh = useCallback(async () => {
-    setStatus(cwd ? await git.status(cwd) : null)
+    if (isSsh && !sshControlPath) return
+    setStatus(cwd ? await readBranchStatus(git, cwd, isSsh ? project?.id : undefined) : null)
     // `sshControlPath` is a dep so an SSH project whose master finishes connecting after the panel
     // opened re-fetches once the connection is live (instead of staying "no repo"/empty).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cwd, git, sshControlPath])
+  }, [cwd, git, sshControlPath, isSsh, project?.id])
 
   const autoFetchOn = useSettings((s) => s.settings.gitAutoFetch)
 
@@ -292,7 +287,7 @@ export function SourceControlPanel({
             setFileMenu({ x: e.clientX, y: e.clientY, path: f.path })
           }}
         >
-          <span className="scm-letter" style={{ color: STATUS_COLOR[f.status] ?? 'rgba(255,255,255,0.85)' }}>
+          <span className="scm-letter" style={{ color: gitStatusColor(f.status) }}>
             {f.status}
           </span>
           <button

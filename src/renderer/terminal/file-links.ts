@@ -1,8 +1,11 @@
 // Cmd/Ctrl+click links in terminal output. `createUrlLinkProvider` handles http(s) URLs;
 // `createFileLinkProvider` handles path-like tokens: absolute (`/x/y`), dot-relative
 // (`./x`, `../x`) and bare relatives with at least one slash (`src/a.ts`), with optional
-// `:line[:col]` suffixes (compiler/grep output). `~` paths are skipped in v1 (no home
-// resolution).
+// `:line[:col]` suffixes (compiler/grep output), and home-relative `~/x` paths. A `~` path stays
+// `~`-rooted all the way to the filesystem call: the core that owns the filesystem expands it
+// against ITS home (`expandHomePath` in core/fs-handlers.ts; an SSH project's remote shell does it
+// for `sshFs`) — the renderer does not know that home, and on the Server Edition it is another
+// machine's.
 //
 // Existence (and dir-ness) is verified before a file link is offered, via a short-TTL cache
 // of parent-directory listings — one fs.list covers every sibling on a compiler-error screen.
@@ -71,19 +74,29 @@ export interface PathConventionOpts {
   windows?: boolean
 }
 
+/** Characters that, right before a `~`, mean it is not the start of a home path (`a~/x`). */
+const HOME_LEAD_BLOCK_RE = /[\w.@+~\/-]/
+
 export function matchFileTokens(lineText: string, opts: PathConventionOpts = {}): FileToken[] {
   const out: FileToken[] = []
   if (opts.windows) return matchWindowsFileTokens(lineText)
   for (const m of lineText.matchAll(TOKEN_RE)) {
     let text = m[0]
-    // URLs (and protocol-ish tokens) belong to the web-links addon. A token preceded by
-    // `~` is a home-relative path minus its tilde (no home resolution in v1) — skip it
-    // rather than mis-resolve `~/x` as the absolute `/x`.
+    let start = m.index
+    // URLs (and protocol-ish tokens) belong to the web-links addon.
     const before = lineText.slice(Math.max(0, m.index - 8), m.index)
     // `\w+:\/{1,2}$` (not just `://`): the optional leading-`/` in TOKEN_RE can swallow the
     // second slash of `://`, so a URL's token starts at that slash and `before` ends `https:/`.
     if (/\w+:\/{1,2}$/.test(before) || text.includes('//')) continue
-    if (m.index > 0 && lineText[m.index - 1] === '~') continue
+    // A token preceded by `~` is a home-relative path minus its tilde. Re-attach the tilde when it
+    // stands at a word start (`~/x`, ` ~/x`, `(~/x`) so it never mis-resolves as the absolute `/x`.
+    // Anything else before the `~` (`a~/x`, `~user/x`) is not a home path — skip it, as before.
+    if (m.index > 0 && lineText[m.index - 1] === '~') {
+      const lead = m.index > 1 ? lineText[m.index - 2] : ''
+      if (!text.startsWith('/') || HOME_LEAD_BLOCK_RE.test(lead)) continue
+      text = '~' + text
+      start = m.index - 1
+    }
     text = text.replace(TRAILING_PUNCT, '')
     if (text.length < 3) continue
     let path = text
@@ -94,7 +107,7 @@ export function matchFileTokens(lineText: string, opts: PathConventionOpts = {})
       line = parseInt(suffix[2], 10)
     }
     if (!path || !path.includes('/')) continue
-    out.push({ text, startIndex: m.index, path, line })
+    out.push({ text, startIndex: start, path, line })
   }
   return out
 }
@@ -215,7 +228,13 @@ export function resolveFileToken(
   opts: PathConventionOpts = {}
 ): string | null {
   if (opts.windows) return resolveWindowsFileToken(path, cwd)
-  const raw = path.startsWith('/') ? path : cwd ? `${cwd.replace(/\/+$/, '')}/${path}` : null
+  // `~/x` is rooted at the home dir, never at cwd; the `~` is kept for the core to expand.
+  const raw =
+    path.startsWith('/') || path.startsWith('~/')
+      ? path
+      : cwd
+        ? `${cwd.replace(/\/+$/, '')}/${path}`
+        : null
   if (!raw) return null
   const segs = raw.split('/').filter((s) => s && s !== '.')
   const tilde = segs[0] === '~'
@@ -487,17 +506,60 @@ function bufferPosFromEvent(term: Terminal, ev: MouseEvent): { col: number; row:
   }
 }
 
-export interface LinkClickDeps {
+/** What sits under a buffer cell: a web URL (typed or OSC 8), or a path resolved to absolute.
+ *  A path is NOT yet known to exist — that is the async `lookup`'s answer, taken by the caller. */
+export type LinkHit = { kind: 'url'; url: string } | { kind: 'path'; abs: string }
+
+/** What `linkAtCell` needs to turn text into a path: the cwd and dialect the file providers use. */
+export interface LinkHitDeps {
   getCwd(): string | undefined
   /** See FileLinkDeps.windows. */
   windows?: boolean
   /** See FileLinkDeps.convention. */
   convention?: () => PathConventionOpts | null
+  /** False while no correctly-routed filesystem/dialect is available. */
+  fileEnabled(): boolean
+}
+
+/**
+ * The link at buffer cell (row, col), in the order the providers rank them: an OSC 8 hyperlink
+ * (its URL is invisible — the label is all the text shows), then a typed URL, then a path-shaped
+ * token. ONE hit-test for both mouse gestures — Cmd/Ctrl+click opens what this returns, a
+ * right-click offers a menu for it — so the two can never disagree about what is under the pointer.
+ */
+export function linkAtCell(
+  term: Terminal,
+  row: number,
+  col: number,
+  deps: LinkHitDeps
+): LinkHit | null {
+  const osc8 = osc8UrlAt(term, row, col)
+  if (osc8) return { kind: 'url', url: osc8 }
+  const logical = paragraphContaining(bufferView(term), row)
+  if (!logical) return null
+  const idx = (row - logical.startRow) * term.cols + col
+  const inRange = (startIndex: number, len: number): boolean =>
+    idx >= startIndex && idx < startIndex + len
+
+  for (const u of matchUrlTokens(logical.text)) {
+    if (inRange(u.startIndex, u.text.length)) return { kind: 'url', url: u.url }
+  }
+  if (!deps.fileEnabled()) return null
+  const convention = deps.convention ? deps.convention() : { windows: deps.windows }
+  if (!convention) return null
+  for (const t of matchFileTokens(logical.text, convention)) {
+    if (inRange(t.startIndex, t.text.length)) {
+      const abs = resolveFileToken(t.path, deps.getCwd(), convention)
+      return abs ? { kind: 'path', abs } : null
+    }
+  }
+  return null
+}
+
+export interface LinkClickDeps extends LinkHitDeps {
   lookup(abs: string): Promise<{ exists: boolean; dir: boolean }>
   activateFile(abs: string, dir: boolean): void
   openUrl(url: string): void
-  /** False while no correctly-routed filesystem/dialect is available. */
-  fileEnabled(): boolean
 }
 
 /**
@@ -524,50 +586,83 @@ export function installLinkClickFallback(
     if (term.modes.mouseTrackingMode === 'none') return
     const pos = bufferPosFromEvent(term, ev)
     if (!pos) return
-    const osc8 = osc8UrlAt(term, pos.row, pos.col)
-    if (osc8) {
-      ev.preventDefault()
-      ev.stopPropagation()
-      term.clearSelection()
-      deps.openUrl(osc8)
+    const hit = linkAtCell(term, pos.row, pos.col, deps)
+    if (!hit) return
+    // Swallow the click NOW so tmux never gets the mouse report. For a path, existence is async
+    // and a Cmd/Ctrl+click on a path-shaped token is a deliberate open regardless of the outcome.
+    ev.preventDefault()
+    ev.stopPropagation()
+    term.clearSelection()
+    if (hit.kind === 'url') {
+      deps.openUrl(hit.url)
       return
     }
-    const logical = paragraphContaining(bufferView(term), pos.row)
-    if (!logical) return
-    const idx = (pos.row - logical.startRow) * term.cols + pos.col
-    const inRange = (startIndex: number, len: number): boolean =>
-      idx >= startIndex && idx < startIndex + len
-
-    for (const u of matchUrlTokens(logical.text)) {
-      if (inRange(u.startIndex, u.text.length)) {
-        ev.preventDefault()
-        ev.stopPropagation()
-        term.clearSelection()
-        deps.openUrl(u.url)
-        return
-      }
-    }
-    if (!deps.fileEnabled()) return
-    const convention = deps.convention ? deps.convention() : { windows: deps.windows }
-    if (!convention) return
-    for (const t of matchFileTokens(logical.text, convention)) {
-      if (inRange(t.startIndex, t.text.length)) {
-        const abs = resolveFileToken(t.path, deps.getCwd(), convention)
-        if (!abs) return
-        // Swallow the click NOW so tmux never gets the mouse report; existence is async and a
-        // Cmd/Ctrl+click on a path-shaped token is a deliberate open regardless of the outcome.
-        ev.preventDefault()
-        ev.stopPropagation()
-        term.clearSelection()
-        void deps.lookup(abs).then((f) => {
-          if (f.exists) deps.activateFile(abs, f.dir)
-        })
-        return
-      }
-    }
+    void deps.lookup(hit.abs).then((f) => {
+      if (f.exists) deps.activateFile(hit.abs, f.dir)
+    })
   }
   host.addEventListener('mouseup', onMouseUp, { capture: true })
   return {
     dispose: () => host.removeEventListener('mouseup', onMouseUp, { capture: true })
+  }
+}
+
+export interface LinkContextMenuDeps extends LinkHitDeps {
+  /** A right-click landed on `hit` at viewport point (x, y) — the host shows its menu there. */
+  openMenu(hit: LinkHit, x: number, y: number): void
+}
+
+/**
+ * Right-click on a link → the host's link menu (open / reveal / download / copy — see
+ * link-menu.ts). A right-click anywhere else is left EXACTLY as it was: tmux's own pane menu in a
+ * plain shell (tmux 3.x binds MouseDown3Pane to `display-menu` unless the app took the mouse), the
+ * press forwarded to an agent TUI that did, and the node's context menu bubbling up to React Flow.
+ *
+ * The decision is made on the PRESS, because that is what reaches tmux: xterm reports a
+ * right-button press as a mouse escape, and once it is sent tmux has already opened its menu. So
+ * the capture-phase `mousedown` hit-tests, and on a link swallows the press, its release and the
+ * `contextmenu` that follows (that one is also what would open the node menu and xterm's own
+ * right-click handling). The menu opens on `contextmenu`, the event every platform fires for the
+ * gesture — after the press on macOS/Linux, after the release on Windows. A `contextmenu` with no
+ * right press on a link before it (Shift+F10, the Menu key) is not ours. Unlike the Cmd+click
+ * fallback this runs whatever the mouse-tracking mode: with reporting off there is no tmux to
+ * protect, but the node menu and xterm's own right-click still must not open over ours.
+ */
+export function installLinkContextMenu(
+  term: Terminal,
+  host: HTMLElement,
+  deps: LinkContextMenuDeps
+): { dispose(): void } {
+  let pending: LinkHit | null = null
+  const swallow = (ev: Event): void => {
+    ev.preventDefault()
+    ev.stopPropagation()
+  }
+  const onMouseDown = (ev: MouseEvent): void => {
+    pending = null
+    if (ev.button !== 2) return
+    const pos = bufferPosFromEvent(term, ev)
+    pending = pos ? linkAtCell(term, pos.row, pos.col, deps) : null
+    if (pending) swallow(ev)
+  }
+  const onMouseUp = (ev: MouseEvent): void => {
+    if (ev.button === 2 && pending) swallow(ev)
+  }
+  const onContextMenu = (ev: MouseEvent): void => {
+    const hit = pending
+    if (!hit) return
+    pending = null
+    swallow(ev)
+    deps.openMenu(hit, ev.clientX, ev.clientY)
+  }
+  host.addEventListener('mousedown', onMouseDown, { capture: true })
+  host.addEventListener('mouseup', onMouseUp, { capture: true })
+  host.addEventListener('contextmenu', onContextMenu, { capture: true })
+  return {
+    dispose: () => {
+      host.removeEventListener('mousedown', onMouseDown, { capture: true })
+      host.removeEventListener('mouseup', onMouseUp, { capture: true })
+      host.removeEventListener('contextmenu', onContextMenu, { capture: true })
+    }
   }
 }

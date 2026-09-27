@@ -8,6 +8,8 @@ import { monacoTheme } from '../lib/appTheme'
 import { useAppTheme } from '../state/useAppTheme'
 import { renderMarkdown } from '../lib/markdown'
 import { opensInPreview } from '../lib/markdownPreview'
+import { canvasOwnsMarkdownChord } from '../lib/markdownChord'
+import { isGlobalKanbanOpen, isKanbanOpen } from '../state/viewMode'
 import { useSettings } from '../state/settings'
 import { sshFs } from '../terminal/ssh-fs'
 import { useProjects } from '../state/projects'
@@ -247,9 +249,11 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Cmd/Ctrl+M toggles a rendered markdown preview when this node is hovered.
+  // Cmd/Ctrl+M toggles a rendered markdown preview when this node is hovered — and never while a
+  // board is up: the hover flag can be stale under the opaque board, whose card modal owns the
+  // chord there (same rule as the terminal node; see `canvasOwnsMarkdownChord`).
   useEffect(() => window.nodeTerminal.onMarkdownToggle(() => {
-    if (hoveredRef.current) toggleRef.current()
+    if (canvasOwnsMarkdownChord(hoveredRef.current, isGlobalKanbanOpen() || isKanbanOpen(useProjects.getState().activeProjectId ?? ''))) toggleRef.current()
   }), [])
 
   // Whatever the markdown toggle is bound to; '' when the user unbound it, in which case the
