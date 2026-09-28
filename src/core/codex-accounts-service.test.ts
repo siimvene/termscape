@@ -421,3 +421,51 @@ describe('codex-accounts — the shell owns row membership', () => {
     expect(() => lstatSync(orphan)).toThrow()
   })
 })
+
+describe('findCodexRolloutInHome — the on-disk thread reader', () => {
+  const THREAD = '019a0000-aaaa-bbbb-cccc-000000000001'
+  let home = ''
+  beforeEach(() => {
+    home = mkdtempSync(path.join(os.tmpdir(), 'nt-codex-rollout-'))
+  })
+  afterEach(() => rmSync(home, { recursive: true, force: true }))
+  const put = (rel: string): string => {
+    const file = path.join(home, 'sessions', rel)
+    mkdirSync(path.dirname(file), { recursive: true })
+    writeFileSync(file, '{}\n')
+    return file
+  }
+
+  it('finds exactly the rollout whose name ENDS with -<threadId>.jsonl', async () => {
+    const want = put(`2026/09/28/rollout-2026-09-28T10-00-00-${THREAD}.jsonl`)
+    put(`2026/09/28/rollout-2026-09-28T11-00-00-${THREAD}0.jsonl`) // a longer id sharing the prefix
+    put(`2026/09/28/rollout-2026-09-28T12-00-00-x${THREAD.slice(1)}.jsonl`)
+    const { findCodexRolloutInHome } = await import('./codex-accounts-service')
+    await expect(findCodexRolloutInHome(home, THREAD)).resolves.toBe(want)
+  })
+
+  it('ignores files outside the YYYY/MM/DD depth and non-rollout names', async () => {
+    put(`rollout-2026-09-28T10-00-00-${THREAD}.jsonl`)
+    put(`2026/09/rollout-2026-09-28T10-00-00-${THREAD}.jsonl`)
+    put(`2026/09/28/notes-${THREAD}.jsonl`)
+    const { findCodexRolloutInHome } = await import('./codex-accounts-service')
+    await expect(findCodexRolloutInHome(home, THREAD)).resolves.toBeNull()
+  })
+
+  it('does not follow a symlinked day directory', async () => {
+    const outside = mkdtempSync(path.join(os.tmpdir(), 'nt-codex-outside-'))
+    writeFileSync(path.join(outside, `rollout-2026-09-28T10-00-00-${THREAD}.jsonl`), '{}\n')
+    mkdirSync(path.join(home, 'sessions', '2026', '09'), { recursive: true })
+    symlinkSync(outside, path.join(home, 'sessions', '2026', '09', '28'))
+    const { findCodexRolloutInHome } = await import('./codex-accounts-service')
+    await expect(findCodexRolloutInHome(home, THREAD)).resolves.toBeNull()
+    rmSync(outside, { recursive: true, force: true })
+  })
+
+  it('refuses an unsafe thread id before it reaches a filename match', async () => {
+    put(`2026/09/28/rollout-x-..jsonl`)
+    const { findCodexRolloutInHome } = await import('./codex-accounts-service')
+    await expect(findCodexRolloutInHome(home, '..')).resolves.toBeNull()
+    await expect(findCodexRolloutInHome(home, '*')).resolves.toBeNull()
+  })
+})

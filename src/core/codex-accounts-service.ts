@@ -48,7 +48,7 @@ import {
   migrateLegacyCodexAccountHomes,
   systemCodexHome
 } from './codex-accounts-core'
-import { readCodexAccountAt } from './codex-session-name'
+import { readCodexAccountAt, readCodexThreadAt } from './codex-session-name'
 import { directExecutableInvocation } from './exec-path'
 import { readCodexAuth } from './usage/codex-usage'
 import { platform } from './platform'
@@ -143,6 +143,77 @@ export async function ensureCodexAccountDaemon(accountId?: string): Promise<void
         maxBuffer: 1024 * 1024
       })
     }
+  )
+}
+
+/** A thread id that may become part of a filename match. Same shape as the switch's SAFE_THREAD_ID. */
+const ROLLOUT_THREAD_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
+
+/**
+ * The rollout file of `threadId` inside an account home, found on DISK:
+ * `<home>/sessions/YYYY/MM/DD/rollout-<ts>-<threadId>.jsonl`, exactly three directory levels under
+ * `sessions/`, symlinks never followed (a `Dirent` for a symlink is neither a directory nor a file).
+ * The name must END with `-<threadId>.jsonl` (never a `.includes` scan, so one id can never match
+ * another's rollout). More than one match is ambiguous and returns null: the caller then refuses
+ * the switch rather than moving a conversation it cannot name exactly.
+ *
+ * The app-server's `thread/read` is the preferred source (it knows the thread even outside the
+ * dated tree), but `codex app-server daemon start` only runs on the installer-managed standalone
+ * Codex build, so on a Homebrew/npm install this is the only reader the switch has.
+ */
+export async function findCodexRolloutInHome(home: string, threadId: string): Promise<string | null> {
+  if (!ROLLOUT_THREAD_ID.test(threadId)) return null
+  const suffix = `-${threadId}.jsonl`
+  const dirs = async (dir: string): Promise<string[]> => {
+    try {
+      const entries = await fs.readdir(dir, { withFileTypes: true })
+      return entries.filter((e) => e.isDirectory()).map((e) => path.join(dir, e.name))
+    } catch {
+      return []
+    }
+  }
+  const matches: string[] = []
+  for (const year of await dirs(path.join(home, 'sessions'))) {
+    for (const month of await dirs(year)) {
+      for (const day of await dirs(month)) {
+        let entries: Array<{ name: string; isFile(): boolean }>
+        try {
+          entries = await fs.readdir(day, { withFileTypes: true })
+        } catch {
+          continue
+        }
+        for (const e of entries) {
+          if (e.isFile() && e.name.startsWith('rollout-') && e.name.endsWith(suffix)) {
+            matches.push(path.join(day, e.name))
+          }
+        }
+      }
+    }
+  }
+  return matches.length === 1 ? matches[0] : null
+}
+
+/**
+ * Where an account's copy of `threadId` lives: the app-server's answer when its daemon can be
+ * started, else the on-disk rollout (`findCodexRolloutInHome`). Null when neither can name it.
+ * Callers still run `planCodexRolloutExposure` on the result, which re-checks containment in the
+ * account's `sessions/`, regular-file-ness and the `<threadId>.jsonl` basename.
+ */
+export async function codexThreadRolloutPath(
+  accountId: string | undefined,
+  threadId: string
+): Promise<string | null> {
+  try {
+    await ensureCodexAccountDaemon(accountId)
+    const viaDaemon = await readCodexThreadAt(localCodexSocket(accountId), threadId, 5000)
+    if (viaDaemon?.path) return viaDaemon.path
+  } catch {
+    // No daemon on this install — the rollout is still on disk.
+  }
+  if (accountId) migrateLegacyCodexAccountHome(platform().userDataDir, accountId)
+  return findCodexRolloutInHome(
+    accountId ? localCodexAccountHome(accountId) : systemCodexHome(),
+    threadId
   )
 }
 

@@ -216,3 +216,50 @@ describe('Codex same-machine switch — three-phase, owner-authorized (Propertie
     await expect(call(IPC.codexAccountsRemove, owner, SOURCE)).resolves.toBeUndefined()
   })
 })
+
+// `codex app-server daemon start` runs only on the installer-managed standalone Codex; on a
+// Homebrew/npm install it exits, and a daemon-only `thread/read` made every switch (and so the
+// usage popover's "Move N sessions" for Codex) fail with "Source Codex conversation is unavailable".
+describe('Codex same-machine switch — no app-server daemon (non-standalone Codex install)', () => {
+  const DAY_DIR = ['2026', '08', '28']
+  const rolloutName = `rollout-2026-08-28T10-00-00-${THREAD}.jsonl`
+
+  beforeEach(() => {
+    // The daemon can neither be probed nor started (findInLoginPath is null), and no thread/read.
+    readAccount.mockResolvedValue(null as any)
+    readThread.mockResolvedValue(null)
+  })
+
+  it('finds the rollout on disk and hardlinks it into the target', async () => {
+    const dayDir = path.join(codexAccountHome(userDataDir, SOURCE), 'sessions', ...DAY_DIR)
+    mkdirSync(dayDir, { recursive: true })
+    const rollout = path.join(dayDir, rolloutName)
+    writeFileSync(rollout, '{"id":"' + THREAD + '"}\n')
+    const owner = makeSender(1)
+    const res = (await call(IPC.codexAccountsSwitchThread, owner, THREAD, '/work', SOURCE, TARGET)) as {
+      rollbackToken?: string
+    }
+    expect(res.rollbackToken).toBeTruthy()
+    await call(IPC.codexAccountsCommitSwitch, owner, res.rollbackToken)
+    const target = path.join(codexAccountHome(userDataDir, TARGET), 'sessions', ...DAY_DIR, rolloutName)
+    expect(statSync(target).ino).toBe(statSync(rollout).ino)
+    await call(IPC.codexAccountsFinishSwitch, owner, res.rollbackToken)
+  })
+
+  it('refuses when the thread has no rollout on disk either', async () => {
+    await expect(
+      call(IPC.codexAccountsSwitchThread, makeSender(1), 'thread-missing', '/work', SOURCE, TARGET)
+    ).rejects.toThrow(/unavailable/)
+  })
+
+  it('refuses an AMBIGUOUS thread (two rollouts end in the id) rather than pick one', async () => {
+    for (const day of ['27', '28']) {
+      const dir = path.join(codexAccountHome(userDataDir, SOURCE), 'sessions', '2026', '08', day)
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(path.join(dir, `rollout-2026-08-${day}T10-00-00-${THREAD}.jsonl`), '{}\n')
+    }
+    await expect(
+      call(IPC.codexAccountsSwitchThread, makeSender(1), THREAD, '/work', SOURCE, TARGET)
+    ).rejects.toThrow(/unavailable/)
+  })
+})
