@@ -173,7 +173,14 @@ describe('registerCodexAccountsIpc — the Server Edition surface', () => {
       expect(readAccount).not.toHaveBeenCalled()
     })
 
-    it('a token with no email claim is still a login ({ email: null }), not pending', async () => {
+    it('an id_token WITHOUT an access token is not a login, however good its email', async () => {
+    register()
+    const { id, home } = await call(IPC.codexAccountsAdd)
+    writeFileSync(path.join(home, 'auth.json'), authJson({ id_token: jwt({ email: 'x@example.com' }) }))
+    await expect(call(IPC.codexAccountsIdentity, id)).resolves.toBeNull()
+  })
+
+  it('a token with no email claim is still a login ({ email: null }), not pending', async () => {
       register()
       const { id, home } = await call(IPC.codexAccountsAdd)
       writeFileSync(path.join(home, 'auth.json'), authJson({ access_token: 'at' }))
@@ -460,6 +467,21 @@ describe('findCodexRolloutInHome — the on-disk thread reader', () => {
     const { findCodexRolloutInHome } = await import('./codex-accounts-service')
     await expect(findCodexRolloutInHome(home, THREAD)).resolves.toBeNull()
     rmSync(outside, { recursive: true, force: true })
+  })
+
+  it('ignores a non-dated tree beside the dated one (a backup cannot shadow or ambiguate)', async () => {
+    const want = put(`2026/09/28/rollout-2026-09-28T10-00-00-${THREAD}.jsonl`)
+    put(`backup/2026/09/rollout-2026-09-28T10-00-00-${THREAD}.jsonl`)
+    put(`2026/old/28/rollout-2026-09-28T10-00-00-${THREAD}.jsonl`)
+    const { findCodexRolloutInHome } = await import('./codex-accounts-service')
+    await expect(findCodexRolloutInHome(home, THREAD)).resolves.toBe(want)
+  })
+
+  it('takes only a FULL thread UUID — a trailing fragment of one never matches', async () => {
+    put(`2026/09/28/rollout-2026-09-28T10-00-00-${THREAD}.jsonl`)
+    const { findCodexRolloutInHome } = await import('./codex-accounts-service')
+    await expect(findCodexRolloutInHome(home, THREAD.split('-').pop()!)).resolves.toBeNull()
+    await expect(findCodexRolloutInHome(home, 'thread-abc123')).resolves.toBeNull()
   })
 
   it('refuses an unsafe thread id before it reaches a filename match', async () => {

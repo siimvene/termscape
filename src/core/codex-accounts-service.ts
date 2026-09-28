@@ -146,13 +146,17 @@ export async function ensureCodexAccountDaemon(accountId?: string): Promise<void
   )
 }
 
-/** A thread id that may become part of a filename match. Same shape as the switch's SAFE_THREAD_ID. */
-const ROLLOUT_THREAD_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
+/** A Codex thread id is a UUID. The on-disk match demands the FULL shape: a suffix compare against
+ *  a shorter token (the last group of some other conversation's id) could otherwise match a
+ *  rollout the caller never named. */
+const ROLLOUT_THREAD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+/** The dated levels under `sessions/`: a backup or scratch tree beside them is never a live rollout. */
+const DATED_LEVEL = [/^\d{4}$/, /^\d{2}$/, /^\d{2}$/] as const
 
 /**
  * The rollout file of `threadId` inside an account home, found on DISK:
- * `<home>/sessions/YYYY/MM/DD/rollout-<ts>-<threadId>.jsonl`, exactly three directory levels under
- * `sessions/`, symlinks never followed (a `Dirent` for a symlink is neither a directory nor a file).
+ * `<home>/sessions/YYYY/MM/DD/rollout-<ts>-<threadId>.jsonl`, exactly three NUMERIC dated directory
+ * levels under `sessions/` (a `backup/…` tree beside them is ignored), symlinks never followed (a `Dirent` for a symlink is neither a directory nor a file).
  * The name must END with `-<threadId>.jsonl` (never a `.includes` scan, so one id can never match
  * another's rollout). More than one match is ambiguous and returns null: the caller then refuses
  * the switch rather than moving a conversation it cannot name exactly.
@@ -164,18 +168,20 @@ const ROLLOUT_THREAD_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 export async function findCodexRolloutInHome(home: string, threadId: string): Promise<string | null> {
   if (!ROLLOUT_THREAD_ID.test(threadId)) return null
   const suffix = `-${threadId}.jsonl`
-  const dirs = async (dir: string): Promise<string[]> => {
+  const dirs = async (dir: string, level: 0 | 1 | 2): Promise<string[]> => {
     try {
       const entries = await fs.readdir(dir, { withFileTypes: true })
-      return entries.filter((e) => e.isDirectory()).map((e) => path.join(dir, e.name))
+      return entries
+        .filter((e) => e.isDirectory() && DATED_LEVEL[level].test(e.name))
+        .map((e) => path.join(dir, e.name))
     } catch {
       return []
     }
   }
   const matches: string[] = []
-  for (const year of await dirs(path.join(home, 'sessions'))) {
-    for (const month of await dirs(year)) {
-      for (const day of await dirs(month)) {
+  for (const year of await dirs(path.join(home, 'sessions'), 0)) {
+    for (const month of await dirs(year, 1)) {
+      for (const day of await dirs(month, 2)) {
         let entries: Array<{ name: string; isFile(): boolean }>
         try {
           entries = await fs.readdir(day, { withFileTypes: true })
@@ -263,7 +269,9 @@ async function accountIdentity(accountId?: string): Promise<{ email: string | nu
   const auth = await readCodexAuth(
     accountId ? localCodexAccountHome(accountId) : systemCodexHome()
   )
-  if (auth.email) return { email: auth.email }
+  // The email names the login only next to a credential: an id_token alone (a partial or malformed
+  // write) is not a login Codex can run under.
+  if (auth.accessToken && auth.email) return { email: auth.email }
   try {
     await ensureCodexAccountDaemon(accountId)
     const viaDaemon = await readCodexAccountAt(localCodexSocket(accountId), 5000)

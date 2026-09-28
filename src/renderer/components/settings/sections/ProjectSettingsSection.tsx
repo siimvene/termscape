@@ -335,7 +335,7 @@ function EditableProjectSection({
       <SearchableRow {...ROWS.account}>
         <FieldRow
           label="Default Claude account"
-          description="Account new Claude and chat nodes in this project use."
+          description="Account new Claude and chat nodes in this project use. Kept on this machine only, not in the shared project file."
           note={accountsHint ?? undefined}
           htmlFor={`project-account-${project.id}`}
           control={
@@ -369,7 +369,7 @@ function EditableProjectSection({
       <SearchableRow {...ROWS.codexAccount}>
         <FieldRow
           label="Default Codex account"
-          description="Account new Codex nodes in this project use."
+          description="Account new Codex nodes in this project use. Kept on this machine only, not in the shared project file."
           htmlFor={`project-codex-account-${project.id}`}
           control={
             <Select
