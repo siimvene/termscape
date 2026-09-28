@@ -188,7 +188,15 @@ paths:
     removal cancels any pending wait + `markDirty`. **Codex accounts have the same two halves** —
     `createCodexAccountLoginNode` (`codex login`, title "Codex login") behind the
     `nodeterm:add-codex-account-login` listener, with `codexAccounts.waitLogin` polling the managed
-    home's `auth.json`. Both flows mint an **agent-less terminal** carrying only `accountId`, and
+    home's `auth.json`. **A Codex identity (managed or system) is read from that `auth.json`'s
+    `id_token` email FIRST; the app-server `account/read` is only the fallback** (2026-09-28).
+    `codex app-server daemon start` runs only on the installer-managed standalone build
+    (`$CODEX_HOME/packages/standalone/current/codex`) and exits on a Homebrew/npm Codex, so a
+    daemon-only reader left every managed account `pending` forever — and pending rows are skipped
+    by the usage popover, the pickers and the mirror, which read as "Codex shows only one account"
+    while Claude showed all of them. A token-bearing `auth.json` with no email claim still resolves
+    (`{ email: null }`); one with no token is not a login. The account SWITCH legs in
+    `src/main/codex-accounts.ts` still start the daemon and are untouched by this. Both flows mint an **agent-less terminal** carrying only `accountId`, and
     that shape is why `needsCodexAccountScope` takes an `isCodexAccount` resolver rather than
     reading `!!accountId`: the two account lists share an id alphabet, so the id alone cannot say
     which provider it belongs to. Guessing "codex" refused every managed **Claude** node (#345);

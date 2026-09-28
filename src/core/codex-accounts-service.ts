@@ -45,10 +45,12 @@ import {
   ensureSharedCodexDaemon,
   legacyCodexAccountHome,
   migrateLegacyCodexAccountHome,
-  migrateLegacyCodexAccountHomes
+  migrateLegacyCodexAccountHomes,
+  systemCodexHome
 } from './codex-accounts-core'
 import { readCodexAccountAt } from './codex-session-name'
 import { directExecutableInvocation } from './exec-path'
+import { readCodexAuth } from './usage/codex-usage'
 import { platform } from './platform'
 import { findInLoginPath } from './pty-manager'
 import { NEW_CODEX_ACCOUNT_LABEL, type CodexAccount } from '../shared/codex-account'
@@ -169,9 +171,36 @@ async function initializeAccountHome(id: string): Promise<string> {
   return home
 }
 
+/**
+ * The signed-in identity of an account home (system when `accountId` is absent). `auth.json` is
+ * read FIRST: the email claim of its own `id_token` — the same source the usage row is named by
+ * (`readCodexAuth`), so the account list and the usage popover can never disagree about who a
+ * home is. The app-server's `account/read` is only the fallback for a credential that carries no
+ * email, because `codex app-server daemon start` works ONLY on the installer-managed standalone
+ * build (`$CODEX_HOME/packages/standalone/current/codex`). On a Homebrew / npm Codex it exits
+ * "managed standalone Codex install not found" [MEASURED 2026-09-28, codex-cli 0.155.1], and
+ * with the daemon as the only reader every managed account stayed `pending` forever: the login
+ * poll timed out, the Settings reconcile never resolved it, and the usage popover, pickers and
+ * mirror — which all skip pending rows — showed only the system Codex account.
+ *
+ * Null ⇒ not logged in (no token-bearing `auth.json`, and no daemon answer). A token with no email
+ * claim that the daemon cannot name is still a login: `{ email: null }`, so the row resolves under
+ * its placeholder label instead of staying pending. Never throws — a failed daemon start is an
+ * absent reader, not an error.
+ */
 async function accountIdentity(accountId?: string): Promise<{ email: string | null } | null> {
-  await ensureCodexAccountDaemon(accountId)
-  return readCodexAccountAt(localCodexSocket(accountId), 5000)
+  const auth = await readCodexAuth(
+    accountId ? localCodexAccountHome(accountId) : systemCodexHome()
+  )
+  if (auth.email) return { email: auth.email }
+  try {
+    await ensureCodexAccountDaemon(accountId)
+    const viaDaemon = await readCodexAccountAt(localCodexSocket(accountId), 5000)
+    if (viaDaemon) return viaDaemon
+  } catch {
+    // No daemon on this install — fall through to what auth.json alone can say.
+  }
+  return auth.accessToken ? { email: null } : null
 }
 
 /**

@@ -142,6 +142,70 @@ describe('registerCodexAccountsIpc — the Server Edition surface', () => {
     await expect(pending).resolves.toBeNull()
   })
 
+  // `codex app-server daemon start` runs only on the installer-managed standalone Codex; on a
+  // Homebrew/npm install it exits, so a daemon-only reader left every managed account `pending`
+  // forever — and pending rows are skipped by the usage popover, the pickers and the mirror (the
+  // "Codex shows only one account" report, 2026-09-28). The home's own auth.json must resolve it.
+  describe('identity without an app-server daemon (non-standalone Codex install)', () => {
+    const jwt = (claims: Record<string, unknown>): string =>
+      ['h', Buffer.from(JSON.stringify(claims)).toString('base64url'), 's'].join('.')
+    const authJson = (tokens: Record<string, unknown>): string => JSON.stringify({ tokens })
+
+    beforeEach(() => {
+      // Probe answers nothing, and findInLoginPath is null ⇒ the daemon cannot be started.
+      readAccount.mockResolvedValue(null as any)
+    })
+
+    it('resolves a managed login from the id_token email, never touching the daemon', async () => {
+      register({ pollMs: 5 })
+      const { id, home } = await call(IPC.codexAccountsAdd)
+      writeFileSync(
+        path.join(home, 'auth.json'),
+        authJson({ access_token: 'at', id_token: jwt({ email: 'second@example.com' }) })
+      )
+      readAccount.mockClear()
+      await expect(call(IPC.codexAccountsWaitLogin, id)).resolves.toEqual({
+        email: 'second@example.com'
+      })
+      await expect(call(IPC.codexAccountsIdentity, id)).resolves.toEqual({
+        email: 'second@example.com'
+      })
+      expect(readAccount).not.toHaveBeenCalled()
+    })
+
+    it('a token with no email claim is still a login ({ email: null }), not pending', async () => {
+      register()
+      const { id, home } = await call(IPC.codexAccountsAdd)
+      writeFileSync(path.join(home, 'auth.json'), authJson({ access_token: 'at' }))
+      await expect(call(IPC.codexAccountsIdentity, id)).resolves.toEqual({ email: null })
+    })
+
+    it('an auth.json with no credential (mid-write, or empty) is NOT a login', async () => {
+      register()
+      const { id, home } = await call(IPC.codexAccountsAdd)
+      writeFileSync(path.join(home, 'auth.json'), '{"tok')
+      await expect(call(IPC.codexAccountsIdentity, id)).resolves.toBeNull()
+      writeFileSync(path.join(home, 'auth.json'), '{}')
+      await expect(call(IPC.codexAccountsIdentity, id)).resolves.toBeNull()
+    })
+
+    it('systemIdentity reads the SYSTEM home auth.json instead of rejecting', async () => {
+      register()
+      writeFileSync(
+        path.join(systemHome, 'auth.json'),
+        authJson({ access_token: 'at', id_token: jwt({ email: 'sys@example.com' }) })
+      )
+      await expect(call(IPC.codexAccountsSystemIdentity)).resolves.toEqual({
+        email: 'sys@example.com'
+      })
+    })
+
+    it('systemIdentity with no system login is null, not a rejection', async () => {
+      register()
+      await expect(call(IPC.codexAccountsSystemIdentity)).resolves.toBeNull()
+    })
+  })
+
   it('rejects an unsafe account id before it becomes a path (supply-chain guard)', async () => {
     register()
     await expect(call(IPC.codexAccountsRemove, '../../etc')).rejects.toThrow()
