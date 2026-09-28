@@ -142,6 +142,77 @@ describe('registerCodexAccountsIpc — the Server Edition surface', () => {
     await expect(pending).resolves.toBeNull()
   })
 
+  // `codex app-server daemon start` runs only on the installer-managed standalone Codex; on a
+  // Homebrew/npm install it exits, so a daemon-only reader left every managed account `pending`
+  // forever — and pending rows are skipped by the usage popover, the pickers and the mirror (the
+  // "Codex shows only one account" report, 2026-09-28). The home's own auth.json must resolve it.
+  describe('identity without an app-server daemon (non-standalone Codex install)', () => {
+    const jwt = (claims: Record<string, unknown>): string =>
+      ['h', Buffer.from(JSON.stringify(claims)).toString('base64url'), 's'].join('.')
+    const authJson = (tokens: Record<string, unknown>): string => JSON.stringify({ tokens })
+
+    beforeEach(() => {
+      // Probe answers nothing, and findInLoginPath is null ⇒ the daemon cannot be started.
+      readAccount.mockResolvedValue(null as any)
+    })
+
+    it('resolves a managed login from the id_token email, never touching the daemon', async () => {
+      register({ pollMs: 5 })
+      const { id, home } = await call(IPC.codexAccountsAdd)
+      writeFileSync(
+        path.join(home, 'auth.json'),
+        authJson({ access_token: 'at', id_token: jwt({ email: 'second@example.com' }) })
+      )
+      readAccount.mockClear()
+      await expect(call(IPC.codexAccountsWaitLogin, id)).resolves.toEqual({
+        email: 'second@example.com'
+      })
+      await expect(call(IPC.codexAccountsIdentity, id)).resolves.toEqual({
+        email: 'second@example.com'
+      })
+      expect(readAccount).not.toHaveBeenCalled()
+    })
+
+    it('an id_token WITHOUT an access token is not a login, however good its email', async () => {
+    register()
+    const { id, home } = await call(IPC.codexAccountsAdd)
+    writeFileSync(path.join(home, 'auth.json'), authJson({ id_token: jwt({ email: 'x@example.com' }) }))
+    await expect(call(IPC.codexAccountsIdentity, id)).resolves.toBeNull()
+  })
+
+  it('a token with no email claim is still a login ({ email: null }), not pending', async () => {
+      register()
+      const { id, home } = await call(IPC.codexAccountsAdd)
+      writeFileSync(path.join(home, 'auth.json'), authJson({ access_token: 'at' }))
+      await expect(call(IPC.codexAccountsIdentity, id)).resolves.toEqual({ email: null })
+    })
+
+    it('an auth.json with no credential (mid-write, or empty) is NOT a login', async () => {
+      register()
+      const { id, home } = await call(IPC.codexAccountsAdd)
+      writeFileSync(path.join(home, 'auth.json'), '{"tok')
+      await expect(call(IPC.codexAccountsIdentity, id)).resolves.toBeNull()
+      writeFileSync(path.join(home, 'auth.json'), '{}')
+      await expect(call(IPC.codexAccountsIdentity, id)).resolves.toBeNull()
+    })
+
+    it('systemIdentity reads the SYSTEM home auth.json instead of rejecting', async () => {
+      register()
+      writeFileSync(
+        path.join(systemHome, 'auth.json'),
+        authJson({ access_token: 'at', id_token: jwt({ email: 'sys@example.com' }) })
+      )
+      await expect(call(IPC.codexAccountsSystemIdentity)).resolves.toEqual({
+        email: 'sys@example.com'
+      })
+    })
+
+    it('systemIdentity with no system login is null, not a rejection', async () => {
+      register()
+      await expect(call(IPC.codexAccountsSystemIdentity)).resolves.toBeNull()
+    })
+  })
+
   it('rejects an unsafe account id before it becomes a path (supply-chain guard)', async () => {
     register()
     await expect(call(IPC.codexAccountsRemove, '../../etc')).rejects.toThrow()
@@ -355,5 +426,68 @@ describe('codex-accounts — the shell owns row membership', () => {
     mkdirSync(orphan, { recursive: true })
     await call(IPC.codexAccountsRemove, 'orphan-1')
     expect(() => lstatSync(orphan)).toThrow()
+  })
+})
+
+describe('findCodexRolloutInHome — the on-disk thread reader', () => {
+  const THREAD = '019a0000-aaaa-bbbb-cccc-000000000001'
+  let home = ''
+  beforeEach(() => {
+    home = mkdtempSync(path.join(os.tmpdir(), 'nt-codex-rollout-'))
+  })
+  afterEach(() => rmSync(home, { recursive: true, force: true }))
+  const put = (rel: string): string => {
+    const file = path.join(home, 'sessions', rel)
+    mkdirSync(path.dirname(file), { recursive: true })
+    writeFileSync(file, '{}\n')
+    return file
+  }
+
+  it('finds exactly the rollout whose name ENDS with -<threadId>.jsonl', async () => {
+    const want = put(`2026/09/28/rollout-2026-09-28T10-00-00-${THREAD}.jsonl`)
+    put(`2026/09/28/rollout-2026-09-28T11-00-00-${THREAD}0.jsonl`) // a longer id sharing the prefix
+    put(`2026/09/28/rollout-2026-09-28T12-00-00-x${THREAD.slice(1)}.jsonl`)
+    const { findCodexRolloutInHome } = await import('./codex-accounts-service')
+    await expect(findCodexRolloutInHome(home, THREAD)).resolves.toBe(want)
+  })
+
+  it('ignores files outside the YYYY/MM/DD depth and non-rollout names', async () => {
+    put(`rollout-2026-09-28T10-00-00-${THREAD}.jsonl`)
+    put(`2026/09/rollout-2026-09-28T10-00-00-${THREAD}.jsonl`)
+    put(`2026/09/28/notes-${THREAD}.jsonl`)
+    const { findCodexRolloutInHome } = await import('./codex-accounts-service')
+    await expect(findCodexRolloutInHome(home, THREAD)).resolves.toBeNull()
+  })
+
+  it('does not follow a symlinked day directory', async () => {
+    const outside = mkdtempSync(path.join(os.tmpdir(), 'nt-codex-outside-'))
+    writeFileSync(path.join(outside, `rollout-2026-09-28T10-00-00-${THREAD}.jsonl`), '{}\n')
+    mkdirSync(path.join(home, 'sessions', '2026', '09'), { recursive: true })
+    symlinkSync(outside, path.join(home, 'sessions', '2026', '09', '28'))
+    const { findCodexRolloutInHome } = await import('./codex-accounts-service')
+    await expect(findCodexRolloutInHome(home, THREAD)).resolves.toBeNull()
+    rmSync(outside, { recursive: true, force: true })
+  })
+
+  it('ignores a non-dated tree beside the dated one (a backup cannot shadow or ambiguate)', async () => {
+    const want = put(`2026/09/28/rollout-2026-09-28T10-00-00-${THREAD}.jsonl`)
+    put(`backup/2026/09/rollout-2026-09-28T10-00-00-${THREAD}.jsonl`)
+    put(`2026/old/28/rollout-2026-09-28T10-00-00-${THREAD}.jsonl`)
+    const { findCodexRolloutInHome } = await import('./codex-accounts-service')
+    await expect(findCodexRolloutInHome(home, THREAD)).resolves.toBe(want)
+  })
+
+  it('takes only a FULL thread UUID — a trailing fragment of one never matches', async () => {
+    put(`2026/09/28/rollout-2026-09-28T10-00-00-${THREAD}.jsonl`)
+    const { findCodexRolloutInHome } = await import('./codex-accounts-service')
+    await expect(findCodexRolloutInHome(home, THREAD.split('-').pop()!)).resolves.toBeNull()
+    await expect(findCodexRolloutInHome(home, 'thread-abc123')).resolves.toBeNull()
+  })
+
+  it('refuses an unsafe thread id before it reaches a filename match', async () => {
+    put(`2026/09/28/rollout-x-..jsonl`)
+    const { findCodexRolloutInHome } = await import('./codex-accounts-service')
+    await expect(findCodexRolloutInHome(home, '..')).resolves.toBeNull()
+    await expect(findCodexRolloutInHome(home, '*')).resolves.toBeNull()
   })
 })

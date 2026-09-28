@@ -188,7 +188,15 @@ paths:
     removal cancels any pending wait + `markDirty`. **Codex accounts have the same two halves** —
     `createCodexAccountLoginNode` (`codex login`, title "Codex login") behind the
     `nodeterm:add-codex-account-login` listener, with `codexAccounts.waitLogin` polling the managed
-    home's `auth.json`. Both flows mint an **agent-less terminal** carrying only `accountId`, and
+    home's `auth.json`. **A Codex identity (managed or system) is read from that `auth.json`'s
+    `id_token` email FIRST; the app-server `account/read` is only the fallback** (2026-09-28).
+    `codex app-server daemon start` runs only on the installer-managed standalone build
+    (`$CODEX_HOME/packages/standalone/current/codex`) and exits on a Homebrew/npm Codex, so a
+    daemon-only reader left every managed account `pending` forever — and pending rows are skipped
+    by the usage popover, the pickers and the mirror, which read as "Codex shows only one account"
+    while Claude showed all of them. A token-bearing `auth.json` with no email claim still resolves
+    (`{ email: null }`); one with no token is not a login. The account SWITCH legs in
+    `src/main/codex-accounts.ts` still start the daemon and are untouched by this. Both flows mint an **agent-less terminal** carrying only `accountId`, and
     that shape is why `needsCodexAccountScope` takes an `isCodexAccount` resolver rather than
     reading `!!accountId`: the two account lists share an id alphabet, so the id alone cannot say
     which provider it belongs to. Guessing "codex" refused every managed **Claude** node (#345);
@@ -325,6 +333,24 @@ paths:
     disabled row would surface as a search result) saying accounts for this host are added in
     Settings → Accounts while the project is connected — local accounts being invisible there is
     correct (their credentials aren't on the host) but read as "multi-account is broken on SSH".
+  - **Codex has its own project default, `project.defaultCodexAccountId` (2026-09-28)** —
+    `defaultAccountId`'s twin, never shared with it: the two account lists share an id alphabet, so
+    one field would let a Claude id name a Codex login. Machine-local exactly like it (index entry
+    only, never `project.json`; a value found in the shared file is a forgery and is not read —
+    there is no legacy fallback because no build ever wrote it there; forbidden to the settings
+    CLI verb). Resolved at creation by `codexProjectDefault` (`canvas/codex-account-ops.ts`): the
+    id only when it names a logged-in account on the project's own machine that
+    `codexAccountSelectable` accepts, else SYSTEM — a stale default falls back, it never refuses
+    (only an EXPLICIT pick is fail-closed, Property 4). The New Codex submenu's System row passes
+    `null` so it skips the default (#419's rule), and ✓ marks the row a no-pick node would take.
+    Set from Project Settings ("Default Codex account") or the usage popover.
+  - **Codex usage rows are ACCOUNT rows (2026-09-28).** Each is headed by the account
+    (`codexRowLabel`: the settings label, else its email; the system row by its signed-in email),
+    carries "Codex" as a chip, and gets Claude's two actions through its OWN handlers —
+    "Use for new sessions" writes `defaultCodexAccountId`, "Move N sessions" moves Codex nodes only
+    (`bulkSwitchCandidates(…, 'codex')`) one at a time through the owner-authorized switch
+    (`runCodexAccountSwitch`, whose outcome feeds both the node menu's notice and the bulk summary).
+    Before this every Codex row was titled "Codex", so N logins read as N copies of one provider.
   - **Remote accounts** — selection + login + env injection, plus **usage** (below); no
     per-account transcript readers beyond env.
   - **Settings → Accounts is ONE machine-grouped surface for BOTH providers** (2026-09): a panel

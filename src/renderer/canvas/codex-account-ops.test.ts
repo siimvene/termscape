@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import type { CodexAccount } from '@shared/codex-account'
-import { resolveNewCodexNodeAccount, planCodexAccountSwitch } from './codex-account-ops'
+import {
+  codexProjectDefault,
+  codexSwitchOutcomeNotice,
+  resolveNewCodexNodeAccount,
+  planCodexAccountSwitch,
+  summarizeCodexBulkSwitch
+} from './codex-account-ops'
 
 const local: CodexAccount = { id: 'account-a', label: 'Work' }
 const remote: CodexAccount = { id: 'account-r', label: 'Box', host: 'u@box' }
@@ -165,6 +171,74 @@ describe('planCodexAccountSwitch — the account must live on the node\'s machin
     expect(planCodexAccountSwitch(local, 'rem', accts, connected)).toEqual({
       ok: false,
       reason: 'unavailable'
+    })
+  })
+})
+
+describe('codexProjectDefault (project.defaultCodexAccountId at node creation)', () => {
+  const pending: CodexAccount = { id: 'account-p', label: 'Pending', pending: true }
+  const all = [local, remote, pending]
+
+  it('returns a valid local default for a local project', () => {
+    expect(codexProjectDefault('account-a', undefined, all, noConnection)).toBe('account-a')
+  })
+
+  it('falls back to SYSTEM (undefined) — never refuses — for a stale, pending or foreign default', () => {
+    expect(codexProjectDefault(undefined, undefined, all, connected)).toBeUndefined()
+    expect(codexProjectDefault('account-gone', undefined, all, connected)).toBeUndefined()
+    expect(codexProjectDefault('account-p', undefined, all, connected)).toBeUndefined()
+    // A local account is not this SSH project's machine, and a host account is not a local one's.
+    expect(codexProjectDefault('account-a', 'u@box', all, connected)).toBeUndefined()
+    expect(codexProjectDefault('account-r', undefined, all, connected)).toBeUndefined()
+  })
+
+  it('takes a host account on its own SSH project only while that host is connected', () => {
+    expect(codexProjectDefault('account-r', 'u@box', all, connected)).toBe('account-r')
+    expect(codexProjectDefault('account-r', 'u@box', all, noConnection)).toBeUndefined()
+  })
+
+  it('refuses a hostile id even when a row carries it', () => {
+    const hostile: CodexAccount = { id: '../x', label: 'Evil' }
+    expect(codexProjectDefault('../x', undefined, [hostile], noConnection)).toBeUndefined()
+  })
+})
+
+describe('Codex switch outcomes — one notice for a node, one summary for a bulk move', () => {
+  it('keeps the single-switch wording and says nothing for a no-op', () => {
+    expect(codexSwitchOutcomeNotice({ kind: 'noop' })).toBeNull()
+    expect(codexSwitchOutcomeNotice({ kind: 'switched' })).toEqual({
+      kind: 'info',
+      text: 'Codex account switched — conversation resumed.'
+    })
+    expect(codexSwitchOutcomeNotice({ kind: 'failed' })?.text).toBe(
+      'The Codex account switch failed and was rolled back. Nothing was changed.'
+    )
+    expect(codexSwitchOutcomeNotice({ kind: 'host-down', hostKey: 'u@box' })?.text).toBe(
+      'u@box is not connected — reconnect the project, then switch. Nothing was changed.'
+    )
+  })
+
+  it('summarizes moved, needs-restart, skipped and failed', () => {
+    expect(summarizeCodexBulkSwitch([{ kind: 'switched' }, { kind: 'switched' }], 0, 'Work')).toEqual({
+      kind: 'info',
+      text: 'Moved 2 Codex sessions to Work.'
+    })
+    expect(
+      summarizeCodexBulkSwitch(
+        [
+          { kind: 'switched' },
+          { kind: 'switched-not-relaunched' },
+          { kind: 'diverged' },
+          { kind: 'failed' }
+        ],
+        1,
+        'Work'
+      )
+    ).toEqual({
+      kind: 'error',
+      text:
+        'Moved 2 Codex sessions to Work · 1 need a restart to resume there · ' +
+        '2 skipped (busy, not attached or without a conversation yet) · 1 failed and stayed on their account.'
     })
   })
 })

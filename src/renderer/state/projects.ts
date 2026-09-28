@@ -94,6 +94,8 @@ interface ProjectsState {
   setProjectUnavailable(id: string, unavailable: boolean): void
   /** Sets (or clears, with undefined) the project's default Claude account for new nodes. */
   setProjectDefaultAccount(id: string, accountId: string | undefined): void
+  /** Sets (or clears, with undefined) the project's default Codex account for new Codex nodes. */
+  setProjectDefaultCodexAccount(id: string, accountId: string | undefined): void
   /** Sets (or clears, with undefined = fall back to the global setting) the project's default
    *  permission mode for new Claude terminal (CLI) sessions. Chat nodes are not covered. */
   setProjectDefaultPermissionMode(id: string, mode: AgentPermissionMode | undefined): void
@@ -466,6 +468,14 @@ export const useProjects = create<ProjectsState>((set, get) => ({
   setProjectDefaultAccount(id, accountId) {
     set((s) => ({
       projects: s.projects.map((p) => (p.id === id ? { ...p, defaultAccountId: accountId } : p))
+    }))
+  },
+
+  setProjectDefaultCodexAccount(id, accountId) {
+    set((s) => ({
+      projects: s.projects.map((p) =>
+        p.id === id ? { ...p, defaultCodexAccountId: accountId } : p
+      )
     }))
   },
 

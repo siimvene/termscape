@@ -214,6 +214,8 @@ export interface IndexEntryV3 {
   /** MACHINE-LOCAL default managed Claude account for a ref'd project: the id names a credential
    *  dir in THIS machine's userData, so it is meaningless in anyone else's checkout. */
   defaultAccountId?: string
+  /** MACHINE-LOCAL default managed Codex account — `defaultAccountId`'s twin for Codex nodes. */
+  defaultCodexAccountId?: string
   /**
    * MACHINE-LOCAL record that this machine's user has acknowledged each capability switch for THIS
    * entry (the one-time clone notice, @shared/project-capability-consent). Never copied into the
@@ -487,6 +489,8 @@ export function fileToProject(
     viewport?: Viewport
     /** This machine's default managed account; falls back to the file's legacy value. */
     defaultAccountId?: string
+    /** This machine's default managed Codex account (index entry only — no legacy file value). */
+    defaultCodexAccountId?: string
     /** This machine's clone-notice acknowledgments for this entry (never from the file). */
     capabilityAck?: import('../shared/project-capability-consent').CapabilityAckMap
     /** This machine's navigation history for this entry (never from the file). */
@@ -537,6 +541,7 @@ export function fileToProject(
     ...(f.bridges ? { bridges: f.bridges } : {}),
     ...(f.ropes ? { ropes: f.ropes } : {}),
     ...(defaultAccountId ? { defaultAccountId } : {}),
+    ...(base.defaultCodexAccountId ? { defaultCodexAccountId: base.defaultCodexAccountId } : {}),
     ...(f.defaultPermissionMode ? { defaultPermissionMode: f.defaultPermissionMode } : {}),
     // The file is hostile input: only a literal `true` under a known key survives the read
     // (readProjectCapabilities). `"true"`, 1, {} et al. vanish here, at the boundary.
@@ -662,6 +667,7 @@ export function splitWorkspace(
     const localState = {
       ...(p.viewport ? { viewport: p.viewport } : {}),
       ...(p.defaultAccountId ? { defaultAccountId: p.defaultAccountId } : {}),
+      ...(p.defaultCodexAccountId ? { defaultCodexAccountId: p.defaultCodexAccountId } : {}),
       // The clone-notice acknowledgment rides the machine-local entry, never the shared file
       // (projectToFile does not emit it — pinned by project-capability-consent.test.ts).
       ...(p.capabilityAck ? { capabilityAck: p.capabilityAck } : {}),

@@ -485,6 +485,18 @@ loop an unrelated client error, and never replay the original prompt after recon
 responsive daemon before invoking lifecycle repair; stale PID bookkeeping is not permission to kill
 working sessions. See `docs/shared-codex-node-identity.md`.
 
+**Never make the Codex daemon a precondition.** `codex app-server daemon start` runs only on the
+installer-managed standalone Codex (`$CODEX_HOME/packages/standalone/current/codex`); on a Homebrew
+or npm install it exits. Anything that needs a fact the daemon can answer must also be able to read
+it from the account home: identity from `auth.json`'s `id_token`, a thread's rollout from
+`sessions/YYYY/MM/DD/rollout-*-<id>.jsonl`. A daemon-only reader kept every managed Codex account
+`pending` forever on those installs, and pending accounts appear nowhere else in the UI.
+
+**Claude and Codex account ids share an alphabet.** The same id can name a Claude account and a
+Codex account at once. Never key a Codex decision on a Claude field or the other way round: Codex
+has its own project default (`defaultCodexAccountId`), its own row actions and its own
+bulk-move filter.
+
 **Credentials never ride argv — local or SSH.** Not a tmux `-e` pair, not `curl -H`, not a remote
 command string. `/proc/<pid>/cmdline` is mode 444 on a stock Linux, and a remote command line is argv
 on the host too: we shipped the hook bearer that way and any other account on the machine could read

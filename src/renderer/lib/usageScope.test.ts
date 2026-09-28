@@ -248,3 +248,22 @@ describe('providerRowKey / dedupeProviderRows (U8 — per-account Codex rows)', 
     expect(out.map(providerRowKey)).toEqual(['codex:system', 'gemini:system'])
   })
 })
+
+describe('codexRowLabel — a Codex usage row is headed by its ACCOUNT, not by "Codex"', () => {
+  const accounts = [
+    { id: 'cx-work', label: 'Work', email: 'w@example.com' },
+    { id: 'cx-bare', label: '', email: 'b@example.com' }
+  ]
+  it('names a managed row by its settings label, then its email, then the row email', async () => {
+    const { codexRowLabel } = await import('./usageScope')
+    expect(codexRowLabel({ accountId: 'cx-work', account: 'w@example.com' }, accounts)).toBe('Work')
+    expect(codexRowLabel({ accountId: 'cx-bare', account: null }, accounts)).toBe('b@example.com')
+    expect(codexRowLabel({ accountId: 'cx-gone', account: 'g@example.com' }, accounts)).toBe('g@example.com')
+    expect(codexRowLabel({ accountId: 'cx-gone', account: null }, accounts)).toBe('Codex account')
+  })
+  it('names the system row by its signed-in email, else "System account"', async () => {
+    const { codexRowLabel } = await import('./usageScope')
+    expect(codexRowLabel({ accountId: undefined, account: 'me@example.com' }, accounts)).toBe('me@example.com')
+    expect(codexRowLabel({ accountId: undefined, account: null }, accounts)).toBe('System account')
+  })
+})

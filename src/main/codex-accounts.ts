@@ -39,15 +39,14 @@ import {
 } from '../core/codex-accounts-core'
 import {
   codexAccountsHandlers,
+  codexThreadRolloutPath,
   type CodexAccountRowStore,
   ensureCodexAccountDaemon,
   isCodexAccountRemoving,
-  localCodexSocket,
   migrateManagedCodexHomes,
   NEW_CODEX_ACCOUNT_LABEL
 } from '../core/codex-accounts-service'
 import type { CodexAccount } from '../shared/codex-account'
-import { readCodexThreadAt } from '../core/codex-session-name'
 import { ensureCodexRelayRoot } from './codex-relay-daemon'
 import { platform } from '../core/platform'
 import type { SshProjectManager } from './remote-ssh/ssh-project'
@@ -385,14 +384,15 @@ export function initCodexAccounts(
         timer
       })
       try {
-        await ensureCodexAccountDaemon(sourceAccountId)
-        await ensureCodexAccountDaemon(targetAccountId)
-        const source = await readCodexThreadAt(localCodexSocket(sourceAccountId), threadId, 5000)
-        if (!source?.path) throw new Error('Source Codex conversation is unavailable')
+        const sourcePath = await codexThreadRolloutPath(sourceAccountId, threadId)
+        if (!sourcePath) throw new Error('Source Codex conversation is unavailable')
+        // The target's app-server is a convenience for the resumed pane, never a precondition: the
+        // daemon runs only on the standalone Codex build, and the exposure below is a hardlink.
+        await ensureCodexAccountDaemon(targetAccountId).catch(() => {})
         const exposure = planCodexRolloutExposure(
           codexHomeForAccount(platform().userDataDir, sourceAccountId),
           codexHomeForAccount(platform().userDataDir, targetAccountId),
-          source.path,
+          sourcePath,
           threadId
         )
         const pending = pendingSwitchExposures.get(rollbackToken)
@@ -446,9 +446,8 @@ export function initCodexAccounts(
       }
       if (sourceAccountId) assertCodexAccountId(sourceAccountId)
       if (targetAccountId) assertCodexAccountId(targetAccountId)
-      await ensureCodexAccountDaemon(sourceAccountId)
-      const source = await readCodexThreadAt(localCodexSocket(sourceAccountId), threadId, 5000)
-      if (!source?.path) throw new Error('Source Codex conversation is unavailable')
+      const sourcePath = await codexThreadRolloutPath(sourceAccountId, threadId)
+      if (!sourcePath) throw new Error('Source Codex conversation is unavailable')
       // STRICT SOURCE CONTAINMENT before any upload: reuse PR 3's `planCodexRolloutExposure`
       // (source-side half) rather than re-implementing the guards. It refuses a source that is not a
       // regular file, whose basename does not end `<threadId>.jsonl`, or that escapes
@@ -456,7 +455,7 @@ export function initCodexAccounts(
       // home as the target home is safe: only the SOURCE fields are read here, the local rollout is
       // never linked/moved (it stays fully usable — §4.2 step 6).
       const sourceHome = codexHomeForAccount(platform().userDataDir, sourceAccountId)
-      const plan = planCodexRolloutExposure(sourceHome, sourceHome, source.path, threadId)
+      const plan = planCodexRolloutExposure(sourceHome, sourceHome, sourcePath, threadId)
       const sessionsRelativePath = path.posix.join('sessions', plan.targetRelativePath.split(path.sep).join('/'))
       // Hand the actual upload + atomic remote install to PR 6's importer. Absent (not yet wired /
       // no live SSH manager) fails closed with a named error rather than silently succeeding.

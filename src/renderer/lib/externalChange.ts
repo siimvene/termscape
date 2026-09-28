@@ -48,6 +48,7 @@ const NOT_SHARED_STATE: ReadonlySet<string> = new Set([
   'nodes',
   'viewport',
   'defaultAccountId',
+  'defaultCodexAccountId',
   'closed',
   'unavailable',
   'remote'

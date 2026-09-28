@@ -12,6 +12,8 @@ import { useProjects } from '../../../state/projects'
 import { useAppTheme } from '../../../state/useAppTheme'
 import { useSettings } from '../../../state/settings'
 import { useSystemAccount } from '../../../state/systemAccount'
+import { useSystemCodexAccount } from '../../../state/systemCodexAccount'
+import { sshHostKey } from '@shared/ssh'
 import { markWorkspaceDirty } from '../../../state/workspaceDirty'
 import {
   SYSTEM_NODE_COLORS,
@@ -65,6 +67,10 @@ const ROWS = {
   account: {
     title: 'Default Claude account',
     keywords: ['account', 'login', 'claude', 'system']
+  },
+  codexAccount: {
+    title: 'Default Codex account',
+    keywords: ['account', 'login', 'codex', 'openai', 'chatgpt', 'system']
   }
 } satisfies Record<string, SettingsSearchEntry>
 
@@ -176,6 +182,16 @@ function EditableProjectSection({
   const systemLabel = systemAccountDisplay(systemLabelSetting, systemEmail)
   const accounts = accountsForProject(claudeAccounts, project)
   const accountsHint = sshAccountsHint(project, accounts)
+  // Codex accounts this project can launch: logged in, and on the project's own machine (local
+  // accounts for a local project, that host's for an SSH one) — the New Codex submenu's rule.
+  const codexAccountsAll = useSettings((s) => s.settings.codexAccounts)
+  const codexHostKey = project.ssh ? sshHostKey(project.ssh.server) : undefined
+  const codexAccounts = codexAccountsAll.filter(
+    (a) => !a.pending && (codexHostKey ? a.host === codexHostKey : !a.host)
+  )
+  const systemCodexEmail = useSystemCodexAccount((s) => s.email)
+  useEffect(() => useSystemCodexAccount.getState().ensure(), [])
+  const codexSystemLabel = systemAccountDisplay(undefined, systemCodexEmail)
 
   // Editors commit on BLUR, never per keystroke: each commit is a disk write.
   const [nameDraft, setNameDraft] = useState(project.name)
@@ -319,7 +335,7 @@ function EditableProjectSection({
       <SearchableRow {...ROWS.account}>
         <FieldRow
           label="Default Claude account"
-          description="Account new Claude and chat nodes in this project use."
+          description="Account new Claude and chat nodes in this project use. Kept on this machine only, not in the shared project file."
           note={accountsHint ?? undefined}
           htmlFor={`project-account-${project.id}`}
           control={
@@ -344,6 +360,40 @@ function EditableProjectSection({
               {project.defaultAccountId && !accounts.some((a) => a.id === project.defaultAccountId) ? (
                 <option value={project.defaultAccountId}>
                   {project.defaultAccountId} (not on this machine)
+                </option>
+              ) : null}
+            </Select>
+          }
+        />
+      </SearchableRow>
+      <SearchableRow {...ROWS.codexAccount}>
+        <FieldRow
+          label="Default Codex account"
+          description="Account new Codex nodes in this project use. Kept on this machine only, not in the shared project file."
+          htmlFor={`project-codex-account-${project.id}`}
+          control={
+            <Select
+              id={`project-codex-account-${project.id}`}
+              aria-label="Default Codex account"
+              value={project.defaultCodexAccountId ?? ''}
+              onChange={(e) => {
+                const v = e.target.value
+                useProjects
+                  .getState()
+                  .setProjectDefaultCodexAccount(project.id, v === '' ? undefined : v)
+                persistIdentityEdit()
+              }}
+            >
+              <option value="">{codexSystemLabel}</option>
+              {codexAccounts.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.label}
+                </option>
+              ))}
+              {project.defaultCodexAccountId &&
+              !codexAccounts.some((a) => a.id === project.defaultCodexAccountId) ? (
+                <option value={project.defaultCodexAccountId}>
+                  {project.defaultCodexAccountId} (not available here)
                 </option>
               ) : null}
             </Select>

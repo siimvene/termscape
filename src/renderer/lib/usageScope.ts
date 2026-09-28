@@ -143,6 +143,22 @@ export function scopeUsage(input: ScopeInput): ScopedUsage {
 }
 
 /**
+ * The heading of a local Codex usage row: the managed account's own label (what Settings →
+ * Accounts and the New Codex submenu call it), falling back to its email; the un-owned system row
+ * is its signed-in email, or "System account" — `systemAccountDisplay`'s rule with no label
+ * setting (Codex has none). Before this every Codex row was headed "Codex", so N logins read as N
+ * copies of one provider rather than N accounts.
+ */
+export function codexRowLabel(
+  row: Pick<ProviderUsage, 'accountId' | 'account'>,
+  accounts: readonly { id: string; label: string; email?: string | null }[]
+): string {
+  if (!row.accountId) return row.account || 'System account'
+  const account = accounts.find((a) => a.id === row.accountId)
+  return account?.label || account?.email || row.account || 'Codex account'
+}
+
+/**
  * The React key for a provider usage row. `runProviders` emits ONE row per Codex account (the
  * system fetcher with no `accountId`, plus one per managed account), all carrying
  * `provider: 'codex'` — so keying on `provider` alone collides every Codex account onto one key

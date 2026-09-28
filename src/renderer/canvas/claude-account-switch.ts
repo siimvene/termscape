@@ -175,11 +175,14 @@ export interface BulkSwitchNode {
 export function bulkSwitchCandidates(
   nodes: readonly BulkSwitchNode[],
   from: string | undefined,
-  scopeHostKey: string | undefined
+  scopeHostKey: string | undefined,
+  /** Whose sessions: the Claude rows move Claude nodes, the Codex rows Codex nodes. The two account
+   *  lists share an id alphabet, so the agent is part of the key, never implied by the id. */
+  agentId: 'claude' | 'codex' = 'claude'
 ): { ready: BulkSwitchNode[]; busy: BulkSwitchNode[] } {
   const on = nodes.filter(
     (n) =>
-      n.agentId === 'claude' &&
+      n.agentId === agentId &&
       (n.accountId || undefined) === (from || undefined) &&
       (n.hostKey || undefined) === (scopeHostKey || undefined)
   )

@@ -848,6 +848,11 @@ export interface Project {
   nodes: CanvasNodeState[]
   /** Default managed Claude account for new Claude/chat nodes in this project. */
   defaultAccountId?: string
+  /** Default managed CODEX account for new Codex nodes in this project — `defaultAccountId`'s
+   *  twin, keyed against `settings.codexAccounts` (the two lists share an id alphabet, so one
+   *  field cannot serve both). Machine-local exactly like it: it names a home under this
+   *  machine's userData, so it rides the index entry and never the shared project file. */
+  defaultCodexAccountId?: string
   /** Permission mode for new Claude TERMINAL (CLI) sessions in this project. SDK chat nodes are
    *  not covered — the chat driver still runs in `default`. Unset = use the global setting. */
   defaultPermissionMode?: AgentPermissionMode

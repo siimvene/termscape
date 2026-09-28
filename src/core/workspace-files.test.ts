@@ -581,6 +581,7 @@ describe('kanban board persistence', () => {
 describe('the shared file carries content, not machine identity', () => {
   const p = project({
     id: 'project-mridky20-11', cwd: '/a/foo', name: 'shared', defaultAccountId: 'acct-1',
+    defaultCodexAccountId: 'cx-1',
     viewport: { x: -400, y: 90, zoom: 0.6 }, dinoHighScore: 12,
     kanban: { columns: [], assignments: [] }
   })
@@ -591,6 +592,7 @@ describe('the shared file carries content, not machine identity', () => {
     expect(f.viewport).not.toEqual(p.viewport) // not this user's camera; a frame for the nodes
     expect(f.viewport).toEqual(framingViewport(f.nodes))
     expect(f.defaultAccountId).toBeUndefined()
+    expect((f as { defaultCodexAccountId?: string }).defaultCodexAccountId).toBeUndefined()
     // Content a team WANTS: two people opening this repo should see the same board, the same
     // canvas, under the same name and color.
     expect(f).toMatchObject({ name: 'shared', color: p.color, dinoHighScore: 12 })
@@ -623,13 +625,24 @@ describe('the shared file carries content, not machine identity', () => {
     })).toMatchObject({ viewport: { x: 9, y: 9, zoom: 9 }, defaultAccountId: 'acct-ours' })
   })
 
+  // No legacy fallback for the Codex default: no build ever wrote it into the shared file, so a
+  // value there is a forgery (a repo steering which login a teammate's Codex nodes open under).
+  it('the Codex default comes from the index entry ONLY, never from the shared file', () => {
+    const forged = { ...projectToFile(p, 1, 'now'), defaultCodexAccountId: 'cx-forged' }
+    expect(fileToProject(forged, { id: 'ours' }).defaultCodexAccountId).toBeUndefined()
+    expect(
+      fileToProject(forged, { id: 'ours', defaultCodexAccountId: 'cx-ours' }).defaultCodexAccountId
+    ).toBe('cx-ours')
+  })
+
   it('splitWorkspace keeps the camera + account in the machine-local index entry', () => {
     const { index } = splitWorkspace(
       { version: 2, activeProjectId: p.id, projects: [p] }, () => 1, 'now'
     )
     expect(index.entries[0]).toMatchObject({
       id: 'project-mridky20-11', cwd: '/a/foo',
-      viewport: { x: -400, y: 90, zoom: 0.6 }, defaultAccountId: 'acct-1'
+      viewport: { x: -400, y: 90, zoom: 0.6 }, defaultAccountId: 'acct-1',
+      defaultCodexAccountId: 'cx-1'
     })
   })
 
