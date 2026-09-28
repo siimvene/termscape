@@ -333,6 +333,24 @@ paths:
     disabled row would surface as a search result) saying accounts for this host are added in
     Settings → Accounts while the project is connected — local accounts being invisible there is
     correct (their credentials aren't on the host) but read as "multi-account is broken on SSH".
+  - **Codex has its own project default, `project.defaultCodexAccountId` (2026-09-28)** —
+    `defaultAccountId`'s twin, never shared with it: the two account lists share an id alphabet, so
+    one field would let a Claude id name a Codex login. Machine-local exactly like it (index entry
+    only, never `project.json`; a value found in the shared file is a forgery and is not read —
+    there is no legacy fallback because no build ever wrote it there; forbidden to the settings
+    CLI verb). Resolved at creation by `codexProjectDefault` (`canvas/codex-account-ops.ts`): the
+    id only when it names a logged-in account on the project's own machine that
+    `codexAccountSelectable` accepts, else SYSTEM — a stale default falls back, it never refuses
+    (only an EXPLICIT pick is fail-closed, Property 4). The New Codex submenu's System row passes
+    `null` so it skips the default (#419's rule), and ✓ marks the row a no-pick node would take.
+    Set from Project Settings ("Default Codex account") or the usage popover.
+  - **Codex usage rows are ACCOUNT rows (2026-09-28).** Each is headed by the account
+    (`codexRowLabel`: the settings label, else its email; the system row by its signed-in email),
+    carries "Codex" as a chip, and gets Claude's two actions through its OWN handlers —
+    "Use for new sessions" writes `defaultCodexAccountId`, "Move N sessions" moves Codex nodes only
+    (`bulkSwitchCandidates(…, 'codex')`) one at a time through the owner-authorized switch
+    (`runCodexAccountSwitch`, whose outcome feeds both the node menu's notice and the bulk summary).
+    Before this every Codex row was titled "Codex", so N logins read as N copies of one provider.
   - **Remote accounts** — selection + login + env injection, plus **usage** (below); no
     per-account transcript readers beyond env.
   - **Settings → Accounts is ONE machine-grouped surface for BOTH providers** (2026-09): a panel

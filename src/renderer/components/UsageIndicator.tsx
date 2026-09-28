@@ -18,6 +18,7 @@ import { capabilityAgentId, type AgentId } from '@shared/agents/config'
 import { useSshConn } from '../state/sshConn'
 import {
   accountRowAction,
+  codexRowLabel,
   dedupeProviderRows,
   providerRowKey,
   scopeFromKey,
@@ -150,16 +151,19 @@ function LimitRow({ limit, mode }: { limit: UsageLimit; mode: 'used' | 'remainin
  */
 function DefaultAccountMark({
   isDefault,
-  onUse
+  onUse,
+  agentLabel = 'Claude'
 }: {
   isDefault: boolean
   onUse?: () => void
+  /** Whose new nodes the mark is about — the Claude and Codex rows keep separate defaults. */
+  agentLabel?: string
 }) {
   if (isDefault)
     return (
       <span
         className="usage-account__default"
-        title="New Claude nodes in this project open under this account."
+        title={`New ${agentLabel} nodes in this project open under this account.`}
       >
         ✓ new sessions
       </span>
@@ -169,7 +173,7 @@ function DefaultAccountMark({
     <button
       type="button"
       className="usage-account__use"
-      title="New Claude nodes in this project will open under this account. Running sessions keep theirs."
+      title={`New ${agentLabel} nodes in this project will open under this account. Running sessions keep theirs.`}
       onClick={onUse}
     >
       Use for new sessions
@@ -341,15 +345,42 @@ function labelFor(provider: string): string {
   return providerLabel(provider, agentLabel)
 }
 
-function ProviderBlock({ u, mode, hostKey }: { u: ProviderUsage; mode: 'used' | 'remaining' | 'tokens'; hostKey?: string }) {
+/** A Codex row rendered as an ACCOUNT row, like Claude's: its own label, the provider as a chip,
+ *  and the same "Use for new sessions" / "Move N sessions" actions. */
+export interface ProviderAccountRow {
+  label: string
+  isDefault?: boolean
+  onUse?: () => void
+  move?: React.ReactNode
+}
+
+function ProviderBlock({
+  u,
+  mode,
+  hostKey,
+  account
+}: {
+  u: ProviderUsage
+  mode: 'used' | 'remaining' | 'tokens'
+  hostKey?: string
+  /** Present for an account-scoped provider (Codex): heads the block with the ACCOUNT, not the
+   *  provider, so three Codex logins read as three accounts instead of three rows titled "Codex". */
+  account?: ProviderAccountRow
+}) {
   if (u.status === 'unavailable') return null
   const label = labelFor(u.provider)
+  const heading = account?.label ?? label
   return (
     <div className="usage-account">
-      <div className="usage-account__label">{label}
+      <div className="usage-account__label">{heading}
+        {account && <span className="usage-account__host">{label}</span>}
         {hostKey && <span className="usage-account__host" title={`Read on ${hostKey} over SSH`}>{hostKey} · SSH</span>}
+        {account && (
+          <DefaultAccountMark isDefault={!!account.isDefault} onUse={account.onUse} agentLabel={label} />
+        )}
+        {account?.move}
       </div>
-      {u.account && <div className="usage-account__email">{u.account}</div>}
+      {u.account && u.account !== heading && <div className="usage-account__email">{u.account}</div>}
       {u.limits.length > 0 && (
         <div className="usage-account__windows">
           {u.limits.map((l) => (
@@ -381,7 +412,10 @@ export function UsageIndicator({
   overBoard = false,
   onSetDefaultAccount,
   countAccountSessions,
-  onMoveSessions
+  onMoveSessions,
+  onSetDefaultCodexAccount,
+  countCodexAccountSessions,
+  onMoveCodexSessions
 }: {
   overBoard?: boolean
   /** Writes `project.defaultAccountId` + persists (Canvas's own TabBar handler). When absent the
@@ -392,6 +426,12 @@ export function UsageIndicator({
   countAccountSessions?: (accountId: string | undefined) => number
   /** Move every such session from one account to another (Canvas `moveAccountSessions`). */
   onMoveSessions?: (from: string | undefined, to: string | undefined, toLabel: string) => void
+  /** The Codex twins of the three above: `project.defaultCodexAccountId`, the Codex sessions on an
+   *  account, and the Codex bulk move. A separate set because the two account lists share an id
+   *  alphabet — a Claude id and a Codex id can be equal and still name different logins. */
+  onSetDefaultCodexAccount?: (projectId: string, accountId: string | undefined) => void
+  countCodexAccountSessions?: (accountId: string | undefined) => number
+  onMoveCodexSessions?: (from: string | undefined, to: string | undefined, toLabel: string) => void
 }): JSX.Element | null {
   const [usage, setUsage] = useState<ClaudeUsage | null>(null)
   const [open, setOpen] = useState(false)
@@ -403,6 +443,7 @@ export function UsageIndicator({
   const closeTimerRef = useRef<number | null>(null)
 
   const claudeAccounts = useSettings((s) => s.settings.claudeAccounts)
+  const codexAccounts = useSettings((s) => s.settings.codexAccounts)
   const systemLabelSetting = useSettings((s) => s.settings.systemAccountLabel)
   const hiddenProviders = useSettings((s) => s.settings.hiddenUsageProviders)
   const percentMode = useSettings((s) => s.settings.usagePercentMode)
@@ -509,6 +550,57 @@ export function UsageIndicator({
         }}
       />
     )
+  }
+
+  // The Codex rows' twin of the above. Same machine rule (`codexEligible` mirrors the New Codex
+  // submenu), same pure decision (`accountRowAction`), but its own default field and handlers.
+  const projectCodexDefaultId = useProjects(
+    (s) => s.projects.find((p) => p.id === s.activeProjectId)?.defaultCodexAccountId
+  )
+  const codexEligible = useMemo(
+    () =>
+      codexAccounts.filter((a) => !a.pending && (scopeHostKey ? a.host === scopeHostKey : !a.host)),
+    [codexAccounts, scopeHostKey]
+  )
+  const codexRow = (
+    accountId: string | null,
+    label: string,
+    systemEmail: string | null | undefined
+  ): ProviderAccountRow => {
+    const action = accountRowAction(accountId, codexEligible, projectCodexDefaultId)
+    const from = accountId ?? undefined
+    let move: React.ReactNode = null
+    if (countCodexAccountSessions && onMoveCodexSessions) {
+      const systemTarget: MoveTarget = {
+        id: undefined,
+        label: scopeHostKey
+          ? `System account (${scopeHostKey})`
+          : systemAccountDisplay(undefined, systemEmail)
+      }
+      const targets = [
+        systemTarget,
+        ...codexEligible.map((a) => ({ id: a.id, label: a.label || a.email || 'Account' }))
+      ].filter((t) => t.id !== from)
+      move = (
+        <MoveSessionsControl
+          count={countCodexAccountSessions(from)}
+          targets={targets}
+          onMove={(to) => {
+            setOpen(false)
+            onMoveCodexSessions(from, to.id, to.label)
+          }}
+        />
+      )
+    }
+    return {
+      label,
+      isDefault: action === 'default',
+      onUse:
+        action === 'offer' && onSetDefaultCodexAccount && activeProjectId
+          ? () => onSetDefaultCodexAccount(activeProjectId, from)
+          : undefined,
+      move
+    }
   }
 
   useEffect(() => {
@@ -618,6 +710,10 @@ export function UsageIndicator({
   const claudeUsage = scoped.claude
   const visibleProviders = scoped.providers
   const visibleRemote = scoped.remote
+  // This machine's system Codex login, as the usage row read it (auth.json's id_token email):
+  // names the "System account" target of a local Codex row's move.
+  const systemCodexEmail =
+    providers.find((p) => p.provider === 'codex' && !p.accountId)?.account ?? null
 
   // Only providers the user has actually enabled reach the pill; render whenever ANY of them
   // (Claude included) has something to say. Both rules are pure and pinned by tests — gating on
@@ -852,7 +948,17 @@ export function UsageIndicator({
             {/* The same offer on an SSH project's rows — scoped as ever: only the host's system
                 identity and THIS host's managed accounts are actionable (accountRowAction). */}
             {visibleRemote.map((r) => r.provider === 'codex' ? (
-              <ProviderBlock key={`codex:${r.hostKey}:${r.accountId ?? ''}`} u={r.usage} mode={percentMode} hostKey={r.hostKey} />
+              <ProviderBlock
+                key={`codex:${r.hostKey}:${r.accountId ?? ''}`}
+                u={r.usage}
+                mode={percentMode}
+                hostKey={r.hostKey}
+                account={codexRow(
+                  r.accountId,
+                  r.accountId ? r.label : systemAccountDisplay(undefined, r.usage.account),
+                  systemCodexEmail
+                )}
+              />
             ) : (
               <RemoteUsageBlock
                 key={`${r.hostKey}#${r.accountId ?? ''}`}
@@ -871,7 +977,16 @@ export function UsageIndicator({
                 Key on provider+accountId so each account renders distinctly, and reduce true
                 duplicates (two settings entries → the same underlying account) to one row. */}
             {dedupeProviderRows(visibleProviders).map((p) => (
-              <ProviderBlock key={providerRowKey(p)} u={p} mode={percentMode} />
+              <ProviderBlock
+                key={providerRowKey(p)}
+                u={p}
+                mode={percentMode}
+                account={
+                  p.provider === 'codex'
+                    ? codexRow(p.accountId ?? null, codexRowLabel(p, codexAccounts), systemCodexEmail)
+                    : undefined
+                }
+              />
             ))}
           </div>
           {/* Issue #420 — "Switch account" where the limit is displayed: opens a terminal

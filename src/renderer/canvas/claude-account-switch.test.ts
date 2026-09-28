@@ -101,6 +101,25 @@ describe('bulk move', () => {
     expect(bulkSwitchCandidates(nodes, undefined, 'u@h').ready.map((n) => n.id)).toEqual(['remote-sys'])
   })
 
+  it('the Codex rows pick CODEX sessions — same account id, other agent, never crosses over', async () => {
+    const { bulkSwitchCandidates } = await import('./claude-account-switch')
+    // The two account lists share an id alphabet: a Claude node on 'w' is NOT on Codex account 'w'.
+    const nodes = [
+      node('claude-w', { accountId: 'w' }),
+      node('codex-w', { agentId: 'codex', accountId: 'w' }),
+      node('codex-sys', { agentId: 'codex' }),
+      node('codex-remote', { agentId: 'codex', hostKey: 'u@h' })
+    ]
+    expect(bulkSwitchCandidates(nodes, 'w', undefined, 'codex').ready.map((n) => n.id)).toEqual(['codex-w'])
+    expect(bulkSwitchCandidates(nodes, 'w', undefined).ready.map((n) => n.id)).toEqual(['claude-w'])
+    expect(bulkSwitchCandidates(nodes, undefined, undefined, 'codex').ready.map((n) => n.id)).toEqual([
+      'codex-sys'
+    ])
+    expect(bulkSwitchCandidates(nodes, undefined, 'u@h', 'codex').ready.map((n) => n.id)).toEqual([
+      'codex-remote'
+    ])
+  })
+
   it('summarizes what moved, what stayed and what was skipped', async () => {
     const { summarizeBulkSwitch } = await import('./claude-account-switch')
     expect(summarizeBulkSwitch([{ kind: 'switched' }, { kind: 'switched' }], 0, 'Work')).toEqual({

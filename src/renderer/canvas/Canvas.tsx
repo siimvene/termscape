@@ -666,7 +666,14 @@ import {
   type CanvasNode
 } from '../state/workspace'
 import { codexAccountSelectable, codexAccountSwitchStillEligible } from './codex-account-switch'
-import { resolveNewCodexNodeAccount, planCodexAccountSwitch } from './codex-account-ops'
+import {
+  codexProjectDefault,
+  codexSwitchOutcomeNotice,
+  resolveNewCodexNodeAccount,
+  planCodexAccountSwitch,
+  summarizeCodexBulkSwitch,
+  type CodexSwitchOutcome
+} from './codex-account-ops'
 import {
   bulkSwitchCandidates,
   claudeSwitchHostKey,
@@ -674,6 +681,7 @@ import {
   planClaudeAccountSwitch,
   summarizeBulkSwitch,
   switchOutcomeNotice,
+  type BulkSwitchNode,
   type ClaudeSwitchOutcome
 } from './claude-account-switch'
 import type { CodexAccount } from '@shared/codex-account'
@@ -5231,13 +5239,24 @@ export function Canvas() {
       const cwd = cwdForNewNodeIn(groupId) ?? project?.cwd
       // Codex accounts (S6) resolve through their OWN fail-closed gate: an explicitly picked account
       // that is missing/hostile/unconnected is REFUSED here rather than silently downgraded to the
-      // system login (Property 4). Claude keeps its project-default-aware resolver. The factory
-      // stamps the id only for the claude/codex builtins.
+      // system login (Property 4). No pick (`undefined`) takes the project's Codex default
+      // (`codexProjectDefault`: a stale one falls back to system, it never refuses); the System row
+      // passes `null`, which skips the default — the #419 rule Claude's resolver follows. The
+      // factory stamps the id only for the claude/codex builtins.
       let account: string | undefined
       if (agentId === 'codex') {
+        const codexAccounts = useSettings.getState().settings.codexAccounts
         const decision = resolveNewCodexNodeAccount(
-          accountId ?? undefined,
-          useSettings.getState().settings.codexAccounts,
+          accountId === null
+            ? undefined
+            : (accountId ??
+                codexProjectDefault(
+                  project?.defaultCodexAccountId,
+                  project?.ssh ? sshHostKey(project.ssh.server) : undefined,
+                  codexAccounts,
+                  connectedProjectIdForHost
+                )),
+          codexAccounts,
           connectedProjectIdForHost
         )
         if (!decision.create) {
@@ -5253,7 +5272,7 @@ export function Canvas() {
         account = decision.accountId
       } else if (agentId === 'pi') {
         // Pi accounts are local-only (v1) and have no project-default concept (no
-        // `defaultPiAccountId` field, matching Codex, which has none either — only Claude does).
+        // `defaultPiAccountId` field; Claude and Codex each have one).
         // An explicit pick is honored as-is on a LOCAL project; on an SSH project it is dropped
         // (`boundAccountId` refuses it at the funnel as well): the remote spawn cannot scope to a
         // dir that exists only on this machine. A missing/deleted account dir is a SOFT fallback in
@@ -7046,8 +7065,8 @@ export function Canvas() {
   // target through codexAccountSelectable) and re-check `codexAccountSwitchStillEligible` before the
   // recycle so a diverged/forked pane is never bound onto the switched account — the conversation id
   // passed to switchThread is the node's own, so the switch RESUMES it, never forks.
-  const switchCodexAccountNode = useCallback(
-    async (nodeId: string, targetAccountId: string | undefined) => {
+  const runCodexAccountSwitch = useCallback(
+    async (nodeId: string, targetAccountId: string | undefined): Promise<CodexSwitchOutcome> => {
       const codexApi = window.nodeTerminal.codexAccounts
       const snapshot = (): {
         agentId?: string
@@ -7079,17 +7098,10 @@ export function Canvas() {
         connectedProjectIdForHost
       )
       if (!decision.ok) {
-        if (decision.reason === 'same-account') return // no-op: already on this account
-        setNotice({
-          kind: 'error',
-          text:
-            decision.reason === 'no-connection'
-              ? 'That Codex account lives on a host that is not connected — connect its SSH project first.'
-              : decision.reason === 'no-session'
-                ? 'This session has no resumable conversation id yet — nothing to switch.'
-                : 'That Codex account is no longer available. Nothing was changed.'
-        })
-        return
+        // no-op: already on this account
+        return decision.reason === 'same-account'
+          ? { kind: 'noop' }
+          : { kind: 'refused', reason: decision.reason }
       }
       const { plan } = decision
       // SSH node: its conversation and account homes are on the HOST. One host-side exposure
@@ -7105,13 +7117,7 @@ export function Canvas() {
           useSshConn.getState().byProject[active.id]
             ? active.id
             : undefined) ?? connectedProjectIdForHost(hostKey)
-        if (!projectId) {
-          setNotice({
-            kind: 'error',
-            text: `${hostKey} is not connected — reconnect the project, then switch. Nothing was changed.`
-          })
-          return
-        }
+        if (!projectId) return { kind: 'host-down', hostKey }
         const hostAccountIds = useSettings
           .getState()
           .settings.codexAccounts.filter((a) => a.host === hostKey && !a.pending)
@@ -7121,24 +7127,12 @@ export function Canvas() {
             projectId
           })
         } catch {
-          setNotice({
-            kind: 'error',
-            text:
-              `The Codex account switch failed on ${hostKey} — the conversation could not be made ` +
-              'available to that account (is Codex set up on the host?). Nothing was changed.'
-          })
-          return
+          return { kind: 'remote-failed', hostKey }
         }
         // The exposure took seconds. The linked rollout is harmless on its own (both accounts now
         // see the same conversation), but the pane is only recycled if it is STILL the exact idle
         // conversation the user chose.
-        if (!codexAccountSwitchStillEligible(plan.expected, snapshot())) {
-          setNotice({
-            kind: 'error',
-            text: 'This session changed while the switch was preparing — nothing was changed.'
-          })
-          return
-        }
+        if (!codexAccountSwitchStillEligible(plan.expected, snapshot())) return { kind: 'diverged' }
         const fn = agentRestartFn(nodeId)
         // The rebind rides the closure's own node update (`beforeRecycle`), so the respawn is
         // guaranteed to launch under the target account — a separate setNodes in the same tick can
@@ -7150,19 +7144,11 @@ export function Canvas() {
               }))
             )
           : 'not-eligible'
-        if (outcome === 'restarted') markDirty()
-        setNotice(
-          outcome === 'restarted'
-            ? { kind: 'info', text: 'Codex account switched — conversation resumed.' }
-            : {
-                kind: 'error',
-                text:
-                  outcome === 'not-eligible'
-                    ? 'Switch skipped: this session is busy or not attached — try again once its turn is done.'
-                    : 'Switch skipped: Codex did not quit in time. Nothing was changed.'
-              }
-        )
-        return
+        if (outcome === 'restarted') {
+          markDirty()
+          return { kind: 'switched' }
+        }
+        return { kind: 'not-restarted', outcome }
       }
       let token: string | undefined
       try {
@@ -7174,16 +7160,12 @@ export function Canvas() {
         )
         token = res.rollbackToken
         // A no-op or unreserved answer (no token) means main-side did not stage an exposure — done.
-        if (!token) return
+        if (!token) return { kind: 'noop' }
         // The fork took seconds — refuse to recycle unless the pane is STILL the exact idle
         // conversation the user chose (Corvin's #112 recycle guard). Else roll the reservation back.
         if (!codexAccountSwitchStillEligible(plan.expected, snapshot())) {
           await codexApi.rollbackSwitch(token)
-          setNotice({
-            kind: 'error',
-            text: 'This session changed while the switch was preparing — nothing was changed.'
-          })
-          return
+          return { kind: 'diverged' }
         }
         await codexApi.commitSwitch(token)
         // Bind the node to the target account, THEN recycle its shell so codex relaunches under the
@@ -7199,16 +7181,7 @@ export function Canvas() {
         const fn = agentRestartFn(nodeId)
         const outcome = fn ? await settleRestart(() => fn(undefined, undefined, true)) : 'not-eligible'
         await codexApi.finishSwitch(token)
-        setNotice(
-          outcome === 'restarted'
-            ? { kind: 'info', text: 'Codex account switched — conversation resumed.' }
-            : {
-                kind: 'error',
-                text:
-                  'Codex account switched, but the pane could not be relaunched — restart the ' +
-                  'agent to resume on the new account.'
-              }
-        )
+        return outcome === 'restarted' ? { kind: 'switched' } : { kind: 'switched-not-relaunched' }
       } catch {
         if (token) {
           try {
@@ -7217,13 +7190,18 @@ export function Canvas() {
             // Best-effort rollback; the reservation also releases on its TTL / owner destruction.
           }
         }
-        setNotice({
-          kind: 'error',
-          text: 'The Codex account switch failed and was rolled back. Nothing was changed.'
-        })
+        return { kind: 'failed' }
       }
     },
     [setNodes, markDirty, connectedProjectIdForHost]
+  )
+
+  const switchCodexAccountNode = useCallback(
+    async (nodeId: string, targetAccountId: string | undefined) => {
+      const notice = codexSwitchOutcomeNotice(await runCodexAccountSwitch(nodeId, targetAccountId))
+      if (notice) setNotice(notice)
+    },
+    [runCodexAccountSwitch]
   )
 
   // "Switch Claude account" on a running node (see `claude-account-switch.ts`): the ordinary
@@ -7367,6 +7345,80 @@ export function Canvas() {
     )
     return ready.length + busy.length
   }, [])
+
+  /** The live nodes as the bulk move sees them (shared by the Claude and Codex moves + counts). */
+  const bulkSwitchNodes = useCallback((): BulkSwitchNode[] => {
+    const byId = useAgentStatus.getState().byId
+    return nodesRef.current
+      .filter((n) => n.type === 'terminal')
+      .map((n) => ({
+        id: n.id,
+        agentId: restartAgentIdOf(n),
+        accountId: (n.data.accountId as string | undefined) || undefined,
+        hostKey: claudeSwitchHostKey(n),
+        busy: byId[n.id]?.state === 'working' || byId[n.id]?.state === 'blocked'
+      }))
+  }, [])
+
+  /**
+   * The usage popover's bulk move for a CODEX account row — `moveAccountSessions`' twin: every
+   * Codex session on this canvas running on `from` (on the popover's machine) is switched to `to`
+   * ONE AT A TIME through the same owner-authorized switch as the node menu. Busy sessions are
+   * skipped, never interrupted. One summary line.
+   */
+  const moveCodexAccountSessions = useCallback(
+    async (from: string | undefined, to: string | undefined, toLabel: string) => {
+      if (bulkSwitchRunning.current) return
+      bulkSwitchRunning.current = true
+      try {
+        const scope = scopeFromKey(
+          usageScopeKey(useProjects.getState().getProject(useProjects.getState().activeProjectId))
+        )
+        const { ready, busy } = bulkSwitchCandidates(
+          bulkSwitchNodes(),
+          from,
+          scope.kind === 'ssh' ? scope.hostKey : undefined,
+          'codex'
+        )
+        if (ready.length + busy.length === 0) return
+        setNotice({
+          kind: 'info',
+          text: `Moving ${ready.length} Codex ${ready.length === 1 ? 'session' : 'sessions'} to ${toLabel}…`
+        })
+        const outcomes: CodexSwitchOutcome[] = []
+        for (const n of ready) outcomes.push(await runCodexAccountSwitch(n.id, to))
+        setNotice(summarizeCodexBulkSwitch(outcomes, busy.length, toLabel))
+      } finally {
+        bulkSwitchRunning.current = false
+      }
+    },
+    [runCodexAccountSwitch, bulkSwitchNodes]
+  )
+
+  /** `countAccountSessions` for Codex nodes — the number a Codex row's "Move N sessions" shows. */
+  const countCodexAccountSessions = useCallback(
+    (accountId: string | undefined): number => {
+      const scope = scopeFromKey(
+        usageScopeKey(useProjects.getState().getProject(useProjects.getState().activeProjectId))
+      )
+      const { ready, busy } = bulkSwitchCandidates(
+        bulkSwitchNodes(),
+        accountId,
+        scope.kind === 'ssh' ? scope.hostKey : undefined,
+        'codex'
+      )
+      return ready.length + busy.length
+    },
+    [bulkSwitchNodes]
+  )
+
+  const setProjectDefaultCodexAccount = useCallback(
+    (id: string, accountId: string | undefined) => {
+      useProjects.getState().setProjectDefaultCodexAccount(id, accountId)
+      void persist()
+    },
+    [persist]
+  )
 
   /**
    * The running-node "Switch Claude account ▸" / "Switch Codex account ▸" rows for one node. ONE
@@ -9495,6 +9547,16 @@ export function Canvas() {
         undefined,
         useSystemCodexAccount.getState().email
       )
+      // The ✓ on the row a new Codex node would take with no pick — the same validated default
+      // `addAgentNode` resolves (a stale one marks the System row, never a ghost).
+      const codexDefaultId = codexProjectDefault(
+        project?.defaultCodexAccountId,
+        codexHostKey,
+        codexAccountsHere,
+        connectedProjectIdForHost
+      )
+      const withCodexDefaultMark = (label: string, id?: string): string =>
+        id === codexDefaultId ? `${label} ✓` : label
       // Pi accounts (local only in v1): offered for a LOCAL project only. An SSH project's nodes
       // run on the host, where `<userData>/pi-accounts/<id>` does not exist and the remote spawn
       // skips the pi scope — a pick there would stamp the account's color on a node running the
@@ -9551,9 +9613,11 @@ export function Canvas() {
             icon: <AgentIcon agentId={aid} />,
             children: [
               {
-                label: codexSystemLabel,
+                // `null`, not undefined: an EXPLICIT system pick that skips the project's Codex
+                // default — the #419 rule the Claude row above follows.
+                label: withCodexDefaultMark(codexSystemLabel),
                 icon: <AgentIcon agentId="codex" />,
-                onClick: () => addAgentNode('codex', at, groupId)
+                onClick: () => addAgentNode('codex', at, groupId, null)
               },
               ...codexAccountsHere.map((a): MenuItem => {
                 const sel = codexAccountSelectable(
@@ -9562,7 +9626,7 @@ export function Canvas() {
                   connectedProjectIdForHost
                 )
                 return {
-                  label: a.label,
+                  label: withCodexDefaultMark(a.label, a.id),
                   icon: <AgentIcon agentId="codex" />,
                   disabled: !sel.ok,
                   hint: sel.ok
@@ -15746,6 +15810,9 @@ export function Canvas() {
             onSetDefaultAccount={setProjectDefaultAccount}
             countAccountSessions={countAccountSessions}
             onMoveSessions={(from, to, label) => void moveAccountSessions(from, to, label)}
+            onSetDefaultCodexAccount={setProjectDefaultCodexAccount}
+            countCodexAccountSessions={countCodexAccountSessions}
+            onMoveCodexSessions={(from, to, label) => void moveCodexAccountSessions(from, to, label)}
           />
         </CanvasPills>
 

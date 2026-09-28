@@ -64,6 +64,7 @@ describe('the allowlist is the gate, and the forbidden set outranks it', () => {
       'controlConfirmWaivers',
       'customAgents',
       'defaultAccountId',
+      'defaultCodexAccountId',
       'defaultPermissionMode',
       'defaultShell',
       'hookIdentityStrict',

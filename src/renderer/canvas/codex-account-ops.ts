@@ -41,6 +41,27 @@ export function resolveNewCodexNodeAccount(
   return { create: true, accountId: explicit }
 }
 
+/**
+ * The project's default Codex account (`project.defaultCodexAccountId`) as a NEW node should see it:
+ * the id only when it still names a logged-in (non-pending) account on THIS project's machine
+ * (`projectHostKey` undefined = this machine) that `codexAccountSelectable` accepts; else undefined,
+ * i.e. the system account. A stale default is a fallback, never a refusal — the same rule Claude's
+ * `resolveNewNodeAccount` applies to `defaultAccountId`. Only an EXPLICIT pick is fail-closed.
+ */
+export function codexProjectDefault(
+  defaultId: string | undefined,
+  projectHostKey: string | undefined,
+  accounts: readonly CodexAccount[],
+  connectedProjectIdForHost: (host: string) => string | undefined
+): string | undefined {
+  if (!defaultId) return undefined
+  const account = accounts.find((a) => a.id === defaultId)
+  if (!account || account.pending || (account.host || undefined) !== (projectHostKey || undefined)) {
+    return undefined
+  }
+  return codexAccountSelectable(defaultId, accounts, connectedProjectIdForHost).ok ? defaultId : undefined
+}
+
 /** What the imperative orchestrator needs to drive PR 5's three-phase switch for a node. */
 export interface CodexSwitchPlan {
   /** The node's current account (undefined = system) — the switch source. */
@@ -118,5 +139,110 @@ export function planCodexAccountSwitch(
         ssh: !!node.ssh
       }
     }
+  }
+}
+
+/**
+ * What one Codex account switch did — returned rather than announced, so the single switch (one
+ * notice) and the usage popover's bulk move (one summary for N nodes) share the choreography and
+ * differ only in what they say. Mirrors `ClaudeSwitchOutcome` (claude-account-switch.ts).
+ */
+export type CodexSwitchOutcome =
+  | { kind: 'switched' }
+  /** Same account, or main staged nothing to expose: nothing to do, nothing to say. */
+  | { kind: 'noop' }
+  | { kind: 'refused'; reason: 'not-codex' | 'no-session' | 'unavailable' | 'no-connection' }
+  /** SSH node whose host has no connected project right now. Nothing changed. */
+  | { kind: 'host-down'; hostKey: string }
+  /** The host-side exposure failed. Nothing changed. */
+  | { kind: 'remote-failed'; hostKey: string }
+  /** The pane moved on while the switch was preparing; the reservation was rolled back. */
+  | { kind: 'diverged' }
+  /** SSH node: the CLI never quit, so the pane stayed on its account. Nothing changed. */
+  | { kind: 'not-restarted'; outcome: 'not-eligible' | 'exit-timeout' }
+  /** Local node: bound to the target, but the pane did not relaunch — a restart resumes it there. */
+  | { kind: 'switched-not-relaunched' }
+  /** Local node: the switch threw and was rolled back. Nothing changed. */
+  | { kind: 'failed' }
+
+/** The single-switch notice (null = say nothing). The strings are the ones the switch always used. */
+export function codexSwitchOutcomeNotice(
+  o: CodexSwitchOutcome
+): { kind: 'info' | 'error'; text: string } | null {
+  switch (o.kind) {
+    case 'switched':
+      return { kind: 'info', text: 'Codex account switched — conversation resumed.' }
+    case 'noop':
+      return null
+    case 'refused':
+      return {
+        kind: 'error',
+        text:
+          o.reason === 'no-connection'
+            ? 'That Codex account lives on a host that is not connected — connect its SSH project first.'
+            : o.reason === 'no-session'
+              ? 'This session has no resumable conversation id yet — nothing to switch.'
+              : 'That Codex account is no longer available. Nothing was changed.'
+      }
+    case 'host-down':
+      return {
+        kind: 'error',
+        text: `${o.hostKey} is not connected — reconnect the project, then switch. Nothing was changed.`
+      }
+    case 'remote-failed':
+      return {
+        kind: 'error',
+        text:
+          `The Codex account switch failed on ${o.hostKey} — the conversation could not be made ` +
+          'available to that account (is Codex set up on the host?). Nothing was changed.'
+      }
+    case 'diverged':
+      return {
+        kind: 'error',
+        text: 'This session changed while the switch was preparing — nothing was changed.'
+      }
+    case 'not-restarted':
+      return {
+        kind: 'error',
+        text:
+          o.outcome === 'not-eligible'
+            ? 'Switch skipped: this session is busy or not attached — try again once its turn is done.'
+            : 'Switch skipped: Codex did not quit in time. Nothing was changed.'
+      }
+    case 'switched-not-relaunched':
+      return {
+        kind: 'error',
+        text:
+          'Codex account switched, but the pane could not be relaunched — restart the ' +
+          'agent to resume on the new account.'
+      }
+    case 'failed':
+      return {
+        kind: 'error',
+        text: 'The Codex account switch failed and was rolled back. Nothing was changed.'
+      }
+  }
+}
+
+/** One line for a bulk Codex move: what moved, what needs a restart, what was skipped or failed. */
+export function summarizeCodexBulkSwitch(
+  outcomes: readonly CodexSwitchOutcome[],
+  busySkipped: number,
+  targetLabel: string
+): { kind: 'info' | 'error'; text: string } {
+  const count = (...kinds: CodexSwitchOutcome['kind'][]): number =>
+    outcomes.filter((o) => kinds.includes(o.kind)).length
+  const moved = count('switched', 'switched-not-relaunched')
+  const relaunch = count('switched-not-relaunched')
+  const skipped = busySkipped + count('refused', 'not-restarted', 'diverged', 'noop')
+  const failed = count('failed', 'remote-failed', 'host-down')
+  const plural = (n: number, one: string, many: string): string => `${n} ${n === 1 ? one : many}`
+  const parts = [`Moved ${plural(moved, 'Codex session', 'Codex sessions')} to ${targetLabel}`]
+  if (relaunch) parts.push(`${relaunch} need a restart to resume there`)
+  if (skipped) parts.push(`${skipped} skipped (busy, not attached or without a conversation yet)`)
+  if (failed) parts.push(`${failed} failed and stayed on their account`)
+  return {
+    kind: relaunch || skipped || failed ? 'error' : 'info',
+    text: `${parts.join(' · ')}.`
   }
 }

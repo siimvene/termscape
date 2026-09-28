@@ -141,6 +141,7 @@ export const SETTINGS_VERB_FORBIDDEN = new Set<keyof Settings | keyof Project>([
   'codexAccounts',
   'piAccounts',
   'defaultAccountId',
+  'defaultCodexAccountId',
   'modelGateway',
   'modelGatewayDefaultModel',
   'agentLaunchCommands',

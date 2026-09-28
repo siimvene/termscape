@@ -394,6 +394,7 @@ export class WorkspaceStore {
               closedAt: e.closedAt,
               viewport: e.viewport,
               defaultAccountId: e.defaultAccountId,
+              defaultCodexAccountId: e.defaultCodexAccountId,
               breadcrumbs: e.breadcrumbs,
               closedSessions: e.closedSessions,
               layoutViewports: e.layoutViewports,
@@ -417,6 +418,7 @@ export class WorkspaceStore {
               closedAt: e.closedAt,
               viewport: e.viewport,
               defaultAccountId: e.defaultAccountId,
+              defaultCodexAccountId: e.defaultCodexAccountId,
               breadcrumbs: e.breadcrumbs,
               closedSessions: e.closedSessions,
               layoutViewports: e.layoutViewports,
@@ -909,6 +911,7 @@ export class WorkspaceStore {
       closedAt: e.closedAt,
       viewport: e.viewport,
       defaultAccountId: e.defaultAccountId,
+      defaultCodexAccountId: e.defaultCodexAccountId,
       breadcrumbs: e.breadcrumbs,
       closedSessions: e.closedSessions,
       layoutViewports: e.layoutViewports,
@@ -1048,6 +1051,7 @@ export class WorkspaceStore {
         // moment a folder is briefly unmounted.
         if (old?.viewport) e.viewport = old.viewport
         if (old?.defaultAccountId) e.defaultAccountId = old.defaultAccountId
+        if (old?.defaultCodexAccountId) e.defaultCodexAccountId = old.defaultCodexAccountId
         if (old?.breadcrumbs) e.breadcrumbs = old.breadcrumbs
         // Same rule: a placeholder's project carries no closedSessions (it has no nodes to have
         // deleted), so without this an unavailable window would silently forget the user's trash
@@ -1337,6 +1341,7 @@ export class WorkspaceStore {
       closedAt: e.closedAt,
       viewport: e.viewport,
       defaultAccountId: e.defaultAccountId,
+      defaultCodexAccountId: e.defaultCodexAccountId,
       breadcrumbs: e.breadcrumbs,
       closedSessions: e.closedSessions,
       layoutViewports: e.layoutViewports,
@@ -1717,6 +1722,7 @@ export class WorkspaceStore {
           closedAt: e.closedAt,
           viewport: e.viewport,
           defaultAccountId: e.defaultAccountId,
+          defaultCodexAccountId: e.defaultCodexAccountId,
           breadcrumbs: e.breadcrumbs,
           closedSessions: e.closedSessions,
           layoutViewports: e.layoutViewports,
@@ -1776,6 +1782,7 @@ export class WorkspaceStore {
             closedAt: e.closedAt,
             viewport: e.viewport,
             defaultAccountId: e.defaultAccountId,
+            defaultCodexAccountId: e.defaultCodexAccountId,
             breadcrumbs: e.breadcrumbs,
             closedSessions: e.closedSessions,
             layoutViewports: e.layoutViewports,
@@ -1997,6 +2004,7 @@ export class WorkspaceStore {
           closedAt: e.closedAt,
           viewport: e.viewport,
           defaultAccountId: e.defaultAccountId,
+          defaultCodexAccountId: e.defaultCodexAccountId,
           breadcrumbs: e.breadcrumbs,
           closedSessions: e.closedSessions,
           capabilityAck: e.capabilityAck,
@@ -2063,7 +2071,8 @@ export class WorkspaceStore {
     this.revs.set(e.id, e.cache.rev)
     return fileToProject(e.cache, {
       id: e.id, ssh: e.ssh, closed: e.closed, closedAt: e.closedAt,
-      viewport: e.viewport, defaultAccountId: e.defaultAccountId, breadcrumbs: e.breadcrumbs,
+      viewport: e.viewport, defaultAccountId: e.defaultAccountId,
+      defaultCodexAccountId: e.defaultCodexAccountId, breadcrumbs: e.breadcrumbs,
       closedSessions: e.closedSessions, layoutViewports: e.layoutViewports,
       capabilityAck: e.capabilityAck, localExec: e.localExec
     })
@@ -2211,7 +2220,8 @@ export class WorkspaceStore {
       else this.unmirrored.delete(e.id) // pure adopt: the server copy IS the truth now — nothing owed
       return fileToProject(adopted, {
         id: e.id, ssh: e.ssh, closed: e.closed, closedAt: e.closedAt,
-        viewport: e.viewport, defaultAccountId: e.defaultAccountId, breadcrumbs: e.breadcrumbs,
+        viewport: e.viewport, defaultAccountId: e.defaultAccountId,
+      defaultCodexAccountId: e.defaultCodexAccountId, breadcrumbs: e.breadcrumbs,
         closedSessions: e.closedSessions, layoutViewports: e.layoutViewports,
         capabilityAck: e.capabilityAck, localExec: e.localExec
       })
@@ -2227,7 +2237,8 @@ export class WorkspaceStore {
         this.unmirrored.add(e.id) // the merged set must land on the server
         merged = fileToProject(e.cache, {
           id: e.id, ssh: e.ssh, closed: e.closed, closedAt: e.closedAt,
-          viewport: e.viewport, defaultAccountId: e.defaultAccountId, breadcrumbs: e.breadcrumbs,
+          viewport: e.viewport, defaultAccountId: e.defaultAccountId,
+      defaultCodexAccountId: e.defaultCodexAccountId, breadcrumbs: e.breadcrumbs,
           closedSessions: e.closedSessions, layoutViewports: e.layoutViewports,
           capabilityAck: e.capabilityAck, localExec: e.localExec
         })

@@ -81,7 +81,8 @@ describe('ProjectSettingsSection', () => {
     unregisterDirty = registerWorkspaceDirty(dirty)
     ;(window as unknown as { nodeTerminal: any }).nodeTerminal = {
       projectSettings: { read, writeShared, updateLocal },
-      workspace: { save: vi.fn() }
+      workspace: { save: vi.fn() },
+      codexAccounts: { systemIdentity: vi.fn(async () => null) }
     }
   })
 
@@ -547,7 +548,8 @@ describe('useProjectSettings', () => {
     updateLocal = vi.fn(async () => true)
     ;(window as unknown as { nodeTerminal: any }).nodeTerminal = {
       projectSettings: { read, writeShared, updateLocal },
-      workspace: { save: vi.fn() }
+      workspace: { save: vi.fn() },
+      codexAccounts: { systemIdentity: vi.fn(async () => null) }
     }
   })
 
@@ -827,7 +829,8 @@ describe('ProjectSettingsSection — setup run controls', () => {
     ;(window as unknown as { nodeTerminal: any }).nodeTerminal = {
       projectSettings: { read: vi.fn(async () => EMPTY_SNAPSHOT), writeShared: vi.fn(async () => true), updateLocal: vi.fn(async () => true) },
       projectSetup: { run: runSetup, cancel, onEvent, consent: vi.fn(), onConsentRequest: vi.fn(), onConsentDismiss: vi.fn() },
-      workspace: { save: vi.fn() }
+      workspace: { save: vi.fn() },
+      codexAccounts: { systemIdentity: vi.fn(async () => null) }
     }
   })
 

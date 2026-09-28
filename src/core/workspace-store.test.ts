@@ -456,6 +456,7 @@ describe('unavailable projects never overwrite real data on save', () => {
       cwd: projRoot,
       viewport: { x: -640, y: 55, zoom: 1.75 },
       defaultAccountId: 'acct-7',
+      defaultCodexAccountId: 'cx-7',
       nodes: [{
         id: 'term-1', kind: 'terminal', position: { x: 0, y: 0 }, size: { width: 1, height: 1 },
         title: 't', color: '#fff', group: null, shell: '/bin/zsh'
@@ -466,6 +467,7 @@ describe('unavailable projects never overwrite real data on save', () => {
     expect(await readEntry()).toMatchObject({
       viewport: { x: -640, y: 55, zoom: 1.75 },
       defaultAccountId: 'acct-7',
+      defaultCodexAccountId: 'cx-7',
       localExec: { 'term-1': { shell: '/bin/zsh' } }
     })
 
@@ -481,6 +483,7 @@ describe('unavailable projects never overwrite real data on save', () => {
     expect(await readEntry()).toMatchObject({
       viewport: { x: -640, y: 55, zoom: 1.75 },
       defaultAccountId: 'acct-7',
+      defaultCodexAccountId: 'cx-7',
       localExec: { 'term-1': { shell: '/bin/zsh' } }
     })
   })
@@ -1947,11 +1950,13 @@ describe('the shared project file carries content, not machine identity', () => 
       id: 'project-ms4zdpc0-1',
       cwd: projRoot,
       viewport: { x: -1200, y: 340, zoom: 0.75 },
-      defaultAccountId: 'acct-9f3c'
+      defaultAccountId: 'acct-9f3c',
+      defaultCodexAccountId: 'cx-9f3c'
     })]))
     const raw = await fs.readFile(path.join(projRoot, '.nodeterm/project.json'), 'utf-8')
     expect(raw).not.toContain('project-ms4zdpc0-1') // this machine's project id
     expect(raw).not.toContain('acct-9f3c') // a config dir under THIS userData
+    expect(raw).not.toContain('cx-9f3c') // a Codex home under THIS userData, same rule
     // The `viewport` that survives is derived from the canvas, not from where THIS user looked:
     // it frames the nodes, identically on every machine (a pre-change build requires the field).
     expect(JSON.parse(raw).viewport).toEqual({ x: 80, y: 80, zoom: 1 })
@@ -1961,7 +1966,13 @@ describe('the shared project file carries content, not machine identity', () => 
       id: 'project-ms4zdpc0-1',
       cwd: projRoot,
       viewport: { x: -1200, y: 340, zoom: 0.75 },
-      defaultAccountId: 'acct-9f3c'
+      defaultAccountId: 'acct-9f3c',
+      defaultCodexAccountId: 'cx-9f3c'
+    })
+    // …and comes back on the next load.
+    expect((await new WorkspaceStore().load()).projects[0]).toMatchObject({
+      defaultAccountId: 'acct-9f3c',
+      defaultCodexAccountId: 'cx-9f3c'
     })
     // The canvas itself is still there — this is a file worth committing.
     expect(JSON.parse(raw).nodes.map((n: { id: string }) => n.id)).toEqual(['term-1'])
