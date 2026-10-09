@@ -171,6 +171,7 @@ import {
 import { WelcomeScreen } from '../components/WelcomeScreen'
 import { CloneRepoDialog } from '../components/CloneRepoDialog'
 import { markMobileLaunchSeen, shouldShowMobileLaunch } from '../lib/mobileLaunch'
+import { countKnownUnread, knownNodeIdsFromSig, knownNodeIdsSig } from '../lib/dockBadge'
 import type { DictationTarget } from '../components/DictationOverlay'
 import {
   announceChatDictationRefusal,
@@ -5237,12 +5238,13 @@ export function Canvas() {
 
   // Reflect Claude nodes with unread output as a macOS Dock badge count (across all projects).
   // Subscribes to the derived count (a primitive), not the byId map, for the same reason as
-  // loopSig above — state flips must not re-render the canvas.
-  const unreadCount = useAgentStatus((s) => {
-    let count = 0
-    for (const st of Object.values(s.byId)) if (st?.unread) count++
-    return count
-  })
+  // loopSig above — state flips must not re-render the canvas. Only nodes that still exist in a
+  // project count: the persisted status table outlives deleted nodes (lib/dockBadge.ts).
+  const knownIdsSig = useProjects((s) => knownNodeIdsSig(s.projects))
+  const knownIds = useMemo(() => knownNodeIdsFromSig(knownIdsSig), [knownIdsSig])
+  const unreadCount = useAgentStatus(
+    useCallback((s) => countKnownUnread(s.byId, knownIds), [knownIds])
+  )
   useEffect(() => {
     window.nodeTerminal.setBadgeCount(unreadCount)
   }, [unreadCount])
