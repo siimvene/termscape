@@ -5240,8 +5240,14 @@ export function Canvas() {
   // Subscribes to the derived count (a primitive), not the byId map, for the same reason as
   // loopSig above — state flips must not re-render the canvas. Only nodes that still exist in a
   // project count: the persisted status table outlives deleted nodes (lib/dockBadge.ts).
+  // Plus the LIVE canvas: a node adopted from an external change while a conflict is pending is on
+  // the canvas before it reaches the store (autosave is suspended), and its unread must count.
   const knownIdsSig = useProjects((s) => knownNodeIdsSig(s.projects))
-  const knownIds = useMemo(() => knownNodeIdsFromSig(knownIdsSig), [knownIdsSig])
+  const liveIdsSig = useMemo(() => JSON.stringify(nodes.map((n) => n.id)), [nodes])
+  const knownIds = useMemo(
+    () => new Set([...knownNodeIdsFromSig(knownIdsSig), ...knownNodeIdsFromSig(liveIdsSig)]),
+    [knownIdsSig, liveIdsSig]
+  )
   const unreadCount = useAgentStatus(
     useCallback((s) => countKnownUnread(s.byId, knownIds), [knownIds])
   )

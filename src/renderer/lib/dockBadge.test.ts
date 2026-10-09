@@ -36,6 +36,12 @@ describe('dock badge counts only nodes that still exist', () => {
     expect(countKnownUnread(byId, later)).toBe(1)
   })
 
+  it('an id carrying a separator character stays ONE id (no split into two known ids)', () => {
+    const k = knownNodeIdsFromSig(knownNodeIdsSig([project('c', ['x\0y', 'p,q'])]))
+    expect([...k].sort()).toEqual(['p,q', 'x\0y'])
+    expect(countKnownUnread({ x: { unread: true }, y: { unread: true } }, k)).toBe(0)
+  })
+
   it('no projects means nothing to count', () => {
     expect(knownNodeIdsFromSig(knownNodeIdsSig([])).size).toBe(0)
     expect(countKnownUnread({ x: { unread: true } }, knownNodeIdsFromSig(''))).toBe(0)
@@ -50,6 +56,9 @@ describe('dock badge counts only nodes that still exist', () => {
     const block = src.slice(Math.max(0, at - 1200), at)
     expect(block).toContain('countKnownUnread(s.byId, knownIds)')
     expect(block).toContain('knownNodeIdsSig(s.projects)')
+    // The live canvas counts too (a conflict-adopted node is there before it is in the store).
+    expect(block).toContain('JSON.stringify(nodes.map((n) => n.id))')
+    expect(block).toContain('knownNodeIdsFromSig(liveIdsSig)')
     expect(block).not.toMatch(/for \(const st of Object\.values\(s\.byId\)\) if \(st\?\.unread\) count\+\+/)
   })
 })

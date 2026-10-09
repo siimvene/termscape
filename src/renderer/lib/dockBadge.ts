@@ -17,12 +17,14 @@ import type { Project } from '@shared/types'
  *  subscriber re-renders only when the set of nodes changes, never on a drag or a viewport move. */
 export function knownNodeIdsSig(projects: readonly Project[]): string {
   const ids: string[] = []
-  for (const p of projects) for (const n of p.nodes) ids.push(n.id)
-  return ids.join('\0')
+  for (const p of projects) for (const n of p.nodes) ids.push(String(n.id))
+  // JSON, not a separator join: a node id is only length-checked on the way in (a peer's or a
+  // hand-edited project.json's), so any separator character could split one id into two.
+  return JSON.stringify(ids)
 }
 
 export function knownNodeIdsFromSig(sig: string): ReadonlySet<string> {
-  return new Set(sig ? sig.split('\0') : [])
+  return new Set(sig ? (JSON.parse(sig) as string[]) : [])
 }
 
 /** Unread nodes that still exist in some project. */
