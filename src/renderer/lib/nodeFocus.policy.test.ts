@@ -81,3 +81,24 @@ describe('Canvas focus policy (#743, #711)', () => {
     }
   })
 })
+
+describe('ordinary focus without a pinned panel (#854)', () => {
+  it.each([undefined, 0.7345, 2])('centres in the whole pane (keepZoom=%s)', (zoom) => {
+    // Only the controls cluster and the dock: nothing pinned at the sides.
+    for (const [className, left, top, right, bottom] of [
+      ['controls-cluster', 950, 50, 1286, 84],
+      ['dock', 500, 770, 900, 822]
+    ] as const) {
+      const el = document.createElement('div')
+      el.className = className
+      el.getBoundingClientRect = () =>
+        ({ left, top, right, bottom, width: right - left, height: bottom - top }) as DOMRect
+      document.body.append(el)
+    }
+    const node = ordinary()
+    const rect = nodeFitRect(node, [node])!
+    const focus = viewportForNodeFocus(node, rect, box, zoom)!
+    expect((rect.x + rect.width / 2) * focus.zoom + focus.x).toBeCloseTo(600)
+    expect((rect.y + rect.height / 2) * focus.zoom + focus.y).toBeCloseTo(400)
+  })
+})

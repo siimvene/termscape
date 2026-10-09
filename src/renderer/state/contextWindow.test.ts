@@ -21,10 +21,10 @@ it('keeps copied remote session ids separate and ignores stale clears for anothe
 })
 
 it('does not restore an old denominator from persistent browser state', async () => {
-  // Node 26 ships an inert `localStorage` global that shadows jsdom's (vitest's jsdom env does
-  // not overwrite it), so bare `localStorage` is undefined here and in the module under test.
-  // Reinstate jsdom's real Storage, as cardModalSize.test.ts does. No-op on Node 22.
-  globalThis.localStorage = (globalThis as unknown as { jsdom: { window: { localStorage: Storage } } }).jsdom.window.localStorage
+  // Node 25+ ships an inert `localStorage` global that shadows jsdom's (vitest's jsdom env does
+  // not overwrite it). test/setup/jsdom-storage.ts (upstream f67ddf7b) reinstates jsdom's real
+  // Storage for every jsdom suite; assert that it did, so this test cannot pass on a no-op store.
+  expect(localStorage).toBe((globalThis as unknown as { jsdom: { window: { localStorage: Storage } } }).jsdom.window.localStorage)
   localStorage.setItem('nodeterm.contextWindow', JSON.stringify({ old: { sessionId: 'old', windowTokens: 200000 }, claude: { sessionId: 'claude', windowSource: 'session-env', windowTokens: 32000 }, own: { sessionId: 'own', windowSource: 'transcript', windowTokens: 64000 } }))
   vi.resetModules()
   const { useContextWindow } = await import('./contextWindow')

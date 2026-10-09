@@ -49,7 +49,15 @@ export const CLAUDE_HOOK_EVENTS = [
   { event: 'PermissionRequest', timeout: PERMISSION_REQUEST_HOOK_TIMEOUT_SECS },
   'SessionEnd',
   'PreToolUse',
-  'PostToolUse'
+  'PostToolUse',
+  // Claude's own subagent lifecycle (since 2.0.43), keyed by the child's agent_id — the authority
+  // for subagent cards whenever a session sends it (core/claude-subagent-lifecycle.ts). The
+  // PreToolUse/PostToolUse pair above stays: it is the fallback for a CLI or hook snapshot without
+  // these, and the source of the task label. Both are no-ops for the CLI: the managed script prints
+  // nothing (SubagentStart stdout would be added to the child's context) and exits 0 (a
+  // SubagentStop decision could block the child from stopping).
+  'SubagentStart',
+  'SubagentStop'
 ] as const satisfies readonly ManagedHookEvent[]
 
 /**
@@ -107,3 +115,37 @@ export const COPILOT_HOOK_EVENTS = [
   'Notification',
   'SessionEnd'
 ] as const
+
+/**
+ * Antigravity CLI (`agy`) hook events (→ normalizeAntigravity), subscribed in
+ * `~/.gemini/config/hooks.json` under our own bundle key (core/agents/hooks/antigravity.ts).
+ *
+ * `agy` 1.2.3 publishes five events in TWO shapes (its bundled `hooks.md`, "Supported Event
+ * Types"): the tool events are GROUPED (`{matcher, hooks: [...]}`) and the lifecycle events are a
+ * FLAT list of handlers. The `{event, matcher}` form here marks the grouped ones; a plain string is
+ * a flat one. The matcher is `*`, which is the value every capture of agy 1.2.3 ran with
+ * and saw match every tool.
+ *
+ * FOUR of the five, and the choice is a cost the user accepted, not an accident:
+ *   - `PreInvocation` fires before every model call → `working`.
+ *   - `PreToolUse` / `PostToolUse` bracket each tool execution; `ask_question` between them is the
+ *     only NEEDS YOU a hook can see. SUBSCRIBING TO `PreToolUse` MAKES OUR HOOK A SYNCHRONOUS GATE
+ *     IN FRONT OF EVERY TOOL CALL OF EVERY `agy` ON THIS MACHINE, inside and outside nodeterm — see
+ *     `antigravityDecisionFor` for the stdout contract that keeps that gate open.
+ *   - `Stop` ends the loop; `fullyIdle` says whether it really ended.
+ *   - `PostInvocation` is left out: it adds no state the four above do not give, and every
+ *     subscribed event is one more SYNCHRONOUS hook process per occurrence.
+ *
+ * COST, measured on Windows 11 (20 runs, dispatched as agy does): the answer reaches stdout in ~100 ms, but agy waits for the PROCESS to exit, and that takes
+ * ~520 ms per event inside a nodeterm node (Git Bash forks ~55 ms each for the token read, the temp
+ * file and the path conversion before the POST is backgrounded) and ~155 ms in a plain terminal.
+ * A tool step fires three of these four events, so ~1.6 s of hook per step inside nodeterm. The
+ * earlier "~100 ms" figure measured a bare `.cmd` stand-in, not this script. Accepted for
+ * now; backgrounding everything after the stdin read is a tracked follow-up.
+ */
+export const ANTIGRAVITY_HOOK_EVENTS: readonly ManagedHookEvent[] = [
+  'PreInvocation',
+  { event: 'PreToolUse', matcher: '*' },
+  { event: 'PostToolUse', matcher: '*' },
+  'Stop'
+]

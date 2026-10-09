@@ -16,8 +16,17 @@ import {
 } from './shortcut'
 import type { ShortcutKeyEvent } from './shortcut'
 
-export type CommandScope = 'app' | 'canvas' | 'terminal' | 'scm'
-export type CommandGroup = 'General' | 'Canvas' | 'Nodes' | 'Terminal' | 'Source Control' | 'Speech'
+/** `board` = fires only while a kanban board is up (the inverse of `canvas`), and never while
+ *  typing or in a terminal — which is what lets its defaults be bare keys (J/K/Space/arrows). */
+export type CommandScope = 'app' | 'canvas' | 'board' | 'terminal' | 'scm'
+export type CommandGroup =
+  | 'General'
+  | 'Canvas'
+  | 'Nodes'
+  | 'Board'
+  | 'Terminal'
+  | 'Source Control'
+  | 'Speech'
 
 export interface CommandDefinition {
   id: CommandId
@@ -59,7 +68,7 @@ export type CommandId =
   | 'canvas.groupSelection'
   | 'node.newTerminal'
   | 'node.newAgent'
-  // Per-builtin-agent creates. The seven ids are spelled STATICALLY (never derived from
+  // Per-builtin-agent creates. The eight ids are spelled STATICALLY (never derived from
   // BUILTIN_AGENT_IDS) so this union stays literal — `isCommandId`, the overrides map and the
   // handler table all depend on that.
   | 'node.newAgent.claude'
@@ -69,6 +78,7 @@ export type CommandId =
   | 'node.newAgent.grok'
   | 'node.newAgent.copilot'
   | 'node.newAgent.pi'
+  | 'node.newAgent.antigravity'
   | 'node.newSticky'
   | 'node.newBrowser'
   | 'node.newWebView'
@@ -85,6 +95,11 @@ export type CommandId =
   | 'node.zoneDown'
   | 'node.close'
   | 'node.toggleMarkdown'
+  | 'board.openCard'
+  | 'board.nextCard'
+  | 'board.prevCard'
+  | 'board.columnLeft'
+  | 'board.columnRight'
   | 'terminal.find'
   | 'terminal.copySelection'
   | 'scm.commit'
@@ -176,6 +191,8 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     scope: 'canvas', defaultBindings: both() },
   { id: 'node.newAgent.pi', title: `New ${AGENT_CONFIG.pi.label} node`, group: 'Nodes',
     scope: 'canvas', defaultBindings: both() },
+  { id: 'node.newAgent.antigravity', title: `New ${AGENT_CONFIG.antigravity.label} node`,
+    group: 'Nodes', scope: 'canvas', defaultBindings: both() },
   { id: 'node.newSticky', title: 'New sticky note', group: 'Nodes', scope: 'canvas',
     defaultBindings: both() },
   { id: 'node.newBrowser', title: 'New browser node', group: 'Nodes', scope: 'canvas',
@@ -237,6 +254,24 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
   { id: 'node.toggleMarkdown', title: 'Toggle markdown view', group: 'Nodes', scope: 'app',
     defaultBindings: both('Cmd+M'), allowInTerminal: true, allowWhileTyping: true },
 
+  // Board — the kanban board's keyboard. Scope 'board' resolves only while a board is up, and none
+  // of these carries allowWhileTyping or allowInTerminal: the comment box, a rename field and the
+  // card modal's terminal keep every key they are typed into. That refusal is the whole reason a
+  // bare letter is acceptable here (see `normalizeBindingForCommand`). Inside the card modal
+  // next/previous step the modal to the neighbouring card. The handler DECLINES (falling through
+  // to the platform) whenever the focused control owns the key — Space on a focused button, any
+  // key in a <select> — see KanbanView's board-key handler.
+  { id: 'board.openCard', title: 'Open focused card', group: 'Board', scope: 'board',
+    defaultBindings: both('Space') },
+  { id: 'board.nextCard', title: 'Next card', group: 'Board', scope: 'board',
+    defaultBindings: both('J', 'ArrowDown') },
+  { id: 'board.prevCard', title: 'Previous card', group: 'Board', scope: 'board',
+    defaultBindings: both('K', 'ArrowUp') },
+  { id: 'board.columnLeft', title: 'Card in the column to the left', group: 'Board', scope: 'board',
+    defaultBindings: both('ArrowLeft') },
+  { id: 'board.columnRight', title: 'Card in the column to the right', group: 'Board', scope: 'board',
+    defaultBindings: both('ArrowRight') },
+
   // Terminal
   { id: 'terminal.find', title: 'Find in terminal', group: 'Terminal', scope: 'terminal',
     defaultBindings: both('Cmd+F') },
@@ -296,7 +331,10 @@ export function normalizeBindingForCommand(
     return { ok: true, value: serializeShortcut(p) }
   }
   const hasStrongModifier = p.cmd || p.ctrl || p.alt
-  if (!hasStrongModifier) {
+  // A board command never fires while typing or in a terminal (the resolver refuses both for its
+  // scope, and no board row may opt out of that), so a bare letter or Space there cannot steal a
+  // character from anyone — it is a board key, not text.
+  if (!hasStrongModifier && def.scope !== 'board') {
     if (p.shift) return { ok: false, error: 'Shift-only shortcuts would steal typed text.' }
     if (!def.allowBareKey || !SAFE_BARE_KEYS.has(p.key)) {
       return { ok: false, error: 'Include a modifier key.' }
@@ -341,9 +379,15 @@ export function bindingIdentity(binding: string, isMac: boolean): string {
   ].join('')
 }
 
-/** Commands sharing a bucket compete for the same keys. 'app' and 'canvas' share one global
- *  keyspace (both dispatch from the window listener; canvas commands are merely inert while
- *  the board is open); terminal and scm are their own focused surfaces.
+/** A bucket is a dispatch CONTEXT: commands sharing one can resolve at the same moment, so they
+ *  compete for the same keys. All three view scopes dispatch from the window listener, but not at
+ *  the same moments: 'canvas' resolves only while the board is CLOSED and 'board' only while it is
+ *  OPEN, while 'app' resolves in both (`resolveCommandForKeyEvent`). So an app command sits in both
+ *  view buckets, a canvas command in 'canvas-view' and a board command in 'board-view' — a canvas
+ *  and a board command never compete. Folding the three into one global keyspace reported a
+ *  collision dispatch cannot produce, and `sanitizeKeybindingOverrides` then stripped a legitimate
+ *  override at load (a bare-arrow canvas command against the board's J/K/arrow keys). Terminal and
+ *  scm are their own focused surfaces.
  *
  *  **`speech.dictation` is its own fourth bucket, and the reason is dispatch, not scope.** It
  *  never competes for a chord: the resolver SKIPS it outright (see the `def.id ===
@@ -369,11 +413,16 @@ export function bindingIdentity(binding: string, isMac: boolean): string {
  *  before the page exists, so such a hand-edit survives sanitization as a permanently dead chord.
  *  The UI can never create it (`commitCandidate`'s reverse-shadow gate refuses it one step earlier
  *  than the dictation gates). */
-export function conflictBucket(
-  def: Pick<CommandDefinition, 'id' | 'scope'>
-): 'global' | 'terminal' | 'scm' | 'dictation' {
-  if (def.id === 'speech.dictation') return 'dictation'
-  return def.scope === 'app' || def.scope === 'canvas' ? 'global' : def.scope
+export type ConflictBucket = 'canvas-view' | 'board-view' | 'terminal' | 'scm' | 'dictation'
+
+export function conflictBuckets(def: Pick<CommandDefinition, 'id' | 'scope'>): readonly ConflictBucket[] {
+  if (def.id === 'speech.dictation') return ['dictation']
+  switch (def.scope) {
+    case 'app': return ['canvas-view', 'board-view']
+    case 'canvas': return ['canvas-view']
+    case 'board': return ['board-view']
+    default: return [def.scope]
+  }
 }
 
 export interface KeybindingConflict {
@@ -395,22 +444,30 @@ export function findKeybindingConflicts(
   const byBucketAndIdentity = new Map<string, { binding: string; ids: Set<CommandId> }>()
   for (const def of COMMAND_DEFINITIONS) {
     for (const binding of getEffectiveBindings(def.id, overrides, isMac)) {
-      const key = `${conflictBucket(def)} ${bindingIdentity(binding, isMac)}`
-      const entry = byBucketAndIdentity.get(key) ?? {
-        // Canonicalized, so a hand-edited `cmd+k` override is reported as `Cmd+K`.
-        binding: serializeShortcut(parseShortcut(binding)),
-        ids: new Set<CommandId>()
+      for (const bucket of conflictBuckets(def)) {
+        const key = `${bucket} ${bindingIdentity(binding, isMac)}`
+        const entry = byBucketAndIdentity.get(key) ?? {
+          // Canonicalized, so a hand-edited `cmd+k` override is reported as `Cmd+K`.
+          binding: serializeShortcut(parseShortcut(binding)),
+          ids: new Set<CommandId>()
+        }
+        entry.ids.add(def.id)
+        byBucketAndIdentity.set(key, entry)
       }
-      entry.ids.add(def.id)
-      byBucketAndIdentity.set(key, entry)
     }
   }
   const conflicts: KeybindingConflict[] = []
+  // Two app commands on one chord meet in BOTH view buckets; that is one conflict, not two.
+  const reported = new Set<string>()
   for (const { binding, ids } of byBucketAndIdentity.values()) {
     if (ids.size < 2) continue
     const commandIds = [...ids].sort()
     const touchesOverride = commandIds.some((id) => overrides[id] !== undefined)
-    if (opts.includeDefaults || touchesOverride) conflicts.push({ binding, commandIds })
+    if (!opts.includeDefaults && !touchesOverride) continue
+    const key = `${binding} ${commandIds.join(' ')}`
+    if (reported.has(key)) continue
+    reported.add(key)
+    conflicts.push({ binding, commandIds })
   }
   return conflicts
 }
@@ -599,6 +656,7 @@ export function resolveCommandForKeyEvent(
     }
     if (!ctx.terminal && def.scope === 'terminal') continue
     if (ctx.kanbanOpen && def.scope === 'canvas') continue
+    if (!ctx.kanbanOpen && def.scope === 'board') continue
     for (const binding of getEffectiveBindings(def.id, overrides, isMac)) {
       // Hold chords belong to the dedicated hold listener, and this skip STATES that contract
       // rather than relying on it being unreachable: `matchesShortcut` also refuses a key-null

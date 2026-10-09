@@ -17,7 +17,7 @@ import type {
   RemoteAccountUsage,
   RemoteUsageQuery
 } from '../../shared/types'
-import { emptyUsage, usageFromPayload } from './claude-usage-map'
+import { emptyUsage, holdLastGood, usageFromPayload } from './claude-usage-map'
 import { classifyUsageResponseStatus, classifyUsageThrow } from './usage-cause'
 import {
   fetchRemoteUsage,
@@ -282,7 +282,10 @@ export async function fetchUsage(
   }
   if (!res.ok) {
     const { status, cause, httpStatus } = classifyUsageResponseStatus(res.status)
-    return identify(emptyUsage(email, now, status, { cause, httpStatus }))
+    const failed = emptyUsage(email, now, status, { cause, httpStatus })
+    // 429 also carries `rateLimited`: the endpoint answered, and its budget is shared with every
+    // Claude CLI using the same login — holdLastGood and the popover's wording key on the flag.
+    return identify(res.status === 429 ? { ...failed, rateLimited: true } : failed)
   }
   // Split from the request above so a body we cannot read is reported as 'parse' rather than
   // being laundered into 'network' — the endpoint answered, and that is worth knowing.
@@ -400,9 +403,15 @@ export function startUsageService(opts: UsageServiceOptions = {}): UsageService 
     }
   }
 
-  const push = (key: string, u: ClaudeUsage): void => {
+  const push = (key: string, fresh: ClaudeUsage): ClaudeUsage => {
+    const now = Date.now()
+    // A failed read keeps the last good numbers (see holdLastGood) instead of blanking the row.
+    const u = holdLastGood(last.get(key), fresh, now)
     last.set(key, u)
-    lastFetchAt.set(key, u.updatedAt)
+    // The READ's time, not `u.updatedAt`: a held snapshot is older than the read that produced
+    // it, and debouncing on its age would re-read on every call — hammering the very endpoint
+    // that just answered 429.
+    lastFetchAt.set(key, now)
     // Only the system account feeds the push channel — the collapsed chip tracks it.
     // Best-effort: a fetch launched before shutdown (or a test's platform reset) can land after
     // the shell is gone, and this runs inside an un-awaited promise chain — throwing here is an
@@ -415,18 +424,18 @@ export function startUsageService(opts: UsageServiceOptions = {}): UsageService 
       }
     }
     notifyCacheUpdate()
+    return u
   }
 
   const run = async (accountId?: string): Promise<ClaudeUsage> => {
     const key = accountId ?? ''
     const pending = inFlight.get(key)
     if (pending) return pending
-    const p = fetchUsage(accountId)
+    // push() is inside the shared promise so a coalesced caller gets the HELD snapshot too.
+    const p = fetchUsage(accountId).then((u) => push(key, u))
     inFlight.set(key, p)
     try {
-      const u = await p
-      push(key, u)
-      return u
+      return await p
     } finally {
       inFlight.delete(key)
     }
@@ -651,7 +660,12 @@ export function startUsageService(opts: UsageServiceOptions = {}): UsageService 
     if (pending) return pending
     const p = target.provider === 'codex'
       ? fetchRemoteCodexUsage(target, deps.run, Date.now())
-      : fetchRemoteUsage(target, deps.run, Date.now())
+      : fetchRemoteUsage(target, deps.run, Date.now()).then((fresh) => {
+          // Same rule as the local cache: a failed read keeps this host's last good numbers.
+          // Folded in here, inside the shared promise, so a coalesced reader sees them too.
+          const prev = remoteCache.get(key)?.usage
+          return prev && !('provider' in prev) ? holdLastGood(prev, fresh, Date.now()) : fresh
+        })
     remoteInFlight.set(key, p)
     try {
       const u = await p

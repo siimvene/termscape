@@ -51,7 +51,7 @@ Fire-time `TriggerArmStore.isArmed` re-ask everywhere; every rule test-pinned. T
 machine-local, content-bound `core/trigger-arm-store.ts` (a spec that arrives or CHANGES via git
 reads as disarmed until armed on this machine). A node's `data`
 carries `title, color, group, tags, collapsed, expandedHeight, shell, cwd, text,
-initialCommand, filePath, diffStaged`, `icon` (a user-chosen emoji or picture — see **Node icons**
+initialCommand, filePath, diffStaged`, `icon` (a user-chosen emoji, glyph or picture — see **Node icons**
 below), `agentId` (which agent CLI a terminal node runs —
 persisted), and `accountId` (which managed Claude account a terminal node runs under — resolved
 at creation, changed ONLY by the explicit account-switch actions, persisted; see **Managed Claude accounts** in `.claude/rules/agents-accounts-usage.md`). `nodeStatesToFlow` defaults a
@@ -85,7 +85,12 @@ Persistence has two layers:
   one-time renderer note). Outside edits (git pull/sync) are detected by
   `core/workspace-watcher.ts` → silent reload, or a Reload/Keep-mine conflict bar when dirty; both
   ride `workspace:external-change`, as do the phone's `appendRemoteNode` and the SSH reconcile
-  (really another device). **A write this core made ITSELF rides `workspace:server-change`** (today:
+  (really another device). The exception is a project a hosted Server Edition
+  shares with its team: the canvas authority adopts that outside edit and publishes it as
+  `canvas:mut` ops, with no `workspace:external-change`, then sends the persisted project on
+  `workspace:server-change` so its non-content fields (name, permission default, capability flags…)
+  reach the tabs too (see **Hosted team relay**, `.claude/rules/hosted-team-relay.md`).
+  **A write this core made ITSELF rides `workspace:server-change`** (today:
   Server Edition headless canvas control, `server/canvas-control.ts`): the renderer three-way merges
   it against the store baseline (`renderer/lib/serverChange.ts` — incoming nodes adopted, ropes/
   bridges merged by id, local unsaved edits kept, dangling edges pruned), never a bar or reload. It

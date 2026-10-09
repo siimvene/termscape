@@ -10,6 +10,13 @@ import { linkedClaudeConfigDirFor } from './claude-config-dir'
 import { platform } from './platform'
 import { toolBody } from './chat-tool-body'
 import { ASK_USER_QUESTION_TOOL, readQuestions } from '../shared/agents/permission-answer'
+import { BASH_COMMAND_TOOL, CHAT_TOOL_ARG_MAX } from '../shared/chat-command'
+import {
+  AGENT_MESSAGE_TOOL,
+  BACKGROUND_TASK_TOOL,
+  SYSTEM_TOOL,
+  expandPastedContent
+} from '../shared/chat-system-records'
 
 // Transcript root for a managed account (its `projects` dir) or the system default
 // (`~/.claude/projects` when accountId is undefined — bit-for-bit the old behavior). Impure
@@ -40,7 +47,7 @@ function textOf(content: unknown): string {
   return ''
 }
 
-function summarizeResult(content: unknown): string {
+export function summarizeResult(content: unknown): string {
   return textOf(content).split('\n').slice(0, 3).join(' ').slice(0, 500)
 }
 
@@ -48,21 +55,340 @@ function toolArg(input: unknown): string {
   if (!input || typeof input !== 'object') return ''
   const o = input as Record<string, unknown>
   const v = o.command ?? o.file_path ?? o.path ?? o.pattern ?? o.description ?? o.prompt
-  return typeof v === 'string' ? v.slice(0, 200) : ''
+  return typeof v === 'string' ? v.slice(0, CHAT_TOOL_ARG_MAX) : ''
+}
+
+// ── Local-command records ────────────────────────────────────────────────────────────────────────
+// A slash command (`/model`) and a `!` bash-mode line are written by claude as `type:"user"` records
+// whose content is a STRING of tags — measured on real transcripts (2026-09):
+//   <command-name>/model</command-name>\n   <command-message>model</command-message>\n   <command-args></command-args>
+//   <local-command-stdout>Set model to \x1b[1m…\x1b[22m</local-command-stdout>
+//   <bash-input>ls</bash-input>
+//   <bash-stdout>…</bash-stdout><bash-stderr>…</bash-stderr>        (ONE record, either may be empty)
+// preceded by an `isMeta:true` `<local-command-caveat>` record. A skill invocation writes
+// `<command-message>` BEFORE `<command-name>` (no args), so order is free. Only a record that is
+// EXACTLY such a tag sequence (whitespace between tags) is one; a record that merely mentions a tag
+// inside prose is a normal user message. Never seen as an array text part, so only string content
+// is matched.
+export type LocalCommandRecord =
+  | { kind: 'command'; family: 'slash' | 'bash'; name: string; arg: string }
+  | { kind: 'output'; family: 'slash' | 'bash'; text: string }
+
+const TAG_RE = /<([a-z-]+)>([\s\S]*?)<\/\1>/y
+const SLASH_TAGS = new Set(['command-name', 'command-message', 'command-args'])
+const BASH_INPUT_TAGS = new Set(['bash-input'])
+const SLASH_OUT_TAGS = new Set(['local-command-stdout', 'local-command-stderr'])
+const BASH_OUT_TAGS = new Set(['bash-stdout', 'bash-stderr'])
+
+/** The record as a sequence of whole tags, each at most once; null if anything else is in it. */
+function tagSequence(content: string): Map<string, string> | null {
+  const tags = new Map<string, string>()
+  let i = 0
+  for (;;) {
+    while (i < content.length && /\s/.test(content[i])) i++
+    if (i >= content.length) break
+    TAG_RE.lastIndex = i
+    const m = TAG_RE.exec(content)
+    if (!m || tags.has(m[1])) return null
+    tags.set(m[1], m[2])
+    i = TAG_RE.lastIndex
+  }
+  return tags.size ? tags : null
+}
+
+const onlyFrom = (tags: Map<string, string>, allowed: Set<string>): boolean =>
+  [...tags.keys()].every((k) => allowed.has(k))
+
+/** CSI (`ESC [ … final`), OSC (`ESC ] … BEL|ESC \\`) and two-byte `ESC x` escapes. */
+export function stripAnsi(s: string): string {
+  return s
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+    .replace(/\x1b[@-_]/g, '')
+}
+
+/** Output tags → one text: each non-empty part ANSI-stripped + trimmed, joined by `\n`. */
+function outputText(tags: Map<string, string>): string {
+  return [...tags.values()]
+    .map((v) => stripAnsi(v).trim())
+    .filter(Boolean)
+    .join('\n')
+}
+
+/** A command's arg: trimmed, then capped like `toolArg` (the composer's `sentCommand` agrees). */
+const capArg = (v: string | undefined): string => (v ?? '').trim().slice(0, CHAT_TOOL_ARG_MAX)
+
+/**
+ * claude's own meta records — the local-command caveat, skill bodies, injected reminders — are not
+ * something the user said, and are skipped. But an `isMeta` record that STARTS a turn (a peer
+ * hand-back, a scheduled / loop wakeup, an auto-continuation) says where that turn's prompt came
+ * from, and hiding it leaves replies with no prompt between them. Measured: those carry
+ * `promptSource` and/or `origin` / `turnOrigin` (present and not null); the hidden kinds carry none.
+ * Measured too: no `isMeta` record carries a tool_result, so skipping one loses nothing.
+ */
+export function isHiddenMetaRecord(o: {
+  type?: string
+  isMeta?: unknown
+  promptSource?: unknown
+  origin?: unknown
+  turnOrigin?: unknown
+}): boolean {
+  return o.type === 'user' && o.isMeta === true && o.promptSource == null && o.origin == null && o.turnOrigin == null
+}
+
+/**
+ * A prompt the user submitted while a turn was running. Claude Code never records it as a `user`
+ * record: it hands it to the model at the next tool boundary of the SAME turn, as an `attachment`
+ * record of type `queued_command` (measured, 2.1.281–2.1.285), so the chat view lost it. Most
+ * queued attachments are NOT the user's words: on the machine this was measured on, 105 of 482 were
+ * typed prompts; the rest were task notifications (`commandMode:"task-notification"`) and peer or
+ * coordinator messages (`isMeta`). Those stay hidden, as before. A typed prompt is
+ * `commandMode:"prompt"`, not `isMeta`, with an `origin` that is absent or `human`. Returns its
+ * text (a string prompt, or the text blocks of an array prompt joined by `\n`), else null.
+ */
+export function queuedHumanPrompt(o: { type?: unknown; attachment?: unknown }): string | null {
+  if (o.type !== 'attachment' || !o.attachment || typeof o.attachment !== 'object') return null
+  const a = o.attachment as { type?: unknown; commandMode?: unknown; isMeta?: unknown; origin?: unknown; prompt?: unknown }
+  if (a.type !== 'queued_command' || a.commandMode !== 'prompt' || a.isMeta === true) return null
+  const origin = originKind(a.origin)
+  if (a.origin != null && origin !== 'human') return null
+  const text =
+    typeof a.prompt === 'string'
+      ? a.prompt
+      : Array.isArray(a.prompt)
+        ? a.prompt
+            .map((b: unknown) =>
+              b && typeof b === 'object' && (b as { type?: unknown }).type === 'text' && typeof (b as { text?: unknown }).text === 'string'
+                ? (b as { text: string }).text
+                : ''
+            )
+            .filter((t) => t !== '')
+            .join('\n')
+        : ''
+  return text.trim() === '' ? null : text
+}
+
+export function classifyLocalCommand(content: string): LocalCommandRecord | null {
+  const tags = tagSequence(content)
+  if (!tags) return null
+  if (onlyFrom(tags, SLASH_TAGS)) {
+    const name = (tags.get('command-name') ?? '').trim()
+    if (!name) return null
+    return { kind: 'command', family: 'slash', name, arg: capArg(tags.get('command-args')) }
+  }
+  if (onlyFrom(tags, BASH_INPUT_TAGS)) {
+    return { kind: 'command', family: 'bash', name: BASH_COMMAND_TOOL, arg: capArg(tags.get('bash-input')) }
+  }
+  if (onlyFrom(tags, SLASH_OUT_TAGS)) return { kind: 'output', family: 'slash', text: outputText(tags) }
+  if (onlyFrom(tags, BASH_OUT_TAGS)) return { kind: 'output', family: 'bash', text: outputText(tags) }
+  return null
+}
+
+/** The name an output record's tool part gets when there is no command to attach it to. */
+export const COMMAND_OUTPUT_TOOL = 'command output'
+
+// ── System-injected user records ─────────────────────────────────────────────────────────────────
+// Claude Code writes several things that are NOT the user's words as `type:"user"` records. Measured
+// on 200 real transcripts (2026-09), user records without a tool_result, by `origin.kind`:
+//   task-notification  (promptSource "system")  `<task-notification>…</task-notification>` string —
+//                      a background task / agent / monitor finished. Child tags seen: task-id (0..n),
+//                      tool-use-id, output-file, status, summary, note, result, event, task-type,
+//                      usage (nested), worktree; each optional.
+//   peer               (isMeta, "system")  "Another Claude session sent a message:\n" + ONE
+//                      `<agent-message from="…">` (a subagent hand-back) or `<cross-session-message
+//                      from="…" from-name="…" from-mode="…">` element + a fixed instruction trailer.
+//   auto-continuation / coordinator  (isMeta)  plain text.
+// Each renders as ONE assistant tool part — the #991 local-command pattern: no new role, part kind
+// or field, so a v1 decoder (the phone) reads it as an ordinary tool chip. A human paste
+// (`<pasted_content id="…">…</pasted_content id="…">` inside typed text) stays the user's bubble.
+// Only STRING content is classified: none of these kinds was ever measured with array content.
+//
+// Every scan below is `indexOf`-based, never a backtracking regex: the records are parsed on the
+// main process, and a regex over many unclosed tags is quadratic (1 MB ≈ 20 s, measured).
+export { BACKGROUND_TASK_TOOL, AGENT_MESSAGE_TOOL, SYSTEM_TOOL, expandPastedContent }
+/** Cap on a system record's full-text `result` (an agent report is long and useful), UTF-16 units. */
+export const SYSTEM_RESULT_MAX = 16384
+/**
+ * The `result` of a task-notification with a summary but neither a status nor a body. Without one the
+ * part has no `result` and renders as a tool still running (the phone shows a pending icon and "No
+ * result yet"). Neutral on purpose, not "done": such a notification is often a START
+ * ("Background agent … started").
+ */
+export const TASK_NOTIFIED_RESULT = 'notified'
+
+export interface SystemRecord {
+  name: string
+  arg: string
+  /** '' = no result (the part carries no `result` key). */
+  result: string
+}
+
+const originKind = (origin: unknown): string | undefined => {
+  if (!origin || typeof origin !== 'object') return undefined
+  const k = (origin as { kind?: unknown }).kind
+  return typeof k === 'string' ? k : undefined
+}
+
+/** The only `promptSource` values a content-only (origin-less) task-notification may carry: none, or
+ *  `system`. An ALLOWLIST, not a list of human sources — a human source added later (`sdk` already
+ *  exists, 132 records measured) must never turn a human's pasted element into a chip. Every real
+ *  notification measured (1,693, CLI 2.1.209–2.1.286) carries `origin.kind` AND `promptSource:"system"`. */
+const systemOrUnsetSource = (source: unknown): boolean => source === undefined || source === 'system'
+
+/** The first line of the trimmed text, trimmed, capped like a tool arg. */
+const firstLine = (text: string): string => capArg(text.trim().split('\n')[0])
+const capResult = (text: string): string => text.trim().slice(0, SYSTEM_RESULT_MAX)
+const fallback = (name: string, content: string): SystemRecord => ({
+  name,
+  arg: firstLine(content),
+  result: capResult(content)
+})
+
+const TN_OPEN = '<task-notification>'
+const TN_CLOSE = '</task-notification>'
+/** The whole string is exactly ONE `<task-notification>` element (JS whitespace around it only). */
+export function isWholeTaskNotification(content: string): boolean {
+  // `trim` strips exactly JS `\s`, so this is `^\s*<task-notification>(…)</task-notification>\s*$`.
+  const t = content.trim()
+  if (t.length < TN_OPEN.length + TN_CLOSE.length || !t.startsWith(TN_OPEN) || !t.endsWith(TN_CLOSE)) return false
+  const inner = t.slice(TN_OPEN.length, t.length - TN_CLOSE.length)
+  return !inner.includes(TN_OPEN) && !inner.includes(TN_CLOSE)
+}
+
+/** The first `<name>…</name>` in `text` (the first close after the first open), trimmed; '' when
+ *  absent. If the first open has no close after it, no later open can have one either. */
+function tagText(text: string, name: string): string {
+  const open = `<${name}>`
+  const o = text.indexOf(open)
+  if (o < 0) return ''
+  const c = text.indexOf(`</${name}>`, o + open.length)
+  return c < 0 ? '' : text.slice(o + open.length, c).trim()
+}
+
+function taskNotification(content: string): SystemRecord {
+  const summary = tagText(content, 'summary')
+  const status = tagText(content, 'status')
+  const body = tagText(content, 'result') || tagText(content, 'event')
+  if (!summary && !status && !body) return fallback(BACKGROUND_TASK_TOOL, content)
+  // Neither a status nor a body: the neutral marker, so the chip reads as finished, not running.
+  const text = status && body ? `${status}: ${body}` : status || body || TASK_NOTIFIED_RESULT
+  return { name: BACKGROUND_TASK_TOOL, arg: summary.slice(0, CHAT_TOOL_ARG_MAX), result: summarizeResult(text) }
+}
+
+const isJsSpace = (ch: string | undefined): boolean => ch !== undefined && /\s/.test(ch)
+
+interface PeerElement {
+  start: number
+  /** Everything between the name and the first `>` (leading whitespace included); '' when none. */
+  attrs: string
+  body: string
+}
+
+/**
+ * The regex `<name(\s[^>]*)?>([\s\S]*)</name>` for one name, in linear time: the first open that is
+ * followed by `>` or JS whitespace, its first `>`, and the LAST `</name>` after that `>`. Only the
+ * first such open can match — a later one's `>` is no earlier, so the last close cannot follow it
+ * if it did not follow the first.
+ */
+function findElement(content: string, name: string): PeerElement | null {
+  const open = `<${name}`
+  const last = content.lastIndexOf(`</${name}>`)
+  if (last < 0) return null
+  for (let o = content.indexOf(open); o >= 0; o = content.indexOf(open, o + 1)) {
+    const after = o + open.length
+    if (content[after] !== '>' && !isJsSpace(content[after])) continue
+    const gt = content.indexOf('>', after)
+    if (gt < 0 || last < gt + 1) return null
+    return { start: o, attrs: content.slice(after, gt), body: content.slice(gt + 1, last) }
+  }
+  return null
+}
+
+/** `(?:^|\s)from-name="([^"]*)"` over the attributes, in linear time; '' when absent. */
+function fromNameAttr(attrs: string): string {
+  const key = 'from-name="'
+  for (let i = attrs.indexOf(key); i >= 0; i = attrs.indexOf(key, i + 1)) {
+    if (i > 0 && !isJsSpace(attrs[i - 1])) continue
+    const end = attrs.indexOf('"', i + key.length)
+    return end < 0 ? '' : attrs.slice(i + key.length, end)
+  }
+  return ''
+}
+
+function peerMessage(content: string): SystemRecord {
+  // The earliest of the two element kinds (they cannot start at the same offset).
+  const a = findElement(content, 'agent-message')
+  const x = findElement(content, 'cross-session-message')
+  const m = a && x ? (a.start < x.start ? a : x) : a ?? x
+  if (!m) return fallback(AGENT_MESSAGE_TOOL, content)
+  const body = m.body.trim()
+  const fromName = fromNameAttr(m.attrs).trim()
+  return { name: AGENT_MESSAGE_TOOL, arg: fromName ? capArg(fromName) : firstLine(body), result: capResult(body) }
+}
+
+/**
+ * A system-injected user record (see above) as the tool part it renders as, or null for anything
+ * else (which keeps its current treatment). `content` is the record's string content.
+ *
+ * The content-only match (no `origin.kind` at all) never applies to a record a human sent: a user
+ * who types or pastes one `<task-notification>` element is recorded exactly like that (measured on
+ * CLI 2.1.285: an unwrapped bracketed paste, `origin.kind:"human"`, `promptSource:"typed"`).
+ */
+export function classifySystemRecord(
+  rec: { origin?: unknown; promptSource?: unknown },
+  content: string
+): SystemRecord | null {
+  const kind = originKind(rec.origin)
+  if (
+    kind === 'task-notification' ||
+    (kind === undefined && systemOrUnsetSource(rec.promptSource) && isWholeTaskNotification(content))
+  ) {
+    return taskNotification(content)
+  }
+  if (kind === 'peer') return peerMessage(content)
+  if (kind === 'auto-continuation' || kind === 'coordinator') return fallback(SYSTEM_TOOL, content)
+  return null
+}
+
+/** A system record's tool part (`result` only when non-empty). */
+function systemPart(r: SystemRecord): Extract<ChatPart, { kind: 'tool' }> {
+  const part: Extract<ChatPart, { kind: 'tool' }> = { kind: 'tool', name: r.name, arg: r.arg }
+  if (r.result) part.result = r.result
+  return part
+}
+
+/** How user text is shown. `expandPastes:false` keeps `<pasted_content>` markup as recorded — for
+ *  a TITLE (recent conversations, the transcript index), where a code fence has no place. */
+export interface ChatParseOptions {
+  expandPastes?: boolean
+}
+const userTextOf = (text: string, opts: ChatParseOptions | undefined): string =>
+  opts?.expandPastes === false ? text : expandPastedContent(text)
+
+/** A tool part as find-bar lines: `$ name arg`, then its result when it has one. */
+function toolLines(name: string, arg: string, result: string): TranscriptLine[] {
+  const out: TranscriptLine[] = [{ role: 'tool', text: `$ ${name}${arg ? ` ${arg}` : ''}` }]
+  if (result) out.push({ role: 'tool', text: result })
+  return out
 }
 
 // Extract 0..n searchable lines from one raw transcript JSONL line.
-function linesFrom(raw: string): TranscriptLine[] {
-  let o: { type?: string; message?: { content?: unknown } }
+function linesFrom(raw: string, opts?: ChatParseOptions): TranscriptLine[] {
+  let o: Parameters<typeof isHiddenMetaRecord>[0] & { message?: { content?: unknown } }
   try {
     o = JSON.parse(raw)
   } catch {
     return []
   }
+  // Same rule as the chat parser: a `null` / scalar line is one skipped line, never a failed read.
+  if (!o || typeof o !== 'object' || Array.isArray(o)) return []
+  // Same rule as the chat parser (see `isHiddenMetaRecord`).
+  if (isHiddenMetaRecord(o)) return []
   const content = o.message?.content
   const out: TranscriptLine[] = []
   if (o.type === 'assistant' && Array.isArray(content)) {
     for (const c of content as Array<{ type?: string; text?: string; name?: string; input?: unknown }>) {
+      if (!c || typeof c !== 'object') continue
       if (c.type === 'text' && c.text) out.push({ role: 'assistant', text: c.text })
       else if (c.type === 'tool_use') {
         const arg = toolArg(c.input)
@@ -75,35 +401,53 @@ function linesFrom(raw: string): TranscriptLine[] {
     }
   } else if (o.type === 'user' && Array.isArray(content)) {
     for (const c of content as Array<{ type?: string; text?: string; content?: unknown }>) {
-      if (c.type === 'text' && c.text) out.push({ role: 'user', text: c.text })
+      if (!c || typeof c !== 'object') continue
+      // A non-string `text` is passed through as before; only a string is a paste to expand.
+      if (c.type === 'text' && c.text) out.push({ role: 'user', text: typeof c.text === 'string' ? userTextOf(c.text, opts) : c.text })
       else if (c.type === 'tool_result') {
         const s = summarizeResult(c.content)
         if (s) out.push({ role: 'tool', text: s })
       }
     }
   } else if (o.type === 'user' && typeof content === 'string') {
-    out.push({ role: 'user', text: content })
+    // A system-injected record indexes as the tool part the chat view shows (its body stays
+    // searchable — an agent's report is worth finding), never as the user's own text.
+    const sys = content.trim() ? classifySystemRecord(o, content) : null
+    if (sys) return toolLines(sys.name, sys.arg, sys.result)
+    const cmd = classifyLocalCommand(content)
+    if (cmd?.kind === 'command') out.push({ role: 'tool', text: `$ ${cmd.name}${cmd.arg ? ` ${cmd.arg}` : ''}` })
+    else if (cmd?.kind === 'output') {
+      const s = summarizeResult(cmd.text)
+      if (s) out.push({ role: 'tool', text: s })
+    } else out.push({ role: 'user', text: userTextOf(content, opts) })
+  } else {
+    const queued = queuedHumanPrompt(o)
+    if (queued !== null) out.push({ role: 'user', text: userTextOf(queued, opts) })
   }
   return out
 }
 
-// Read the last ~READ_CAP_BYTES of the file as UTF-8 (dropping the partial leading line on a
-// capped read), or the whole file when it's small. Returns undefined if it can't be read.
-export async function readCappedTail(filePath: string): Promise<string | undefined> {
+// Read the last `cap` bytes (default and ceiling READ_CAP_BYTES) of the file as UTF-8 (dropping the
+// partial leading line on a capped read), or the whole file when it's small. Returns undefined if
+// it can't be read.
+export async function readCappedTail(filePath: string, cap: number = READ_CAP_BYTES): Promise<string | undefined> {
+  const limit = Math.min(READ_CAP_BYTES, Math.max(1, Math.floor(cap)))
   try {
     const stat = await fs.promises.stat(filePath)
-    if (stat.size > READ_CAP_BYTES) {
+    if (stat.size > limit) {
       const fd = await fs.promises.open(filePath, 'r')
       try {
-        const start = stat.size - READ_CAP_BYTES
-        const { buffer } = await fd.read({
+        // One LOOKBEHIND byte before the window: when it is a `\n`, the window's first line is
+        // whole and survives the drop below (the remote page reader's rule).
+        const start = stat.size - limit - 1
+        const { buffer, bytesRead } = await fd.read({
           position: start,
-          length: READ_CAP_BYTES,
-          buffer: Buffer.alloc(READ_CAP_BYTES)
+          length: limit + 1,
+          buffer: Buffer.alloc(limit + 1)
         })
-        const s = buffer.toString('utf8')
-        const nl = s.indexOf('\n') // drop the first (partial) line
-        return nl >= 0 ? s.slice(nl + 1) : s
+        const data = buffer.subarray(0, bytesRead)
+        const nl = data.indexOf(0x0a) // drop the first (partial) line
+        return nl >= 0 ? data.subarray(nl + 1).toString('utf8') : ''
       } finally {
         await fd.close()
       }
@@ -116,10 +460,10 @@ export async function readCappedTail(filePath: string): Promise<string | undefin
 
 // Parse transcript text into flat searchable lines. Pure — splits on newlines and maps each
 // non-blank line via linesFrom. Reused by the remote reader (which fetches the text over SSH).
-export function parseTranscriptLines(text: string): TranscriptLine[] {
+export function parseTranscriptLines(text: string, opts?: ChatParseOptions): TranscriptLine[] {
   const lines: TranscriptLine[] = []
   for (const raw of text.split('\n')) {
-    if (raw.trim()) lines.push(...linesFrom(raw))
+    if (raw.trim()) lines.push(...linesFrom(raw, opts))
   }
   return lines
 }
@@ -138,12 +482,26 @@ export async function readTranscriptLines(filePath: string): Promise<TranscriptL
 // `paged` switches on the three things only a paged read needs (the legacy result grows only by
 // the optional `at` both paths carry): a `key` per message (its line's absolute byte offset), the `tool_use` id on
 // each tool part, and the list of results whose tool was not among these lines.
-interface ChatRecordsOut {
+export interface ChatRecordsOut {
   messages: ChatMessage[]
   unmatched: Map<string, string>
+  /** PAGED only: `message.model` / `effort` of the newest non-synthetic assistant record (one record). */
+  model?: string
+  effort?: string
+}
+
+/** Longest `model` / `effort` value a paged read reports, in UTF-16 code units (JS `.length`; Swift
+ *  `utf16.count`); anything longer is not a model name. */
+export const CHAT_META_MAX_CHARS = 100
+/** The model claude stamps on a line it wrote itself (an API error, an interrupt) — not a model. */
+const SYNTHETIC_MODEL = '<synthetic>'
+
+/** A string field worth reporting as chat metadata, else undefined. */
+export function metaString(v: unknown): string | undefined {
+  return typeof v === 'string' && v.length > 0 && v.length <= CHAT_META_MAX_CHARS ? v : undefined
 }
 /** A transcript line's ISO `timestamp` as epoch ms; undefined when absent or not a date string. */
-function lineTime(v: unknown): number | undefined {
+export function lineTime(v: unknown): number | undefined {
   if (typeof v !== 'string' || !v) return undefined
   const t = Date.parse(v)
   return Number.isFinite(t) ? t : undefined
@@ -151,13 +509,26 @@ function lineTime(v: unknown): number | undefined {
 
 function parseChatRecords(
   records: Iterable<{ raw: string; offset: number }>,
-  paged: boolean
+  paged: boolean,
+  opts?: ChatParseOptions
 ): ChatRecordsOut {
   const messages: ChatMessage[] = []
   const unmatched = new Map<string, string>()
   const toolById = new Map<string, Extract<ChatPart, { kind: 'tool' }>>()
   let at: number | undefined
+  // A snapshot of ONE record (paged only): the newest non-synthetic assistant record answers BOTH
+  // fields, and a field it does not state (or states invalidly) is absent — never carried forward
+  // from an older record, which may describe a different model or CLI. Same rule as
+  // `parseLatestUsage` (context-tail.ts). `<synthetic>` lines (API errors, interrupts — measured
+  // with no `effort`) are claude's own, not a model turn, so they are skipped entirely.
+  let model: string | undefined
+  let effort: string | undefined
+  // The tool part of the LAST pushed message when that message is a local command still waiting for
+  // its output record (cleared by any other push, so output attaches only to the record right
+  // before it).
+  let awaitingOutput: { family: 'slash' | 'bash'; part: Extract<ChatPart, { kind: 'tool' }> } | null = null
   const push = (m: ChatMessage, offset: number): void => {
+    awaitingOutput = null
     // `at` rides BOTH paths (additive): the time the line was written, for the thread's relative
     // timestamp. Absent when the line states none — never a made-up time.
     const withAt = at === undefined ? m : { ...m, at }
@@ -165,14 +536,26 @@ function parseChatRecords(
   }
   for (const { raw, offset } of records) {
     if (!raw.trim()) continue
-    let o: { type?: string; timestamp?: unknown; message?: { content?: unknown } }
+    let o: Parameters<typeof isHiddenMetaRecord>[0] & {
+      timestamp?: unknown
+      effort?: unknown
+      message?: { content?: unknown; model?: unknown }
+    }
     try {
       o = JSON.parse(raw)
     } catch {
       continue
     }
+    // `null` / a number / a string parse fine and would throw on the reads below, failing the whole
+    // page over one line another program wrote. One bad line costs one line (the Swift port agrees).
+    if (!o || typeof o !== 'object' || Array.isArray(o)) continue
+    if (isHiddenMetaRecord(o)) continue
     at = lineTime(o.timestamp)
     const content = o.message?.content
+    if (paged && o.type === 'assistant' && o.message?.model !== SYNTHETIC_MODEL) {
+      model = metaString(o.message?.model)
+      effort = metaString(o.effort)
+    }
     if (o.type === 'assistant' && Array.isArray(content)) {
       const parts: ChatPart[] = []
       for (const c of content as Array<{
@@ -182,6 +565,7 @@ function parseChatRecords(
         id?: string
         input?: unknown
       }>) {
+        if (!c || typeof c !== 'object') continue
         if (c.type === 'text' && c.text) parts.push({ kind: 'text', text: c.text })
         else if (c.type === 'tool_use') {
           const part: Extract<ChatPart, { kind: 'tool' }> = {
@@ -209,7 +593,9 @@ function parseChatRecords(
         tool_use_id?: string
         content?: unknown
       }>) {
-        if (c.type === 'text' && c.text) parts.push({ kind: 'text', text: c.text })
+        if (!c || typeof c !== 'object') continue
+        // A non-string `text` is passed through as before; only a string is a paste to expand.
+        if (c.type === 'text' && c.text) parts.push({ kind: 'text', text: typeof c.text === 'string' ? userTextOf(c.text, opts) : c.text })
         else if (c.type === 'tool_result') {
           const tool = c.tool_use_id ? toolById.get(c.tool_use_id) : undefined
           const s = summarizeResult(c.content)
@@ -224,16 +610,51 @@ function parseChatRecords(
       }
       if (parts.length) push({ role: 'user', parts }, offset)
     } else if (o.type === 'user' && typeof content === 'string' && content.trim()) {
-      push({ role: 'user', parts: [{ kind: 'text', text: content }] }, offset)
+      // Not the user's words (a background task's completion, another session's message, an
+      // auto-continuation): one assistant tool part, like a local command.
+      const sys = classifySystemRecord(o, content)
+      if (sys) {
+        push({ role: 'assistant', parts: [systemPart(sys)] }, offset)
+        continue
+      }
+      const cmd = classifyLocalCommand(content)
+      if (cmd?.kind === 'command') {
+        // The user running a command reads like a tool call — no new role or part kind on the wire.
+        const part: Extract<ChatPart, { kind: 'tool' }> = { kind: 'tool', name: cmd.name, arg: cmd.arg }
+        push({ role: 'assistant', parts: [part] }, offset)
+        awaitingOutput = { family: cmd.family, part }
+      } else if (cmd?.kind === 'output') {
+        const s = summarizeResult(cmd.text)
+        if (!s) continue
+        if (awaitingOutput && awaitingOutput.family === cmd.family) {
+          awaitingOutput.part.result = s
+          awaitingOutput = null
+        } else {
+          push({ role: 'assistant', parts: [{ kind: 'tool', name: COMMAND_OUTPUT_TOOL, arg: '', result: s }] }, offset)
+        }
+      } else {
+        push({ role: 'user', parts: [{ kind: 'text', text: userTextOf(content, opts) }] }, offset)
+      }
+    } else {
+      // A prompt typed while a turn was running (see `queuedHumanPrompt`), in the place the model
+      // received it.
+      const queued = queuedHumanPrompt(o)
+      if (queued !== null) push({ role: 'user', parts: [{ kind: 'text', text: userTextOf(queued, opts) }] }, offset)
     }
   }
-  return { messages, unmatched }
+  const out: ChatRecordsOut = { messages, unmatched }
+  // Keys only when stated: an absent key, never `model: undefined`, keeps the output deterministic
+  // (and JSON-identical) for the ports locked to it.
+  if (model !== undefined) out.model = model
+  if (effort !== undefined) out.effort = effort
+  return out
 }
 
-export function parseChatMessages(rawLines: string[]): ChatMessage[] {
+export function parseChatMessages(rawLines: string[], opts?: ChatParseOptions): ChatMessage[] {
   return parseChatRecords(
     rawLines.map((raw) => ({ raw, offset: 0 })),
-    false
+    false,
+    opts
   ).messages
 }
 
@@ -242,6 +663,10 @@ export interface ChatWindowParse {
   messages: ChatMessage[]
   olderCursor: number | null
   unmatchedResults: ChatCarriedToolResult[]
+  /** The newest assistant record's model / effort among this window's complete lines. Absent (the
+   *  key, not just the value) when no such record states one. */
+  model?: string
+  effort?: string
   /**
    * The window (not starting at 0) held no complete line: one record is bigger than the whole
    * window. Explicit rather than inferred from "no messages", because a window of complete lines
@@ -274,7 +699,14 @@ export interface ChatWindowParse {
  * (`readChatPage`, only once the window is already at the 5 MB cap) keeps paging and skips that one
  * record. Answering the window end instead would ask for the identical window forever.
  */
-export function parseChatWindow(buf: Buffer, bufStart: number): ChatWindowParse {
+export function parseChatWindow(
+  buf: Buffer,
+  bufStart: number,
+  // The record parser for the window's complete lines. Claude's by default; another agent whose
+  // transcript is also append-only JSONL (copilot's `events.jsonl`) passes its own, so the byte
+  // window, the lookbehind and the cursor rules exist exactly once.
+  parseRecords: (records: Iterable<{ raw: string; offset: number }>, paged: true) => ChatRecordsOut = parseChatRecords
+): ChatWindowParse {
   const end = bufStart + buf.length
   let from = 0
   let olderCursor: number | null = null
@@ -293,11 +725,13 @@ export function parseChatWindow(buf: Buffer, bufStart: number): ChatWindowParse 
     if (to > from) records.push({ raw: buf.toString('utf8', from, to), offset: bufStart + from })
     from = to + 1
   }
-  const { messages, unmatched } = parseChatRecords(records, true)
+  const { messages, unmatched, model, effort } = parseRecords(records, true)
   return {
     messages,
     olderCursor,
     unmatchedResults: [...unmatched].map(([id, result]) => ({ id, result })),
+    ...(model !== undefined ? { model } : {}),
+    ...(effort !== undefined ? { effort } : {}),
     noCompleteLine: false
   }
 }

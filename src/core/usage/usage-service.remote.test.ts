@@ -79,6 +79,29 @@ describe('usage:remote', () => {
     expect(run).toHaveBeenCalledTimes(2)
   })
 
+  it('keeps the last good numbers through a rate-limited read, and does not re-read inside the debounce', async () => {
+    const limited = [
+      '__NTU_BEGIN__',
+      '__NTU_EMAIL__me@example.com',
+      '{"error":{"type":"rate_limit_error","message":"Rate limited. Please try again later."}}',
+      '__NTU_HTTP__429',
+      '__NTU_END__'
+    ].join('\n')
+    const replies = [OK_REPLY, limited, limited]
+    const run = vi.fn(async () => replies.shift() ?? limited)
+    start({ targets: () => [target('root@alpha')], run })
+    const [first] = await callRemote()
+    // Two readers racing the same failing read both see the held numbers, not an empty row.
+    const [[a], [b]] = await Promise.all([callRemote({ force: true }), callRemote({ force: true })])
+    for (const held of [a, b]) {
+      expect(held.usage).toMatchObject({ status: 'error', rateLimited: true, updatedAt: first.usage.updatedAt })
+      expect(held.usage.limits).toEqual(first.usage.limits)
+    }
+    // The held row is cached like any other: reopening the popover must not hammer a 429.
+    await callRemote()
+    expect(run).toHaveBeenCalledTimes(2)
+  })
+
   it('retires a host that has disconnected instead of serving its last numbers', async () => {
     const run = vi.fn(async () => OK_REPLY)
     let connected = [target('root@alpha')]

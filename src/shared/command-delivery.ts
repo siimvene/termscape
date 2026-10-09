@@ -8,14 +8,17 @@
 // fail-open, a terminal whose echo we can't recognize must never block the launch (that
 // worst case is exactly the pre-fix behavior).
 //
+// Lives in @shared (not the renderer) because the headless launcher in core (#925) runs the same
+// delivery with a core-side io — one writer, not two copies that drift.
+//
 // The ONE exception to failing open is a line the tty could not physically have taken: a
 // canonical-mode buffer silently drops everything past its cap (1024 bytes on macOS), so an
 // over-cap command is truncated mid-quote and Enter would strand the shell at `quote>` with the
 // agent never launched (#706). That case is refused, not submitted — see `DeliveryOutcome` and
 // @shared/canonical-line.
 
-import { fitsLaunchLine } from '@shared/canonical-line'
-import { KILL_LINE, WINDOWS_KILL_LINE } from '@shared/shell-kill-line'
+import { fitsLaunchLine } from './canonical-line'
+import { KILL_LINE, WINDOWS_KILL_LINE } from './shell-kill-line'
 
 export const VERIFY_TIMEOUT_MS = 2000
 export const DELIVERY_ATTEMPTS = 3

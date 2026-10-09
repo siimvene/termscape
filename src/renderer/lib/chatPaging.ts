@@ -1,4 +1,6 @@
 import type { ChatMessage, ChatPart, ChatTranscriptResult } from '@shared/types'
+import { BASH_COMMAND_TOOL, sentCommand } from '@shared/chat-command'
+import { fencePasted } from '@shared/chat-system-records'
 
 /**
  * Pure paging state for the ⌘M chat panel (`nodes/ChatPanel.tsx`). The panel reads a SMALL tail
@@ -127,6 +129,35 @@ const userText = (m: ChatMessage): string =>
     .join('')
     .trim()
 
+/** The thread's TRAILING unkeyed user messages — the optimistic sends a live read may still carry. */
+function trailingSends(t: ChatThread): ChatMessage[] {
+  const trailing: ChatMessage[] = []
+  for (let i = t.messages.length - 1; i >= 0; i--) {
+    const m = t.messages[i]
+    if (m.key !== undefined || m.role !== 'user') break
+    trailing.unshift(m)
+  }
+  return trailing
+}
+
+/**
+ * Would a LIVE read (`applyTail` with `carryUnconfirmed`) confirm every optimistic send the thread
+ * is waiting on? False when nothing was waiting, or for another transcript. The panel uses it to
+ * retire its optimistic working row when no hook will: a local command (`/model`, `!ls`) is
+ * confirmed only by its command record, and fires no state change.
+ */
+export function tailConfirmsSends(t: ChatThread, identity: string, res: ChatTranscriptResult): boolean {
+  return t.identity === identity && trailingSends(t).length > 0 && unconfirmedSends(t, res).length === 0
+}
+
+/** A command message's tool part (`/model`, `!`), as the reader renders a command record. */
+function commandPart(m: ChatMessage): { name: string; arg: string } | null {
+  if (m.role !== 'assistant' || m.parts.length !== 1) return null
+  const p = m.parts[0]
+  if (p.kind !== 'tool' || (p.name !== BASH_COMMAND_TOOL && !p.name.startsWith('/'))) return null
+  return { name: p.name, arg: p.arg.trim() }
+}
+
 /**
  * The optimistic "just sent" bubbles a LIVE tail read must not drop. A live read fires on the very
  * hook event the send caused (UserPromptSubmit), racing the agent's own transcript write — so the
@@ -136,29 +167,45 @@ const userText = (m: ChatMessage): string =>
  * Carried: the thread's TRAILING unkeyed `user` messages (in a paged thread only sends are
  * unkeyed; grok's thread is unkeyed throughout, but its whole-file read contains every prompt it
  * rendered, so each one is matched and dropped). Each one is dropped when the new read contains a user message with
- * the same trimmed text, ONE-FOR-ONE, and only among messages NEWER than anything the thread had
- * keyed — an older identical "yes" already on screen must not confirm a new "yes".
+ * the same trimmed text (or with that text as the reader renders a send the CLI recorded as ONE
+ * `<pasted_content>` span: `fencePasted(text).trim()`), ONE-FOR-ONE, and only among messages NEWER
+ * than anything the thread had keyed — an older identical "yes" already on screen must not confirm
+ * a new "yes". A sent slash
+ * command / `!` line is confirmed the same way by a command tool part (`sentCommand`): same name,
+ * and the same trimmed arg when both sides have one.
  *
  * A non-live reload (turn end, ↻) never carries: by then the transcript holds the prompt, and a
  * send whose transcript line never matches (a CLI that rewrites the prompt) must not stay duplicated.
  */
 function unconfirmedSends(t: ChatThread, res: ChatTranscriptResult): ChatMessage[] {
-  const trailing: ChatMessage[] = []
-  for (let i = t.messages.length - 1; i >= 0; i--) {
-    const m = t.messages[i]
-    if (m.key !== undefined || m.role !== 'user') break
-    trailing.unshift(m)
-  }
+  const trailing = trailingSends(t)
   if (trailing.length === 0) return []
   let newest = -Infinity
   for (const m of t.messages) if (m.key !== undefined && m.key > newest) newest = m.key
-  const available = res.messages
-    .filter((m) => m.role === 'user' && (m.key === undefined || m.key > newest))
-    .map(userText)
+  // Known limitation: "newer than anything keyed" is all this can know. A line written after the
+  // last read by someone ELSE — the same command (or, on the exact-text path, the same text) typed
+  // in the TERMINAL — is indistinguishable from the composer's own send and confirms it early. The
+  // transcript records no sender to tell them apart.
+  const fresh = res.messages.filter((m) => m.key === undefined || m.key > newest)
+  const available = fresh.filter((m) => m.role === 'user').map(userText)
+  // A slash command / `!` line is recorded as a command, which the reader renders as an assistant
+  // tool part — never as the typed text — so a send of one is confirmed by that part instead.
+  const commands = fresh.map(commandPart).filter((c): c is { name: string; arg: string } => c !== null)
   return trailing.filter((m) => {
-    const i = available.indexOf(userText(m))
-    if (i < 0) return true
-    available.splice(i, 1)
+    const sentText = userText(m)
+    let i = available.indexOf(sentText)
+    // The CLI may record a send delivered as a bracketed paste as ONE `<pasted_content>` span, which
+    // the reader renders fenced — the same send, in the form the reader gives it.
+    if (i < 0 && sentText) i = available.indexOf(fencePasted(sentText).trim())
+    if (i >= 0) {
+      available.splice(i, 1)
+      return false
+    }
+    const sent = sentCommand(userText(m))
+    if (!sent) return true
+    const j = commands.findIndex((c) => c.name === sent.name && (!c.arg || !sent.arg || c.arg === sent.arg))
+    if (j < 0) return true
+    commands.splice(j, 1)
     return false
   })
 }

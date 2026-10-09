@@ -32,6 +32,17 @@ the same script hand-packs `build/icon.icns` (size-checked frames — issue #369
 zip, `--publish never`). Production release signing/notarization and the update-feed hosting are
 handled outside this repo.
 
+**The running app's name is `node-terminal`, not `nodeterm`.** Electron reads `app.name` from
+package.json's top-level `name`; `productName` lives only under `build`, which electron-builder
+strips from the packaged package.json, so it names the bundle and the installer and nothing else.
+Everything keyed by the app NAME therefore says `node-terminal` on every build, dev or installed:
+`userData` (`~/Library/Application Support/node-terminal`, `~/.config/node-terminal`,
+`%APPDATA%\node-terminal`), the `node-terminal Safe Storage` Keychain entry, electron-updater's
+`node-terminal-updater` cache. Only what is keyed by the bundle id (`com.nodeterm.app`) or the
+bundle itself (`/Applications/nodeterm.app`) carries `nodeterm`. `scripts/uninstall.sh` looked
+under `…/nodeterm` and never found the desktop's data; `scripts/uninstall.test.ts` now ties its
+`APP_NAME` to package.json `name`.
+
 **Windows ships as an UNSIGNED BETA** (extracted from external PR #276; the session-host phase
 #305 merged 2026-08-20, and the decision to release without signing is #454 — CI-green, but no
 real-device daily-use verification yet, and that is a stated risk, not an oversight). Deliberate
@@ -69,6 +80,65 @@ Update preparation must keep saved canvas nodes: exit programs normally, quit, t
 verify and stop any remaining host. Never recommend **End session** (it deletes nodes). Cold agent
 resume depends on supported, saved conversation history; it does not preserve running tasks.
 See `docs/windows-session-host.md` for the user-controlled preparation/recovery steps and limits.
+
+**Prepare for update (#829 step 2).** The in-app answer to the refusal above, Windows only.
+Rules a refactor must not undo:
+- **The host's `shutdown` command is the only thing that stops the host**, and only on a connection
+  that negotiated the `shutdown` hello feature (`SESSION_HOST_FEATURES`). An older host answers
+  `host-unsupported` and the dialog shows `MANUAL_UPDATE_STEPS` — never a taskkill/name-based
+  fallback from the app. The host ends every session through the SAME `handleKill` path (taskkill
+  of the tree, then node-pty's onExit as proof), refuses attach/attachExisting/executeLaunch while
+  it runs, bounds each kill at 20 s, and on ANY unconfirmed kill answers `ok:false` naming the
+  sessions and keeps serving. It exits only after the success reply is flushed (`socket.end`), and
+  removes its state/token files. It touches no node metadata; nodes cold-restore next launch.
+- **Inspection never launches a host** (`SessionHostClient.inspectForUpdate` /
+  `shutdownForUpdate` read the published state first; absent = `no-host`). Once `shutdown` is
+  sent the client latches `shutDownForUpdate` so a dropped connection cannot reconnect into a
+  freshly launched host that re-locks the install dir; only the host's explicit refusal (or a frame
+  provably never sent) clears it. "Shut down" means reply AND state file gone AND pid dead.
+- **Busy blocks, from either source**: `planUpdatePrep` (`renderer/lib/updatePrep.ts`, pure)
+  refuses on working / waiting / blocked / a held question or approval ticket, read from the
+  renderer store AND core's mirror (`app:update-prep-inspect` carries `mirror` per session) — an
+  unmounted node's renderer state is cleared, so the mirror is the only witness for closed/other
+  projects. Only a MOUNTED node can be asked to quit (`registerAgentUpdateExit` in TerminalNode:
+  Pause's exit half with its refusals, marking SLEEPING not PAUSED so cold restore resumes it);
+  every other agent is disclosed as "stopped without a clean exit".
+- The confirm is a danger `ConfirmDialog` with `enterConfirms={false}` (Cancel focused) and says
+  plainly that shells and their unsaved work stop and that nodes are kept. Never route anything
+  through End session / node deletion.
+- IPC (`app:update-prep-*`) is raw `ipcMain`, main-window senders only, and in
+  `HOST_ONLY_CHANNELS`. Server Edition: the bridge stub answers `unsupported` (Linux tmux, no
+  installer; a browser must never end every session on the server). Mobile: N/A — a phone cannot
+  authorize an update shutdown; it sees its sessions end like any other end.
+
+**Staged host runtime (#829 step 3).** The host used to run as a hard link of `nodeterm.exe` INSIDE
+the install dir, so it mapped the installed exe/DLLs/`resources.pak` and every update stopped until
+the user ended it (and every session). Packaged Windows builds now copy what the host needs into
+`%LOCALAPPDATA%\nodeterm\session-host\<version>-<fingerprint>\` and launch
+`nodeterm-sessionhost-v2.exe` from there (`core/session-host-runtime.ts`, wired in
+`session-host-backend.ts`; the client waits at most `STAGED_RUNTIME_WAIT_MS` for the first staging
+of a version). Rules a refactor must not undo:
+- **Only a published, verified copy is launched.** Files are copied into `.staging-<uuid>`, each
+  re-read and compared by SHA-256, the copy is smoke-run once (`ELECTRON_RUN_AS_NODE`, requires its
+  node-pty, must exit `SMOKE_OK`), the marker is written LAST, and the dir is published by one
+  `renameAtomic`. A dir without a valid marker (sizes checked on reuse) is moved aside, never run.
+- **A new image name.** Old uninstallers match `nodeterm.exe`/`nodeterm-session-host.exe` by NAME
+  machine-wide; the staged host must never answer to either. The preflight deliberately does not
+  match it by name (path test still applies).
+- **Fail-safe, not fail-open.** Any staging failure, or a staged host that dies within 10 s with a
+  code other than the host's own 0/1 (`stagedExitWantsFallback` — a missing DLL, a policy block),
+  falls back to the legacy hard-link launch for the rest of the run. That host still blocks the
+  installer through the unchanged read-only preflight.
+- **GC is fail-closed.** An old version dir is deleted only when a successful Win32_Process query
+  shows nothing running under it, no staged-host process has an unreadable path, it is older than
+  10 min, AND a rename aside succeeds (Windows refuses while an image inside is mapped). The
+  uninstaller leaves the staged runtimes alone (never kills a host); `docs/uninstall.md` lists them.
+- **The file set is not measured yet** (written on Linux): exe, top-level `*.dll`, `icudtl.dat`
+  (required), `resources.pak`, snapshot blobs, `locales/`, `resources/session-host/**`. The smoke
+  run is what proves it per machine; device checklist in docs/windows-session-host.md.
+- **Protocol is additive-only across versions.** A newer app keeps using an older staged host
+  (protocol v1/v2 + `hello` features); an unsupported one is left running and reported
+  (`SessionHostProtocolCompatibilityError`), never killed. ~250 MB of disk per staged version.
 
 **Follow-ups, in order:** code signing, then Windows auto-update wiring (electron-updater NSIS leg
 + `latest.yml` on the nodeterm.dev feed — blocked on signing: an unsigned auto-update is a

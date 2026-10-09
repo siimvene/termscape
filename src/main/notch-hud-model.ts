@@ -9,7 +9,7 @@
 // clipping constant (PROMPT_MAX) — never electron.
 
 import type { NormalizedAgentEvent, AgentState } from '../shared/agents/normalize'
-import { PROMPT_MAX } from '../core/agent-status-mirror'
+import { PROMPT_MAX, EXPIRE_MS } from '../core/agent-status-mirror'
 import type { NodeStateChange, NodeNowChange, MirrorFile } from '../core/agent-status-mirror'
 import { WORKING_STALE_MS } from '@shared/agents/stale'
 
@@ -224,6 +224,12 @@ export function createHudModel(): HudModel {
   function applyMirrorFlush(doc: MirrorFile): void {
     const seen = new Set<string>()
     for (const [nodeId, n] of Object.entries(doc.nodes ?? {})) {
+      // An IDENTITY-ONLY entry (no state, older than the mirror's state expiry): the mirror keeps
+      // the node's session id for the phone, but says nothing about its state. To the HUD that is
+      // the same as the node being absent — it must age out, not be pinned present for 30 days.
+      const identityOnly =
+        !n.state && !n.hibernated && typeof doc.updatedAt === 'number' && doc.updatedAt - n.updatedAt > EXPIRE_MS
+      if (identityOnly) continue
       seen.add(nodeId)
       // Is this the FIRST time this process hears of the node? The mirror keeps entries for hours
       // and is re-read at every launch, so a node we're meeting through the file is HISTORY, not an
@@ -268,6 +274,8 @@ export function createHudModel(): HudModel {
       return
     }
     if (ev.kind === 'subagent-start' && ev.toolUseId) {
+      // A native card replacing the row its tool call drew (core/claude-subagent-lifecycle.ts).
+      if (ev.supersedes) a.subagents.delete(ev.supersedes)
       a.subagents.set(ev.toolUseId, {
         id: ev.toolUseId,
         label: ev.taskLabel || ev.subagentType || undefined,

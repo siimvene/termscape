@@ -60,8 +60,15 @@ describe('consent ends with the node — every removal path calls forgetArmed', 
   it('a peer’s remove mutation, on the active project AND on a background one', () => {
     // Two branches, two pins: a cold-open arming lives in exactly the background-project branch.
     expect(canvas.match(/forgetArmed\(mutation\.id\)/g)?.length).toBe(2)
+    // The background branch revokes BEFORE the peer op lands in the stored copy. Since upstream
+    // v0.4 that store write is `applyToStored` (→ `applyToStoredCopy` → the store's peer reducer
+    // `applyCanvasOp`, which `applyNodeMutation` now merely delegates to) — the PEER path, never
+    // `applyOwnNodeMutation`, which would keep a peer-sent `pendingLaunch`.
     expect(canvas).toMatch(
-      /if \(mutation\.op === 'remove'\) \{[\s\S]{0,700}?forgetArmed\(mutation\.id\)[\s\S]{0,300}?applyNodeMutation\(projectId, mutation\)/
+      /if \(mutation\.op === 'remove'\) \{[\s\S]{0,700}?forgetArmed\(mutation\.id\)[\s\S]{0,300}?applyToStored\(projectId, mutation\)/
+    )
+    expect(canvas).toMatch(
+      /const applyToStored = useCallback\(\s*\(projectId: string, mutation: CanvasMutation\): void => applyToStoredCopy\(projectId, mutation, markDirty\)/
     )
     expect(canvas).toMatch(
       /const gone = nodesRef\.current\.find\(\(n\) => n\.id === mutation\.id\)[\s\S]{0,800}?forgetArmed\(mutation\.id\)/

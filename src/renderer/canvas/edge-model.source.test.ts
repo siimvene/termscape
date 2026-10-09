@@ -31,14 +31,25 @@ describe('canvas edge model (source pins)', () => {
   })
 
   it('--after writes a rope from each dep to each opened node, beside the hidden bridge', () => {
-    // One helper, three verbs: the rope id shape is what hiddenLinkIds / delete key on.
+    // One helper, three verbs. The id is the marked WAIT id (`waitRopeId`, still `ctrl-`-routed):
+    // an opener rope and a wait rope must be told apart once the canvas prunes the opener's.
     expect(src).toMatch(/const ropeDeps = \(ids: string\[\], after: string\[\] \| undefined\)/)
     // Written THROUGH the surface, not a bare `setControlEdges`: upstream had no off-screen surface
     // and wrote dep ropes to the active canvas, which control-no-travel.source.test.ts pins against
-    // (an off-screen source's ropes must land in its own project). `surface.addRope` mints the same
-    // `ctrl-<dep>-<node>` id live and, off screen, commits it to the owning project's store.
-    expect(src).toContain('surface.addRope(dep, nid, edgeColor)')
-    expect(src).toContain('id: `ctrl-${source}-${target}`') // the id shape ropeDeps relies on
+    // (an off-screen source's ropes must land in its own project). Off screen the surface commits
+    // the rope to the owning project's store; live it mints the same edge on the active canvas.
+    //
+    // …and with the marked WAIT id (upstream c3e3e3f5): an opener rope and a wait rope must be told
+    // apart once the canvas prunes the opener's, or the first surviving wait rope reads as the
+    // node's team leader. Either surface spelling carries `waitRopeId`: an explicit id argument on
+    // `surface.addRope`, or a wait-specific surface method that mints `waitRopeId(source, target)`.
+    const viaIdArg = /surface\.addRope\(dep, nid, edgeColor, waitRopeId\(dep, nid\)\)/.test(src)
+    const viaWaitMethod =
+      src.includes('surface.addWaitRope(dep, nid, edgeColor)') &&
+      (src.match(/waitRopeId\(source, target\)/g) ?? []).length >= 2 // live + store surfaces
+    expect(viaIdArg || viaWaitMethod, 'dep ropes go through the surface with the wait id').toBe(true)
+    // The opener rope keeps the plain `ctrl-<source>-<target>` id (the id shape `connect` relies on).
+    expect(src).toMatch(/`ctrl-\$\{source\}-\$\{target\}`/)
     expect((src.match(/ropeDeps\(ids, after\)/g) ?? []).length).toBe(2)
   })
 

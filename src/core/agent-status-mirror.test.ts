@@ -35,6 +35,7 @@ import {
   trimInboxFeed,
   workingNodes,
   _resetForTest,
+  pendingTicketsFor,
   _snapshot,
   _inboxSnapshot,
   DONE_HOLDOFF_MS,
@@ -2856,5 +2857,22 @@ describe('MirrorEntry.account (observed Claude account)', () => {
     const now = EXPIRE_MS + 100_000
     const doc = buildFile({ stale: { state: 'working', account, updatedAt: now - EXPIRE_MS - 1 } }, now)
     expect(Object.keys(doc.nodes)).toEqual([])
+  })
+})
+
+// The phone's `agent.answer` binds a pendingId to the node it names (main/remote/host-chat.ts): a
+// ticket the mirror recorded for THIS node passes, one recorded for another node — or one it has
+// since resolved — does not.
+describe('pendingTicketsFor', () => {
+  beforeEach(() => _resetForTest())
+  it('lists the node\'s unresolved approval tickets only', () => {
+    recordAgentEvent(ev({ state: 'working', newTurn: true }))
+    recordAgentEvent(ev({ state: 'blocked', lastMessage: 'Approve write', pendingId: 'n1-1-1' }))
+    recordAgentEvent(ev({ nodeId: 'n2', state: 'blocked', lastMessage: 'Approve', pendingId: 'n2-1-1' }))
+    expect(pendingTicketsFor('n1')).toEqual(['n1-1-1'])
+    expect(pendingTicketsFor('n2')).toEqual(['n2-1-1'])
+    expect(pendingTicketsFor('nope')).toEqual([])
+    recordAgentEvent(syntheticAnsweredEvent('n1', 'n1-1-1', 'allow')!)
+    expect(pendingTicketsFor('n1')).toEqual([])
   })
 })

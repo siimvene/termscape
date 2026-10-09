@@ -99,28 +99,48 @@ describe('the --project targeted-opens block (source pins)', () => {
   })
 
   it('the gate order is refusal-before-write: every refusal precedes every store/canvas write', () => {
-    // A refused target must write NOTHING. The flag refusal, the source checks, the
-    // unknown-target belt and the SSH belt all return before the first applyNodeMutation or
-    // setNodes — moving a write above any of them is the gate-before-write mutation.
+    // A refused target must write NOTHING. The flag refusal and the source/target belt both
+    // return before the first applyOwnNodeMutation or setNodes — moving a write above either is the
+    // gate-before-write mutation. Both are decided by pure helpers whose logic (and every refusal
+    // sentence) is red-capable in projectOpen.test.ts; what only the source can show is that the
+    // dispatch relays their answer before it writes.
     const body = targetedOpensBody()
     const firstWrite = Math.min(
-      ...['applyNodeMutation', 'setNodes'].map((s) => {
+      ...['applyOwnNodeMutation', 'setNodes'].map((s) => {
         const i = body.indexOf(s)
         return i === -1 ? body.length : i
       })
     )
     for (const refusal of [
-      // The flag exclusion is decided by the pure projectTargetFlagRefusal (its logic is
-      // red-capable in projectOpen.test.ts — review #363 I-2); here we pin its CALL SITE's
-      // position, like the inline refusals below.
       'projectTargetFlagRefusal(args)',
-      'project-target-refused',
-      'project-target-ssh-unsupported',
-      'source node is not a control-capable agent'
+      'resolveProjectTarget(',
+      "if (tgResolved.kind === 'refused') {"
     ]) {
       const at = body.indexOf(refusal)
       expect(at, refusal).toBeGreaterThan(-1)
       expect(at, `${refusal} after a write`).toBeLessThan(firstWrite)
+    }
+    expect(body).toMatch(
+      /if \(tgResolved\.kind === 'refused'\) \{\s+reply\(\{ ok: false, error: tgResolved\.error \}\)\s+return/
+    )
+  })
+
+  it('the --project belt is ONE definition: open-* and run both call resolveProjectTarget (#925)', () => {
+    // Two hand-copies of the caller-project resolution + source + target checks are how one of
+    // them drifts (CLAUDE.md "Adding a new agent" rule 10). Neither block may re-grow an inline
+    // copy of the belt; each passes only the word its refusal differs in.
+    const body = targetedOpensBody()
+    expect(body.match(/resolveProjectTarget\(/g)?.length).toBe(2)
+    expect(body).toMatch(/resolveProjectTarget\(\{[^}]*sshVerbWord: 'opening'/)
+    expect(body).toMatch(/resolveProjectTarget\(\{[^}]*sshVerbWord: 'starting'/)
+    for (const inline of [
+      'project-target-refused',
+      'project-target-ssh-unsupported',
+      'source node is not in any open project',
+      'source node is not a control-capable agent',
+      'callerProjectId'
+    ]) {
+      expect(body, inline).not.toContain(inline)
     }
   })
 
@@ -138,7 +158,19 @@ describe('the --project targeted-opens block (source pins)', () => {
     // The wrapper is the ONLY way cold-open arming may happen: a bare armForColdOpen call would
     // persist a launch this process never consented to auto-fire (consort re-review, 2026-09-02).
     expect(src).toMatch(/function armColdOpenHere[\s\S]*?const armed = armForColdOpen\(node\)[\s\S]*?markArmedThisSession\(node\.id, armed\.data\.pendingLaunch/)
-    expect(src.match(/flowToNodeStates\(\[armForColdOpen\(/g)).toBeNull()
+    // ONE bare site is allowed, and only in its pre-claimed shape: upstream's #925 issue-dispatch
+    // headless start writes the launch ALREADY CLAIMED (`claimForHeadless` sets `manualOnly`, which
+    // `launchesToFire` skips), so that launch can never auto-fire and needs no consent record — the
+    // dispatch itself starts it, and a failed start leaves it waiting for ▶ Run now. Any other bare
+    // `flowToNodeStates([armForColdOpen(` (or a second copy of this one) is a decision to sign for.
+    const bare = [...src.matchAll(/flowToNodeStates\(\[armForColdOpen\(/g)]
+    expect(bare).toHaveLength(1)
+    const after = src.slice(bare[0].index!, bare[0].index! + 400)
+    expect(after).toMatch(
+      /^flowToNodeStates\(\[armForColdOpen\(node\)\]\)\s+st\.applyOwnNodeMutation\(project\.id, \{\s+op: 'upsert',\s+node: armed\.pendingLaunch \? \{ \.\.\.armed, pendingLaunch: claimForHeadless\(armed\.pendingLaunch\) \} : armed/
+    )
+    // …nor the same bare call under upstream's launch decorations (`withLaunchBrief`, `withPrHold`).
+    expect(src.match(/withLaunchBrief\(armForColdOpen\(/g)).toBeNull()
   })
 
   it('the store path arms through armForColdOpen — the launch survives serialization', () => {
@@ -146,23 +178,38 @@ describe('the --project targeted-opens block (source pins)', () => {
     // command into pendingLaunch is the silent-never-starts mutation (Task 2.0's pins prove the
     // round-trip; this pins that the store path actually uses the mover).
     const body = targetedOpensBody()
-    expect(body).toMatch(/flowToNodeStates\(\[armColdOpenHere\(node\)\]\)\[0\]/)
+    // The fork's consent-recording wrapper (`armColdOpenHere`), with upstream's decorations on the
+    // launch it moved: `withLaunchBrief` records the prompt file and `withPrHold` the `--after-pr`
+    // wait. Both run AFTER the consent record; `launchKey` binds only command/after/setup group, so
+    // the recorded consent still matches the decorated launch.
+    expect(body).toMatch(
+      /flowToNodeStates\(\[withPrHold\(withLaunchBrief\(armColdOpenHere\(node\), openPrompt\.promptFile\), prHoldPre\)\]\)\[0\]/
+    )
+    // …and it writes through the OWN-node store path. `applyNodeMutation` is the PEER path: since
+    // upstream 2d3e54cb it strips `pendingLaunch` (a machine-local exec field), so a cold open
+    // written through it would land with no launch at all — the silent-never-starts mutation again.
+    expect(body).toContain('applyOwnNodeMutation(')
+    expect(body).not.toMatch(/\.applyNodeMutation\(/)
   })
 
   it('the store path persists (persist(), never a bare writeDisk) and states the cold-open contract in the reply', () => {
     const body = targetedOpensBody()
     // Fork consort CRITICAL (fb351294): the store path persists through `persist()`, NEVER a bare
     // `writeDisk()` — the latter clears `dirty` on an unchanged generation and writes the user's
-    // canvas STALE. That security invariant stays, and the resolved Canvas.tsx keeps the fork's
-    // inline "queued; starts when that project is next viewed" reply (it did NOT adopt upstream's
-    // `coldOpenMessage` builder here — the dropped upstream expectation is in the CONTROL merge notes).
+    // canvas STALE. That security invariant stays.
     expect(body).toContain('persist()')
-    expect(body).toContain('starts when that project is next viewed')
+    expect(body).not.toMatch(/\bwriteDisk\(/)
+    // The reply states the cold-open contract through the shared builder (lib/coldOpen
+    // `coldOpenMessage`, whose "queued; starts when that project is next viewed" wording is pinned in
+    // coldOpen.test.ts) — this leg must not drift into its own copy of that sentence.
+    expect(body).toMatch(/message: coldOpenMessage\(/)
   })
 
   it('the caller’s OWN project id falls through to the legacy path (B3a) — no return on that leg', () => {
+    // `own` is the one resolution with no branch of its own: only `refused` and `target` return.
     const body = targetedOpensBody()
-    expect(body).toContain('if (targetId !== callerProjectId)')
+    expect(body).toContain("if (tgResolved.kind === 'target') {")
+    expect(body).not.toMatch(/kind === 'own'/)
     expect(body).toContain('fall through to the legacy path unchanged')
   })
 

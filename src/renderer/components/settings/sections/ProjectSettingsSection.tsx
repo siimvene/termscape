@@ -30,6 +30,7 @@ import { useSettingsSearch } from '../context'
 import { projectSectionId } from '../project-settings-targets'
 import { matchesQuery, type SettingsSearchEntry } from '../search'
 import { useProjectSettings } from '../useProjectSettings'
+import { PROJECT_NAME_MAX, clampProjectName } from '@shared/project-name'
 
 /**
  * Persists an identity/defaults edit. The store setters (`renameProject`, `setProjectColor`,
@@ -194,8 +195,11 @@ function EditableProjectSection({
   const codexSystemLabel = systemAccountDisplay(undefined, systemCodexEmail)
 
   // Editors commit on BLUR, never per keystroke: each commit is a disk write.
-  const [nameDraft, setNameDraft] = useState(project.name)
-  useEffect(() => setNameDraft(project.name), [project.name])
+  // Shown cut to what a rename would store (issue #940); an unedited field writes nothing, so
+  // merely visiting it does not cut an existing over-long name.
+  const shownName = clampProjectName(project.name)
+  const [nameDraft, setNameDraft] = useState(shownName)
+  useEffect(() => setNameDraft(shownName), [shownName])
 
   const snapshot = settings.snapshot
   // A git-conflicted settings.json is left untouched for the user to resolve, so every editor of
@@ -205,8 +209,8 @@ function EditableProjectSection({
 
   const commitName = (): void => {
     const next = nameDraft.trim()
-    if (!next || next === project.name) {
-      setNameDraft(project.name)
+    if (!next || next === shownName) {
+      setNameDraft(shownName)
       return
     }
     useProjects.getState().renameProject(project.id, next)
@@ -244,12 +248,13 @@ function EditableProjectSection({
               id={`project-name-${project.id}`}
               className="w-72"
               value={nameDraft}
+              maxLength={PROJECT_NAME_MAX}
               aria-label="Project name"
               onChange={(e) => setNameDraft(e.target.value)}
               onBlur={commitName}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') e.currentTarget.blur()
-                if (e.key === 'Escape') setNameDraft(project.name)
+                if (e.key === 'Escape') setNameDraft(shownName)
               }}
             />
           }

@@ -16,23 +16,25 @@ import { useAgentStatus } from '../state/agentStatus'
 interface Pending {
   sessionId: string | undefined
   resolve: (r: ChatTranscriptResult) => void
+  reject: (e: unknown) => void
 }
 
 // ONE stable api object: `load` depends on `api`, so a fresh object per `useSession()` call would
 // re-run the load effect on every render and never settle.
-const { sendText, readTranscript, pending, session } = vi.hoisted(() => {
+const { sendChatPrompt, readTranscript, pending, session } = vi.hoisted(() => {
   const pending: Pending[] = []
-  const sendText = vi.fn(async (_id: string, _text: string) => true as const)
+  const sendChatPrompt = vi.fn(async (_id: string, _text: string, _agent: string) => true as const)
   const readTranscript = vi.fn(
     (sessionId: string | undefined) =>
-      new Promise<ChatTranscriptResult>((resolve) => pending.push({ sessionId, resolve }))
+      new Promise<ChatTranscriptResult>((resolve, reject) => pending.push({ sessionId, resolve, reject }))
   )
-  const session = { api: { chat: { readTranscript }, pty: { sendText } } }
-  return { sendText, readTranscript, pending, session }
+  const session = { api: { chat: { readTranscript }, pty: { sendChatPrompt } } }
+  return { sendChatPrompt, readTranscript, pending, session }
 })
 vi.mock('../session/session', () => ({ useSession: () => session }))
 
 import { ChatPanel } from './ChatPanel'
+import { GROK_AMBIGUOUS_SESSION_MESSAGE } from '@shared/chat-page'
 
 const NODE = 'n-chat-ux'
 let host: HTMLDivElement
@@ -74,7 +76,7 @@ function geometry(el: HTMLElement, g: { scrollHeight: number; clientHeight: numb
 }
 
 beforeEach(() => {
-  sendText.mockClear()
+  sendChatPrompt.mockClear()
   readTranscript.mockClear()
   pending.length = 0
   host = document.createElement('div')
@@ -101,7 +103,7 @@ describe('ChatPanel composer keys', () => {
     await act(async () => {
       ev = key(textarea(), { key: 'Enter', shiftKey: true })
     })
-    expect(sendText).not.toHaveBeenCalled()
+    expect(sendChatPrompt).not.toHaveBeenCalled()
     expect(ev.defaultPrevented).toBe(false)
   })
 
@@ -112,7 +114,7 @@ describe('ChatPanel composer keys', () => {
     await act(async () => {
       key(textarea(), { key: 'Enter', isComposing: true })
     })
-    expect(sendText).not.toHaveBeenCalled()
+    expect(sendChatPrompt).not.toHaveBeenCalled()
   })
 
   it('plain Enter still sends', async () => {
@@ -122,7 +124,7 @@ describe('ChatPanel composer keys', () => {
     await act(async () => {
       key(textarea(), { key: 'Enter' })
     })
-    expect(sendText).toHaveBeenCalledWith(NODE, 'hi')
+    expect(sendChatPrompt).toHaveBeenCalledWith(NODE, 'hi', 'claude')
   })
 })
 
@@ -223,6 +225,94 @@ describe('ChatPanel loading', () => {
     expect(readTranscript).toHaveBeenCalledTimes(2)
     await resolveAt(1, [text('assistant', 'one'), text('assistant', 'two')])
     expect(msgs().textContent).toContain('two')
+  })
+})
+
+describe('ChatPanel empty states', () => {
+  // A read that FAILED (the host did not answer, a remote node with no reachable master) is not the
+  // same sentence as "there is no transcript": one heals on retry, the other never will.
+  it('an unreadable first read says it could not read the transcript', async () => {
+    await render()
+    await act(async () => {
+      pending[0].resolve({ messages: [], found: false, olderCursor: null, unmatchedResults: [], unreadable: true })
+    })
+    expect(msgs().textContent).toContain("Couldn't read the transcript.")
+    expect(msgs().textContent).toContain("The agent's host may not be reachable")
+    expect(msgs().textContent).not.toContain('No transcript found')
+    expect(host.querySelector('.term-chat__retry')).not.toBeNull()
+  })
+
+  it('an unreadable REMOTE grok read is a host failure like any other: it says so and offers Retry', async () => {
+    // Grok has a remote reader now (core/remote-grok-chat.ts): `unreadable` means the HOST did not
+    // answer, which a retry can heal — not "remote grok is unsupported", which it never could.
+    await render({ agentId: 'grok' })
+    await act(async () => {
+      pending[0].resolve({ messages: [], found: false, olderCursor: null, unmatchedResults: [], unreadable: true })
+    })
+    expect(msgs().textContent).toContain("Couldn't read the transcript.")
+    expect(msgs().textContent).not.toContain("isn't supported yet")
+    expect(host.querySelector('.term-chat__retry')).not.toBeNull()
+  })
+
+  it('a grok session id that matches two host sessions says so, with NO Retry (a retry cannot fix it)', async () => {
+    await render({ agentId: 'grok' })
+    // Over Electron IPC only the message survives a rejection (the `code` is dropped), wrapped in
+    // Electron's own prefix — the panel must recognise it from the message alone.
+    await act(async () => {
+      pending[0].reject(
+        new Error(`Error invoking remote method 'chat:read-transcript': Error: ${GROK_AMBIGUOUS_SESSION_MESSAGE}`)
+      )
+    })
+    expect(msgs().textContent).toContain(GROK_AMBIGUOUS_SESSION_MESSAGE)
+    expect(msgs().textContent).not.toContain('may not be reachable')
+    expect(msgs().textContent).not.toContain("can't be read on this surface")
+    expect(host.querySelector('.term-chat__retry')).toBeNull()
+  })
+
+  it('an unreadable REMOTE gemini read names Gemini, not Grok, and offers no Retry', async () => {
+    await render({ agentId: 'gemini' })
+    await act(async () => {
+      pending[0].resolve({ messages: [], found: false, olderCursor: null, unmatchedResults: [], unreadable: true })
+    })
+    expect(msgs().textContent).toContain("Reading a remote Gemini session's transcript isn't supported yet.")
+    expect(msgs().textContent).not.toContain('Grok')
+    expect(host.querySelector('.term-chat__retry')).toBeNull()
+  })
+
+  it('an unreadable REMOTE copilot read says so in copilot\'s own name, with no Retry', async () => {
+    // Core's copilot leg is local-only too (core/copilot-chat.ts): its `unreadable` can only be the
+    // remote refusal, which no retry heals.
+    await render({ agentId: 'copilot' })
+    await act(async () => {
+      pending[0].resolve({ messages: [], found: false, olderCursor: null, unmatchedResults: [], unreadable: true })
+    })
+    expect(msgs().textContent).toContain("Reading a remote GitHub Copilot session's transcript isn't supported yet.")
+    expect(msgs().textContent).not.toContain('Grok')
+    expect(host.querySelector('.term-chat__retry')).toBeNull()
+  })
+
+  it('an unreadable opencode read names BOTH causes it can have, and keeps Retry', async () => {
+    // opencode's reader sets `unreadable` for a local `opencode export` that failed (heals on retry)
+    // AND for a remote node it refuses (never heals). No wire field tells them apart, so the copy
+    // says both rather than guessing — and never blames an unreachable host for a local failure.
+    await render({ agentId: 'opencode' })
+    await act(async () => {
+      pending[0].resolve({ messages: [], found: false, olderCursor: null, unmatchedResults: [], unreadable: true })
+    })
+    expect(msgs().textContent).toContain("Couldn't read this opencode session.")
+    expect(msgs().textContent).toContain('opencode export')
+    expect(msgs().textContent).toContain('remote host')
+    expect(msgs().textContent).not.toContain("The agent's host may not be reachable")
+    expect(host.querySelector('.term-chat__retry')).not.toBeNull()
+  })
+
+  it('a clean miss still says no transcript was found', async () => {
+    await render()
+    await act(async () => {
+      pending[0].resolve({ messages: [], found: false, olderCursor: null, unmatchedResults: [] })
+    })
+    expect(msgs().textContent).toContain('No transcript found for this session.')
+    expect(msgs().textContent).toContain("hasn't written one yet")
   })
 })
 

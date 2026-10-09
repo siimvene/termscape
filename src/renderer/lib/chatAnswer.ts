@@ -58,6 +58,98 @@ export function activeAnswerCard(messages: readonly ChatMessage[], held: HeldPer
   return null
 }
 
+/** A plan or a question: the two held tools whose card in the thread can carry answer controls. */
+const isAnswerCardTool = (name: string): boolean => name === EXIT_PLAN_MODE_TOOL || name === ASK_USER_QUESTION_TOOL
+
+/**
+ * The newest card of `toolName`, when it is still unanswered — the one card that says "Updating…"
+ * while the thread is re-read. Unlike `activeAnswerCard` it needs no matching question texts: it
+ * marks where the controls WILL be, it never answers anything.
+ */
+export function latestUnansweredCard(messages: readonly ChatMessage[], toolName: string): AnswerCardRef | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const parts = messages[i].parts
+    for (let j = parts.length - 1; j >= 0; j--) {
+      const p = parts[j]
+      if (p.kind !== 'tool' || p.name !== toolName) continue
+      return p.result === undefined ? { message: i, part: j } : null
+    }
+  }
+  return null
+}
+
+/**
+ * How long a card waits on "Updating…" before its reload is tried again. The held-request reload can
+ * fail (a downed ControlMaster, an unreadable transcript) and nothing else reads the tail while the
+ * agent is `blocked`, so without a retry the card would stay on "Updating…" for the whole hold.
+ */
+export const CHAT_ANSWER_REBIND_RETRY_MS = 2000
+/** The retry backs off (doubling) up to this, so a card that never updates costs one read per 30 s. */
+export const CHAT_ANSWER_REBIND_RETRY_MAX_MS = 30_000
+
+/** The delay before retry number `attempt` (0-based): 2 s, 4, 8, 16, then 30 s. */
+export function rebindRetryDelay(attempt: number): number {
+  return Math.min(CHAT_ANSWER_REBIND_RETRY_MS * 2 ** Math.max(0, attempt), CHAT_ANSWER_REBIND_RETRY_MAX_MS)
+}
+
+/**
+ * A stable name for a card across reads: the tool_use id when the paged reader gives one, else the
+ * source line's byte offset + part, else (an unkeyed thread) its position.
+ */
+export function answerCardKey(messages: readonly ChatMessage[], ref: AnswerCardRef): string {
+  const m = messages[ref.message]
+  const p = m?.parts[ref.part]
+  if (p && p.kind === 'tool' && p.id) return p.id
+  return m?.key !== undefined ? `k${m.key}:${ref.part}` : `i${ref.message}:${ref.part}`
+}
+
+/** The card a request was last bound to, so a NEW request cannot bind that same card. */
+export interface BoundAnswerCard {
+  pendingId: string
+  cardKey: string
+}
+
+/** A plan / question is held that the thread on screen was not read for: the tail must be re-read
+ *  (and the card waits on "Updating…") before any card may answer it. */
+export function answerRebindPending(held: HeldPermission | undefined, threadHeldFor: string | null | undefined): boolean {
+  return !!held && isAnswerCardTool(held.toolName) && threadHeldFor !== held.pendingId
+}
+
+/** What the held plan / question card shows: controls bound to one request, or "Updating…". */
+export type AnswerCardState =
+  | { kind: 'active'; card: AnswerCardRef; cardKey: string; pendingId: string }
+  | { kind: 'updating'; card: AnswerCardRef | null }
+  | null
+
+/**
+ * The answer card for the request held NOW, given the request the thread on screen was READ for
+ * (`threadHeldFor`: the held ticket at the START of the last applied tail read; `null` = read with
+ * nothing held, `undefined` = not read for this transcript yet).
+ *
+ * The card may only answer the request the thread was read for. While the hook moves held A → held
+ * B (plan A revised into plan B) the thread can still show plan A's card with no result, and a card
+ * matched by tool name alone would approve B from A's card. So a request the thread was not read
+ * for gets NO controls — only "Updating…" on the latest unanswered card of its tool, until a tail
+ * read that started under it lands — and, given `previous` (the card the last request was bound to),
+ * until the thread shows a card OTHER than that one. Active controls bind `threadHeldFor`, which is then the held id.
+ */
+export function answerCardState(
+  messages: readonly ChatMessage[],
+  held: HeldPermission | undefined,
+  threadHeldFor: string | null | undefined,
+  previous?: BoundAnswerCard | null
+): AnswerCardState {
+  if (!held || !isAnswerCardTool(held.toolName)) return null
+  if (answerRebindPending(held, threadHeldFor)) return { kind: 'updating', card: latestUnansweredCard(messages, held.toolName) }
+  const card = activeAnswerCard(messages, held)
+  if (!card) return null
+  const cardKey = answerCardKey(messages, card)
+  // A read under B that still shows the very card A was bound to has not caught up with B (the
+  // transcript may lag the hook): B must surface on a card the thread shows as NEW.
+  if (previous && previous.pendingId !== held.pendingId && previous.cardKey === cardKey) return { kind: 'updating', card }
+  return { kind: 'active', card, cardKey, pendingId: held.pendingId }
+}
+
 /** What the user has picked for one question. `labels` are option labels; `other` + `otherText`
  *  is the free-text "Other" (the only input on a question with no options). */
 export interface QuestionSelection {
@@ -76,17 +168,29 @@ export function toggleLabel(labels: readonly string[], label: string, on: boolea
 }
 
 /**
+ * The typed "Other" as one item of a multi-select answer, quoted the way Claude Code's own picker
+ * quotes it — MEASURED on 2.1.283: `Red, Blue, "teal, sort of"`, `Green, "say \"hi\""`, but
+ * `Red, teal`. Quoted (with the inner quotes escaped) only when it contains a comma or a quote, so
+ * the model can always tell where the user's own words start and end in the joined list.
+ */
+export function quoteCustomItem(text: string): string {
+  return /[,"]/.test(text) ? JSON.stringify(text) : text
+}
+
+/**
  * The free text a question's answer would carry, or null when it is not a free-text answer. ONE
  * definition, so the text that is capped is the text that is sent: on a multi choice with "Other" it
- * is the ticked labels (in option order) plus the typed text, joined with ", " — the TUI's own
- * multi-select format, and one string because core carries one free-text answer per question.
- * Core caps THAT string, so capping only the typed part let a long answer through to a refusal.
+ * is the ticked labels (in option order) plus the typed text (`quoteCustomItem`), joined with ", " —
+ * the TUI's own multi-select format, and one string because core carries one free-text answer per
+ * question. Core caps THAT string, so capping only the typed part let a long answer through to a
+ * refusal. A single choice's "Other" is the typed text as-is: it is the whole answer.
  */
 function freeTextOf(q: ChatQuestion, sel: QuestionSelection): string | null {
   if (!sel.other && q.options.length > 0) return null
   const typed = sel.otherText.trim()
+  if (!q.multiSelect || typed === '') return typed
   const labels = q.options.map((o) => o.label).filter((l) => sel.labels.includes(l))
-  return q.multiSelect && labels.length && typed ? [...labels, typed].join(', ') : typed
+  return [...labels, quoteCustomItem(typed)].join(', ')
 }
 
 /** The first question whose free-text answer is over the shared cap (core would refuse it), or null.

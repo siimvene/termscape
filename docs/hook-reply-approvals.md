@@ -158,11 +158,31 @@ same order. That is why a held question also carries its texts (`held.questions`
 before edits", "Revise…" (feedback → `plan-revise`). Question: radio (single) / checkbox (multiSelect),
 an "Other" text field (the only input on a question with no options), Submit once every question is
 answered; a multi-select "Other" joins the ticked labels and the text with `", "` as one free-text
-answer. The ticket is re-checked against the store at send time; `false` (or a rejection) shows
+answer, the text quoted (inner quotes escaped) when it contains a comma or a quote — Claude Code's own
+picker format, MEASURED on 2.1.283 (`Red, Blue, "teal, sort of"`, `Red, teal`), so the model can tell
+the user's words from the labels. "Chat about this" (`question-clarify`) declines the question: a deny
+whose message is the native clarify text, built by core from the pending file's questions; no
+`interrupt`, so Claude asks what to clarify and stops at the prompt. The ticket is re-checked against the store at send time; `false` (or a rejection) shows
 "Couldn't send — answer in the terminal (⌘M)" and leaves the controls usable — never a stuck "Sent".
 While controls are up, the composer placeholder and the status row point at the card
 (`chatComposerPlaceholder({answerOnCard})`). The kanban card modal mounts the same `ChatPanel`, so the
 controls appear there too.
+
+**Binding to the thread that was read (2026-09-28).** A card answers only the request the DISPLAYED
+thread was read for (`answerCardState`; the iOS fix of the same race is #41): `threadHeldFor` is the
+held ticket at the start of the last applied tail read. While the hook moves held A → held B, plan A's
+card can still be on screen with no result; matched by tool name alone it would approve B. So a
+request the thread was not read for gets no controls — the latest unanswered card of its tool shows
+"Updating… — or answer in the terminal" — and the panel forces a quiet tail reload (queued behind a
+read or an older-page fetch in flight; retried with 2 s → 30 s backoff until a read under the new
+request lands, whether or not a card is on screen to say "Updating…").
+A read under B that still shows the very card A was bound to does not bind B either: the transcript
+can lag the hook, and a new request must surface on a card the thread shows as new. The answer
+payload names the bound id, re-checked against both the store and the binding at send time.
+Residuals: the previous-card memory lives per panel mount, so a panel opened fresh under B binds B to
+the latest matching card; a re-issued ticket for the same tool_use (duplicate hooks) stays
+"Updating…" and must be answered in the terminal; and the guarantee assumes Claude writes the
+tool_use to the transcript before the hook fires.
 
 **Surfaces.** Desktop: local + SSH (ControlMaster read + stdin write). Server Edition: local projects
 (SSH projects remain unsupported there, as before). Relay: unchanged. Mobile: keeps writing

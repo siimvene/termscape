@@ -1,4 +1,8 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { execFileSync } from 'node:child_process'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { parseTranscriptPage, parseTranscriptWindow, transcriptPageCommand, transcriptWindowCommand } from './transcript-window'
 
 const frame = (payload: string, status = 0): string => Buffer.from(payload + `\nNODETERM_READ_STATUS:${status}\n`).toString('base64')
@@ -18,8 +22,42 @@ describe('strict transcript window framing', () => {
   it.each([-1, 1.5, NaN, Infinity])('rejects an invalid offset %s before invoking a shell', offset => {
     expect(() => transcriptWindowCommand('/fixture', offset, 1024)).toThrow()
   })
+  it('reads the absent marker as an empty, absent window — and only the exact marker', () => {
+    expect(parseTranscriptWindow('NODETERM_ABSENT\n', 4)).toMatchObject({ absent: true, data: Buffer.alloc(0) })
+    for (const reply of ['NODETERM_ABSENT', 'NODETERM_ABSENT\n0 0 0 1\n', 'x NODETERM_ABSENT\n']) {
+      expect(() => parseTranscriptWindow(reply, 4)).toThrow()
+    }
+  })
   it.each([0, -1, 1.5, Infinity, 1024 * 1024 + 1])('rejects an invalid cap %s', cap => {
     expect(() => transcriptWindowCommand('/fixture', null, cap)).toThrow()
+  })
+})
+
+// Generated shell: run it for real, as the other remote scripts are (a composed fixture cannot tell
+// you what `sh` does with it).
+describe.skipIf(process.platform === 'win32')('transcript window command under a real /bin/sh', () => {
+  let dir: string
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'nt-window-')) })
+  afterEach(() => rmSync(dir, { recursive: true, force: true }))
+  const run = (path: string, offset: number | null): string =>
+    execFileSync('/bin/sh', ['-c', transcriptWindowCommand(path, offset, 1024)], { encoding: 'utf8' })
+
+  it('answers a missing file — or a missing project directory — with the marker and status 0', () => {
+    for (const path of [join(dir, "not ' yet.jsonl"), join(dir, 'no-project-dir', 'x.jsonl')]) {
+      const stdout = run(path, null)
+      expect(stdout).toBe('NODETERM_ABSENT\n')
+      expect(parseTranscriptWindow(stdout, 1024).absent).toBe(true)
+    }
+  })
+  it('still reads an existing file, empty or not', () => {
+    const path = join(dir, "here ' now.jsonl")
+    writeFileSync(path, '')
+    expect(parseTranscriptWindow(run(path, null), 1024)).toMatchObject({ initial: true, newOffset: 0, data: Buffer.alloc(0) })
+    writeFileSync(path, 'abc\n')
+    const r = parseTranscriptWindow(run(path, null), 1024)
+    expect(r).toMatchObject({ initial: true, start: 0, newOffset: 4 })
+    expect(r.absent).toBeUndefined()
+    expect(r.data.toString()).toBe('abc\n')
   })
 })
 

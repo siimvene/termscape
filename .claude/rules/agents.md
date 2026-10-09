@@ -41,7 +41,7 @@ paths:
 > when the root routing table points here, read this file before touching the subsystem.
 <!-- moved-verbatim-from: CLAUDE.md -->
 
-## Agent support (Claude / Codex / Gemini / Copilot / opencode / Grok / Pi / custom)
+## Agent support (Claude / Codex / Antigravity / Gemini / Copilot / opencode / Grok / Pi / custom)
 
 The app is a pluggable multi-agent system: Claude Code is one builtin of
 several. Extra terminal-node behavior is driven per agent by a registry + capability lists, a
@@ -62,8 +62,10 @@ else, and its context links must keep classifying across restarts).
   `PERMISSION_MODE_CAPABLE`, `MODEL_SWITCH_CAPABLE`, with helpers (`hasHooks`,
   `canBranch`, `canContextLink`, `canChat`, `canRename`, `canReadTitle`, `hasPermissionMode`, …).
   Branch stays **Claude-only** purely by being in only `BRANCH_CAPABLE`. The ⌘M **ChatPanel**
-  transcript view (`CHAT_CAPABLE` / `canChat`) is **claude + grok** since 2026-09: grok's
-  `chat_history.jsonl` gets its own reader, and `chat:read-transcript` routes by agent. That list had
+  transcript view (`CHAT_CAPABLE` / `canChat`) is **claude + grok + gemini + codex + copilot +
+  opencode** since 2026-09: grok's `chat_history.jsonl`, gemini's session file, codex's rollout,
+  copilot's `events.jsonl` and opencode's `opencode export` document each get their own reader, and
+  `chat:read-transcript` routes by agent. That list had
   to be SPLIT to do it — `CHAT_CAPABLE` carried two facts that coincided while claude was its only
   member ("we can render this" and "claude's resolver can locate and parse this file"), and the
   second now lives in `CLAUDE_TRANSCRIPT_READABLE` (claude only). Merging them back is a
@@ -82,7 +84,7 @@ else, and its context links must keep classifying across restarts).
   on these helpers — no hardcoded `=== 'claude'`. **Custom agents** (user-defined in Settings,
   `customAgents`) inherit the declared `baseAgent` harness through `capabilityAgentId`; a custom
   agent with no base remains spawn + terminal-title + process status only. Per-agent write-ups:
-  **`docs/grok-agent.md`**, **`docs/gemini-agent.md`**, **`docs/copilot-agent.md`** (there is none for codex — its approval mapping
+  **`docs/grok-agent.md`**, **`docs/gemini-agent.md`**, **`docs/copilot-agent.md`**, **`docs/antigravity-agent.md`** (there is none for codex — its approval mapping
   and every value's reasoning live in `src/shared/agents/approval-mode.ts`);
   the distilled rules are **Adding a new agent** at the end of this section.
 - **Model gateway / switcher** — `settings.modelGateway` stores one gateway root + a NON-SECRET
@@ -120,6 +122,79 @@ else, and its context links must keep classifying across restarts).
   session-path derivation, the inert claude-hook cross-fire, and native `SubagentStart`/`SubagentStop`
   card keying) lives in **`.claude/rules/agents-grok.md`** and **`docs/grok-agent.md`**. It loads when
   grok code is touched, so it is not duplicated here.
+- **Grok NEEDS YOU confirmation + Grok ⌘M/phone chat view** (upstream v0.4.2) — the permission
+  gate checked against grok's own event log (`core/agents/grok-permission-gate.ts`) and the
+  `chat_history.jsonl` reader (`core/grok-chat.ts`) live in **`.claude/rules/agents-grok.md`**.
+- **Copilot ⌘M chat view** (`core/copilot-chat.ts`, 2026-09; copilot 1.0.88 measured in BYOK mode
+  against a local fake model, plus the CLI's own `schemas/session-events.schema.json`). Reads
+  `<COPILOT_HOME>/session-state/<id>/events.jsonl` (then the snap package's
+  `~/snap/copilot-cli/common/.copilot`), located STRICTLY by the node's session id and routed by
+  `capabilityAgentId` before anything claude-shaped, so a missing journal is "not found", never
+  claude's cwd-newest or another session. The journal is append-only JSONL (compaction appends), so it
+  PAGES like claude's — `parseChatWindow`/`parseGrowingWindow` take copilot's record parser — and the
+  phone gets the same pages over the relay (`page()` gates only on `canChat`). Shown: typed prompts
+  (`content`, never `transformedContent`; the sources copilot's own timeline hides stay hidden),
+  assistant text, tool calls with results (`Error: …` on failure), a user's `!` shell command as the
+  `!` part, `Error:`/`Warning:`/`Info:` notices, and `model`. Never shown: the system prompt,
+  reasoning, sub-agent events (envelope `agentId` / `data.agentId` / `data.parentToolCallId`). Not
+  supported: remote (SSH) nodes (`unreadable`, "not supported yet" — never this machine's disk),
+  `effort` (not recorded), plan/question answer cards (claude-only), composer model labels (claude's
+  picker commands only). Golden fixtures: `src/shared/chat-fixtures/copilot/` (README "Copilot").
+- **Antigravity** (`agy`, builtin since 2026-09 — Google's replacement for Gemini CLI on personal
+  accounts) — full per-CLI reference (capability memberships, resume, launch, Windows hook dispatch,
+  vendor-location fallback) lives in **`.claude/rules/agents-antigravity.md`** and
+  **`docs/antigravity-agent.md`**. It loads when antigravity code is touched.
+- **Codex in the ⌘M chat view** (2026-09-28; the desktop panel, the kanban card modal, the phone's
+  `chat.page`). `core/codex-chat.ts` reads the rollout with codex's own rules, never claude's
+  resolver. It takes USER text from the UI stream only: `event_msg/user_message` (legacy, ≤ 0.146) or
+  an `item_completed` `UserMessage` (paginated, ≥ 0.151). Model-side `role:user` messages also carry
+  injected context (AGENTS.md, `<environment_context>`, image wrappers), so they are never read.
+  Assistant text and tools come from `response_item`, correlated by `call_id`. The UI copies
+  (`agent_message`, `AgentMessage`) and reasoning are skipped. Failed and interrupted turns become
+  `[error] …` / `[turn aborted…]` notes. A tool result drops codex's `… Output:` preamble. The rollout
+  is append-only, so it pages by byte offset like claude. The locator matches a WHOLE-uuid thread id
+  (`CODEX_THREAD_ID_RE`), because a uuid's last group passes `SESSION_ID_RE` and suffix-matches
+  another thread's file. It searches only the node's own account home, and uses the codex tail's hook
+  path only as a checked hint. An SSH node is read on its host (`main/remote-codex-chat-page.ts`,
+  through the same resolvers as its remote meter) or not at all. Because codex announces no session
+  end, a chat send first asks the kernel (`renderer/lib/chatPaneGate.ts`, `isAgentPane`). After a
+  `/quit` the store still reads `done`, and the message would otherwise run in the shell. **Not
+  supported:** images in prompts, reasoning summaries, the composer's model/effort labels (the
+  `/model` picker is measured for claude only), plan/question answer cards (codex never sets
+  `held`), and a closed REMOTE session's transcript. Record rules and fixtures:
+  `src/shared/chat-fixtures/codex/`.
+- **opencode in the ⌘M chat view** (2026-09-28, opencode 1.18.25 measured) — opencode has NO
+  transcript file (SQLite since 1.18; that database also holds its account tokens and is never
+  opened), so `readChatTranscript` routes `capabilityAgentId(agentId) === 'opencode'` to
+  `core/opencode-chat.ts`, which runs `opencode export <sessionId>` (argv only, no flag an older
+  yargs-strict CLI might refuse) and parses the one JSON document into claude's `ChatMessage` shape:
+  user/assistant text, tool chips (arg by an opencode key order, result = 3 lines / 500 units,
+  `Error: …` on a failed call), `[name] message` for an errored turn, compaction/subtask chips,
+  `at` from `time.created`, `model`/`effort` from the newest assistant's `modelID`/`variant`.
+  Reasoning, `synthetic`/`ignored` text, file/agent parts and step bookkeeping are dropped;
+  unmappable shapes are skipped and counted. **One page, always** (`olderCursor: null`): there are
+  no byte offsets to page by. The page honours the caller's `maxBytes` (the phone asks 256 KB),
+  grows ×4 up to 5 MB like claude's reader when it holds no whole message, and shows a newest
+  message larger than 5 MB TRUNCATED (with a note) rather than as an empty conversation. Refusals: no/unsafe session id runs
+  nothing (a bare `opencode export` opens a picker over the NEWEST sessions — someone else's); an
+  export whose `info.id` is another session is `unreadable`; only `Session not found: <id>` with
+  exit 1 and empty stdout is a clean miss. **Remote (SSH) nodes are refused** (`unreadable`, no
+  export runs) — their sessions are in the host's database and there is no remote leg yet; the
+  panel's copy names both causes an opencode `unreadable` can have. One export costs 1.0–1.7 s and
+  ~320 MB, so `createOpencodeExportGate` runs at most one per session (a caller arriving mid-run
+  gets a FRESH export) and two in total; the panel's hook-driven refreshes are marked
+  `page.background` and spaced ≥ 5 s per session, while an open / ↻ / Retry is immediate (and wakes
+  a sleeping background one). A **change gate** in front of it `stat`s (never opens) opencode's
+  `opencode*.db` + `-wal` in `$XDG_DATA_HOME/opencode` (else `~/.local/share/opencode`, opencode's
+  own xdg-basedir rule) BEFORE exporting, and an unchanged fingerprint answers from a 4-session LRU
+  of parsed exports; no db file found, or `OPENCODE_DB` set, means no caching. The export runs with
+  `cwd: os.tmpdir()` (from a repo cwd opencode writes `<repo>/.git/opencode`; sessions resolve by
+  global id). **It inherits the APP's `process.env`, not the node's shell env**: a user who
+  relocates opencode's data via `XDG_DATA_HOME` / `OPENCODE_*` only in their shell rc gets
+  "Session not found" — an honest miss, not a bug in the reader. Plan/question answer
+  cards stay claude-only (no `body`/`questions` on opencode's `question` tool). Desktop and Server
+  Edition both serve it (core handler); the phone gets it over the relay `chat.page` for free.
+  Fixtures + the exact rules for the iOS port: `src/shared/chat-fixtures/opencode/README.md`.
 - **Gemini + codex parity** (2026-08-09) — brought both up to grok's level in the lists above. Unlike
   grok, **both CLIs are installed** and gemini **ships its own hook reference**
   (`/usr/lib/node_modules/@google/gemini-cli/bundle/docs/hooks/reference.md`), so almost every fact is
@@ -165,6 +240,29 @@ else, and its context links must keep classifying across restarts).
     because `/quit --delete` exits *and permanently deletes* the session history, i.e. exactly what the
     restart exists to resume (pinned by its own test).
   Full picture, measurements, gaps and a device checklist: **`docs/gemini-agent.md`**.
+- **Gemini CLI refuses personal Google accounts since 2026-06-18** (free / AI Pro / AI Ultra moved to
+  Antigravity CLI — the `antigravity` agent above; Code Assist Standard/Enterprise, Vertex AI and paid
+  API keys still work, so `gemini` stays a builtin). The refusal happens before any session, so no
+  hook reports it: a gemini-harness node reads its own pane for the CLI's sentence
+  (`renderer/terminal/gemini-retired.ts`, letters-and-digits match because the TUI wraps it in a
+  box) and raises a slim banner — "Open Antigravity" (`nodeterm:open-agent`, an agy node beside it,
+  in its frame) + Google's migration guide. It types and relaunches NOTHING, which is why a phrase
+  match is enough here where `resume-fallback.ts` needs three refusals. `AgentConfig.notice` carries
+  the one-line caveat to the menus/Dock tooltips; it is never read to decide behaviour.
+- **Gemini ⌘M chat view** (2026-09, `core/gemini-chat.ts`) — gemini is in `CHAT_CAPABLE` with its own
+  reader, routed in `readChatTranscript` via `capabilityAgentId` BEFORE anything claude-shaped and
+  located only by the header session id (`locateGemini`, which now reads just the header and honours
+  `GEMINI_CLI_HOME`). Its session file is an UPSERT log, not a message list: one id is rewritten in
+  full as tool results/tokens land, `$rewindTo` truncates, and `$set.messages` replaces the MODEL's
+  context at start, compression and rollback. The thread is the message records upserted by id with
+  rewinds honoured and **`$set.messages` ignored** — honouring it erases the thread at every
+  compression and shows the `<state_snapshot>` as the human's words. Not paged (a record depends on
+  earlier ones): one read under the 5 MB cap, `olderCursor: null`, like grok. Shows typed prompts
+  (`displayContent` over `@file` expansion; `<session_context>`/`<hook_context>` dropped per part),
+  replies, tool calls with results, `[info]`/`[warning]`/`[error]` notes and (paged) the model;
+  thinking is dropped. NOT supported: remote (SSH) nodes (`CHAT_LOCAL_ONLY` → "not supported yet"),
+  plan/question answer cards, the composer's model/effort labels. The phone gets it over the relay
+  unchanged; fixtures and exact rules: `src/shared/chat-fixtures/gemini/`, `docs/gemini-agent.md` §3.
 - **Claude session context capacity (#818)** — the managed hook reports only
   `CLAUDE_CODE_MAX_CONTEXT_TOKENS` from the effective Claude process environment (including
   `--settings` env), never the GUI/server process environment. HookServer validates decimal safe
@@ -188,11 +286,20 @@ else, and its context links must keep classifying across restarts).
   with base64, transferring less than 1.6 MiB including alignment/framing; idle replies contain
   only the size/range header. The encoded dd exit status must survive the shell pipeline:
   pipeline success alone can hide a failed read. Short/malformed replies and SSH failures throw,
-  retain the cursor, and back off from 2s to 60s with payload-free diagnostics. A SEPARATE idle
-  backoff (`idleDelayMs`) stretches the 1 s poll after three consecutive empty successful reads
+  retain the cursor, and back off from 2s to 60s with payload-free diagnostics — logged when a
+  streak starts, when it settles at 60 s and when it recovers, never per retry, and naming only the
+  observed status (`exit 255`, `malformed reply`), never a guessed cause: the runner reports a
+  timeout as status 1. **A transcript that does not exist is not a failure.** Claude creates it on
+  the first prompt while SessionStart already hands over the path (measured on 2.1.283), so every
+  unused remote Claude node used to walk the failure backoff and log a line a minute. The command
+  answers `NODETERM_ABSENT` with status 0 and the tail polls it on the idle cadence; a file that
+  appears after being seen missing is live from byte 0 when its bootstrap window covers all of it.
+  A SEPARATE idle backoff (`idleDelayMs`) stretches the 1 s poll after three consecutive empty successful reads
   (2/4/8 s, capped at 10 s) and is reset by any data-bearing read and by every same-ref `track()`
   — i.e. every hook POST for the session, which is what keeps a `<task-notification>` (it rides
-  a UserPromptSubmit hook) at ~1 s latency; never merge it with the failure backoff. Bootstrap and
+  a UserPromptSubmit hook) at ~1 s latency; never merge it with the failure backoff. That same
+  `track()` also skips the rest of a pending failure wait (the host just reached us) but keeps the
+  failure streak, so a read that fails again goes straight back to 60 s. Bootstrap and
   detected truncation restore usage without replaying historical task notifications/tool results,
   including a historical partial line completed later. A changed remote reference replaces its
   tracking generation so stale in-flight replies cannot publish. Server Edition uses the local
@@ -311,12 +418,87 @@ else, and its context links must keep classifying across restarts).
   own gate adds one beside claude's.
 - **State via each agent's hooks → shared 4-state model** — detection uses the agent's own
   hooks, **not** output parsing. `src/shared/agents/normalize.ts` has per-agent normalizers
-  (`normalizeClaude`/`normalizeCodex`/`normalizeGemini`/`normalizeCopilot`/`normalizeOpencode`/`normalizeGrok`) that map each agent's native hook
+  (`normalizeClaude`/`normalizeCodex`/`normalizeGemini`/`normalizeCopilot`/`normalizeOpencode`/`normalizeGrok`/`normalizeAntigravity`) that map each agent's native hook
   events to a `NormalizedAgentEvent` over the shared `AgentState` (`working | waiting | blocked
   | done`) plus subagent/recurring/session kinds. Canvas's listener consumes
   `NormalizedAgentEvent` from `agent:status`, drives the `agentStatus` store, fires throttled
   (5s/node) background notifications, and records the session id. Header shows a pulsing
   **RUNNING** (working) / **NEEDS YOU** (waiting/blocked) badge.
+- **An interrupted Claude turn (Esc / Ctrl+C) fires NO hook — the transcript marker ends it**
+  (`core/claude-turn-interrupt.test.ts`, fixture `shared/agents/__fixtures__/claude/interrupt-capture.json`).
+  MEASURED on Claude Code **2.1.285**, interactive TUI in a private tmux server, capture hooks via
+  `--settings`, every `NODETERM_*` unset: Esc while it streams, Esc during a foreground tool call,
+  Esc on a permission dialog, and Ctrl+C once mid-stream each fire **nothing** — no `Stop`, no
+  `StopFailure`, no `PostToolUse(Failure)`, and **no `idle_prompt` either**: that notification came
+  60 s after a NORMAL `Stop` but not in 75 s / 80 s after an interrupt, so the `idle` rescue in
+  `normalizeClaude` does not cover this case. Before this a node sat on RUNNING (or NEEDS YOU, for a
+  dismissed permission dialog) until the 20-min stale sweep: `--after` dependents waited, Eco never
+  saw it idle, the notch and the phone showed it working. What the interrupt DOES leave is a USER
+  record, content `[{type:'text', text:'[Request interrupted by user]'}]` (`… for tool use]` when a
+  tool call or its dialog was cancelled), whose **`promptId` equals the turn's `UserPromptSubmit`
+  `prompt_id`** in every capture. Wiring, and the rules it rests on:
+  - `normalizeClaude` puts `prompt_id` on the `UserPromptSubmit` event as **`turnId`**; the mirror
+    keeps it (`MirrorEntry.turnId`, runtime-only, dropped at a session boundary).
+  - The claude context tails (local, and the desktop's SSH one) scan COMPLETE lines with ONE
+    stateful scanner per tracked transcript (`createTurnInterruptScanner`): a CLOSED set of the two
+    texts, array content with exactly that one text part, non-sidechain (a typed prompt is a plain
+    string, so typing the words matches nothing) — **and a marker counts for turn P only if P's
+    OPENING prompt record was read BEFORE it** (bounded set of seen prompt ids, 256). The id alone
+    is NOT enough, and this is not theoretical: in real transcripts on the dev host (2.1.209–2.1.283)
+    34 of 114 accepted-shape markers carried the promptId of the prompt written AFTER them — "queue a
+    message while Claude works, then Esc": the CLI tags the marker with the QUEUED prompt's id and
+    writes that prompt ~36 ms later, and its `UserPromptSubmit` has already made it the node's
+    current turn, so an id-only match ended the NEW live turn (fixture
+    `__fixtures__/claude/interrupt-queued.json`). Measured on this host after the fix: all 26
+    queued-shape markers rejected, no real interrupt lost. The one interrupt this drops is the one
+    it cannot place; the interrupted turn really ended and the node is already in the next one. The
+    remote tail's historical first read records prompts but never reports.
+  - **Both shells** check the marker with `turnInterruptEvent` (a mirror PEEK) and push the result
+    through their ONE hook-event path — desktop `emitAgentStatus` (mirror, broadcast, Notch HUD,
+    agent messaging, station notices), Server Edition `emit` (mirror, broadcast, `opts.onEvent`:
+    its delivery queue and `--after` scheduler). Pinned in `hook-verified-parity.test.ts`. It ends
+    the turn ONLY when the marker names the node's CURRENT turn (same session, same `turnId`, state
+    working/blocked/waiting): a marker read back from history, one from a finished turn or another
+    session, one after a restart (no `turnId` then) changes nothing. A prompt event whose
+    `prompt_id` is missing or not a plain token carries `turnId: ''`, which makes the mirror FORGET
+    the previous id. The event is an ordinary `done` + `interrupted` (what a `Stop` with
+    `is_interrupt` already produced), UNverified (a transcript read is not a hook POST), so no
+    completion alert and the question/approval resets apply unchanged.
+  - **`--after` does NOT release on an interrupted turn** (decision, 2026-09-30): the person
+    stopped it, usually to redirect it, and the dependent would start on unfinished work — #521's
+    reasoning for an errored turn. It is its OWN annotation, `agentStatus.lastTurnInterrupted`
+    (transient; set by an interrupted `done`, cleared by a new turn or a `done` that is not
+    interrupted), read by `depSatisfied`, the QUEUED tooltip (`interruptedDeps`), `list`
+    (`LAST TURN INTERRUPTED`; an error outranks it), the canvas's `armedDepSig` (a verdict can clear
+    under a steady `done` — a guessed interrupt then the real Stop — and the launch effect must
+    re-run) and team progress (its own `interrupted` kind, NOT counted as done, so the ring never
+    says "finished" beside a held dependent). It is deliberately NOT `lastTurnError`: the TURN
+    FAILED chip, the station-failure notice and issue runs do not treat an interrupt as a failure.
+    **The `idle_prompt` rescue does NOT set it** (`recordsTurnInterrupt`): it is flagged
+    `interrupted` only to stay silent, and since `idle_prompt` follows a NORMAL Stop, a rescue means
+    a lost Stop POST on a turn that finished — its dependents release as before. ▶ / `run` still
+    start the dependent. The renderer's older keystroke
+    guess (`inferInterruptAfterSettle`, 1.5 s after a lone Esc/Ctrl-C typed into THAT terminal)
+    now records an interrupted `done` too, so a guess cannot release dependents before the marker
+    lands; it stays because it is the only signal for the next case.
+  - **Residual, measured:** Esc or Ctrl+C BEFORE the first token rewinds the prompt into the input
+    box and writes NO marker (the transcript ends at the prompt record). Only the renderer guess
+    (keystroke in that canvas terminal) sees it; the mirror — notch, phone, Eco's mirror reads, the
+    Server Edition's headless `--after` — keeps `working` until the next hook or the stale sweep.
+  - **Esc "during a subagent":** on 2.1.285 the Agent tool launched ASYNC even when asked for a
+    foreground run, so the parent turn had already ended (`Stop`) — Esc at the prompt then fires
+    nothing and does NOT stop the child, whose `SubagentStop` and `<task-notification>` arrive as
+    usual. Nothing to fix there; a truly synchronous child being interrupted was not reproducible.
+  - Server Edition: same core path (its tail + handler); its own headless `--after` still ignores
+    both #521 and this annotation (pre-existing gap). Mobile: gets the `done` through the mirror.
+  - **Device checklist:** (a) macOS desktop: Esc mid-stream / mid-tool / on a dialog → RUNNING
+    clears within ~1 s, no chime, an armed `--after` dependent stays QUEUED with the interrupted
+    tooltip; (b) SSH node: the same over the remote tail; (c) Server Edition browser tab; (d) a
+    Claude older than 2.1.285 — whether the marker text and `promptId` match there is unmeasured
+    (a changed text or a missing `promptId` matches nothing and degrades to the old behaviour); (e)
+    queue a message while a turn runs, then Esc: the node must STAY working on the queued prompt;
+    (f) the phone's Live
+    Activity ends on the interrupt.
 - **Hook server (loopback HTTP)** — `src/core/agents/hook-server.ts` is a main-process
   loopback HTTP server (per-session bearer token, fail-open) that the installed hook scripts
   POST to; it replaced the old `fs.watch` signal-log mechanism. `buildPtyEnv` injects the
@@ -331,7 +513,16 @@ else, and its context links must keep classifying across restarts).
   `settings` block (`claudePermissionMode`/`autoSupported`/`claudeAccounts`) so the phone can
   launch agents with the desktop's permission mode + managed accounts, and SSH slices get their
   **per-host** settings (remote CLI caps + host-matched accounts) injected via
-  `remote-status-push`'s `settingsFor` dep.
+  `remote-status-push`'s `settingsFor` dep. `settings.customAgents` (`[{id, label, baseAgent?,
+  binaries}]`) lets the phone chat with a custom agent: built ONLY by `core/mirror-custom-agents.ts`
+  (one definition for all three providers — local file, which relay `projects.list` also serves,
+  SSH slices, Server Edition), `binaries` = `binariesFor` from the pane-owner predicate, published
+  only when every name fits the plain alphabet `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$` (else `[]`) —
+  the builder enforces it because the tokenizer can "name" a slice of a secret (`oauth2:ghp_…` out
+  of a git URL, a quoted env value, a `${env:…}` template). **Never put a custom agent's raw
+  `launchCmd`/`args`/`env` in the mirror** — they carry API keys and the file lands on every SSH
+  host. `binariesFor` resolves a BLANK launch command with a *builtin* `baseAgent` to the base's
+  binaries (what `resolveAgentConfig` actually launches).
 - **Hook installers** — `src/core/agents/hooks/` holds per-agent hook services + an installer
   registry `MANAGED_HOOK_INSTALLERS`. `managed-script.ts` builds the POSIX hook script that
   POSTs to the server (env-gated: a no-op in the user's normal terminals, active only in
@@ -461,6 +652,53 @@ when their display titles match. Answering either resolves only that question or
     layout by construction on all three surfaces) and then the well-known data dirs; it is monotone
     — advertised dir first, keyed by node-id filename in every candidate, and a foreign instance's
     dir yields a foreign `kid` = `legacy` = exactly what presenting nothing already gave.
+  - Control/context endpoint discovery keeps a known node capability as a **routing rule, not an
+    ownership proof**. A dead Desktop SSH tunnel must not redirect a command to a local Server
+    Edition: its unsupported-edition response describes the wrong instance. The two shims use
+    `nt_adopt_for_node` (`core/agents/hook-endpoint-failover-sh.ts`). The reference value is read
+    from the PRIMARY endpoint's own token dir only — the one it advertises, else the adjacent
+    `node-tokens` — never from the global search `nt_read_node_token` walks (that search exists to
+    PRESENT a capability, #384; as a reference it let a Server Edition that opened the same
+    project.json supply the "owner's" token whenever the desktop's token write had failed). Once
+    that dir EXISTS, a candidate must hold the same value in its own dir — and when the reference
+    is EMPTY (the write failed), a value proves nothing (a Server Edition that never heard of the
+    node holds nothing too, and `"" = ""` relayed its permanent refusal, measured in review), so the
+    candidate's token dir must be the same REAL directory (`pwd -P`) instead. Only a session with no
+    such dir at all keeps legacy discovery. What a match shows is
+    that the candidate reads the same token file for this node — on an SSH host that file is shared
+    per unix ACCOUNT (`remote-hooks.ts`, KNOWN LIMITATION), so two desktops driving one account are
+    indistinguishable here, and the receiving server still authorizes every request. Actual
+    owning-endpoint refusals remain final. Skipped foreign candidates do not consume the
+    three-attempt budget, and a skipped candidate restores the previous endpoint vars (the codex
+    sandbox hint names `$NODETERM_HOOK_SOCK` as the socket to allow). Hook event delivery retains
+    its existing independent failover policy.
+    **Every FALLBACK candidate is probed before the real POST** (`nt_probe_endpoint`: `/hook/verify`,
+    204 on the bearer alone on every server build, `--connect-timeout 0.5 --max-time 1.5`). A reverse
+    tunnel whose sshd outlived the desktop's connection ACCEPTS and never answers, and once the
+    foreign Server Edition stopped absorbing the walk, a call posted straight into such a socket
+    hung. The bound is on the probe only: the primary is never probed and every real POST stays
+    unbounded, because a confirm-gated verb waits for a human (see "two canvases cannot raise two
+    dialogs" below). The probe writes into `$nt_out` like the POST would, so a 421 at the probe
+    still prints its body (into /dev/null it left the control shim exiting 1 with an EMPTY stderr),
+    and the control shim names a final 421 with `CONTROL_UNREACHABLE_MSG` as the context shim does.
+    Consequence to know: while sshd still holds the session's OWN tunnel socket, the primary POST
+    itself still hangs — unbounded by design, for the dialogs.
+    **Measured on an SSH host (2026-09-28/29):** the desktop slept, the session's tunnel socket
+    stayed on disk with no listener, and the walk reached an unrelated Server Edition whose
+    `control-unsupported-on-this-edition … permanent … do not retry` (and, for context reads,
+    "No linked nodes") was true about that server and false about the session; the tunnel came
+    back minutes later. When a foreign candidate was skipped and no owner answered, the shims now
+    print `FOREIGN_ENDPOINT_HINT` — the owning connection is unreachable, the state is temporary,
+    the usual cause for an SSH project is the tunnel — INSTEAD OF `STALE_ENDPOINT_HINT`, so a failure
+    carries one retry advice, not two. With nothing foreign skipped, a primary that is an SSH tunnel
+    file (`~/.nodeterm/hook-endpoint*.env`, the only files the desktop writes there) gets
+    `TUNNEL_DOWN_HINT` (reconnect) instead of the stale-endpoint advice (app restart); both hints
+    open with the lead the bodies quote. All four agent-facing bodies quote its lead via
+    `ownerUnreachableGuidanceLines`, because their other refusal lines rightly say "do not retry".
+    `src/server/control-owner-tunnel-down.test.ts` rebuilds that host under real `/bin/sh` with the
+    real Server Edition handlers as the foreign endpoint; `src/core/owned-endpoint-walk.test.ts`
+    pins the probe (hanging sockets), the owner reference, the single advice and the restore, each
+    mutation-checked.
   - **Every generated sh client walks the SAME endpoint failover** (`nt_candidates`/`nt_adopt`,
     `core/agents/hook-endpoint-failover-sh.ts`) — issue #445, the endpoint-level twin of #384: a
     session is pinned for life to the endpoint PATH it got at tmux creation, so an app
@@ -505,6 +743,16 @@ when their display titles match. Answering either resolves only that question or
     reconnecting terminals. These changes share the core listener in Desktop and Server Edition;
     the mobile wire protocol and node-identity rules are unchanged.
 
+  - **No keyring is not "no identity" (#1088).** Electron 42 on a Linux session without Secret
+    Service/kwallet picks `basic_text` and `safeStorage.encryptString` THROWS (measured under xvfb).
+    The desktop secret load used to reject on every boot ⇒ no node token was ever written ⇒ `send` /
+    `settings` refused forever with no visible cause. The loader now falls back to the Server
+    Edition's raw 0600 `node-auth-key.bin` when it cannot seal and no sealed key exists (a sealed key
+    it merely cannot unseal still rejects — rotating it orphans codex thread records), and both shells
+    record a failed arming via `hookServer.setNodeIdentityUnavailable`, which a verified-only refusal
+    then names. A secret that cannot be stored must degrade to the weaker store, never to a feature
+    that is silently off.
+
   Enforcement is dated (`NODE_IDENTITY_STRICT_AFTER`, 2026-10-13, read through `isStrictInstant` so a
   clock years ahead cannot enter strict mode early) with a `settings.hookIdentityStrict` escape hatch
   in Settings → Agents. **Trust on first proof latches a node the moment it authenticates, so it
@@ -546,6 +794,22 @@ when their display titles match. Answering either resolves only that question or
   Settings (`notifyOnClaudeDone`). Selecting, focusing, dwelling into, or opening a session card
   clears `unread` and ACKs the finish across phone/notch surfaces — existing read-on-view behavior.
   This NEVER changes the workflow bucket: read state is independent from agent state.
+- **Sound alerts + custom sounds** (issue #289) — the `done` / `needsYou` alert (`SfxKind`) is a
+  synthesized WebAudio chime (`renderer/lib/sfx.ts`, fired from Canvas's `alert` closure, gated by
+  `soundEffects`, 5 s/node cooldown). Settings → Notifications lets the user replace either with their
+  own file. The picked file's BYTES (never its path) go to `files.saveAlertSound`, a core handler in
+  `registerFsHandlers` (both shells), which validates kind / extension allow-list / 5 MB cap / magic
+  bytes and writes ONE format-independent name `<userData>/sounds/<kind>.sound` (`core/alert-sounds.ts`;
+  a name per format needed a delete-the-others step, and two tabs saving different formats at once
+  deleted each other's file — do not reintroduce per-format names); reads and Reset take only the
+  kind (no path from the renderer, symlinks refused). Settings keep only
+  `customAlertSounds[kind] = {name, stamp}`. Playback decodes the bytes with `decodeAudioData` — no
+  `<audio>`, so CSP `media-src` is untouched on both surfaces — and **any failure (missing file,
+  refused read, decode/playback error) falls back to the chime without throwing** (`lib/customSfx.ts`,
+  read failures and a missing/closed audio context are retried on the next alert; a DECODE failure
+  is cached for that `stamp`, so a new pick is tried afresh). Every `playSfx` caller must pass `customAlertSounds` (source-pinned in
+  `customSfx.wiring.test.ts`). Server Edition: full — the browser's `<input type=file>` bytes are
+  stored in the SERVER's data dir. Mobile: N/A (own notification sounds).
 - **Status-grouped sessions** — three always-visible sections: **Waiting for your response** maps
   internal `done`, `waiting`, and `blocked` together (a completed turn, question, or approval all
   need the user); **Running** maps `working`; **Unknown** means no live hook state is available.
@@ -553,6 +817,49 @@ when their display titles match. Answering either resolves only that question or
   another user prompt. Within each section rows sort newest-first by `lastEventAt`, the transition
   clock (same-state hook freshness is `stateAt`), and show its short relative age. Missing clocks
   stay last with no made-up timestamp. A click may clear the glow but cannot move the row.
+  **The clock survives an app restart as "last seen", never as a state** (`agentStatus.lastSeen`,
+  `{at, state}`). `lastEventAt`/`stateAt`/`state` are transient, so before this every row after a
+  restart sorted as "no clock" and lost its age. `lastSeen` is the time of the LAST hook event (a
+  same-state one included) and the state it asserted, persisted beside the agentStatus record under
+  its OWN small key (`nodeterm.agentStatus.lastSeen`) — chosen over the core mirror because the
+  sidebar already reads this store,
+  the mirror expires state after 6 h and identity later, and reading it would need a new IPC leg for
+  a display fact. Rules a refactor must not undo:
+  - **Restored as a clock only.** Load fills `lastSeen` and nothing else: `state` stays unknown (the
+    hook server was down with the app, so a turn may have started or ended in between), and
+    `lastEventAt` stays unset. Load marks the clock `restored` (transient, never written); the row
+    reads `lastEventAt ?? lastSeen.at` and its `statusClock` is `transition` / `seen` (a hook event
+    this run but no transition yet) / `restored`. Only `restored` says "before nodeterm restarted"
+    (`seen 3h ago`, tooltip naming the state it was last seen in). **The first event after a restart
+    is usually a SAME-state one** (a cold-restore `--resume` fires SessionStart = `state: undefined`
+    on an entry whose state is already unknown), so the store's in-place fast path must not take it:
+    it replaces the entry (the row loses `restored` and re-sorts at once) without stamping
+    `lastEventAt` (an unknown state is not an idle clock).
+  - **Eco never reads it** (so `idleKnown` and `planHibernation` are unchanged). Even a proven-idle
+    prompt after boot would not be enough: the background-task stamp and the subagent cards Eco
+    also needs are transient and cannot be rebuilt after a restart, and `/exit` kills both
+    silently. A session becomes a candidate again from its next live `done`.
+  - **Its own key, so the main table's write cadence is unchanged.** State events still write
+    nothing to `nodeterm.agentStatus`. That matters twice: the main table carries `loop.items` (up to
+    100 × 4000 chars per loop node — 428 KB and ~2.1 ms per stringify with one full loop, measured in
+    review), and on the Server Edition every tab rewrites its whole in-memory table, so a periodic
+    rewrite would let tab B undo tab A's `clearUnread`/`hibernated` within seconds. A first version
+    stored the clock inside that table on a 2 s THROTTLE and rewrote it every 2 s while any agent
+    worked. The clock key is saved on a real TRAILING debounce (5 s quiet, `LAST_SEEN_SAVE_MAX_WAIT_MS`
+    30 s at most while never quiet) plus `pagehide`: 2 Hz hook events for 10 s = ONE write. Measured:
+    ~59 bytes per clock, 1000 clocks = 59 KB and 0.7 ms per `JSON.stringify` on this dev host. Two
+    Server Edition tabs still race on the CLOCK key (last writer wins), which costs only display.
+  - **Bounded.** At most `LAST_SEEN_MAX` (1000) newest clocks are written; a clock older than 90 days
+    or more than 5 min in the future is refused on load (hand-editable input — a future stamp would
+    pin a row to the top); an unknown `state` keeps the time and drops the state; an unreadable clock
+    key costs the clocks, never the table.
+  - **It cannot create a row**: rows come from canvas nodes, never from the status table.
+    `remove(id)` writes the clock key at once, a pending debounced save included; a deletion path
+    that bypasses `remove` (e.g. `reloadActiveProject` dropping nodes) leaves a clock that simply
+    ages out. Tests: `state/agentStatus.lastSeen.test.ts`.
+  - Surfaces: Desktop full; Server Edition per browser profile (localStorage, like `unread`); relay
+    tabs keep a keyless store and persist nothing; kanban has no clock-ordered view, so nothing to
+    wire there; Mobile N/A (its own state).
 - **Session name ⇄ node title** — **two lists, because the two directions are separate facts**:
   `TITLE_READ_CAPABLE` (`canReadTitle` — claude, **codex**, grok, **gemini**) is the READ leg,
   `RENAME_CAPABLE` (`canRename` — claude, grok) the WRITE leg, and **read ⊇ write** is an invariant
@@ -615,13 +922,44 @@ when their display titles match. Answering either resolves only that question or
   would otherwise replay it forever) — a HOOK-fed ref is never dropped that way, since an empty
   read there is usually a transient master hiccup and forgetting it sends the next read local.
   It is generated shell, so `remote-transcript-locate.test.ts` runs it for real under `/bin/sh`
-  against a fake host tree — keep it that way. (2) **The cwd fallback keeps `accountId`** in BOTH
+  against a fake host tree — keep it that way.
+  **A remote node never falls through to this machine** (2026-09-28): the handler decides
+  remoteness from the SHELL's records (`isRemoteNode` dep — live remote pty or
+  `workspaceStore.sshProjectIdForNode`, never a renderer flag) and applies `remoteOnly` to the
+  paged ⌘M read, the legacy read, the find-bar index (`[]`) and `transcriptExists` (`unknown`).
+  The host locate is tri-state (`locateRemoteTranscriptRef`): a CLEAN MISS is `found:false`, a
+  failure to ask is `unreadable` ("Couldn't read the transcript.") — the phone's `chat.page` shares
+  the same deps and the same distinction. Before this, a mounted SSH node whose locate missed (or
+  whose master was down) read THIS machine's resolver, cwd-newest fallback included. `transcriptExists` shares the same locate
+  (`remotePresenceFromLocate`: ref/absent/unreadable → present/absent/unknown, a malformed id
+  `unknown`), so it also works for a node with no live pty. A remote grok node is read on its host
+  by its own leg (`readRemoteGrok`, see the grok chat bullet), with the same absent/unreadable split. (2) **The cwd fallback keeps `accountId`** in BOTH
   `resolveTranscript` and `contextEnsure`; without it a managed-account node fell back to the
   system root and could adopt an unrelated session's newest transcript. (3) **Relay tabs** stay
   local-only (a transcript read over the relay would read the GUEST's disk) and reject with
   `E_UNSUPPORTED`; ChatPanel catches it and says so instead of leaving the initial `[]` on screen
   as an empty conversation. Same `nodeId` rides `claude.readTranscript`, so the find-bar searches
   a remote node's transcript too.
+  **Which session id is read is ONE rule, `transcriptSessionFor`** (`renderer/lib/transcriptSession.ts`,
+  2026-10): the hook-confirmed `agentStatus.sessionId`, else the id the node was LAUNCHED with
+  (`data.agentSessionId` — minted with `--session-id`, or the id "Open recent" resumed). The canvas
+  node, the ⌘M hint, the kanban card, the card modal and its viewer all ask it. Before, Chat (and
+  the meter) were gated on the hook id alone, so a node whose hook events never reached this app —
+  an SSH session pinned for life to a dead hook endpoint, the 107-of-128 case in "A reused
+  ControlMaster…" — opened "Markdown view" and showed no meter while its transcript sat on disk
+  under an id the node itself had on record; others in the same project opened Chat. The fallback
+  is HONEST, because the persisted id can be stale (`/clear` / `/resume` in the CLI moves to
+  another session; nothing rewrites `agentSessionId` from hooks): (1) ChatPanel's
+  `sessionFallback` prints one quiet line saying so, and the meter's popover says "From the session
+  this node was started with"; (2) the read carries **no cwd** (`transcriptReadCwd`), because
+  claude's resolver answers a missing id with the newest transcript in the folder — under a
+  fallback id that would be a stranger's conversation; the remote locator globs by id without a
+  cwd, so SSH nodes are still read on their host; (3) plan/question answer controls are never
+  offered on a fallback thread (an answer is a WRITE bound to the live `held` ticket). The composer
+  still sends (it types into the pane, which is right whatever the transcript). The persisted id is
+  the CREATED agent's, which is exactly the agent both mount sites pick the reader by, and it is
+  re-validated against `SAFE_SESSION_ID` (hand-editable project.json). The find bar's transcript
+  index still uses the hook id only (it has claude's cwd fallback and no `remoteOnly` here).
   **Both channels live in `core/transcript-ipc.ts` (`registerTranscriptIpc`), so the Server
   Edition serves them too** — it used to have no handler at all, which is why ⌘M in the browser
   read as an empty conversation on EVERY session. The remote leg is an injected dep
@@ -631,6 +969,13 @@ when their display titles match. Answering either resolves only that question or
   its `contextTail`, the hook-fed path authority). The browser's real reader is
   `buildTranscriptApi` in ws-bridge — deliberately NOT folded into `buildClaudeApi`, which the
   relay shares and must not adopt it.
+  **System-injected user records are not the user's words** — a `<task-notification>`, a peer
+  `<agent-message>`/`<cross-session-message>`, an auto-continuation/coordinator prompt — so
+  `parseChatRecords` (and the find-bar index) renders each as ONE assistant tool part
+  (`classifySystemRecord`: "Background task" / "Agent message" / "System", no wire change; each is
+  a turn boundary in `assistantTurnEnds`) and fences a human paste's `<pasted_content>` span (the
+  CLI's own 4-hex-id grammar only; titles keep the raw text) — all `indexOf` scans, never a
+  backtracking regex (quadratic on unclosed tags); exact rules in `src/shared/chat-fixtures/README.md`.
   **Paged reads (2026-09).** `chat.readTranscript` takes a trailing optional `page`
   (`{before?, maxBytes?}`, `shared/chat-page.ts`). Absent = the legacy 5 MB-tail read, byte for byte
   (result is exactly `{messages, found}`). Present = ONE window of at most `maxBytes` (clamped
@@ -654,7 +999,8 @@ when their display titles match. Answering either resolves only that question or
   trip, dd status inside the base64 like the context-tail's window command) instead of pulling the
   5 MB tail on every open and every turn-end reload; its `{ok:false}` is terminal (never the local
   disk), and it is tested under a real `/bin/sh` (`transcript-page.realsh.test.ts`). **Grok does not
-  page**: a paged request gets its whole capped read with `olderCursor: null` and no keys.
+  page** (its file is rewritten in place, so offsets are no identity): a paged request gets its whole
+  capped read with `olderCursor: null`, no keys, and the newest record's `model`/`effort`.
   Server Edition passes `page` through ws-bridge to the same core handler; relay still refuses.
   **ChatPanel consumes it progressively** (pure state in `renderer/lib/chatPaging.ts`): the first
   read is a 256 KB tail (`CHAT_TAIL_PAGE_BYTES`, with a "Loading conversation…" row), older 512 KB
@@ -683,7 +1029,13 @@ when their display titles match. Answering either resolves only that question or
   clips, so it can never add a line to the row (a height flip would refit xterm and SIGWINCH
   tmux). It is not on the kanban card modal: that header already carries the ⌘M toggle.
   **The composer sends only in `done` or an unknown state** (`canSendFromChat`,
-  `renderer/lib/chatSendGate.ts`) — never in `waiting`/`blocked`, not just never in `working`:
+  `renderer/lib/chatSendGate.ts`), with ONE exception: `working` for an agent in
+  `INPUT_QUEUE_CAPABLE` (claude — measured: a prompt submitted mid-turn waits in Claude Code's own
+  queue and reaches the model at the next tool boundary), where Enter QUEUES (`chatSendMode`) and
+  the bubble reads "Queued" until the transcript has it. Only a plain prompt queues (`canQueue`):
+  a slash command or `!` line mid-turn is unmeasured and waits. While the agent works the textarea
+  stays editable for every agent (`composerStandsDown`) — only sending is gated. Never in
+  `waiting`/`blocked`:
   PermissionRequest and AskUserQuestion both normalize to `waiting`, the pane then holds a TUI
   select dialog this view does not show, and `sendText`'s Enter would ANSWER it ("Yes" is the
   default highlight). It also refuses any node whose CLI has left the pane — hibernated, paused,
@@ -694,6 +1046,17 @@ when their display titles match. Answering either resolves only that question or
   store at send time, not only at render. Same trap as the in-place restart's `/exit`. The bar's ↻
   reloads on demand (beside the empty state's Retry), since a session whose hooks never report
   `working` never takes the turn-finish reload.
+  **The agent's OWN dialogs are read off the screen** (`shared/agents/claude-screen.ts`, claude
+  only — `SCREEN_DIALOG_READABLE`). The folder-trust prompt, `/model` and one-time setup questions
+  fire NO hook, so the state gate above reads `done` while one owns the keyboard, and a paste into
+  it was swallowed while its Enter answered the dialog (the trust prompt's default is "No, exit").
+  A send therefore goes through `pty.sendChatPrompt`, where core captures the pane first and
+  refuses (`ChatPromptBlocked`, nothing written, the draft kept) when the bottom of the screen is a
+  dialog footer or has no input box; an empty or unreadable capture is NOT evidence and sends as
+  before. A LOCAL pane is also polled every 2 s while the view is visible, to disable the composer
+  and show the dialog's lines; SSH and relay panes are not polled (a round trip per read) and rely
+  on the send-time check. Another CLI's layout would read as a permanent dialog, so an agent joins
+  the list only with its own measured reader.
   **Live progress (2026-09).** While the agent works, a `role=status` row closes the thread (the ONE
   spinner + the placeholder's own "<agent> is working…"/"waiting for an answer" sentence; optimistic
   right after a send, bounded by `CHAT_OPTIMISTIC_WORKING_MS`), and every hook event re-reads the
@@ -720,6 +1083,22 @@ when their display titles match. Answering either resolves only that question or
   `readQuestions`), and only while the pane is in a dialog state. They send a `PermissionAnswer`
   through `answerPermission`; a refusal is a quiet retryable error pointing at the terminal. Plan's
   default button is `restore` — never auto. See docs/hook-reply-approvals.md.
+  **A card answers only the request the THREAD was read for** (`answerCardState`, same rule as
+  iOS #41): `threadHeldFor` = the held ticket at the START of the last applied tail read, keyed by
+  transcript identity. While held moves A → B (a revised plan) plan A's card can still be on screen
+  unanswered, and a tool-name match would approve B from it — so until a read started under B lands,
+  the latest unanswered card of that tool says "Updating… — or answer in the terminal" and nothing
+  is answerable. A held change forces a tail reload (queued behind a read in flight, which started
+  under A and cannot bind B, and behind an older-page fetch, which it never cancels). It is a QUIET
+  read (no "Loading…"), and one path owns it: on working → blocked the turn-end reload does. While a
+  request is unbound it retries with backoff (`rebindRetryDelay`: 2 s doubling to 30 s, reset per
+  request) — card on screen or not; it stops once B surfaces on a new card (a duplicate ticket for the same tool_use keeps a quiet 30 s retry while the agent stays blocked). A read under B that still shows the card A was bound to (same tool id / line offset —
+  the transcript can lag the hook) stays "Updating…": B must surface on a card the thread shows as
+  new. The answer payload carries the BOUND id, re-checked against store and binding at send time.
+  Residuals: the previous-card memory is per MOUNT (a panel opened fresh under B has none, so it
+  binds B to the latest matching card); a re-issued ticket for the SAME tool_use (duplicate hooks)
+  stays "Updating…" and is answered in the terminal; and the whole guarantee assumes Claude writes
+  the tool_use to the transcript before the hook fires.
   **The thread look (2026-09-26, claude.ai-style)**: the user's message is a neutral rounded bubble
   on the right (`term-chat__bubble`, a tint lift — never the blue accent), the assistant's is plain
   full-width text with no bubble. One quiet action row per assistant TURN (`lib/chatThread.ts`
@@ -787,14 +1166,106 @@ when their display titles match. Answering either resolves only that question or
   a modal showing the LIVE terminal still targets it), a chat view with no composer refuses, and
   otherwise it is the terminal as before. Every refusal says so in one `nodeterm:toast`
   (`announceChatDictationRefusal`, naming the composer mic) instead of a silent dead key.
+- **The composer completes `/` and `@` (2026-09-30).** Typing `/` at the START of the message (after
+  optional whitespace — every CLI measured reads `/x` mid-sentence as text) opens a menu of the
+  node's CATALOG; `@` at the start of a word opens the node's files. Arrows move, Enter/Tab ACCEPT,
+  Esc closes the menu only (CardModal's capture-phase Esc already stands aside inside
+  `.term-chat__compose`). **Accepting only inserts text** (`/name ` / `@path `): nothing is typed into
+  the pane, and the send is still the composer's own gated Enter (`chatSendRefusal`) — completing
+  `/clear` then pressing Enter is exactly typing it. **Enter accepts only when accepting CHANGES the
+  draft**: a fully typed `/model` with the menu still open is a message and Enter sends it (the
+  first version swallowed it, and `ChatPanel.live.test.tsx` caught the regression). Pure decisions in
+  `renderer/lib/chatComposerComplete.ts`; the wire shape, sanitizer, measured tables and ranking in
+  `@shared/chat-catalog`; the builder in `core/chat-catalog.ts` behind `chat:catalog`
+  (`registerChatCatalogIpc`, registered by BOTH shells). Rules a refactor must not undo:
+  - **Built-ins are only what was MEASURED** (2026-09-30), by typing `/` in each TUI inside a private
+    tmux server and paging the whole menu: claude 2.1.285, codex 0.156.1, opencode 1.18.25, gemini
+    0.62.0 (throwaway HOME + a dummy API key — the menu is client-side). **grok has no table**: 1.0.44
+    would not start past its browser sign-in on the measuring host, and a list copied from docs is a
+    guess about the binary the user runs. Plan-, login- and experiment-gated entries are left out.
+    Any other agent (grok, copilot, antigravity, a custom agent with no base) gets `@` only; a custom
+    agent inherits its base's table through `capabilityAgentId`. The descriptions are our own words.
+  - **A built-in that opens a DIALOG in the TUI is `interactive`, and sending one flips to the
+    terminal.** `/model`, `/rewind`, `/resume`, `/config`, `/permissions`, … open a picker the ⌘M view
+    cannot see while the state still reads `done` — the next message's Enter would ANSWER it (confirm
+    the highlighted row), the hazard the toolbar labels already guard. So every built-in is tagged
+    `interactive` EXCEPT a per-agent `SAFE` set of measured no-dialog commands (claude
+    `clear compact init recap reload-skills security-review`, codex `clear compact init new recap`,
+    gemini `clear compress init`, opencode `new`) — unknown means dialog, because over-tagging costs a
+    flip and under-tagging costs a wrong answer. `ChatPanel.send` calls `onShowTerminal` after a send
+    confirmed `=== true` whose text `isInteractiveBuiltin` (menu-completed OR typed by hand, with or
+    without arguments); a composer with no `onShowTerminal` does not offer those entries at all. The
+    phone gets the tag in its catalog and owes the same rule.
+  - **Custom commands and skills: claude and gemini only**, at the measured locations. claude:
+    `<configDir>/commands/**/*.md` + `<cwd>/.claude/commands/**/*.md` (measured: a subfolder is a
+    `dir:name` namespace; description = frontmatter `description`, else the first body line; a
+    `SKILL.md` inside a commands folder names its FOLDER, `review/SKILL.md` → `review`, per the 2.1.285
+    loader) and
+    `<configDir>/skills/*/SKILL.md` + `<cwd>/.claude/skills/*/SKILL.md` (measured: the frontmatter
+    `name` WINS over the folder name, the folder is the fallback, `user-invocable: false` is not
+    offered). `<configDir>` is the bound account's dir (`claudeConfigDirFor`, linked accounts
+    included), which REPLACES `~/.claude` — never both, and a malformed account id yields NO user
+    root, never the system dir in its place (another identity's commands). gemini:
+    `~/.gemini/commands/**/*.toml` + `<cwd>/.gemini/commands/**/*.toml` (its shipped
+    custom-commands reference). Precedence project > user > built-in, deduped by name. Other agents'
+    custom locations were not measured, so they list none — a guessed location offers commands the
+    CLI does not have.
+  - **A PROJECT root follows no symlink, at any level** (`CatalogRoot.within`). A cloned repository's
+    `.claude/commands/notes.md -> ~/.git-credentials` otherwise put the token-bearing first line in
+    the menu and in the phone's catalog (reproduced in review, both legs). Locally entries are
+    lstat'ed and files opened `O_NOFOLLOW`; remotely `find -P` and `[ -L ]` on the skill folder and
+    its SKILL.md; and the root itself must resolve inside the cwd (realpath / `pwd -P`), so a
+    `.claude` linked out of the project lists nothing. USER roots (the person's own config dir) are
+    followed — that is how shared system skills reach an account dir.
+  - **Names and descriptions are hostile data** (a project's `.claude/commands` is whatever the
+    repository holds): a name passes `catalogName` (closed alphabet `[A-Za-z0-9][A-Za-z0-9._:-]*`,
+    ≤ 64, never trimmed) or the entry is dropped; a description is one line with C0/C1 and `\p{Cf}`
+    (bidi, zero-width) removed, capped at 160 code points. The renderer re-runs
+    `sanitizeChatCatalog` on every reply and renders both as text nodes. `@` never offers a path with
+    whitespace, a control or format character, or one failing `isSafeQuickOpenRelPath`.
+  - **The menu is DERIVED from the draft plus a caret snapshot taken for that exact draft**
+    (`caretSnap.value === value`), never kept as its own state. A draft changed outside the textarea
+    — ChatPanel clearing it after the async send, dictation, an attach — invalidates the snapshot and
+    closes the menu (reproduced in review: send `/compact`, the Enter's keyup re-armed the menu from the
+    old text, and Tab then turned the emptied draft back into `/compact `). A disabled composer derives
+    nothing. A bare `@` is not a choice: Enter sends `hello @`, Tab still accepts.
+  - **Cost: nothing is polled.** A composer asks on its first `/` (or `@`) and reuses the answer for
+    `CATALOG_REUSE_MS` (30 s). Core caches every directory listing by the directory's mtime and
+    every file head (first 4 KB) by (mtime, size), so an unchanged tree costs stats, no reads. Per
+    root at most 200 files, commands 3 levels deep.
+  - **`@` is the existing quick-open index**, not a new walker: `files.quickOpen(cwd)` on the
+    session's api (this machine, or a relay peer's core) or `sshFs.quickOpen(scope, cwd)` for an SSH
+    node — gitignore-aware, capped, traversal-guarded — rooted at the node's cwd, ranked by the
+    quick-open fuzzy ranker. The SSH scope is the one the composer's attach already uploads through
+    (`nodeUploadScope`), passed as ChatPanel's `sshProjectId` from both mount sites.
+  - **An SSH node's catalog is read on its HOST, in ONE round trip** (`remoteCatalogCommand`, run over
+    the node's master by the desktop's `runRemote`; tested under a real `/bin/sh` against a fake host
+    tree). A remote node whose host cannot be asked — or a shell with no remote leg — answers
+    built-ins + `partial`, never this machine's folders. Every file's bytes pass `tr -d '\036'`, so a
+    hostile file cannot forge a record boundary. Remoteness is the shell's own record
+    (`isRemoteTranscriptNode`), never an argument.
+  - **Surfaces.** Desktop full (local + SSH). Server Edition full, local only (real ws-bridge
+    `chat.catalog`; it runs on the host it reads). Relay tabs: `chat.catalog` REJECTS (stub) and the
+    composer offers the shared built-in table alone; `@` uses the peer's own quick-open index, which
+    is the right machine. Kanban card modal: the same ChatPanel/composer. **Mobile**: `chat.status`
+    carries the same catalog as an OPTIONAL field when the phone sends `catalog: true`
+    (docs/mobile-chat-view.md); an older phone never asks. It is bounded
+    (`HOST_CHAT_CATALOG_TIMEOUT_MS`, 4 s, then the status goes out WITHOUT it — `chat.status` is the
+    relay's status poll and must never wait on an ssh round trip to a half-dead master), and a client
+    asks once per composer open, not on every poll. The Server Edition names an SSH-project node
+    remote (`workspaceStore.sshProjectIdForNode`), so it answers built-ins + `partial` there instead of
+    reading the server's own `~/.claude`. Adopting it in nodeterm mobile is an iOS
+    follow-up.
 - **Subagent visualization** (agents in `SUBAGENT_CAPABLE`) — `subagent-start`/`subagent-end`
-  normalized events (from Claude's `PreToolUse`/`PostToolUse` on tool `Agent`/`Task`, correlated
-  by `tool_use_id`) drive a transient `state/agentNodes.ts` store. Claude launches subagents
-  **async by default**: that PostToolUse is only a launch ack (`status:'async_launched'`), NOT the
-  end — normalize keeps the card working, the transcript tail keeps streaming, and the real end is
-  the `<task-notification>` queued into the parent transcript (sniffed by the context tails →
-  synthetic `subagent-end` in `index.ts`; the notification's `UserPromptSubmit` is also not a
-  `newTurn`, so it doesn't clear the fan-out). Canvas renders each subagent
+  normalized events drive a transient `state/agentNodes.ts` store. For Claude they come from
+  **Claude's own `SubagentStart`/`SubagentStop` hooks** whenever a session sends them (2026-09,
+  see **Claude's native subagent hooks** below); the older reconstruction — `PreToolUse`/
+  `PostToolUse` on tool `Agent`/`Task` correlated by `tool_use_id`, whose PostToolUse on an async
+  launch is only an ack (`status:'async_launched'`), with the real end sniffed from the
+  `<task-notification>` queued into the parent transcript (context tails → synthetic
+  `subagent-end` in both shells) — is kept as the FALLBACK and as the source of the task label.
+  Neither the notification's `UserPromptSubmit` nor the `[Subagent hand-back]` one is a `newTurn`,
+  so neither clears the fan-out. Canvas renders each subagent
   as an **ephemeral** `SubagentNode` (display-only card: type + task + working/done) connected by
   an **edge** to its parent agent node. These ephemeral nodes/edges live outside the React Flow
   `nodes` state (merged only at the `<ReactFlow>` prop), so they're never persisted
@@ -806,7 +1277,7 @@ when their display titles match. Answering either resolves only that question or
   definition" is true of a finished card and false of a working one: Claude launches subagents
   **async**, so *"waiting for N background agents to finish"* is exactly the state in which the
   next prompt gets typed, and nothing rehydrates `byId` afterwards (`start()` fires only from a
-  live `PreToolUse`; a subagent past that emits no second one) — the card was gone for the rest of
+  live launch event; a running subagent emits no second one) — the card was gone for the rest of
   the run while the agent kept working. The expensive half is not the missing card: Eco's
   hibernation guard derives `liveSubagents` from this same store, so the wipe let a parent with
   live background agents read as idle and get its CLI `/exit`ed. Keeping an unfinished card then
@@ -817,10 +1288,90 @@ when their display titles match. Answering either resolves only that question or
   late `finish()` is the no-op it already was and the next turn boundary takes it.
   (Subagents share the parent's process — no PTY.) Each card shows
   duration/tokens/tool-uses and **expands** (click) to a **live transcript**:
-  `core/subagent-tail.ts` resolves the subagent's own transcript file
-  (`<…>/<sessionId>/subagents/agent-<id>.jsonl`, matched by `tool_use_id` via the sibling
-  `.meta.json`), tails it read-only, formats each line (assistant text + tool calls + results),
-  and streams chunks over `agent:subagent-activity` into the store.
+  `core/subagent-tail.ts` tails the subagent's own transcript file
+  (`<…>/<sessionId>/subagents/agent-<id>.jsonl` — for a native card at the path DERIVED from the
+  parent's transcript and the `agent_id`, `claudeSubagentTranscriptPath`; for a tool-path card
+  matched by `tool_use_id` via the sibling `.meta.json`), read-only, formats each line (assistant
+  text + tool calls + results), and streams chunks over `agent:subagent-activity` into the store.
+  **Claude's native subagent hooks** (2026-09; `CLAUDE_HOOK_EVENTS` subscribes `SubagentStart` +
+  `SubagentStop` for every installer — local, managed account dirs, SSH host). MEASURED on Claude
+  Code **2.1.284** in a throwaway `CLAUDE_CONFIG_DIR` (nine scenarios, print mode and the
+  interactive TUI; fixture `src/shared/agents/__fixtures__/claude/subagent-hook-payloads.json`,
+  pinned by `normalize.claude.subagent-capture.test.ts`); the published npm bundles date them:
+  `SubagentStop` gained `agent_id` + `agent_transcript_path` in **2.0.42**, `SubagentStart` first
+  ships in **2.0.43**. Facts a refactor must not lose:
+  **(1)** both events carry the PARENT's `session_id` and `transcript_path` (unlike grok, whose
+  stop carries the child's), and `agent_id` (`a` + 16 hex, validated as a token by
+  `isClaudeAgentId` because it becomes a card key and a file name) is the one id they share. The
+  start names the child ONLY by `agent_id` + `agent_type` — no `tool_use_id`, no task text; the
+  stop adds `last_assistant_message` + `agent_transcript_path`. **(2)** `SubagentStop` is the end
+  of the child's TURN and arrives before the `<task-notification>`, sync or async — but a
+  background child that stops while its OWN child still runs is **resumed under the same
+  `agent_id`** (a second start, then a second stop): a native stop does not always mean
+  "finished". **(3)** Claude fires `SubagentStop` for **internal side-agents** (prompt
+  suggestions — after nearly every interactive turn) with `agent_type: ""` and **no start**. **(4)**
+  a **killed** child (interrupt) fires **no** stop. **(5)** nested children fire both events
+  through the same subscription and connect flat to the owning node; the tool path never saw them
+  (their `PreToolUse` carries `agent_id` and is filtered), so native hooks are the first time a
+  nested subagent gets a card at all. **(6)** `Stop` (and `SubagentStop`) carry
+  `background_tasks` — every running BACKGROUND task of the session (async subagents incl.
+  nested ones, background shells), never a foreground subagent; on `SubagentStop` the finishing
+  child still lists itself, so only the parent `Stop`'s copy is read (`liveBackgroundTaskIds`,
+  closed set of finished statuses, anything else counts as running). Absent through 2.1.112,
+  present by 2.1.266 (not bisected — feature-detected per payload). **(7)** in interactive auto
+  mode every `PreToolUse(Agent)` of a message fires FIRST, then the children start within 5 ms of
+  each other (the permission classifier sits between; 20 ms gap in print mode, up to ~5 s
+  interactive), each followed ~1 ms later by its async ack whose `tool_response.agentId` names the
+  exact child. **(8)** the child's `SubagentHandback` tool injects `<agent-message from="…">
+  [Subagent hand-back] …` into the parent before the task-notification — not a genuine turn
+  (`isInjectedSubagentPrompt`, matched on the whole marker).
+  **How the two paths coexist** — ONE core module, `core/claude-subagent-lifecycle.ts`, fed every
+  normalized event (and the task-notification end) by BOTH shells before any consumer; events it
+  does not act on come back as the same object. Latch per node+session on the first native
+  start: before it a tool call draws its card immediately (an old CLI, or a session whose hook
+  snapshot predates the upgrade, is byte-for-byte the old stream — pinned over the fixtures with
+  the native events stripped); after it a tool call is only a pending LABEL and the card appears
+  at the child's own `SubagentStart` (so a denied tool call draws nothing). The session's first
+  child is drawn from its tool call and then REPLACED by its native card (`supersedes` — the
+  renderer store, the host replay and the notch HUD move the card; nothing can know at the tool
+  call that a native start is coming). Native cards are keyed by `agent_id`, so start/stop/resume
+  follow the CLI exactly; only the label is paired, first-in-first-out by type, corrected exactly
+  by the ack (also when the ack overtakes its start — and a call an ack already named is never
+  handed to another child), and for a SYNC child by its end (`tool_response.agentId`), which
+  takes its call out of the queue and relabels a still-running sibling that guessed it. Every
+  turn-end `Stop`/`StopFailure` (never the `idle` rescue — an Agent call may be waiting on a
+  permission prompt) clears the queue of calls whose child never started, with or WITHOUT an
+  inventory: 2.0.43 had native hooks long before `background_tasks`, and a denied call's label
+  must not go to the next child. A native stop for an id that never started is dropped
+  (side-agents); a later start of a known id re-opens its card; the parent `Stop` inventory, when
+  present, ends a native card it no longer lists (the killed child); a tool card whose child
+  never started is ended at the turn end; a replaced tool card also gets a plain end AFTER the
+  replacing start (for a consumer too old for `supersedes`); tool-path ends are re-keyed onto the
+  native card (idempotent, and they bring the sync stats the native stop lacks — a late
+  stats-bearing `finish()` fills them on a done card). Tails: the native start begins the child's tail in the RAW listener, which must run
+  BEFORE the `ignoreQuestionHook` child-event gate (it ignores every `agent_id`-tagged payload);
+  the lifecycle's `onRelease` ends it (local + remote); a resumed child continues from its
+  remembered offset (`subagent-tail` / `remote-subagent-tail`) instead of re-streaming; a remote
+  child is tailed at its derived host path with no `.meta.json` ssh polling. **Eco**: because a
+  native stop can be a pause (fact 2), the parent `Stop`'s non-empty inventory stamps
+  `backgroundTaskAt` (Canvas), the guard Eco and the bulk restart already read — a strictly safer
+  rule than before (it also covers a background shell a subagent launched). Both shells pinned by
+  `hook-verified-parity.test.ts`; the Server Edition also behaviorally over the fixture
+  (`server/agent-status.test.ts`). Cost: one extra managed-hook process + POST per interactive turn
+  (the side-agent stop). Residuals, stated: a SYNC child has no ack, so while it runs a reordered
+  same-type burst can show a sibling's LABEL (never lifecycle) until the first of them ends; a
+  killed child with no later parent `Stop` inventory still waits for the decay. **Device checklist** (not runnable
+  here): (a) macOS + Windows canvas, interactive: cards at start, right labels, live activity,
+  done at stop, nested card, resumed card re-opens; (b) SSH node: native tail over the
+  ControlMaster at the derived path; (c) a session started BEFORE the upgrade (old hook snapshot —
+  whether Claude reloads hooks mid-session is unmeasured): no double and no missing cards; (d) Eco
+  with a background subagent paused on its own background shell: not hibernated, bulk restart
+  skips it; (e) a managed-account node gets native cards (installer writes the account dir); (f)
+  Windows: the derived path keeps the reported separator; (g) a pre-2.0.43 CLI tolerates the two
+  new keys in settings.json (same class as `StopFailure`, which already shipped); (h) the
+  hand-back turn (a background child reporting back wakes the parent for a turn, then the
+  `<task-notification>` wakes it again) may chime "finished" twice — #708's quiet rule is per
+  turn.
   **Codex** (2026-08-24, `spawn_agent` collaboration — issue #401) joined via its **native
   `SubagentStart`/`SubagentStop` hooks**, measured on codex-cli 0.146.0, keyed by `agent_id` (NOT
   `tool_use_id` — nothing correlates the spawn tool call with the Start it launches; agent_id is
@@ -969,6 +1520,71 @@ when their display titles match. Answering either resolves only that question or
   (`src/main/remote-ssh/tunnel-repair.ts`, pure + tested): first failure repairs immediately, a host
   that can never forward settles at one attempt per 15 min. A missing spec answers "not alive" (nothing
   bound = a tunnel that cannot deliver).
+- **An SSH host's agent tools are CHECKED, not assumed** (`RemoteHooks.refreshAgentTools`,
+  `main/remote-ssh/agent-tools-freshness.ts`). The canvas/context shims, both SKILL.md files and our
+  blocks in the codex/gemini/copilot/opencode instruction files used to be written only by the
+  establish path, blind, and never looked at again, so a host could keep another build's text for
+  a whole run: a fire-and-forget install that failed open was never retried; a tunnel that failed
+  verification at connect and was repaired later on the reuse branch (#735, above) never got them
+  at all; and a managed account's skill was written ONCE, when the account was added, so after
+  every update each remote account session read the verb docs of the build that created the
+  account. (The obvious suspect is not one: an app update never lands on the reuse branch. `conns`
+  is in memory, so the first connect after a relaunch adopts the ControlPersist orphan on the
+  ESTABLISH path, which always wrote. `ssh-project.test.ts` pins that it checks there too.)
+  - **The stamp is the bytes.** One generated probe (one round trip, a few hundred bytes back)
+    runs POSIX `cksum` over every file the host holds and, for an instruction file, over exactly
+    the span `merge*Block` would replace (awk under `LC_ALL=C`: the first start marker through the
+    first end marker, only when the end follows the start). That is compared with `posixCksum` of
+    the exact bytes this build would write (`core/remote-ssh/posix-cksum.ts`, pinned against the
+    real binary), and only what differs is rewritten, through the same appliers as the install. A
+    current host costs the probe and no write. Nothing is embedded in the artifacts: a stamp line
+    would be noise in every agent's context, would need a migration for hosts written by older
+    builds, and would trust a file's claim about itself. `cksum` because it is the one checksum POSIX
+    requires; CRC-32 + length is not collision resistant and does not need to be, because this
+    detects drift and is not a security check. Ubuntu's own BusyBox build omits `cksum`, so such a
+    host exists: missing, unreadable and gated files are still told apart there, the files it can
+    read are written without comparison (what every connect did before) and the blocks merged. An
+    awk that fails on a block is reported (`X`, through fd 3 — `awk | cksum` exits with cksum's
+    status) and that block is merged, which writes only on a change. Only files ACTUALLY written
+    are logged as "rewrote" or make the outcome `refreshed`. The permanent suite runs the probe
+    under every shell × awk the machine has (what the CI image has); a one-off manual run added
+    BusyBox sh, zsh 5.9 and the one-true awk 20231127 (`NT_PROBE_EXTRA_AWK` / `_SH`). macOS's own
+    awk (20200816) and BSD `cksum` have never been run — that is on the PR's Mac checklist.
+  - **The end marker is searched AFTER the start marker** — in both `merge*Block` functions and in
+    the probe's awk alike. Taking the first end marker anywhere read a hand-deleted block's leftover
+    end line as "no block": the merge appended a fresh copy every time, and with an hourly check a
+    host's AGENTS.md grew by one block an hour (measured in review: 41,693 → 81,279 → 120,865 →
+    160,451 bytes). The same merges run at boot for the desktop's and the Server Edition's own local
+    instruction files (`initCanvasControl`, `initContextLink`), which grew by one block per launch.
+  - **Refusals.** A file that is not a readable regular file (a directory, a dangling dotfile link,
+    no permission) is NEVER written over, and the host is not called confirmed. A managed account's
+    skill is refreshed only when its dir ALREADY exists — checked by the probe and again on the host
+    in the write itself (`remoteAtomicWrite`'s `requireDir`), so a dir removed in between is not
+    brought back by the parent `mkdir -p`. A report that does not
+    parse changes nothing. Account ids from settings are re-validated (`isSafeAccountId`) before
+    they become paths. The copilot block is judged at the host's `$COPILOT_HOME` only when the
+    installer's validator would accept that value.
+  - **Cadence.** A connect (establish, including the post-relaunch orphan adoption) and a tunnel
+    repair always check. The 45 s reuse branch costs nothing once this run has confirmed the host
+    for the current expected set (content + account list). An unconfirmed host is retried there on
+    the tunnel-repair backoff (1/5/15 min). A confirmed host is looked at again hourly
+    (`AGENT_TOOLS_RECHECK_MS`), because within a run only a writer outside it (another desktop,
+    possibly an older build, on the same host account; a hand edit) can change the files. One check
+    per host at a time: projects sharing a host share it.
+  - **A new agent-facing doc on a host goes into the artifact plan in `remote-hooks.ts`**
+    (`canvasControlArtifacts` / `contextLinkArtifacts` / `accountSkillArtifacts`) — shims, skills,
+    instruction blocks. The installers and the probe both read it, so a file added there is written
+    AND kept current. NOT the rest of what connect writes: the hook scripts and the agents' hook
+    config belong to `setup()`'s ordered chain (after the verified tunnel and the endpoint file),
+    and the endpoint file and node tokens carry credentials — none of those may be rewritten on a
+    freshness cadence.
+  - **What a running agent sees.** The shim's `help` is answered by the shim itself (baked from the
+    verb registry), so it is current the moment the file is. Claude reads a SKILL.md body when the
+    skill is invoked; codex, gemini and opencode read their instruction files at session start, so
+    a session started before a rewrite keeps the old text until it restarts. Nothing is typed into
+    a pane to announce it.
+  - Surfaces: Desktop only (SSH projects are a desktop concept). The Server Edition runs ON its host
+    and rewrites its local shims at every boot. Mobile: N/A.
 - **The per-agent remote hook installs run CONCURRENTLY** (`RemoteHooks.setup()`, the chain
   `connectOnce` awaits before a project reports connected). MEASURED against a real sshd through 50 ms
   RTT, 5 runs: **3281 ms serial → 1471 ms concurrent** over the same 22–24 ssh children. The installers

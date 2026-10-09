@@ -18,10 +18,13 @@ import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import { platform } from './platform'
+import { writeManagedHookFileAtomic } from './agents/hooks/install-helper'
+import { mergeInstructionFile } from './agents/hooks/settings-file'
 import { IPC } from '../shared/ipc'
 import type { ContextLinkInfo, ContextLinkMap } from '../shared/types'
 import { type PtyManager } from './pty-manager'
-import { directExecutableInvocation, findInLoginPath } from './exec-path'
+import { findInLoginPath } from './exec-path'
+import { isSafeOpencodeSessionId, runOpencodeExportAt } from './opencode-export'
 import { TMUX_SOCKET } from './tmux-naming'
 import {
   buildContextShimScript,
@@ -64,12 +67,8 @@ function skillPath(): string {
 function writeCliFiles(): void {
   const d = contextLinkDir()
   fs.mkdirSync(d, { recursive: true })
-  fs.writeFileSync(cliShimPath(), buildContextShimScript(codexThreadIdentityRoot()))
-  try {
-    fs.chmodSync(cliShimPath(), 0o755)
-  } catch {
-    /* fail open */
-  }
+  // Temp + rename, never a truncating write: agents execute this file (see canvas-control.ts).
+  writeManagedHookFileAtomic(cliShimPath(), buildContextShimScript(codexThreadIdentityRoot()), undefined, 0o755)
   // Sweep the retired Electron-as-Node CLI off upgraders' disks: the shim no longer execs it,
   // and it would sit there pointing at a binary path that moves with every app update.
   try {
@@ -82,7 +81,7 @@ function writeCliFiles(): void {
 function installSkill(): void {
   try {
     fs.mkdirSync(path.dirname(skillPath()), { recursive: true })
-    fs.writeFileSync(skillPath(), buildContextLinkSkillBody(cliShimPath()), 'utf8')
+    writeManagedHookFileAtomic(skillPath(), buildContextLinkSkillBody(cliShimPath()))
   } catch (e) {
     console.warn('[context-link] skill install failed', e)
   }
@@ -116,17 +115,9 @@ function installAgentInstructions(): void {
     path.join(opencodeConfigDir(), 'AGENTS.md')
   ]
   for (const p of targets) {
-    try {
-      let existing = ''
-      try {
-        existing = fs.readFileSync(p, 'utf8')
-      } catch {
-        /* new file */
-      }
-      fs.mkdirSync(path.dirname(p), { recursive: true })
-      fs.writeFileSync(p, mergeInstructionsBlock(existing, block), 'utf8')
-    } catch (e) {
-      console.warn('[context-link] instructions install failed', p, e)
+    // The user's file: the guarded transaction keeps its link and mode (see canvas-control.ts).
+    if (mergeInstructionFile(p, (existing) => mergeInstructionsBlock(existing, block)) === 'failed') {
+      console.warn('[context-link] instructions install failed', p)
     }
   }
 }
@@ -260,42 +251,16 @@ async function fetchTranscript(node: LinkDocEntry): Promise<string | null> {
   }
 }
 
-/** An export names ONE provider session. The id reaches us from a hook payload, so it is re-checked
- *  here, where it becomes an argv entry: `directExecutableInvocation` stops it being read as shell
- *  syntax, and nothing but this stops a leading `-` being read by opencode as an option. */
-const SAFE_OPENCODE_SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/
+// The id check and the export bounds live in `opencode-export.ts`, shared with the ⌘M chat view's
+// reader. Re-exported so this module's callers are unchanged.
+export { isSafeOpencodeSessionId } from './opencode-export'
 
-export function isSafeOpencodeSessionId(sessionId: string): boolean {
-  return SAFE_OPENCODE_SESSION_ID.test(sessionId)
-}
-
-// A whole conversation comes back on stdout. execFile's default 1 MiB buffer turns a long session
-// into an error, which reads here as "no transcript"; and with no timeout a wedged CLI holds the
-// linked agent's read open for good.
-const OPENCODE_EXPORT_MAX_BYTES = 32 * 1024 * 1024
+// With no timeout a wedged CLI holds the linked agent's read open for good.
 const OPENCODE_EXPORT_TIMEOUT_MS = 60_000
 
 export async function opencodeExportAt(bin: string, sessionId: string): Promise<string | null> {
-  const invocation = directExecutableInvocation(bin, ['export', sessionId])
-  if (!invocation) return null
-  try {
-    const { execFile } = await import('node:child_process')
-    return await new Promise<string | null>((resolve) => {
-      execFile(
-        invocation.executable,
-        invocation.args,
-        {
-          ...invocation.options,
-          encoding: 'utf-8',
-          maxBuffer: OPENCODE_EXPORT_MAX_BYTES,
-          timeout: OPENCODE_EXPORT_TIMEOUT_MS
-        },
-        (err, stdout) => resolve(err ? null : stdout)
-      )
-    })
-  } catch {
-    return null
-  }
+  const out = await runOpencodeExportAt(bin, sessionId, OPENCODE_EXPORT_TIMEOUT_MS)
+  return out.ok ? out.stdout : null
 }
 
 async function fetchOpencodeExport(node: LinkDocEntry): Promise<string | null> {
@@ -468,6 +433,10 @@ export function initContextLink(
 ): void {
   pty = ptyManager
   deps = platformDeps
+  // Re-derive from the platform this init runs under: a process that boots a second core (the
+  // server e2e suites start several, each on its own dataDir) must not keep writing into the
+  // FIRST one's directory — which is how a test's removed dataDir came back, `context.sh` and all.
+  dir = ''
   linkRevision++
   linkDocs.clear()
   verifiedPaths.clear()

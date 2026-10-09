@@ -72,7 +72,11 @@ describe.skipIf(!piOnPath || !scriptOnPath)('pi extension inside the real pi bin
   })
 
   const baseEnv = (): NodeJS.ProcessEnv => {
-    const env: NodeJS.ProcessEnv = { ...process.env, PI_CODING_AGENT_DIR: agentDir, TERM: 'xterm-256color' }
+    // pi compiles the extension with jiti, which caches into `$TMPDIR/jiti`; point that inside this
+    // test's own dir so afterEach removes it (it otherwise outlived the run in the shared temp dir).
+    const ownTmp = path.join(tmp, 'os-tmp')
+    fs.mkdirSync(ownTmp, { recursive: true })
+    const env: NodeJS.ProcessEnv = { ...process.env, PI_CODING_AGENT_DIR: agentDir, TERM: 'xterm-256color', TMPDIR: ownTmp }
     for (const k of Object.keys(env)) if (k.startsWith('NODETERM_')) delete env[k]
     return env
   }

@@ -10,6 +10,7 @@ paths:
   - "src/shared/webgl.ts"
   - "src/main/remote-ssh/**"
   - "src/core/pty-*.ts"
+  - "src/core/zellij-*.ts"
   - "src/core/pane-cwd*.ts"
   - "src/renderer/terminal/**"
   - "src/renderer/glyphgrid/**"
@@ -74,6 +75,14 @@ tmux 3.4:
 - **No `pbcopy` pipe.** The copy-mode bindings are bare `copy-pipe-and-cancel` (no command): piping
   to `pbcopy` was macOS-only, and over SSH it would have copied on the *remote* host anyway. OSC 52
   is cross-platform and works over SSH.
+
+**Copy-on-select (opt-in, `copyOnSelect`, default off — #759)** is the route for a selection
+**xterm** owns, which OSC 52 never sees: a plain drag on Windows (no tmux), a forced Option/Shift
+drag inside a mouse-tracking app. `terminal/copy-on-select.ts` triggers on the GESTURE (a press
+xterm's SelectionService takes, then a release anywhere), not on `onSelectionChange` — the search
+addon's `select()` must never touch the clipboard. Canvas node and kanban modal only, never the
+settings preview; attached once per xterm (it survives park/adopt) and written via the bridge's
+`{ quiet: true }` path so a failed write raises no toast per drag.
 
 **A tmux client is not necessarily a watcher.** `SessionInfo.clients` is a COUNT
 (`#{session_attached}`), never a boolean, because one session can hold several: the app's painter,
@@ -213,13 +222,104 @@ Lifecycle, by intent:
   The refusal is **only** in `spawnNew` — a co-attach JOIN to a live session for that node id is
   still correct. An offline node reports itself to `SshReconnector`, so the canvas heals itself;
   `retryNow` (banner Reconnect / node Reconnect) skips the backoff and clears the refuse window.
+- **Codex's auto-started shared daemon: every nodeterm Codex TUI runs `--no-daemon`** (2026-09-30).
+  From codex-cli **0.157.0** the `daemon_auto_start` feature is `stable, true` (0.156.1:
+  `experimental, false`; 0.148.0: no such feature): a plain `codex` TUI no longer runs in-process
+  but starts, or JOINS, ONE background `app-server` per `CODEX_HOME`, and that daemon keeps the
+  environment of the pane that STARTED it and outlives it. The daemon is what spawns tool shells and
+  hook processes, and nodeterm tells a node apart by environment (`buildPtyEnv`). MEASURED on
+  0.159.2 (private `CODEX_HOME`, private tmux socket, `env -i`): pane A (`NODETERM_NODE_ID=node-A`)
+  started the daemon; in pane B (`node-B`) the tool shell printed `node-A` and every hook process
+  logged `node-A` — pane B's status, canvas-control verbs and context-link reads were pane A's.
+  `--no-daemon` put pane C back on `node-C` in both; `-c features.daemon_auto_start=false` did NOT
+  (it still joins a RUNNING daemon); there is no environment switch. Transcript and the three help
+  pages: `src/core/__fixtures__/codex-daemon/`. Rules a refactor must not undo:
+  - **Feature-detected, fail open.** `core/codex-cli.ts` `codexNoDaemonFrom` reads the flag off the
+    option-header lines of the same memoized `codex --help` the approval vocabulary uses;
+    `CodexCliCaps.noDaemon` rides the existing `ApprovalCaps` bag (`codexNoDaemon`) that every launch
+    site already threads, and `withCodexNoDaemon` (`shared/agents/codex-daemon.ts`) appends it in
+    BOTH assemblers — fresh launch and resume (cold restore, restart, restart-with-model, account
+    switch, transfer, headless Server opens, custom agents whose `baseAgent` is codex, a launch-
+    command override). Only a literal `true` emits it: clap exits on an unknown option, so an
+    unprobed, remote-unknown or older CLI gets the line it always got.
+  - **Await the answer before building a line — the race is the bug.** After a reboot every Codex
+    node cold-restores in the same tick; a node that builds its line before the probe lands launches
+    flagless, starts the shared daemon with ITS env, and every other node joins it. On a
+    shared-identity machine `codex app-server daemon version` reports such a daemon `running`
+    (verified in review), so the managed launcher adopts it too. So TerminalNode's four codex sites
+    (cold restore, its fresh fallback, restart, wake) `await ensureCodexLaunchCaps(...)`
+    (`renderer/state/codexCli.ts`, 3 s bound, fail open to the old line): local waits for the local
+    probe, SSH waits for that host's answer to arrive in `useSshConn`, non-codex agents and relay
+    tabs never wait. Pinned at source level by `nodes/codex-launch-caps-wiring.test.ts`.
+    `createAgentNode` (a NEW node) is synchronous and still reads the landed answer — a node created
+    inside the first ~second after boot can miss it; stated, not fixed.
+  - **A relay tab never gets this machine's answer.** Its pane runs the HOST's codex; the guest's
+    `true` typed into a host older than 0.156 dies on the unknown option. `codexApprovalCaps(remote,
+    projectId)` treats a relay-bound project (checked through `registerCodexRelayProjectCheck`,
+    registered by the projects store to avoid an import cycle) or a node's
+    `session.source === 'relay'` as remote-with-no-probe: no flag, baseline vocabulary.
+  - **One detection rule, two spellings.** `CODEX_NO_DAEMON_HELP_RE` / `_ERE`
+    (`shared/agents/codex-daemon.ts`): an option header at indent <= 6 followed by whitespace or end
+    of line, so a future `--no-daemon-x` is not this flag. TS reader, launcher and remote probe all
+    use it; a test runs the ERE through real `grep -E` beside the regex.
+  - **Never beside `--remote`** — measured: `ERROR: --no-daemon cannot be used with --remote.` The
+    managed launcher (`buildCodexLauncherScript`) therefore STRIPS it before its own
+    `codex --remote unix:// resume` and routes every plain-codex fallback through `nt_exec_plain`,
+    which keeps it, or ADDS it when the codex about to run advertises it (the SSH launcher's host was
+    never probed from here). This matters beyond the fallback node itself: a daemon started by a
+    plain pane carries that pane's `NODETERM_NODE_ID`, and the thread-identity prelude only resolves
+    a tool shell whose `NODETERM_NODE_ID` is EMPTY — so one plain launch used to poison every managed
+    thread of that account too. Our own start stays the scrubbed `nt_start_app_server` (#350).
+  - **SSH: the HOST's binary is asked.** `core/remote-ssh/codex-no-daemon-probe.ts` runs one
+    marker-delimited `codex --help` through the login shell after connect (off the connect path, like
+    the claude probe) and publishes `{hostKey, supported}` on a `connected` event and on a reused
+    connect's result; the renderer keeps it per host (`useSshConn.codexNoDaemonByHost`). **The key
+    is `user@host:port`** (`codexProbeHostKey`), NOT `sshHostKey`: two containers behind one machine
+    (`root@localhost:2222` on 0.159, `:2223` on 0.148) are two binaries, and a portless key let the
+    last probe answer for both. The SSH mirror slice carries the host's `true` to the phone.
+  - `codex exec` (commit messages), `login`, `mcp` and `app-server` take no such flag and are not
+    TUI clients of the daemon. The phone gets `MirrorSettings.codexNoDaemon`, local and per SSH slice (iOS
+    reader: follow-up, @eneskirca). opencode was checked the same way: no published release has `serve --service`
+    (latest 1.18.33 and the `dev` channel), and a plain TUI leaves no process behind.
+  - **Residuals, stated:** (1) a `codex` TYPED into a pane rather than launched by us — by hand in a
+    plain terminal, or by an agent through `open-terminal --cmd codex` / `write` — carries that
+    node's `NODETERM_NODE_ID` and, on 0.157+, can still start the account's daemon with it; managed
+    threads' tool shells then keep the leaked id (the prelude skips a set one). Changing the prelude
+    to prefer the thread record over a set id was rejected: a bind-refused fallback pane legitimately
+    runs a thread another node's record names. (2) A launch-command override or custom `launchCmd`
+    that runs a DIFFERENT codex than PATH's (`npx @openai/codex@0.148.0`) is given the flag from
+    PATH's probe and dies on it; the fix there is the user's (drop the pin or add the flag to their
+    own command) — we cannot probe an arbitrary command line. (3) The Windows argv planner
+    (`core/agent-launch.ts`) carries the flag but has no production caller today; Windows native
+    Codex is unmeasured.
+  - **Machines that ran a pre-fix build keep the mis-attribution until they recycle.** Panes already
+    joined to the daemon stay joined across a warm reattach (the TUI process is still the old one); a
+    daemon started before the fix keeps its first pane's env, and so does its `pid-update-loop`
+    process (verified in review), so managed threads keep using it. We deliberately do NOT kill it:
+    every unsupervised plain client attached to it would die with it. Recovery, in order: restart
+    each Codex node (node menu → Restart, or close and reopen), then from a shell WITHOUT any
+    `NODETERM_*` variables run `codex app-server daemon restart` (one per account: set that
+    account's `CODEX_HOME`).
+  - **Device checklist:** (a) macOS desktop, npm codex ≥ 0.157: two Codex nodes, each RUNNING badge
+    and `nodeterm list` line on its own node; (b) standalone codex with shared identity: a node
+    whose launcher fell back still reports as itself; (c) SSH project on a host with codex ≥ 0.157:
+    the second remote Codex node's badge is its own after the probe landed (and flagless before);
+    (d) Windows native codex: whether the daemon exists there at all is unmeasured — the flag rides
+    only if its `--help` lists it; (e) reboot a Mac with 5+ Codex nodes: after cold restore each
+    badge is its own (the bounded wait); (f) an upgraded machine: after the recovery steps above,
+    `ps eww` on the daemon shows no `NODETERM_NODE_ID`; (g) two SSH projects on one host at
+    different ports with different codex versions: only the newer one's lines carry the flag.
 - **"Restart agent (resume)"** → deliberately NOT a session lifecycle event: `terminal/
   agent-restart.ts` restarts the agent CLI *inside* the pane and leaves the PTY, the tmux session
   and its scrollback untouched. It exists for **new-model pickup** — a freshly released model only
   shows up in a CLI's model list on a fresh launch, and doing that by hand means closing and
-  re-resuming every agent node on the canvas. Choreography: write the CLI's own exit line (`/exit`
-  for claude, `/quit` for codex — that table is also the gate, an agent not in it can never be
-  restarted in place), poll `pty:pane-command` (`#{pane_current_command}`, local tmux socket or the
+  re-resuming every agent node on the canvas. Choreography: ask the CLI to quit with a fixed
+  number of Ctrl-Cs (`CTRL_C_QUITS`: codex 2, claude 3, grok 3, opencode 2, copilot 2). In all
+  five, Ctrl-U clears only the cursor's line, so a typed exit submitted the rest of a multi-line
+  draft as a prompt, while Ctrl-C clears the whole composer and quits once it is empty (#842,
+  #928). gemini alone still gets its typed exit (a bare `/quit`), because it was never measured
+  — its composer is only reachable after a login. `EXIT_SEQUENCES` is still the
+  gate — an agent not in it can never be restarted in place. Then poll `pty:pane-command` (`#{pane_current_command}`, local tmux socket or the
   project's SSH ControlMaster; any failure reads as "not a shell yet") every `RESTART_POLL_MS`
   (250 ms) until a SHELL owns the pane, then echo-deliver `resumeCommand(...)` — the same
   `claude --resume` / `codex resume` the cold restore uses. **Nothing is ever killed**: if the CLI
@@ -259,7 +359,10 @@ Lifecycle, by intent:
   Eco defers the Phase-2 viewer release until the node hibernates (hard cap idle+offscreen), but
   ONLY when the idle clock is known (`idleKnown` — `lastEventAt` is transient, so after an app
   restart nothing can hibernate and deferring would make Eco a memory regression). Eco is
-  structurally inert for sessions with no turn in the current app run — documented follow-up.
+  structurally inert for sessions with no turn in the current app run, and that is now a DECISION,
+  not a follow-up: the persisted `agentStatus.lastSeen` clock (see **Status-grouped sessions**, `.claude/rules/agents.md`) is
+  deliberately never an idle proof — see "A restored clock is not an idle proof" in
+  `terminal/hibernation-policy.ts`.
   The deferral is also unaware of `paused`: a deep-paused node's freshly recycled shell keeps its
   xterm alive until the hard cap, waiting for a hibernation that (being already exited, or having
   no CLI to exit) can never come — a second documented follow-up.
@@ -431,6 +534,76 @@ session (you can't keep a live OS process across a reboot):
   layouts. Logic is the pure `cold-resume-session.ts`; **adding a `CoState` field owes the hand-written
   equality list in `setCo`** or the banner is silently swallowed (`nodes/cold-resume-wiring.test.ts`
   pins it). Not yet on the kanban CARD MODAL (`ModalTerminal` reads no `CoState`).
+
+### Zellij as an optional local backend (`settings.sessionBackend`)
+
+Local POSIX terminals can live in **Zellij** instead of tmux (`src/core/zellij-backend.ts`; the
+measurement table, the herdr comparison and the device checklist are in
+**`docs/session-backends.md`** — Zellij 0.45.1 and herdr 0.9.3 release binaries, Linux, sandboxed
+HOME/XDG/socket dir). Default stays tmux; `normalizeSessionBackend` reads anything unknown as tmux;
+SSH projects keep the remote tmux and Windows keeps the session host. herdr was measured and not
+implemented: its unit is a server of workspaces, a plain pane cannot be attached on its own
+(`agent attach` refuses a non-agent pane), per-pane env is argv, and `pane send-text` ignores the
+app's paste mode (measured: unframed after `?2004h`).
+
+Rules a refactor must not undo:
+- **The backend follows the session that exists** (`decideZellij`). A warm tmux session wins and
+  never reaches the Zellij probe; a LIVE Zellij session is reattached in Zellij whatever the setting
+  now says; only a node with no session anywhere is created in the selected backend. Otherwise
+  flipping the setting cold-restores (`--resume`) an agent into the other multiplexer while the
+  original keeps running in the first.
+- **Env rides the client, never argv.** Each Zellij session is its own server forked by the client
+  that created it, so the painter's `env` (hook env, account scope, gateway/project/custom-agent
+  values, all merged in `spawnSession`) IS the session env — measured. There is no `-e` list to
+  maintain and nothing to leak; do not add one.
+- **Only an answer is absence, and `unknown` is WARM whatever the setting.** `list-sessions -n`
+  exits 1 both for "No active zellij sessions found" (absence) and for real failures; only the
+  sentence counts. When Zellij cannot be asked, the create is never cold — even with tmux selected
+  — or a node still live in Zellij gets its snapshot replayed and its agent resumed a SECOND time
+  in a new tmux shell (the review blocker on #1067: the first version folded to warm only when
+  Zellij was selected). `sessionExists` is the opposite fold: it claims a Zellij session only from
+  a listing that PARSED and shows it live, or every node on the machine "exists" (the phone's End
+  session always said "still running"). Session names may contain SPACES (`my work [Created …]`),
+  and a space-intolerant parser turned ONE personal session into `unknown` for every probe.
+- **`--` before every positional text** (`paste`, `write-chars`): otherwise clap reads a leading
+  `-` as a flag — measured in review, a markdown bullet list was refused and `-h` printed help with
+  exit 0, delivering nothing while the caller then pressed Enter.
+- **Zellij is probed only when it is in play** (`zellijProbeRun`: selected, or `zellij.kdl`
+  exists — written only when a Zellij painter is created), so a tmux user with Zellij merely
+  installed runs exactly the old path: no `list-sessions` per cold create, no `kill-session` per
+  delete.
+- **Socket path length**: Zellij refuses a socket path over `sun_path` (107 bytes on Linux, 103 on
+  macOS). `zellijSocketPath` mirrors its dir rule; a create that would not fit falls back to tmux
+  and Settings says why. A stock Mac with no `XDG_RUNTIME_DIR` computes to ~104 bytes for a real
+  node id — calculated, not run; it is the first device-checklist item.
+- **A zombie needs confirming before it is killed.** A shell that exits with no client attached
+  leaves the session listed with only the hidden plugin pane, and `attach --create` to it exits at
+  once, so `decideZellij` kills it first. But a session a moment old ALSO has no terminal pane yet
+  (measured, and it made the first version of this code kill its own fresh sessions): five pane-less
+  reads 300 ms apart, and one pane at any read is `live`.
+- **Every action names a pane** (`pickZellijPane`): without `--pane-id` an action silently did
+  nothing headless. `action paste` is the `paste-buffer -p` contract (framed only when the app asked
+  — measured both ways); Enter is a second `write 13`; a paste over 120,000 bytes is refused, never
+  split (one argv element; 140,000 failed with exit 126).
+- **Keybindings are session-wide**, so our `zellij.kdl` decides what everyone attached to a canvas
+  session can press: locked mode (Ctrl-g/p/t/o reach the app — Claude Code uses Ctrl-g), unlock on
+  Ctrl-Alt-g so an outside client can still detach, `session_serialization false` so a killed
+  session is not resurrected by the next `attach --create`.
+- **`tmuxBacked` is also true for a Zellij session** (it means "releasing the client destroys
+  nothing"); every path that would talk to the tmux socket asks `isZellij` first. A delete kills
+  `nt-<id>` in Zellij whenever Zellij is in play (exact-name match, a no-op for a tmux node), because a
+  node deleted after a restart has no live session and no record (only when Zellij is in play).
+- **Explicit degrades, named in Settings** (`ZELLIJ_BACKEND_GAPS`, pinned to the doc by
+  `zellij-backend.test.ts`): messaging/triggers refused (`paneOwner` null), model switch refused
+  (`terminateForeground` false), the session-memory panel COUNTS Zellij sessions it did not measure
+  (`SessionMemoryReport.unmeasured` — never "No sessions are running here." over live ones) and the
+  reaper ignores them, pasted text rides argv (readable while the call runs), no pane cwd /
+  stale-cwd banner, mobile direct-SSH sees only tmux. The pane foreground command IS provided, from one `ps` read
+  (server → shell → the shell's `tpgid`); ambiguous (two pane shells) answers null.
+Surfaces: Desktop measured and tested on Linux only (macOS unverified — socket path first); Server Edition the same core (row shown when its host reports Zellij);
+Mobile via relay joins the Zellij session (`listNodetermSessions` includes and remembers them),
+the phone's direct SSH path does not — iOS follow-up. Real-binary suites: `*.realzellij.test.ts`
+(`NODETERM_TEST_ZELLIJ` or `zellij` on PATH; skipped in CI, which has none).
 
 ### We have our own VT emulator — check it before asking tmux
 
@@ -612,6 +785,39 @@ automatic host restart is performed. Legacy clients still use the existing `send
 - The xterm container is `nodrag nowheel`; a transparent **hover-guard** overlay sits on top
   until you dwell `settings.panHoverDelay` (so quick drag = move node, scroll = pan). After
   the dwell the guard is removed and xterm takes input. The header stays draggable.
+- **Click to focus** (`settings.terminalFocusFollowsPointer`, default ON = the dwell above; issue
+  #757, Settings → Behavior). Off, the pointer decides nothing: no dwell, and `mouseleave` no
+  longer blurs, re-arms or releases. A click (`HoverGuard` pointer events → `onGuardClick` → `enterNow`) or a "go to node" takes the
+  keyboard, and the node's active flag, presence focus AND guard then follow DOM focus. ONE hook
+  owns all of it, `nodes/useClickToFocus.ts`, and it binds to the stable `.term-node` ROOT, never
+  the React Flow wrapper: focus mode MOVES that root into the fullscreen surface
+  (`surface.appendChild(root)`), so a listener or containment check captured on the wrapper went
+  deaf there and read every body press as an outside press. The wrapper is re-resolved at event
+  time only to recognise the node's own React Flow chrome (resize handles). Root `focusin`/
+  `focusout` run `focusLossOutcome` (`lib/terminalFocusMode.ts`): focus moving inside the node or
+  the WINDOW blurring (Cmd+Tab) keeps it, a press on the node's own chrome (header drag — React Flow
+  focuses its wrapper, MEASURED in Electron 42) hands it back to the element that lost it (the ⌘M
+  composer) or the xterm (`reclaimTarget`), anything else — another node, a field, the empty canvas
+  (`onPaneClick` blurs the xterm textarea, `shouldReleasePaneFocus`) — releases it and re-arms the
+  guard. One document capture `pointerdown` does the rest: outside the node it releases activity
+  claimed WITHOUT focus (go-to-node under the ⌘M view, Canvas's own `setActive` on a jump — no
+  focusout ever comes, `outsidePressReleases`), and a document capture `focusin` landing outside
+  the node (its own wrapper counts as inside) does the same for KEYBOARD focus moves — ⌘M open,
+  then ⌘K's autofocus — else the stale `activeId` suppresses that node's unread dot; inside the BODY, any deliberate primary press that is not on the guard runs `enterNow`
+  (`bodyPressAcknowledges`) — guard down, xterm focused, ⌘M view open, all the same — so an unread
+  finish is cleared by clicking the terminal, not only by clicking the guard. A focus RESTORE that
+  no press caused (window activation) never acknowledges. The xterm blur that OPENING the ⌘M view
+  causes is `keep`, not a release (`lostIsCoveredXterm`). Focus mode's reparent blurs a focused xterm SYNCHRONOUSLY inside
+  `appendChild` (MEASURED, Electron 42: `relatedTarget` null, root still connected — so an
+  `isConnected` test cannot see it); `nodes/reparentKeepingFocus.ts` brackets the move with a flag the
+  hook honours (`reparenting`) and re-focuses the element that held the keyboard, in BOTH modes —
+  before it, entering/leaving focus mode dropped the keyboard in the default mode too. The guard listens to POINTER events
+  (`nodes/HoverGuard.tsx`): React Flow's d3-drag swallows a left `mousedown`/`mouseup` on a
+  draggable node before React sees them, so the old mouse-event guard never received a left click
+  (#87's click-to-focus only ever worked through the dwell). Only a literal `false` in
+  settings.json selects it (`resolveFocusFollowsPointer`). The ⌘/ shortcuts panel prints "Click" instead of
+  the dwell. Renderer only: Desktop + Server Edition identical; kanban card modal N/A (it has no
+  hover guard); Mobile N/A.
 - **FitAddon reads the host's computed size, not its content rect.** The absolute, inset
   canvas host uses `box-sizing: content-box` so its padding is excluded from that size
   (#671). Its outer hit/plate rect still fills the body. The board modal instead keeps

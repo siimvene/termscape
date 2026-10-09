@@ -4,11 +4,19 @@ import type { ChatQuestion } from '@shared/agents/permission-answer'
 import {
   PLAN_CHOICES,
   activeAnswerCard,
+  answerCardState,
+  answerRebindPending,
+  answerCardKey,
+  rebindRetryDelay,
+  CHAT_ANSWER_REBIND_RETRY_MS,
+  CHAT_ANSWER_REBIND_RETRY_MAX_MS,
   emptySelection,
+  latestUnansweredCard,
   CHAT_ANSWER_TEXT_MAX,
   answerTooLong,
   planReviseAnswer,
   questionAnswerFrom,
+  quoteCustomItem,
   toggleLabel
 } from './chatAnswer'
 
@@ -109,6 +117,31 @@ describe('questionAnswerFrom — UI selection → the structured answer core val
       freeText: ['Which surfaces?']
     })
   })
+  it('quotes a typed "Other" containing a comma, so the model can tell it from the labels', () => {
+    const sel = emptySelection([MULTI])
+    sel[0].labels = ['Desktop', 'Phone']
+    sel[0].other = true
+    sel[0].otherText = 'teal, sort of'
+
+    expect(questionAnswerFrom([MULTI], sel)?.answers['Which surfaces?']).toBe('Desktop, Phone, "teal, sort of"')
+  })
+
+  it('quotes a lone typed "Other" on a multi choice by the same rule', () => {
+    const sel = emptySelection([MULTI])
+    sel[0].other = true
+    sel[0].otherText = 'a, b'
+
+    expect(questionAnswerFrom([MULTI], sel)?.answers['Which surfaces?']).toBe('"a, b"')
+  })
+
+  it('never quotes a single choice\'s "Other": it is the whole answer', () => {
+    const sel = emptySelection([SINGLE])
+    sel[0].other = true
+    sel[0].otherText = 'neither, really'
+
+    expect(questionAnswerFrom([SINGLE], sel)?.answers['Pick one?']).toBe('neither, really')
+  })
+
   it('a question with no options is answered by its text field alone', () => {
     const sel = emptySelection([FREE])
     sel[0].otherText = 'Ada'
@@ -168,3 +201,107 @@ describe('planReviseAnswer', () => {
   })
 })
 
+
+describe('latestUnansweredCard', () => {
+  it('is the newest card of that tool when it has no result', () => {
+    expect(latestUnansweredCard([plan(0), plan(1)], 'ExitPlanMode')).toEqual({ message: 1, part: 0 })
+  })
+  it('is null when the newest card of that tool is answered (older unanswered ones are history)', () => {
+    expect(latestUnansweredCard([plan(0), plan(1, 'User approved')], 'ExitPlanMode')).toBeNull()
+  })
+  it('ignores other tools and needs no matching questions', () => {
+    expect(latestUnansweredCard([ask(0, undefined), plan(1, 'done')], 'AskUserQuestion')).toEqual({ message: 0, part: 1 })
+    expect(latestUnansweredCard([], 'ExitPlanMode')).toBeNull()
+  })
+})
+
+describe('answerCardState (the card binds the request the thread was READ for)', () => {
+  const A = { pendingId: 'p-A', toolName: 'ExitPlanMode' }
+  const B = { pendingId: 'p-B', toolName: 'ExitPlanMode' }
+
+  it('active, bound to the held id, when the thread was read for the request held now', () => {
+    expect(answerCardState([plan(0)], A, 'p-A')).toEqual({
+      kind: 'active',
+      card: { message: 0, part: 0 },
+      cardKey: 'k0:0',
+      pendingId: 'p-A'
+    })
+  })
+  it('updating (no controls) while the thread was read for ANOTHER request: plan A card must not answer B', () => {
+    expect(answerCardState([plan(0)], B, 'p-A')).toEqual({ kind: 'updating', card: { message: 0, part: 0 } })
+  })
+  it('updating while the thread was read with nothing held (nil → held), or never read', () => {
+    expect(answerCardState([plan(0)], B, null)).toEqual({ kind: 'updating', card: { message: 0, part: 0 } })
+    expect(answerCardState([plan(0)], B, undefined)).toEqual({ kind: 'updating', card: { message: 0, part: 0 } })
+  })
+  it('updating shows on no card when the latest card of the held tool is answered', () => {
+    expect(answerCardState([plan(0, 'User rejected')], B, 'p-A')).toEqual({ kind: 'updating', card: null })
+  })
+  it('nothing held (held → nil), or a held tool with no card at all: null', () => {
+    expect(answerCardState([plan(0)], undefined, 'p-A')).toBeNull()
+    expect(answerCardState([plan(0)], { pendingId: 'p-A', toolName: 'Bash' }, null)).toBeNull()
+  })
+  it('bound but the card does not match (question texts): null, like activeAnswerCard', () => {
+    const q = { pendingId: 'p-Q', toolName: 'AskUserQuestion', questions: ['Other?'] }
+    expect(answerCardState([ask(0, [SINGLE])], q, 'p-Q')).toBeNull()
+  })
+})
+
+describe('answerRebindPending', () => {
+  it('only for a held plan / question the thread was not read for', () => {
+    expect(answerRebindPending({ pendingId: 'p-B', toolName: 'ExitPlanMode' }, 'p-A')).toBe(true)
+    expect(answerRebindPending({ pendingId: 'p-B', toolName: 'AskUserQuestion' }, null)).toBe(true)
+    expect(answerRebindPending({ pendingId: 'p-B', toolName: 'ExitPlanMode' }, 'p-B')).toBe(false)
+    expect(answerRebindPending({ pendingId: 'p-B', toolName: 'Bash' }, 'p-A')).toBe(false)
+    expect(answerRebindPending(undefined, 'p-A')).toBe(false)
+  })
+})
+
+describe('answerCardKey', () => {
+  it('prefers the tool_use id, else the line offset + part, else the position', () => {
+    const withId: ChatMessage = { role: 'assistant', key: 5, parts: [{ kind: 'tool', name: 'ExitPlanMode', arg: '', body: 'p', id: 'toolu_1' }] }
+    expect(answerCardKey([withId], { message: 0, part: 0 })).toBe('toolu_1')
+    expect(answerCardKey([plan(7)], { message: 0, part: 0 })).toBe('k7:0')
+    const unkeyed: ChatMessage = { role: 'assistant', parts: [{ kind: 'tool', name: 'ExitPlanMode', arg: '', body: 'p' }] }
+    expect(answerCardKey([unkeyed], { message: 0, part: 0 })).toBe('i0:0')
+  })
+})
+
+describe('answerCardState: a new request must surface on a card the thread shows as NEW', () => {
+  const B = { pendingId: 'p-B', toolName: 'ExitPlanMode' }
+  it('the card that was bound to the previous request stays "Updating…" even after a read under B', () => {
+    expect(answerCardState([plan(0)], B, 'p-B', { pendingId: 'p-A', cardKey: 'k0:0' })).toEqual({
+      kind: 'updating',
+      card: { message: 0, part: 0 }
+    })
+  })
+  it('a different card binds B; the same request re-reading its own card stays bound', () => {
+    expect(answerCardState([plan(0, 'rejected'), plan(10)], B, 'p-B', { pendingId: 'p-A', cardKey: 'k0:0' })).toMatchObject({
+      kind: 'active',
+      pendingId: 'p-B',
+      cardKey: 'k10:0'
+    })
+    expect(answerCardState([plan(0)], B, 'p-B', { pendingId: 'p-B', cardKey: 'k0:0' })).toMatchObject({ kind: 'active' })
+  })
+})
+
+describe('rebindRetryDelay', () => {
+  it('doubles from the base and caps', () => {
+    expect([0, 1, 2, 3, 4, 10].map(rebindRetryDelay)).toEqual([
+      CHAT_ANSWER_REBIND_RETRY_MS,
+      2 * CHAT_ANSWER_REBIND_RETRY_MS,
+      4 * CHAT_ANSWER_REBIND_RETRY_MS,
+      8 * CHAT_ANSWER_REBIND_RETRY_MS,
+      CHAT_ANSWER_REBIND_RETRY_MAX_MS,
+      CHAT_ANSWER_REBIND_RETRY_MAX_MS
+    ])
+  })
+})
+
+describe('quoteCustomItem — Claude Code\'s own multi-select quoting (measured, 2.1.283)', () => {
+  it('matches the native picker on every measured answer', () => {
+    expect(quoteCustomItem('teal, sort of')).toBe('"teal, sort of"')
+    expect(quoteCustomItem('say "hi"')).toBe('"say \\"hi\\""')
+    expect(quoteCustomItem('teal')).toBe('teal')
+  })
+})

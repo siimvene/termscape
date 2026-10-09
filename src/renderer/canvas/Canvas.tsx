@@ -1,13 +1,20 @@
+import { PrepareUpdateDialog } from '../components/PrepareUpdateDialog'
+import type { PrepNode } from '../lib/updatePrep'
 import { reportTextDelivery } from '../lib/textDelivery'
+import { useDevPortScanner } from './useDevPortScanner'
+import { withCodexNoDaemon } from '@shared/agents/codex-daemon'
+import { codexApprovalCaps } from '../state/codexCli'
 import { TEXT_NOT_SUBMITTED } from '@shared/text-delivery'
 import { VisibleMiniMap } from './VisibleMiniMap'
+import { MinimapDock } from './MinimapDock'
 import { keepGlassBlurWhileMoving } from '../lib/glassContrast'
 import { LINK_ENDPOINT_NOT_FOUND } from '@shared/canvas-link'
 import { createControlOpenBatch } from '../lib/controlOpenBatch'
 import { commitOwnedLaunchAttempt, registerLaunchCommit } from '../terminal/launch-attempt'
-import { launchCommand } from '../terminal/launch-command'
+import { hasLaunchWriter, launchCommand } from '../terminal/launch-command'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useContextLinkSync } from './useContextLinkSync'
+import { useMirrorIdentitySeed } from './useMirrorIdentitySeed'
 import { useShallow } from 'zustand/react/shallow'
 import { playSfx, primeSfx } from '@renderer/lib/sfx'
 import { fanoutStillWorking } from '@renderer/lib/completionAlert'
@@ -61,6 +68,7 @@ import {
 } from './canvas-image-import'
 import {
   SharedGlyphLayer,
+  createPixelRatioWatcher,
   flushOpaqueNodeIds,
   gestureTerminalIds,
   hasActiveGesture,
@@ -73,8 +81,10 @@ import {
   useSharedGlyphActive
 } from './SharedGlyphLayer'
 import { SshReconnector } from '../lib/sshReconnect'
+import { projectMayDialSsh, receivedCanvasMutation, sanitizeRelayProject } from '../session/relay-ssh'
 import {
   hostAttachmentsFor,
+  planActiveProjectDials,
   connectHostAttachment,
   type SshConnectFn
 } from '../lib/sshAttachments'
@@ -82,6 +92,7 @@ import { terminalKey } from '../terminal/terminal-config'
 import {
   setWebglGesture,
   setWebglZoom,
+  setWebglDevicePixelRatio,
   releaseAllHiddenGrants,
   WEBGL_GESTURE_SETTLE_MS
 } from '../terminal/webgl-budget'
@@ -104,6 +115,8 @@ import { CommandPalette, type Command } from '../components/CommandPalette'
 import { Tooltip } from '../components/Tooltip'
 import {
   IconBranch,
+  IconBroadcast,
+  IconChat,
   IconCanvasView,
   IconClose,
   IconCollapse,
@@ -146,6 +159,7 @@ import {
   SettingsPage,
   SourceControlPanel,
   ExplorerPanel,
+  LiveChatDrawer,
   ShortcutsPanel,
   OnboardingFlow,
   DictationOverlay,
@@ -175,6 +189,11 @@ import {
 import { SaveFailureBar } from '../components/SaveFailureBar'
 import { syncMessageScope } from '../lib/messageScopeSync'
 import {
+  coalesce,
+  registerBoardCommentDeliverer,
+  runBoardCommentDelivery
+} from '../lib/boardCommentDelivery'
+import {
   adoptedNodesNotice,
   decideExternalChange,
   mergeIncomingNodes
@@ -198,6 +217,9 @@ import { containerOrigin, snapPointInRootSpace } from '../lib/gridSnap'
 import { zoomFromPct } from '../lib/zoomPresets'
 import { CANVAS_MAX_ZOOM, CANVAS_MIN_ZOOM } from './zoom-limits'
 import { isSpaceRelease, spacePanKeydown } from '../lib/spacePan'
+import { handoffsFor, installHandoffFocusReset, noteHandoff, suppressDoneAfterHandoff } from '../lib/handoffPings'
+import { loadIdentity } from '../state/presence'
+import { runBoardKey } from '../lib/boardKeys'
 import { readCanvasLocked, writeCanvasLocked } from '../lib/canvasLock'
 import {
   FLOW_NODE_CLASS,
@@ -223,6 +245,21 @@ import { approvePhoneWithFeedback } from '../lib/phone-approval'
 import { peerApprovalView } from '@shared/remote/approval'
 import { promptDialog } from '../components/promptDialog'
 import { UpgradeDialog } from '../components/UpgradeDialog'
+import { LiveLinkDialog } from '../components/LiveLinkDialog'
+import { requireProOr } from '../state/upgradeGate'
+import { startWatchLinkSync, useWatchLinks } from '../state/watchLinks'
+import { liveLinkNoticeEffect } from '../lib/liveLink'
+import {
+  liveLinkCommands,
+  liveLinkMenuItemsFor,
+  liveLinkPrepare,
+  liveLinkRemoteFacts,
+  openLiveLink,
+  stopAllConfirm,
+  stopAllLiveLinks,
+  type LiveLinkAvailabilityFacts,
+  type LiveLinkTarget
+} from '../lib/liveLinkEntry'
 import { RemotePicker } from '../components/RemotePicker'
 import { WorktreeDialog } from '../components/WorktreeDialog'
 import { SpawnTeamDialog } from '../components/SpawnTeamDialog'
@@ -237,6 +274,17 @@ import {
   zoomShortcutAllowed,
   zoomShortcutChord
 } from '../lib/zoomShortcut'
+import {
+  TERMINAL_FONT_ZOOM_EVENT,
+  fontZoomTargetNodeId,
+  forwardedResetMatches,
+  nextTerminalFontSizeOverride,
+  normalizeTerminalFontSize,
+  patchProjectFontSize,
+  requestTerminalFontZoom,
+  type TerminalFontZoomRequest
+} from '../terminal/terminal-font-zoom'
+import { isMacPlatform } from '@shared/platform-utils'
 import {
   dispatchGlobalKeydown,
   type GlobalKeyEvent,
@@ -262,20 +310,26 @@ import {
   terminalShortcutPolicy
 } from '../lib/keybindingOverrides'
 import { CanvasPills } from '../components/CanvasPills'
-import { UsageIndicator } from '../components/UsageIndicator'
+import { UsageIndicator, type AccountMoveProgress } from '../components/UsageIndicator'
 import { SystemResourcePill } from '../components/SystemResourcePill'
 import { PresenceLayer } from '../components/PresenceLayer'
 import { Facepile } from '../components/Facepile'
 import { PresenceNamePrompt } from '../components/PresenceNamePrompt'
 import { nodeTravel, projectTravel } from '../lib/presenceTravel'
-import { backgroundNodeIds, mergeWithKeepAlive, overlayKeepAliveData } from '../lib/webviewKeepAlive'
-import { useWebviewKeepAlive } from '../state/webviewKeepAlive'
+import { nodeIdsHeldElsewhere, nodeOwner } from '../lib/nodeOwner'
 import {
   closeConfirmCopy,
   closedSessionCounts,
   deleteConfirmCopy,
   planProjectClose
 } from '../lib/projectCloseSessions'
+import {
+  USER_CLOSED_SESSION_EVENT,
+  lastSessionCloseCopy,
+  shouldOfferProjectClose
+} from '../lib/lastSessionClose'
+import { backgroundNodeIds, mergeWithKeepAlive, overlayKeepAliveData } from '../lib/webviewKeepAlive'
+import { useWebviewKeepAlive } from '../state/webviewKeepAlive'
 import {
   routeControlSource,
   needsLiveCanvas,
@@ -290,7 +344,6 @@ import {
   coldGroupCwd,
   coldGroupChildCount,
   coldOpenMessage,
-  coldPlaceBelow,
   offCanvasNoticeText,
   offCanvasReplyClause,
   coldResolveAfter,
@@ -300,6 +353,9 @@ import {
   storedAgentIdOf,
   type ColdNode
 } from '../lib/coldOpen'
+import { stampOpenedBy, withOpenedBy } from '../lib/stationOpener'
+import { installStationNoticeWiring } from '../lib/stationNoticeWiring'
+import { installBoardDispatchReportWiring } from '../lib/boardDispatchReportWiring'
 import { applyStickyWrite, parseStickyArgs, resolveStickyRef } from '@shared/sticky-write'
 import {
   unavailableRecovery,
@@ -310,6 +366,7 @@ import {
   nextFreePosition,
   armForColdOpen,
   projectTargetFlagRefusal,
+  resolveProjectTarget,
   clearAttachConsent,
   folderName
 } from '../lib/projectOpen'
@@ -334,6 +391,11 @@ import {
 import { planSessionKill } from '../lib/sessionKill'
 import { sessionPauseOffer, type SessionPauseOffer } from '../lib/sessionPause'
 import { RemoteAccessDialog } from '../components/RemoteAccessDialog'
+import { ShareTeamDialog } from '../components/ShareTeamDialog'
+import { runShare, type ShareConfirmSummary, type ShareOutcome, type SharePhase } from '../lib/shareSshTeam'
+import { followSharedProject, shareCanvas, shareProjectDeps } from '../lib/shareTeamCanvas'
+import { handedOffWarning } from '../lib/handedOff'
+import { skipNextColdResumeFor } from '../terminal/handed-off-resume'
 import { SshProjectDialog } from '../components/SshProjectDialog'
 import { SshPassphrasePrompt } from '../components/SshPassphrasePrompt'
 import { transport } from '../terminal/local-transport'
@@ -374,6 +436,15 @@ import { opensInEditor } from '../lib/openTarget'
 import { displacedFilesPatch } from '../lib/filesNode'
 import { newEntryPath, parentDir } from '../lib/explorerCreate'
 import {
+  liveChatShown,
+  nextLiveChat,
+  readLiveChatLink,
+  readLiveChatPinned,
+  writeLiveChatLink,
+  writeLiveChatPinned,
+  type LiveChatState
+} from '../lib/liveChatPin'
+import {
   explorerIsOpen,
   nextExplorerPin,
   nextExplorerShow,
@@ -387,8 +458,10 @@ import {
   shouldShowExplorerPinHint,
   writeSeenExplorerPinHint
 } from '../lib/explorerPinHint'
-import { useProjects } from '../state/projects'
-import { useAgentStatus } from '../state/agentStatus'
+import { sameSshEndpoint, setKanbanPublishHook, setStoredCanvasPublishHook, useProjects } from '../state/projects'
+import { useAgentStatus, recordsTurnInterrupt } from '../state/agentStatus'
+import { hostChatSend, hostChatSession, hostChatStatus } from '../lib/hostChatQuery'
+import { chatPaneRefusal } from '../lib/chatPaneGate'
 import { useLaunchDelivery } from '../state/launchDelivery'
 import { useBrowserLease, drivingNodeIds } from '../state/browserLease'
 import { useTerminalFocus } from '../state/terminalFocus'
@@ -417,7 +490,6 @@ import {
   isRemoteSessionNode,
   resolveBaseRef,
   sanitizeWorktreeBranch,
-  worktreeFromCreate,
   worktreeFromEntry,
   worktreeRemoveMessage,
   resolveWorktreeBase,
@@ -447,6 +519,7 @@ import { activeSessionApi } from '../session/session'
 import {
   agentConfig,
   hasHooks,
+  hasHooksOverSsh,
   canBranch,
   canRename,
   canContextLink,
@@ -455,25 +528,74 @@ import {
   inheritableAccountId,
   createdAgentId,
   resumeCommand,
+  canResumeWith,
   vanillaEnvStripPattern,
   AGENT_CONFIG,
   BUILTIN_AGENT_IDS,
+  resolvePermissionMode,
   type AgentId,
   type AgentPermissionMode
 } from '@shared/agents/config'
 import { withPermissionMode } from '@shared/agents/approval-mode'
 import { promptFilePathError } from '@shared/agents/launch'
-import {
-  encodeUtf8Base64,
-  shouldSpillPrompt,
-  spillPromptToFile
-} from '../lib/promptSpill'
+import { encodeUtf8Base64, launchPromptFor } from '../lib/promptSpill'
 import { parseTeamSpec } from '../lib/teamSpec'
 import { relativeTime } from '../lib/relativeTime'
 import { AgentIcon } from '../lib/agentIcons'
+import type { RecentConversation } from '@shared/recent-conversations'
+import {
+  heldSessions,
+  localCodexAccountIds,
+  worktreeGroups,
+  planResume,
+  folderLabel,
+  recentTitle,
+  resumeActionLabel,
+  RESUME_REFUSALS,
+  type ResumeContext
+} from '../lib/recentConversations'
 import { nodeIconDialog } from '../components/NodeIconPicker'
 import { applyIconChoice } from '../lib/nodeIconChoice'
 import type { NodeIcon } from '@shared/node-icon'
+import {
+  formatIssueRef,
+  issueKey,
+  issueLaunchPrompt,
+  issueRefFromHtmlUrl,
+  normalizeIssueRef,
+  type IssueRef
+} from '@shared/github-issue-ref'
+import { dispatchBinding, sanitizeBoardDispatch, type BoardDispatchProject } from '@shared/board-dispatch'
+import {
+  DISPATCH_DRAIN_MS,
+  DISPATCH_REFUSAL_TEXT,
+  decideDispatch,
+  dispatchableAgent,
+  moveWithdrawsDispatch,
+  occupiesSlot,
+  queueToDrop,
+  queueToStart,
+  recheckQueued,
+  type QueuedCardFact
+} from '../lib/boardDispatch'
+import { dispatchEntry, useBoardDispatch, type DispatchCardEntry } from '../state/boardDispatch'
+import type { GitHubIssueCardView as DispatchIssueCard } from '@shared/github-issues'
+import { planIssueWorktree } from '@shared/issue-worktree'
+import { sharedBasePathOf, sharedWorktreeLocationRefusal } from '@shared/worktree-location'
+import {
+  frameAgentPlacement,
+  issueWorktreeChoiceCopy,
+  issueWorktreeFrames,
+  issueWorktreeRefusal,
+  issueWorktreeRenamedNotice,
+  runExclusive,
+  type IssueWorktreeAsk,
+  type IssueWorktreeChoice,
+  type IssueWorktreeMenuAnswer
+} from '../lib/issueWorktree'
+import { runEndedEntry, runStartedEntry } from '../lib/issueRuns'
+import { issueFlagScope, resolveIssueFlagForCall, type IssueFlagResult } from '../lib/issueFlag'
+import type { GitHubIssueCardView } from '@shared/github-issues'
 import { branchClaudeSession } from '../lib/claudeBranch'
 import {
   useSession,
@@ -482,6 +604,8 @@ import {
   presenceForProject,
   setActiveSession,
   disposeSession,
+  holdSessionTeardown,
+  projectIdsBoundToSession,
 } from '../session/session'
 import {
   openRelayTab,
@@ -490,22 +614,63 @@ import {
   type RelayTab,
 } from '../session/relay-tab'
 import { spawnSlot, type Box as SpawnBox } from '../lib/spawnPlacement'
-import { buildContextLinkNote, buildNotePushMessage, classifyLink, hiddenLinkIds, linkIdsCoveredByRopes, pairKey, planBridges, type LinkEndpoint } from '../lib/noteLink'
+import { HostedApprovalDialog } from '../components/HostedApprovalDialog'
+import { emitLocalRelayClose, onLocalRelayClose } from '../bridge/relay-local-close'
+import { isJoinCode } from '@shared/relay-join-code'
+import { createHostedJoiner, type HostedJoiner, type HostedMountOutcome } from '../lib/hostedJoin'
+import { createTeamTabs, reconcileTeamTabs, type TeamTabs } from '../lib/hostedTeamTabs'
+import { isOpenTab, teamTabStoreOps } from '../lib/hostedTeamTabStore'
+import { HOSTED_APPROVAL_WAIT_MS, isReadOnlyRole, stripIpcPrefix, viewerBannerText } from '../lib/hostedTeam'
+import { answerHostedRequest, type HostedAnswer } from '../lib/hostedOwner'
+import { headRequest, type QueuedRequest } from '../lib/hostedPendingQueue'
+import { useHostedPending } from '../state/hostedPending'
+import { hostedInfoFor, isHostedReadOnly, useHostedTeams } from '../state/hostedTeams'
+import { appendBridgeEdges, bridgeToEdge, buildContextLinkNote, contextLinkForEdge, buildNotePushMessage, classifyLink, edgeToBridge, gainedReaders, hiddenLinkIds, isCurrentLinkDirection, linkIdsCoveredByRopes, linkReadPairs, pairKey, planBridges, withLinkReader, type LinkEndpoint } from '../lib/noteLink'
 import {
   abandonLaunch,
   beginLaunch,
   forgetArmed,
   isLaunchInFlight,
   pruneArmed,
+  deliveriesToRetire,
   launchesToFire,
   markArmedThisSession,
   queueControlLaunch,
   settleLaunch,
   wasArmedThisSession,
+  withPrHold,
+  withSuccessHold,
+  withLaunchBrief,
+  launchBriefPresent,
   LAUNCH_STALL_MS,
   type ArmedNode
 } from '../lib/pendingLaunch'
-import { WAIT_LABEL, dropAfterDep, edgeHidden, hiddenEdgeNodeIds, missingDepRopes, ropeInfoOf, ropeVisual } from '../lib/edgeModel'
+import { prHoldReports, prWaitReplyLine, resolvePrWaitFor, startFreshReadAsks, type PrWaitArmResult } from '../lib/prWait'
+import { RUN_NOW_AFTER_PR_REFUSAL } from '@shared/pr-wait'
+import {
+  afterSuccessFlagRefusal,
+  normalizeSuccessWaitHold,
+  parseAfterSuccessArg,
+  parseSuccessDeadlineArg,
+  outcomeOf,
+  successDepRefusal,
+  type SuccessWaitHold
+} from '@shared/station-outcome'
+import { useStationOutcomes } from '../state/stationOutcomes'
+import { installStationOutcomeWiring } from '../lib/stationOutcomeWiring'
+import { useStationHandovers } from '../state/stationHandovers'
+import { installStationHandoverWiring } from '../lib/stationHandoverWiring'
+import { lookupPullRequests, pullBoardFor, useGitHubIssues } from '../state/githubIssues'
+import { usePullChase } from '../components/kanban/usePullAutoMove'
+import {
+  createBoundWorktree,
+  type CreateBoundWorktreeDeps,
+  type WorktreeAttachTarget
+} from '../lib/worktreeCreate'
+import {
+  WAIT_LABEL, dropAfterDep, edgeHidden, hiddenEdgeNodeIds, markLegacyWaitRopes, missingDepRopes, pruneRopes,
+  ropeInfoOf, ropeVisual, waitRopeId
+} from '../lib/edgeModel'
 import { triggerEdges } from '../lib/triggerCard'
 import { freeSpot } from '../lib/placement'
 import { pushSessionRename, sessionNameUnchanged } from '../lib/sessionRename'
@@ -513,6 +678,8 @@ import { useReopenHistory, type ReopenEntry } from '../state/reopenHistory'
 import { snapshotNode, recreateNodeFromSnapshot } from '../lib/reopenNode'
 import {
   buildClosedSessionEntries,
+  CLOSED_TEAM_TAB_NOTICE,
+  isClosedTeamTab,
   recentlyClosedProjects,
   stateToReopenSnapshot
 } from '../lib/closedHistory'
@@ -551,12 +718,15 @@ import { sshHostKey } from '@shared/ssh'
 import type {
   BridgeLink,
   ClaudeSessionCopyResult,
+  CanvasMutation,
   CanvasNodeState,
   ClosedSessionEntry,
+  HostedSessionApi,
   NodeKind,
   PendingLaunch,
   Project,
   ProjectKanban,
+  PtyCreateOptions,
   SshPassphraseRequest,
   SshProjectStatus,
   TranscriptHit
@@ -566,29 +736,68 @@ import { assignNode, assignedTo, defaultKanban, labelsForCard, migrateProjectTag
 import { registerWorkspaceDirty } from '../state/workspaceDirty'
 import { snapNodeToGrid } from '../lib/nodeSizing'
 import { snapResizeChanges } from '../lib/resizeSnap'
-import { canClearDirty, canCommitCanvas, canCreateOnCanvas } from '../state/persistGuards'
-import { useNodesEpoch } from './nodesEpoch'
+import { canClearDirty, canCommitCanvas, canCreateOnCanvas, liveCanvasHolds } from '../state/persistGuards'
+import { mirrorLatest, rebaseOnLatest, useNodesEpoch } from './nodesEpoch'
+import { boardLiveNodeIds, createKanbanPublisher } from './kanban-sync'
+import { applyToStoredCopy, createStoredCanvasPublisher } from './stored-publish'
 import { isHidden } from '../lib/ui-visibility'
 import { boardLogEvents } from '../lib/boardLogDiff'
 import { useBoardLog } from '../state/boardLog'
-import { isGlobalKanbanOpen, isKanbanOpen, isOmniKanbanEnabled, useViewMode, viewFor } from '../state/viewMode'
+import {
+  isGlobalKanbanOpen,
+  isKanbanOpen,
+  isOmniKanbanEnabled,
+  showCanvas,
+  toggleAllProjectsBoard,
+  toggleBoardView,
+  useViewMode,
+  viewFor
+} from '../state/viewMode'
 import { GlobalKanbanView } from '../components/kanban/GlobalKanbanView'
 import { useFocusNode, FOCUS_SURFACE_ID } from '../state/focusNode'
 import { focusTargetId } from '../lib/focusTarget'
 import {
   createCanvasPublisher,
   isEphemeralNodeId,
-  publishableStates,
+  publishableScene,
   type CanvasPublisher
 } from '@shared/canvas-publish'
-import { createCanvasOrder, createReconnectWatch, type CanvasOrder } from '@shared/canvas-order'
-import { createMutationGuard } from '@shared/canvas-mutations'
+import {
+  createCanvasOrder,
+  createReconnectWatch,
+  isRemoveOp,
+  mutationKey,
+  type CanvasOrder
+} from '@shared/canvas-order'
+import {
+  applyEdgeMutationToScene,
+  createMutationGuard,
+  diffToMutations,
+  isEdgeMutation,
+  type CanvasScene
+} from '@shared/canvas-mutations'
+import { isKanbanOp } from '@shared/kanban-ops'
 import { chordHeld, isHoldChord, isModifierEventKey, matchesShortcut } from '@shared/shortcut'
 
 // The dispatch below is the CONSUMER of the confirm-gated set. Before this import the set named
 // write/close as "the confirm-gated pair" from inside `src/main` — which this project cannot see —
 // while the gating lived in two hand-written blocks here, so the set decided nothing.
-import { isDestructiveVerb, dryRunRequested } from '@shared/control-verbs'
+import {
+  isDestructiveVerb,
+  dryRunRequested,
+  runNowRequested,
+  RUN_NOW_AFTER_REFUSAL
+} from '@shared/control-verbs'
+import {
+  claimForHeadless,
+  headlessStartNoticeText,
+  mergeRunNow,
+  planRunVerb,
+  savePendingAnywhere,
+  startHeadless,
+  unhidesForHeadlessStart,
+  type HeadlessStartBatch
+} from '../lib/headlessRun'
 import {
   SETTINGS_VERB_KEY_LIST,
   parseSettingsRequest,
@@ -611,7 +820,14 @@ import {
   parseCloseTargets,
   CLOSE_BULK_MAX
 } from '../lib/closeTargets'
-import { canvasSyncTarget } from './collab-sync'
+import {
+  canvasSyncTarget,
+  followGoverned,
+  NO_PROJECTS,
+  provesPeer,
+  shouldPublish,
+  type GovernedProjects
+} from './collab-sync'
 import {
   applyCanvasMutation,
   applyMutationToFlow,
@@ -644,7 +860,7 @@ import {
   nodeSshFor,
   createVideoNode,
   createWebNode,
-  isMediaFile,
+  fileViewerKind,
   duplicateNode,
   flowToNodeStates,
   addSelectionToGroup,
@@ -663,6 +879,7 @@ import {
   refitMaximizedNode,
   restoreMaximizedNode,
   placeNodeInRect,
+  terminalNodeSize,
   type CanvasNode
 } from '../state/workspace'
 import { codexAccountSelectable, codexAccountSwitchStillEligible } from './codex-account-switch'
@@ -679,6 +896,7 @@ import {
   claudeSwitchHostKey,
   claudeSwitchTargets,
   planClaudeAccountSwitch,
+  startBulkSwitch,
   summarizeBulkSwitch,
   switchOutcomeNotice,
   type BulkSwitchNode,
@@ -686,9 +904,13 @@ import {
 } from './claude-account-switch'
 import type { CodexAccount } from '@shared/codex-account'
 import { useSystemCodexAccount } from '../state/systemCodexAccount'
-import { toKanbanSession } from './toKanbanSession'
+import { kanbanSessionsFrom, toKanbanSession } from './toKanbanSession'
+import type { TeamStation } from '../lib/teamProgress'
+import { canvasTeamStations, useTeamStations } from '../state/teamStations'
+import { applyPullAutoMove } from '../lib/pullAutoMove'
 import { useWallpaperBackground, wallpaperLayers } from '../state/wallpaper'
 import { showCanvasDots } from '../lib/canvasDots'
+import { PROJECT_NAME_MAX, clampProjectName } from '@shared/project-name'
 
 const isMac = /Mac/i.test(navigator.platform || navigator.userAgent)
 
@@ -728,6 +950,24 @@ const NOTICE_MAX_MS = 15000
 function noticeDwellMs(text: string): number {
   return Math.min(NOTICE_MAX_MS, NOTICE_MS + text.length * 25)
 }
+
+/** React Flow props for a hosted team tab whose role is below Editor. */
+const HOSTED_READ_ONLY_FLOW = { nodesDraggable: false, nodesConnectable: false } as const
+
+/** How a hosted team's connection mounts (see `mountRemoteMirror`). */
+interface HostedMountOpts {
+  /** Switch to the team's tab once it is live (a reconnect nobody asked for does not). */
+  activate: boolean
+  /** This user confirmed the SAS: the owner's approval wait starts now. */
+  onSasConfirmed?: () => void
+  /** The team, for its tabs (one per project it shares). */
+  hostId: string
+  /** The tab to land on when the mount takes the screen, when it is among the placed ones. */
+  focusProjectId?: string
+}
+
+/** What the agent-control handler's `reply` accepts, for helpers that build one outside it. */
+type ControlReply = { ok: boolean; message?: string; result?: unknown; error?: string }
 
 /** The confirm dialogs, named so their setters can be wrapped in a synchronous open-guard (see
  *  `confirmFlags`): ONE confirm at a time, decided at call time rather than at the next render. */
@@ -857,6 +1097,12 @@ const WORKTREE_SSH_NOTICE = 'Worktrees are not supported in SSH projects yet.'
 const WORKTREE_NO_CWD_NOTICE =
   'This project has no folder, so it has no git repository to add a worktree to. Set one first (tab ⌄ → “Set folder…”).'
 const FOCUS_NO_TARGET_NOTICE = 'Select a terminal or agent node to focus.'
+/** `addAgentNode`'s up-front refusals, shared with `agentCreateRefusal` (one wording per reason). */
+const CANVAS_NOT_ACTIVE_NOTICE =
+  'Could not create the node: the canvas on screen is not the active project’s. Switch tabs once and try again.'
+const CODEX_ACCOUNT_NO_CONNECTION_NOTICE =
+  'That Codex account lives on a host that is not connected — connect its SSH project first.'
+const CODEX_ACCOUNT_GONE_NOTICE = 'That Codex account is no longer available. Nothing was created.'
 
 // The webview's file loader renders off the LOCAL disk and has no remote counterpart, so a host
 // path from a remote agent could only resolve to a same-named local file — or nothing. Refuse and
@@ -970,7 +1216,9 @@ interface ControlSurface {
   nodes: () => CanvasNode[]
   setNodes: (next: CanvasNode[] | ((ns: CanvasNode[]) => CanvasNode[])) => void
   ropes: () => readonly { source: string; target: string }[]
-  addRope: (source: string, target: string, color: string) => void
+  /** `id` defaults to the opener rope's `ctrl-<source>-<target>`; an `--after` wait passes
+   *  `waitRopeId(dep, node)` (lib/edgeModel) so the two kinds of rope stay distinguishable. */
+  addRope: (source: string, target: string, color: string, id?: string) => void
   pruneRopes: (gone: Set<string>) => void
   bridges: () => readonly { source: string; target: string }[]
   addBridges: (edges: readonly BridgeLink[]) => void
@@ -1034,6 +1282,10 @@ const ropeEdge = (id: string, source: string, target: string): Edge => ({
 /** The one edge renderer — every family routes between nearest borders (see FloatingEdge). */
 const edgeTypes = { floating: FloatingEdge }
 
+/** A React Flow edge reduced to what is PERSISTED (and what goes on the wire). The decoration —
+ *  colour, markers, the waiting look — is re-derived on every client at render time
+ *  (`displayEdges` / `ropeVisual`), so it never travels. */
+const toBridgeLink = (e: Edge): BridgeLink => ({ id: e.id, source: e.source, target: e.target })
 
 const minimapNodeColor = (n: Node): string =>
   (n.data as { color?: string })?.color ?? '#0a84ff'
@@ -1155,15 +1407,28 @@ export function Canvas() {
   const [nodes, setNodes, onNodesChange] = useNodesState<CanvasNode>([])
   // Persistent context links between Claude nodes (separate from ephemeral subagent/loop edges).
   const [linkEdges, setLinkEdges, onLinkEdgesChange] = useEdgesState<Edge>([])
-  const linkEdgesRef = useRef<Edge[]>([])
-  linkEdgesRef.current = linkEdges
+  // The edge refs are the LATEST edges, which is not always the rendered state. Three writers — the
+  // project load, a server change, a peer's edge op (canvas sync) — assign a ref synchronously
+  // beside its setter, because the setter lands on a later render and the next event must build on
+  // the new edges. A render can come FIRST that skips that pending update: a zustand write is a
+  // SyncLane re-render and the setter a DefaultLane one (see nodesEpoch.ts). So the render-time
+  // mirror only copies the state when the STATE changed; an unconditional copy put the previous
+  // project's edges back into the ref in exactly the window the synchronous write closes.
+  // It is gated on the epoch as well, beside the node mirror (`mirrorLatest`, below `useNodesEpoch`).
+  const linkEdgesRef = useRef<Edge[]>(linkEdges)
+  const linkEdgesMirroredRef = useRef<Edge[]>(linkEdges)
   // "Spawned by" ropes drawn from a control-capable agent to the nodes it opens via the
   // `nodeterm` CLI (see the onAgentControl effect) and from browser popups to their opener.
   // Merged only at the <ReactFlow> prop and never turned into context links, but PERSISTED
   // per project (`ropes`) so the lineage survives restarts; deletable like a context link.
   const [controlEdges, setControlEdges] = useState<Edge[]>([])
-  const controlEdgesRef = useRef<Edge[]>([])
-  controlEdgesRef.current = controlEdges
+  // Same latest-not-rendered mirror as linkEdgesRef above, for the same three writers.
+  const controlEdgesRef = useRef<Edge[]>(controlEdges)
+  const controlEdgesMirroredRef = useRef<Edge[]>(controlEdges)
+  // The stored-canvas publisher (canvas/stored-publish.ts) the sync effect below registers, kept
+  // here too so the fork's own whole-canvas store writes (`commitStoredCanvas`: the control
+  // surface's off-screen commits, `deleteStoredNodes`) publish like every other own store writer.
+  const storedCanvasPublishRef = useRef<ReturnType<typeof createStoredCanvasPublisher> | null>(null)
   // Nodes opened with `--auto-close yes` BY THIS PROCESS → the node that opened them. In memory on
   // purpose, never persisted: the flag authorizes closing a session without a confirm dialog, and
   // a flag loaded from the git-shared project file (or a canvas-sync peer) would be consent nobody
@@ -1320,7 +1585,8 @@ export function Canvas() {
    */
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent): void => {
-      if (spacePanKeydown(e, document.activeElement) !== 'engage') return
+      const covered = isGlobalKanbanOpen() || isKanbanOpen(useProjects.getState().activeProjectId)
+      if (spacePanKeydown(e, document.activeElement, covered) !== 'engage') return
       e.preventDefault()
       setSpacePan(true)
     }
@@ -1476,6 +1742,16 @@ export function Canvas() {
   // Live relay tabs, keyed by relay connectionId, so a host/relay drop can dispose the right one
   // (a remote connection is now a project TAB, not a full-surface overlay — Stage 4 Task 6).
   const relayTabsRef = useRef<Map<string, RelayTab>>(new Map())
+  // The hosted-team joiner (created below, with the relay mount it drives): here so the tab disposal
+  // can stop a closed tab's reconnect.
+  const hostedJoinerRef = useRef<HostedJoiner | null>(null)
+  // One tab per shared project of a hosted team (lib/hostedTeamTabs.ts), over the store ops in
+  // lib/hostedTeamTabStore.ts; the relay binding and the joiner bookkeeping stay here. Built once
+  // (the model holds every team's tab set, and Canvas renders far too often to rebuild it each time).
+  const [teamTabs] = useState<TeamTabs>(() => {
+    const tabs: TeamTabs = createTeamTabs(teamTabStoreOps((id) => tabs.teamOf(id)))
+    return tabs
+  })
   // A relay tab is a live client of a remote core — closing/deleting its project must tear the
   // relay session down (held presence teardown + socket close), or the peer lingers in the host's
   // facepile and the socket leaks until quit. Runs on BOTH close and delete (unlike a local tmux
@@ -1488,15 +1764,33 @@ export function Canvas() {
   // a still-live tab, no-ops them for an already-offline one, and unbinds + drops the entry either
   // way. We also sweep any live relayTabsRef entry for the project so a dead connectionId can't linger.
   const disposeRelayTabForProject = useCallback((projectId: string) => {
-    for (const [connectionId, tab] of relayTabsRef.current) {
-      if (tab.projectId === projectId) relayTabsRef.current.delete(connectionId)
+    // One of a hosted team's several tabs: dismiss just this one. The team's connection lives on
+    // for the others (and the joiner keeps reconnecting into one that is still open).
+    const { remaining } = teamTabs.closeTab(projectId)
+    if (remaining.length > 0) {
+      hostedJoinerRef.current?.tabRemoved(projectId, remaining[0])
+      return
     }
+    // A hosted tab's team stops trying to come back into it, in any phase (R40). A no-op otherwise.
+    hostedJoinerRef.current?.tabClosed(projectId)
     const s = sessionForProject(projectId)
-    if (s.source === 'relay') disposeSession(s.id)
-  }, [])
+    for (const [connectionId, tab] of relayTabsRef.current) {
+      // By session too: a team's last tab may be one a share event opened after the mount. Never
+      // while the connection still serves other tabs (one closed earlier lingers in `projectIds`).
+      const ours = tab.projectIds.includes(projectId) || (s.source === 'relay' && tab.sessionId === s.id)
+      const othersBound = projectIdsBoundToSession(tab.sessionId).some((id) => id !== projectId)
+      if (ours && !othersBound) relayTabsRef.current.delete(connectionId)
+    }
+    if (s.source === 'relay') {
+      disposeSession(s.id)
+      useHostedTeams.getState().forget(s.id) // a no-op for a Team Access relay tab
+    }
+  }, [teamTabs])
   const [remoteDialogOpen, setRemoteDialogOpen] = useState(false)
   // "Connect over SSH…" project-creation dialog (from the Welcome screen).
   const [sshDialogOpen, setSshDialogOpen] = useState(false)
+  // The SSH project "Share with team" is running for (its dialog is open while set).
+  const [shareProjectId, setShareProjectId] = useState<string | null>(null)
   // "Clone repository…" dialog (from the Welcome screen + command palette).
   const [cloneDialogOpen, setCloneDialogOpen] = useState(false)
   // Live SSH ControlMaster status per project id (drives the thin connection banner).
@@ -1515,12 +1809,30 @@ export function Canvas() {
   const sshPassphraseRequest = sshPassphraseQueue[0] ?? null
   // A client has finished the handshake and is awaiting this host's approval (carries the SAS).
   const [pendingPeer, setPendingPeerState] = useState<PendingPeerState | null>(null)
+  // Devices asking to join a hosted team this device OWNS (lib/hostedPendingQueue.ts, fed per owner
+  // tab by relay-tab's owner subscription): the oldest is on screen, the rest wait their turn. Empty
+  // for anyone who owns no hosted team, so nothing renders.
+  const hostedHead = useHostedPending((st) => headRequest(st.queue))
+  const hostedMore = useHostedPending((st) => Math.max(0, st.queue.items.length - 1))
+  const hostedPendingNotice = useHostedPending((st) => st.notice)
+  useEffect(() => {
+    if (hostedPendingNotice) setNotice({ kind: 'info', text: hostedPendingNotice.text })
+  }, [hostedPendingNotice])
+  const answerHosted = useCallback((item: QueuedRequest, answer: HostedAnswer) => {
+    // Off the screen at once; settled only once the host answers (R40), then say what did not land.
+    const q = useHostedPending.getState()
+    void answerHostedRequest(item, answer, { begin: q.beginAnswer, finish: q.finishAnswer }).then((line) => {
+      if (line) setNotice(line)
+    })
+  }, [])
   const [confirm, setConfirmState] = useState<ConfirmState | null>(null)
   // The closed-session entry whose transcript is on screen (issue #531), or null. A SNAPSHOT of
   // the ledger row, not a reference into the store: reading it needs only the pointer it carries.
   const [closedTranscript, setClosedTranscript] = useState<ClosedSessionEntry | null>(null)
   // Node to center once its project finishes loading (cross-project notification click).
   const pendingFocusRef = useRef<string | null>(null)
+  // "Open recent": a conversation to resume once the project it belongs to is on the canvas.
+  const pendingResumeRef = useRef<{ projectId: string; conv: RecentConversation } | null>(null)
   // One-shot: the next active-project load keeps the CURRENT camera instead of applying the
   // project's saved viewport. Set by reloadActiveProject (in-place external-change reload).
   const preserveViewportRef = useRef(false)
@@ -1636,6 +1948,9 @@ export function Canvas() {
     confirmLabel: string
     danger: boolean
   } | null>(null)
+  // Issue #848 (opt-in): the project whose LAST session node the user just closed with ×, awaiting
+  // "close the project too?". Declining only clears this; the session was already ended by ×.
+  const [lastSessionOffer, setLastSessionOfferState] = useState<{ id: string; name: string } | null>(null)
   const [mergePush, setMergePush] = useState(false)
   const settings = useSettings((s) => s.settings)
   const gatewayModels = useModelGateway((s) => s.models)
@@ -1677,7 +1992,15 @@ export function Canvas() {
    * load effect, cleared (null) on its bail-out paths; null until the first load, so the initial
    * empty `useNodesState([])` can never be committed as some project's canvas.
    */
-  const { nodesRef, nodesProjectIdRef, installEpoch } = useNodesEpoch(nodes)
+  const { nodesRef, nodesProjectIdRef, renderedProjectId, installEpoch } = useNodesEpoch(nodes)
+  // The two edge refs' render-time mirrors (declared beside their state, above), under the node
+  // mirror's two conditions: the state CHANGED, and this render belongs to the latest epoch. Without
+  // the second, a discrete `setLinkEdges(fn)` in a switch window renders fn(the OUTGOING project's
+  // edges) and the mirror put them in the ref under the incoming project's tag, so the edge publisher
+  // diffed the incoming project against them and cast spurious `edge-remove`s into it (D4).
+  const inLatestEpoch = renderedProjectId === nodesProjectIdRef.current
+  mirrorLatest(linkEdges, linkEdgesMirroredRef, linkEdgesRef, inLatestEpoch)
+  mirrorLatest(controlEdges, controlEdgesMirroredRef, controlEdgesRef, inLatestEpoch)
   /**
    * The project whose webview nodes the NEXT load must retire into the keep-alive pool. Separate
    * from `nodesProjectIdRef` on purpose: the epoch tag is invalidated on the load effect's
@@ -1710,9 +2033,6 @@ export function Canvas() {
   const onCanvasMoveStart = useCallback(() => {
     if (movingClearRef.current) clearTimeout(movingClearRef.current)
     movingClearRef.current = null
-    // Every appearance: freeze the viewport's raster scale for the duration of the move (see the
-    // `.canvas-camera-moving` rule). Before the glass early-return — this is not a glass feature.
-    flowWrapRef.current?.classList.add('canvas-camera-moving')
     if (keepBlurWhileMovingRef.current) return
     flowWrapRef.current?.classList.add('canvas-moving')
   }, [])
@@ -1721,7 +2041,6 @@ export function Canvas() {
     movingClearRef.current = setTimeout(() => {
       movingClearRef.current = null
       flowWrapRef.current?.classList.remove('canvas-moving')
-      flowWrapRef.current?.classList.remove('canvas-camera-moving')
     }, 150)
   }, [])
   useEffect(
@@ -1752,6 +2071,20 @@ export function Canvas() {
    * Sticky once a peer mutation actually arrives: proof of a peer that outranks any table.
    */
   const hasPeersRef = useRef(false)
+  /**
+   * The projects the ACTIVE core's canvas authority governs (docs/hosted-team-relay.md): their
+   * content is written only from the ops the authority hears, so the gate publishes for them even
+   * when nobody else is attached. Per core, like `hasPeersRef`, and a ref for the same reason (the
+   * gate is asked at ~20 Hz while a node is dragged). Empty on the desktop, which governs nothing.
+   *
+   * The MOUNT window: before a core first answers, a Server Edition core counts every project as
+   * governed (`assumeAllUntilAnswered`), so no edit made in that round trip goes unpublished; a
+   * desktop or Team Access core governs nothing, and a hosted relay tab answers from its bindings at
+   * once. What remains is the SHARE-TIME window, described at `onSharedChange` in src/server/index.ts.
+   */
+  const governedRef = useRef<GovernedProjects>(NO_PROJECTS)
+  /** This Canvas's publisher tag (the `src` it stamps): what `provesPeer` tells our own echo by. */
+  const canvasSrcRef = useRef<string | null>(null)
   const [, bumpHist] = useState(0)
   // Same trick as bumpHist, for the breadcrumb cursor: the Dock's back/forward buttons read
   // navRef during render, and a ref mutation is invisible to React — so every write to
@@ -1873,7 +2206,18 @@ export function Canvas() {
   // tab switch. Reading presence imperatively via `.store.getState()`/`.subscribe` (never a reactive
   // `usePresence(sel)` hook) is the PERF CONTRACT: a peer's 20 Hz cursor never re-renders Canvas.
   const activeSession = sessionForProject(activeProjectId || '')
+  // Dev-server ports of the project on screen (CLAUDE.md → Dev-server ports): a primitive of its
+  // terminal ids, so a drag or an edit does not re-run the scanner's effects.
+  const devPortTerminalSig = useMemo(
+    () => nodes.filter((n) => n.type === 'terminal').map((n) => n.id).join(','),
+    [nodes]
+  )
+  useDevPortScanner(activeProjectId || '', devPortTerminalSig)
   const activePresence = presenceForProject(activeProjectId || '')
+  // The active tab's hosted team, when it is one (undefined for every other tab). A role below Editor
+  // makes the canvas read-only in the UI; the host enforces the role either way.
+  const activeHosted = useHostedTeams((st) => st.bySession[activeSession.id])
+  const hostedReadOnly = isReadOnlyRole(activeHosted?.role)
   // "Has projects" = at least one OPEN (non-closed) tab. With only closed projects left, the
   // welcome screen shows (and lists them under "Recently closed" for reopening).
   const hasProjects = useProjects((s) => s.projects.some((p) => !p.closed))
@@ -1909,7 +2253,9 @@ export function Canvas() {
     merge: false,
     peer: false,
     closeProject: false,
-    deleteProject: false
+    deleteProject: false,
+    issueWorktree: false,
+    lastSessionOffer: false
   })
   // Every confirm setter flips its flag AT CALL TIME. Assigning the mirror during RENDER (what this
   // used to do) is a tick too late: two agent verbs arriving in separate IPC events before React
@@ -2008,9 +2354,45 @@ export function Canvas() {
       f.peer ||
       f.closeProject ||
       f.deleteProject ||
+      f.issueWorktree ||
+      f.lastSessionOffer ||
       removePendingRef.current
     )
   }, [])
+  // Issue #848's offer is an actionable dialog like the rest, so it is in the same guard: an agent
+  // `write`/`close` or a worktree removal must not stack over it (flag flipped at call time).
+  const setLastSessionOffer = useCallback((v: { id: string; name: string } | null) => {
+    confirmFlags.current.lastSessionOffer = !!v
+    setLastSessionOfferState(v)
+  }, [])
+  // Issue #848: TerminalNode's × announces the user's own close (and nothing else does — not an
+  // exit, restart, hibernation, bulk delete, canvas-control close, project close or quit). Decided
+  // HERE against the live canvas while the closed node is still on it, and only for the project
+  // whose nodes `nodesRef` actually holds — see lib/lastSessionClose for what counts as a session.
+  useEffect(() => {
+    const onUserClosedSession = (e: Event): void => {
+      const nodeId = (e as CustomEvent<{ nodeId?: unknown }>).detail?.nodeId
+      if (typeof nodeId !== 'string') return
+      // One actionable dialog at a time: if any confirm is open — or being opened (the async gap
+      // in requestRemoveWorktree) — SKIP the offer rather than queue it. It is a convenience tied
+      // to this click; raised later it would no longer be about what the user just did (and the
+      // project may have sessions again). Closing the project by hand remains one menu away.
+      if (confirmBusy()) return
+      const store = useProjects.getState()
+      const projectId = nodesProjectIdRef.current
+      if (!projectId || projectId !== store.activeProjectId) return
+      const project = store.getProject(projectId)
+      const offer = shouldOfferProjectClose({
+        enabled: useSettings.getState().settings.offerCloseProjectOnLastSession,
+        closedNodeId: nodeId,
+        nodes: nodesRef.current,
+        project
+      })
+      if (offer && project) setLastSessionOffer({ id: project.id, name: project.name })
+    }
+    window.addEventListener(USER_CLOSED_SESSION_EVENT, onUserClosedSession)
+    return () => window.removeEventListener(USER_CLOSED_SESSION_EVENT, onUserClosedSession)
+  }, [confirmBusy, setLastSessionOffer])
 
   const nodeTypes = useMemo(
     () => ({
@@ -2062,7 +2444,28 @@ export function Canvas() {
       const p = n.data.pendingLaunch
       if (!p) continue
       sig += `${n.id}:`
-      for (const d of p.after) sig += `${d}=${s.byId[d]?.state ?? ''},`
+      // The last-turn verdicts ride the signature too: a verdict can clear while the state stays
+      // `done` (a keystroke-guessed interrupt, then the turn's real Stop), and the launch effect
+      // must re-run to release the dependent then.
+      for (const d of p.after) {
+        const st = s.byId[d]
+        sig += `${d}=${st?.state ?? ''}${st?.lastTurnError ? 'e' : ''}${st?.lastTurnInterrupted ? 'i' : ''},`
+      }
+      sig += '|'
+    }
+    return sig
+  })
+  // ---- work handed to the stations an armed node waits on (plain `--after`) ----
+  // A station handed new work it has not finished (core/station-handover.ts) is never a satisfied
+  // dep, whatever its state reads. A PRIMITIVE signature over the armed nodes' deps only — the
+  // `armedDepSig` discipline — so the launch effect re-runs when one of THOSE stations finishes its
+  // new work, and nothing re-renders on another station's hand-over.
+  const armedHandoverSig = useStationHandovers((s) => {
+    let sig = ''
+    for (const n of nodesRef.current) {
+      const p = n.data.pendingLaunch
+      if (!p) continue
+      for (const d of p.after) if (s.byId[d]) sig += `${d},`
       sig += '|'
     }
     return sig
@@ -2082,6 +2485,25 @@ export function Canvas() {
     const s = useProjectSetup.getState()
     return setupGateDone(s.runForGroup(groupId), s.pendingForGroup(groupId) > 0)
   }, [])
+  /**
+   * Should a node opened INTO this frame hold its launch for the frame's setup script? Returns the
+   * group to wait on (`PendingLaunch.awaitSetupGroup`), or undefined to launch as usual. A group
+   * counts while its launch is still PENDING (the ack — and with it `waitForSetup` — has not come
+   * back yet; holding is the safe side of that unknown, and a non-waiting ack releases it again) or
+   * while its acked run said `waitForSetup` and has not finished. Shared by the control opens
+   * (`armAfter`) and the issue card's "Start with agent in a new worktree".
+   */
+  const setupHoldGroup = useCallback(
+    (groupId: string | null | undefined): string | undefined => {
+      if (!groupId) return undefined
+      const holds =
+        (useProjectSetup.getState().pendingForGroup(groupId) > 0 ||
+          setupWaitGroupsRef.current.has(groupId)) &&
+        !setupDoneForGroup(groupId)
+      return holds ? groupId : undefined
+    },
+    [setupDoneForGroup]
+  )
   // A signature over the setup-run state of every group an armed node is waiting on, so a run going
   // `done` re-runs the launch effect — the same trick as `armedDepSig`. Subscribing to the whole
   // store would re-render the canvas on every output chunk of every script.
@@ -2098,6 +2520,107 @@ export function Canvas() {
     }
     return sig
   })
+  // ---- the pull requests an armed node waits on (`--after-pr`) ----
+  // Judged against the pull request status of the project whose nodes are on this canvas
+  // (`nodesProjectIdRef`, never a separately-read active id: during a switch the two disagree, and
+  // a board for the wrong repository answers "blocked", which holds rather than fires). A PRIMITIVE
+  // signature of each wait's state, the same discipline as `armedDepSig`: the launch effect re-runs
+  // when a waited-on PR changes, and nothing re-renders on an unrelated GitHub update.
+  const armedPrSig = useGitHubIssues((s) => {
+    let sig = ''
+    let board: ReturnType<typeof pullBoardFor>
+    let read = false
+    for (const n of nodesRef.current) {
+      const hold = (n.data.pendingLaunch as PendingLaunch | undefined)?.afterPr
+      if (!hold) continue
+      if (!read) {
+        board = pullBoardFor(s, nodesProjectIdRef.current ?? '')
+        read = true
+      }
+      sig += `${n.id}:${prHoldReports(hold, board).map((r) => r.state).join(',')}|`
+    }
+    return sig
+  })
+  // ---- the success reports an armed node waits on (`--after-success`) ----
+  // A PRIMITIVE signature of each waited-on station's latest report, the same discipline as
+  // `armedDepSig`: the launch effect re-runs when one of THOSE stations reports, and nothing
+  // re-renders on another station's report. Their turn state is already in `armedDepSig` — every
+  // success station is in `after` too.
+  const armedSuccessSig = useStationOutcomes((s) => {
+    let sig = ''
+    for (const n of nodesRef.current) {
+      // Through the shape rule: a selector must never throw on a malformed hold.
+      const hold = normalizeSuccessWaitHold((n.data.pendingLaunch as PendingLaunch | undefined)?.afterSuccess)
+      if (!hold || hold.invalid) continue
+      for (const d of hold.deps) {
+        const r = outcomeOf(s.byId, d)
+        sig += `${d}:${r ? `${r.outcome}@${r.at}${r.workPending ? 'p' : ''}` : '-'},`
+      }
+      sig += '|'
+    }
+    return sig
+  })
+  // Keep the host's pull request status coming while any node here waits on a PR. It is the board's
+  // own refcounted host subscription and #1008's conditional heartbeat (free while nothing changes),
+  // not a poller; a `checks` wait also asks the host's bounded chase (30 s … 5 min, at most 12 reads
+  // per episode) while the window is visible, because a finished check run does not move the
+  // heartbeat. Everything is released the moment no node waits any more.
+  const prWatchNeeded = nodes.some((n) => !!(n.data.pendingLaunch as PendingLaunch | undefined)?.afterPr)
+  // Paired with the rendered `nodes` it was derived from — the rendered epoch, not the latest one.
+  const prWatchProjectId = prWatchNeeded ? (renderedProjectId ?? '') : ''
+  useEffect(() => {
+    if (!prWatchProjectId) return
+    let cancelled = false
+    let release: (() => void) | undefined
+    void useGitHubIssues
+      .getState()
+      .watchPulls(api.githubIssues, prWatchProjectId)
+      .then(
+        (r) => {
+          if (cancelled) r()
+          else release = r
+        },
+        () => undefined
+      )
+    return () => {
+      cancelled = true
+      release?.()
+    }
+  }, [api, prWatchProjectId])
+  const prChecksWaited = nodes.some((n) =>
+    (n.data.pendingLaunch as PendingLaunch | undefined)?.afterPr?.waits.some((w) => w.until === 'checks')
+  )
+  const prBoardUndecided = useGitHubIssues(
+    (s) => !!prWatchProjectId && !!pullBoardFor(s, prWatchProjectId)?.undecided
+  )
+  const prChaseNeeded = prChecksWaited && prBoardUndecided
+  usePullChase(api.githubIssues, prWatchProjectId, prChaseNeeded)
+  // B2: a `checks` wait is judged only on a read that STARTED after it was armed — the host may still
+  // remember "passed" for the head before a push made just before arming. While some wait lacks such
+  // a read, ask the host for a foreground one (which answers even when nothing changed), a bounded
+  // number of times: the refresh floor, or a read already in flight from before the arming, can
+  // swallow a single ask.
+  const prFreshReadWanted = useGitHubIssues((s) => {
+    if (!prWatchProjectId) return false
+    const board = pullBoardFor(s, prWatchProjectId)
+    return nodesRef.current.some((n) => {
+      const hold = (n.data.pendingLaunch as PendingLaunch | undefined)?.afterPr
+      return (
+        !!hold &&
+        !hold.invalid &&
+        hold.waits.some((w) => w.until === 'checks') &&
+        (board?.readStartedAt === undefined || board.readStartedAt < hold.armedAt)
+      )
+    })
+  })
+  useEffect(() => {
+    if (!prWatchProjectId || !prFreshReadWanted) return
+    return startFreshReadAsks({
+      ask: () => void api.githubIssues.refresh(prWatchProjectId).catch(() => undefined),
+      setTimeout: (fn, ms) => window.setTimeout(fn, ms),
+      clearTimeout: (timer) => window.clearTimeout(timer as number)
+    })
+  }, [api, prWatchProjectId, prFreshReadWanted])
   // Bumped to re-run the launch effect: after a refused delivery's backoff, and when a node
   // reports its session ready (`subscribeSessionReady` below).
   const [launchNudge, setLaunchNudge] = useState(0)
@@ -2143,12 +2666,27 @@ export function Canvas() {
   // sitting in a poll loop burning context.
   useEffect(() => {
     const live = new Set(nodes.map((n) => n.id))
+    // The project THIS render's `nodes` belong to (`renderedProjectId`), not the latest installed
+    // epoch: in a project switch's window the ref already names the incoming project while `nodes`
+    // are still the outgoing one's (see useNodesEpoch).
+    const briefPresent = (path: string | undefined): Promise<boolean> =>
+      launchBriefPresent(
+        path,
+        useProjects.getState().getProject(renderedProjectId ?? ''),
+        (p) => activeSession.api.fs.exists(p)
+      )
     const ready = launchesToFire(
       nodes as unknown as ArmedNode[],
       useAgentStatus.getState().byId,
       live,
       setupDoneForGroup,
-      useLaunchDelivery.getState().byId
+      useLaunchDelivery.getState().byId,
+      // The `--after-pr` gate: this canvas's pull request status and the clock its deadlines are on.
+      { board: pullBoardFor(useGitHubIssues.getState(), renderedProjectId ?? ''), now: Date.now() },
+      // The `--after-success` gate: every station's latest task report (core's store, mirrored).
+      { outcomes: useStationOutcomes.getState().byId, now: Date.now() },
+      // Stations handed new work they have not finished: their `done` is the previous task's.
+      useStationHandovers.getState().byId
     )
       // CONSENT GATE: only a launch armed by THIS process may be typed into a shell. A pendingLaunch
       // loaded from .nodeterm/project.json (git-shared, hostile) or received from a canvas-sync peer
@@ -2158,13 +2696,12 @@ export function Canvas() {
       .filter((f) => !isLaunchInFlight(f.id))
     // Anything we were reporting on that is no longer an armed node — delivered, run by hand with
     // ▶, or deleted — stops being reported. Timers go with it: a stall warning for a node that has
-    // already started is a lie with a countdown on it.
+    // already started is a lie with a countdown on it. A headless start in flight is spared: its
+    // node lives in ANOTHER project by design, and its orchestrator settles it (#925).
     const delivery = useLaunchDelivery.getState()
-    for (const id of Object.keys(delivery.byId)) {
-      if (!nodes.some((n) => n.id === id && n.data.pendingLaunch)) {
-        delivery.clear(id)
-        clearStallTimer(id)
-      }
+    for (const id of deliveriesToRetire(delivery.byId, (id) => nodes.some((n) => n.id === id && n.data.pendingLaunch))) {
+      delivery.clear(id)
+      clearStallTimer(id)
     }
     for (const f of ready) {
       // THE gate this whole loop turns on. Every dependency is satisfied, but that says nothing
@@ -2260,10 +2797,39 @@ export function Canvas() {
       }
       // A REJECTED promise is a refusal, not a hang: without the second handler the claim was
       // never released and nothing could ever retry it.
-      void launchCommand(f.id, f.command, false, activeSession.api).then(settle, () => settle('cancelled'))
+      const deliverHeld = (): Promise<void> =>
+        launchCommand(f.id, f.command, false, activeSession.api).then(settle, () => settle('cancelled'))
+      // The file the launch reads its prompt from must still be there: a held launch may be
+      // delivered weeks after it was armed (a cold open waits for its project to be viewed), and
+      // `"$(cat '<path>')"` over a missing file starts the agent with an EMPTY prompt — the silent
+      // failure the open-time existence check exists to catch. Only a definite "not there" holds it
+      // (for ▶, persisted `manualOnly`, the path named on the badge); a check that errors answers
+      // "present", as the open-time check does. Local projects only: a spill is never written for an
+      // SSH project, and there `exists === false` cannot tell a gone file from a dropped master.
+      void briefPresent(f.briefFile).then((present) => {
+        if (!present) {
+          // Nothing was typed, so the registry claim is released (ok=false); the consent is
+          // consumed all the same — ▶ is now the only way onward, which is what the badge says.
+          settleLaunch(
+            f.id,
+            sentKey,
+            false,
+            nodesRef.current.find((n) => n.id === f.id)?.data.pendingLaunch as PendingLaunch | undefined
+          )
+          forgetArmed(f.id)
+          launchAttempts.current.delete(f.id)
+          setNodes((ns) => ns.map((n) => n.id === f.id && n.data.pendingLaunch
+            ? { ...n, data: { ...n.data, pendingLaunch: { ...n.data.pendingLaunch, manualOnly: true } } }
+            : n))
+          markDirty()
+          useLaunchDelivery.getState().markBriefMissing(f.id, f.briefFile as string)
+          return
+        }
+        return deliverHeld()
+      }, () => settle('cancelled'))
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- armedDepSig/armedSetupSig/launchNudge are the triggers
-  }, [nodes, armedDepSig, armedSetupSig, launchNudge])
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- armedDepSig/armedHandoverSig/armedSetupSig/armedPrSig/armedSuccessSig/launchNudge are the triggers
+  }, [nodes, armedDepSig, armedHandoverSig, armedSetupSig, armedPrSig, armedSuccessSig, launchNudge])
 
   // Selection state for ephemeral nodes (they live outside React Flow's managed nodes), owned by
   // the agent-nodes store so the cards themselves can set it — see `selectable: false` below.
@@ -2530,26 +3096,43 @@ export function Canvas() {
       const sel = !!e.selected
       const isNote = stickyIds.has(e.source)
       const stroke = sel ? '#ffffff' : accent
-      const baseLabel = isNote ? '🗒 note' : '⇄ context'
+      const arrow = { type: MarkerType.ArrowClosed, color: stroke, width: 14, height: 14 }
+      // Arrowheads point at the side that READS, as a note link's does (it ends at the terminal).
+      // A context link is two-way unless it names a one-way reader (issue #852).
+      const readers = isNote ? [e.target] : linkReadPairs(edgeToBridge(e)).map((p) => p.reader)
+      const oneWay = !isNote && readers.length < 2
+      const baseLabel = isNote
+        ? '🗒 note'
+        : readers.length === 0
+          ? '⊘ context (invalid direction)'
+          : oneWay ? '→ context (one-way)' : '⇄ context'
       return {
         ...e,
         type: 'floating',
         // Context and note links meet the node at its bridge handles (left/right dots) — the point
         // the user dragged from — never at the top or bottom.
         data: { anchor: 'horizontal' },
-        label: sel ? `${baseLabel} — ⌫ to remove` : baseLabel,
+        label: sel
+          ? `${baseLabel} — ⌫ to remove${isNote ? '' : ' · right-click for direction'}`
+          : baseLabel,
         labelStyle: { fill: stroke, fontSize: 11, fontWeight: 600 },
         ...labelBg,
         style: { stroke, strokeWidth: sel ? 3.5 : 2 },
-        markerEnd: { type: MarkerType.ArrowClosed, color: stroke, width: 14, height: 14 },
-        // Context links are bidirectional (arrowheads both ends); note links flow one way.
-        ...(isNote
-          ? {}
-          : { markerStart: { type: MarkerType.ArrowClosed, color: stroke, width: 14, height: 14 } })
+        ...(readers.includes(e.target) ? { markerEnd: arrow } : {}),
+        ...(readers.includes(e.source) ? { markerStart: arrow } : {})
       }
     })
-    const ropeCoversLink = new Set(
-      linkEdges.filter((e) => hiddenLinks.has(e.id)).map((e) => pairKey(e.source, e.target))
+    // The covered link's label, by pair, so a selected rope still says which way its hidden
+    // context link reads (issue #852) — the rope's own arrow shows lineage, not reading.
+    const ropeCoversLink = new Map(
+      linkEdges.filter((e) => hiddenLinks.has(e.id)).map((e) => {
+        const n = linkReadPairs(edgeToBridge(e)).length
+        const label =
+          n === 2
+            ? '⇄ context · ⌫ to remove'
+            : `${n === 1 ? '→ context (one-way)' : '⊘ context (invalid direction)'} · ⌫ to remove`
+        return [pairKey(e.source, e.target), label] as const
+      })
     )
     // Ropes: colour from the source's agent, dashed + ⏳ while the target still waits on the
     // source, white + a removal hint while selected, clay + flowing while the target is a driven
@@ -2559,7 +3142,10 @@ export function Canvas() {
       const base = {
         ...e,
         type: 'floating',
-        animated: v.waiting,
+        // A waiting rope is dashed + ⏳ but does NOT flow: an `--after` wait can last hours, and
+        // React Flow's `animated` (dashdraw, 0.5 s, infinite) kept the compositor producing frames
+        // for the whole wait. The driven-browser rope below still flows; it is short-lived.
+        animated: false,
         style: { stroke: v.color, strokeWidth: 1.5, ...(v.waiting ? { strokeDasharray: '6 4' } : {}) },
         markerEnd: { type: MarkerType.ArrowClosed, color: v.color, width: 14, height: 14 },
         ...(v.waiting
@@ -2570,7 +3156,7 @@ export function Canvas() {
         const label = v.waiting
           ? `${WAIT_LABEL} · ⌫ to stop waiting`
           : ropeCoversLink.has(pairKey(e.source, e.target))
-            ? '⇄ context · ⌫ to remove'
+            ? `${ropeCoversLink.get(pairKey(e.source, e.target))} · right-click for direction`
             : '⌫ to remove'
         return {
           ...base,
@@ -2831,8 +3417,11 @@ export function Canvas() {
     // SSH project: (re)open its ControlMaster and record the controlPath so this project's
     // terminal nodes can run over it. Idempotent in main (a live master is reused), so a tab
     // switch back to a connected project is a no-op. Remote tmux is unaffected by the master.
-    if (project.ssh) {
-      const ssh = project.ssh
+    // A RELAY tab dials nothing (`planActiveProjectDials`): its project and nodes are another
+    // machine's, and connecting them would log THIS machine into a server the host named.
+    const dials = planActiveProjectDials(project)
+    if (dials.own) {
+      const ssh = dials.own
       // SSH remote projects are free (Core). Only phone/relay remote access is Pro-gated.
       window.nodeTerminal.sshProject
         .connect(project.id, ssh.server, ssh.remoteCwd)
@@ -2859,7 +3448,7 @@ export function Canvas() {
     // locally.
     // NOTE: git routing is deliberately NOT armed for an attachment. The project's own cwd is what
     // the Source Control panel is about, and an attached node must not repoint it at another host.
-    for (const attachment of hostAttachmentsFor(project.id, project.nodes, project.ssh?.server)) {
+    for (const attachment of dials.attachments) {
       void connectHostAttachment(
         attachment.scopeId,
         {
@@ -2912,15 +3501,26 @@ export function Canvas() {
     if (project.cwd && !project.ssh) {
       void useWorktrees.getState().refresh(project.cwd, boundGroups(flow))
     }
-    setLinkEdges((project.bridges ?? []).map((b) => ({ id: b.id, source: b.source, target: b.target })))
+    // The edge refs are assigned HERE, synchronously, beside their setters — the same reason
+    // installEpoch assigns nodesRef: the setters land on a later render, and a peer's edge op
+    // arriving in between would otherwise be built from the PREVIOUS project's edges and then
+    // overwrite this load's queued value (see the ref declarations for the render-time half).
+    const loadedBridges: Edge[] = (project.bridges ?? []).map(bridgeToEdge)
+    linkEdgesRef.current = loadedBridges
+    setLinkEdges(loadedBridges)
     // A wait with no rope is a wait nothing on screen explains. Ropes for `--after` are written by
     // the verbs that arm a node, so an arming that predates them (persisted `pendingLaunch`, no
     // persisted rope) — or any future path that forgets one — is healed here on the next load.
-    const restoredRopes = (project.ropes ?? []).map((r) => ropeEdge(r.id, r.source, r.target))
-    setControlEdges([
+    // `markLegacyWaitRopes` first: a canvas saved before waits carried their own id marks them by
+    // append order, and it must run before the prune below can delete an opener's rope — after
+    // that, nothing left says which rope into a node was its opener (lib/teamProgress reads it).
+    const restoredRopes = markLegacyWaitRopes(project.ropes ?? []).map((r) => ropeEdge(r.id, r.source, r.target))
+    const loadedRopes = [
       ...restoredRopes,
       ...missingDepRopes(flow, restoredRopes).map((r) => ropeEdge(r.id, r.source, r.target))
-    ])
+    ]
+    controlEdgesRef.current = loadedRopes
+    setControlEdges(loadedRopes)
     // Reset history for the newly loaded project.
     committedRef.current = flow
     pastRef.current = []
@@ -2979,6 +3579,12 @@ export function Canvas() {
         setResumeProject(project)
       } else {
         setResumeProject(null)
+      }
+      // Finish an "Open recent" resume that had to land on this project first.
+      const pendingResume = pendingResumeRef.current
+      if (pendingResume && pendingResume.projectId === project.id) {
+        pendingResumeRef.current = null
+        resumeCreateRef.current(pendingResume.conv)
       }
       // Consume a cross-project focus request (notification click on a background node).
       const pending = pendingFocusRef.current
@@ -3044,20 +3650,21 @@ export function Canvas() {
   const globalKanbanOpen = rawGlobalKanban && omniEnabled
   const kanbanOpen = globalKanbanOpen || perProjectKanbanOpen
   const projectKanban = useProjects((s) => s.projects.find((p) => p.id === s.activeProjectId)?.kanban)
-  // Fresh default per project — ids must not be shared across projects; NOT persisted
-  // until the first edit writes it (spec lazy-default rule).
-  const seedBoard = useMemo(
-    () => defaultKanban(),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [activeProjectId]
-  )
+  // The active project's lazy default board — deterministic per project (the same ids on every
+  // client, different across projects); NOT persisted until the first edit writes it (spec
+  // lazy-default rule). Callbacks that know WHICH project they write read `defaultKanban(thatId)`
+  // themselves rather than this render-time value, which can name the previous project for a
+  // render during a switch.
+  const seedBoard = useMemo(() => defaultKanban(activeProjectId ?? ''), [activeProjectId])
   const onKanbanChange = useCallback(
     (next: ProjectKanban) => {
       const id = useProjects.getState().activeProjectId
       if (!id) return
+      // A hosted Viewer/Commenter's board is the host's to change: a move here would only diverge.
+      if (isHostedReadOnly(sessionForProject(id).id)) return
       // The board BEFORE this change — read fresh at callback entry (a stale closed-over value
       // would misattribute the diff). Same lazy-default as the KanbanView render.
-      const prev = useProjects.getState().getProject(id)?.kanban ?? seedBoard
+      const prev = useProjects.getState().getProject(id)?.kanban ?? defaultKanban(id)
       useProjects.getState().setProjectKanban(id, next)
       markDirty() // rides the existing debounced persist (commitActiveToStore + workspace.save)
       // cardTitle must return '' for — and ONLY for — nodes that no longer exist (the diff reads
@@ -3071,10 +3678,35 @@ export function Canvas() {
         return card ? card.title || 'Untitled' : ''
       }
       for (const { nodeId, event } of boardLogEvents(prev, next, cardTitle)) {
-        useBoardLog.getState().append(api, id, { kind: 'event', nodeId, event })
+        useBoardLog.getState().append(sessionForProject(id).api, id, { kind: 'event', nodeId, event })
       }
     },
-    [markDirty, api, seedBoard]
+    [markDirty]
+  )
+
+  // The board moving a session card by itself because every pull request linked to it merged
+  // (lib/pullAutoMove.ts decides). A compare-and-set against the store's CURRENT board: the card
+  // must still sit in the column the decision saw, on the project the decision was made for. Logged
+  // as ONE card-moved line naming the PRs — it bypasses onKanbanChange so the diff funnel does not
+  // log the same move a second time without its reason.
+  const autoMoveCardFromPulls = useCallback(
+    (projectId: string, cardId: string, fromColumnId: string | null, toColumnId: string, note: string) => {
+      if (useProjects.getState().activeProjectId !== projectId) return
+      const current = useProjects.getState().getProject(projectId)?.kanban
+      if (!current) return
+      const next = applyPullAutoMove(current, cardId, fromColumnId, toColumnId)
+      if (!next) return
+      useProjects.getState().setProjectKanban(projectId, next)
+      markDirty()
+      const title = (id: string | null): string =>
+        (id && current.columns.find((column) => column.id === id)?.title) || 'Ungrouped'
+      useBoardLog.getState().append(sessionForProject(projectId).api, projectId, {
+        kind: 'event',
+        nodeId: cardId,
+        event: { type: 'card-moved', from: title(fromColumnId), to: title(toColumnId), title: note }
+      })
+    },
+    [markDirty]
   )
 
   // The node states that go on the wire: React Flow's managed nodes minus the ephemeral cards
@@ -3085,11 +3717,58 @@ export function Canvas() {
   // once per drag FRAME — so handing over an array meant a solo user paid the whole cost of a
   // feature the publisher's own solo gate then declined to use. What must NOT be deferred is the
   // ephemeral-id set: it is read from a live store, so it is captured here, as of this call.
-  const publishableLater = useCallback((flow: CanvasNode[]): (() => CanvasNodeState[]) => {
-    const ephIds = new Set(Object.keys(useAgentNodes.getState().byId))
-    const retainInitial = sessionForProject(nodesProjectIdRef.current ?? '').source !== 'relay'
-    return () => publishableStates(flowToNodeStates(flow, retainInitial), ephIds)
-  }, [])
+  //
+  // The two PERSISTED edge lists ride along, because they ride the same whole-file save and were
+  // the one thing canvas sync did not carry: an edge you drew never reached your teammate, and
+  // their next save — of a canvas that never had it — DELETED it. The edge ARRAYS are captured
+  // NOW, as of this call, like the ephemeral ids: the publisher may resolve this thunk much later
+  // (an `adopt` baseline stays lazy until the NEXT publish), and by then the refs have moved on.
+  // Reading them late made a link drawn right after a peer op (or a project load) diff against
+  // itself — nothing cast, and the teammate's next save deleted it (port of feat/team-sync-gaps,
+  // fixed). Capturing a reference is free and React state arrays are never mutated in place, so
+  // only the `.map` is deferred and the solo gate still skips the whole cost. `edges` is for a
+  // caller that already holds the arrays (the publish effect's own deps); the rest read the refs.
+  const publishableLater = useCallback(
+    (flow: CanvasNode[], edges?: { bridges: Edge[]; ropes: Edge[] }): (() => CanvasScene) => {
+      const ephIds = new Set(Object.keys(useAgentNodes.getState().byId))
+      const retainInitial = sessionForProject(nodesProjectIdRef.current ?? '').source !== 'relay'
+      const bridges = edges?.bridges ?? linkEdgesRef.current
+      const ropes = edges?.ropes ?? controlEdgesRef.current
+      return () =>
+        publishableScene(
+          {
+            nodes: flowToNodeStates(flow, retainInitial),
+            // Bridges keep their one-way `reader` (issue #852): a peer applies what is cast, and a
+            // three-id bridge would widen a one-way link back to both-read on every teammate.
+            bridges: bridges.map(edgeToBridge),
+            ropes: ropes.map(toBridgeLink)
+          },
+          ephIds
+        )
+    },
+    []
+  )
+
+  /**
+   * Cast a node created THIS tick before anything that names it — spec §2's batch order (node adds,
+   * then card adds). A board write publishes at once from the store funnel (`setProjectKanban` →
+   * the kanban publisher), while `setNodes` lands on a later render and the node publish effect runs
+   * after that, so a site that files a fresh node's card would otherwise put the card on the wire
+   * first. A peer holding the card of a node it has not received prunes the card on its next board
+   * commit (the prune stays local — its removal is never cast — but that peer's own board keeps the
+   * loss). Only for the canvas React Flow holds: a node charged to a stored project is not the node
+   * publisher's. The node is written into `nodesRef` beside the caller's `setNodes` (idempotent), the
+   * same synchronous-ref discipline `attachWorktree` follows, so the render that lands it diffs to
+   * nothing. `node` must be the node AS INSERTED (its frame parenting included).
+   */
+  const castNewNodeNow = useCallback(
+    (projectId: string, node: CanvasNode): void => {
+      if (nodesProjectIdRef.current !== projectId || loadingRef.current) return
+      if (!nodesRef.current.some((n) => n.id === node.id)) nodesRef.current = [...nodesRef.current, node]
+      publisherRef.current?.publish(publishableLater(nodesRef.current))
+    },
+    [publishableLater]
+  )
 
   // ---- persistence helpers ----
   const commitActiveToStore = useCallback(() => {
@@ -3105,8 +3784,8 @@ export function Canvas() {
           id,
           flowToNodeStates(nodesRef.current, sessionForProject(nodesProjectIdRef.current ?? '').source !== 'relay'),
           viewportRef.current,
-          linkEdgesRef.current.map((e) => ({ id: e.id, source: e.source, target: e.target })),
-          controlEdgesRef.current.map((e) => ({ id: e.id, source: e.source, target: e.target }))
+          linkEdgesRef.current.map(edgeToBridge),
+          controlEdgesRef.current.map(toBridgeLink)
         )
   }, [])
 
@@ -3188,29 +3867,18 @@ export function Canvas() {
   // place: the IPC path bypasses the registry, so duplicating the omni/asDefault choice
   // caused Cmd+Shift+B on desktop to ignore omniKanbanAsDefault and to toggle the per-project
   // board underneath the global overlay.
-  const performKanbanToggle = useCallback(() => {
-    if (isGlobalKanbanOpen()) {
-      useViewMode.getState().toggleGlobalKanban()
-      return true
-    }
-    const settings = useSettings.getState().settings
-    if (isOmniKanbanEnabled(settings) && settings.omniKanbanAsDefault === true) {
-      commitActiveToStore()
-      useViewMode.getState().toggleGlobalKanban()
-      return true
-    }
-    const id = useProjects.getState().activeProjectId
-    if (!id) return false
-    useViewMode.getState().toggle(id)
-    return true
-  }, [commitActiveToStore])
+  // The decision itself is `toggleBoardView` / `toggleAllProjectsBoard` (state/viewMode.ts), which
+  // TabBar's board icon calls too. No commit is needed before Omni opens: its active lane reads
+  // the live canvas (GlobalKanbanLive), and the effect above commits for the other readers.
+  const performKanbanToggle = useCallback(
+    () => toggleBoardView(useProjects.getState().activeProjectId),
+    []
+  )
 
-  const performGlobalKanbanToggle = useCallback(() => {
-    if (!isOmniKanbanEnabled(useSettings.getState().settings)) return false
-    if (!isGlobalKanbanOpen()) commitActiveToStore()
-    useViewMode.getState().toggleGlobalKanban()
-    return true
-  }, [commitActiveToStore])
+  const performGlobalKanbanToggle = useCallback(
+    () => toggleAllProjectsBoard(useProjects.getState().activeProjectId),
+    []
+  )
 
   // Mirror `dirty` into a ref so the external-change listener (mounted once) reads the
   // live value without re-subscribing on every edit.
@@ -3220,6 +3888,217 @@ export function Canvas() {
   useEffect(() => {
     dirtyRef.current = dirty
   }, [dirty])
+
+  // A board comment that @mentions a session (BoardLogPanel's send → lib/boardCommentDelivery).
+  // The SAME two renderer steps an agent `send` takes around main's gate: hold the target node's
+  // restart lock (a comment must never land inside a wake's un-submitted resume line), and publish
+  // pending canvas edits first (main authorizes against its persisted store, which a just-created
+  // node is not in yet). A project bound to a relay session is another machine's: its panes are not
+  // ours to type into, so it is refused here too, behind the panel's own display-only gate.
+  useEffect(() => {
+    // A comment's mentions deliver in parallel; they share ONE publish of the pending edits.
+    const saveOnce = coalesce(persist)
+    return registerBoardCommentDeliverer((req) => {
+      if (sessionForProject(req.projectId).source !== 'local')
+        return Promise.resolve({
+          ok: false,
+          error: 'board comments reach agents only on this machine',
+          result: { kind: 'notPermitted', reason: 'unsupported-edition' }
+        })
+      return runBoardCommentDelivery(req, {
+        guard: (target, fn) => guardConcurrentRestart(target, fn)(),
+        sync: () =>
+          syncMessageScope({
+            needed: dirtyRef.current && nodesRef.current.some((n) => n.id === req.targetNodeId),
+            conflict: !!conflictRef.current,
+            save: saveOnce
+          }),
+        deliver: (r) => api.agentMessage.deliverBoardComment(r)
+      })
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- refs are read at call time
+  }, [api, persist])
+
+  // ── Live links (Task 17) ────────────────────────────────────────────────────────────────────
+  // A browser view of ONE terminal. The store (state/watchLinks) mirrors this machine's core
+  // registry — `window.nodeTerminal`, never a relay session's api: links are made on the machine
+  // that runs the terminal. Started ONCE per Canvas mount; without it the store stays empty and no
+  // LIVE chip ever appears. What a notice does is lib/liveLink's `liveLinkNoticeEffect` (tested
+  // there): the info strip — `not-persistent` and `control-locked` stay on screen — and, for
+  // `control-taken` (a security event), an OS notification under the notification consent alone — not
+  // the agent-done preference — once per link per 5 s.
+  const liveNotifyAtRef = useRef(new Map<string, number>())
+  useEffect(
+    () =>
+      startWatchLinkSync(window.nodeTerminal, (n) => {
+        const fx = liveLinkNoticeEffect(n, useSettings.getState().settings, Date.now(), liveNotifyAtRef.current)
+        if (fx.strip) setNotice({ kind: 'info', ...fx.strip })
+        if (fx.os) void window.nodeTerminal.notify(fx.os)
+      }),
+    []
+  )
+  // The Live chat drawer (lib/liveChatPin — the Explorer's pin pattern, its own keys): which link it
+  // follows and whether it is docked are this machine's view state, in localStorage only. Opened by
+  // the popover's "Open chat" (`nodeterm:live-chat`, `{ linkId }` — this is its ONE listener, pinned
+  // in lib/nodeterm-events.test.ts) and by the palette's "Live chat".
+  const [liveChat, setLiveChat] = useState<LiveChatState>(() => ({
+    pinned: readLiveChatPinned(),
+    dismissed: false,
+    open: false,
+    linkId: readLiveChatLink()
+  }))
+  // A primitive count, not the list: a push about one link's viewers must not re-render the canvas.
+  // A pinned drawer is rendered only while a link is live (`liveChatShown`); the pin is kept.
+  const liveLinkCount = useWatchLinks((s) => s.links.length)
+  const liveChatRef = useRef(liveChat)
+  liveChatRef.current = liveChat
+  useEffect(() => {
+    const on = (e: Event): void => {
+      const linkId = (e as CustomEvent<{ linkId?: unknown }>).detail?.linkId
+      if (typeof linkId !== 'string' || !linkId) return
+      // Open chat on a chip IS a pick: the drawer comes back to this link next time.
+      writeLiveChatLink(linkId)
+      setLiveChat((s) => nextLiveChat(s, { kind: 'open', linkId }))
+    }
+    window.addEventListener('nodeterm:live-chat', on)
+    return () => window.removeEventListener('nodeterm:live-chat', on)
+  }, [])
+  const pickLiveChatLink = useCallback((linkId: string) => {
+    writeLiveChatLink(linkId)
+    setLiveChat((s) => nextLiveChat(s, { kind: 'open', linkId }))
+  }, [])
+  const closeLiveChat = useCallback(() => setLiveChat((s) => nextLiveChat(s, { kind: 'close' })), [])
+  const toggleLiveChatPin = useCallback(() => {
+    setLiveChat((s) => {
+      const next = nextLiveChat(s, { kind: 'pin' })
+      writeLiveChatPinned(next.pinned)
+      return next
+    })
+  }, [])
+  /** True while a kanban card modal is open (either board): the drawer then sits above its scrim. */
+  const [cardModalOpen, setCardModalOpen] = useState(false)
+  const [liveLinkDialog, setLiveLinkDialog] = useState<LiveLinkTarget | null>(null)
+  const closeLiveLinkDialog = useCallback(() => setLiveLinkDialog(null), [])
+  /** The facts the ONE availability rule reads, for the node's OWN project (H4): a node of a relay
+   *  tab — shown on the Omni board or in the sidebar while a local tab is active — is judged by the
+   *  relay session, not by whichever tab is on screen. Read at call time, never memoized. */
+  const liveLinkFacts = useCallback(
+    (projectId: string): LiveLinkAvailabilityFacts => ({
+      serverEdition: isBrowserRuntime(),
+      source: sessionForProject(projectId).source,
+      activeLinks: useWatchLinks.getState().links.length
+    }),
+    []
+  )
+  /** Every entry point ends here: availability (with its reason in the info strip), THEN the Pro
+   *  gate, then the dialog — see lib/liveLinkEntry `openLiveLink`. */
+  const openLiveLinkFor = useCallback(
+    (target: LiveLinkTarget) =>
+      openLiveLink(
+        {
+          facts: liveLinkFacts,
+          requirePro: requireProOr,
+          show: setLiveLinkDialog,
+          notice: (text) => setNotice({ kind: 'info', text })
+        },
+        target
+      ),
+    [liveLinkFacts]
+  )
+  // The card modal's "Share live link" action (it cannot reach Canvas state). Its detail names the
+  // card's PROJECT, so an Omni-board card of another tab is judged by its own session.
+  useEffect(() => {
+    const on = (e: Event): void => {
+      const d = (e as CustomEvent<{ nodeId?: unknown; title?: unknown; projectId?: unknown }>).detail
+      if (typeof d?.nodeId !== 'string' || typeof d.projectId !== 'string') return
+      const title = typeof d.title === 'string' && d.title.trim() ? d.title : 'Terminal'
+      openLiveLinkFor({ nodeId: d.nodeId, title, projectId: d.projectId })
+    }
+    window.addEventListener('nodeterm:live-link', on)
+    return () => window.removeEventListener('nodeterm:live-link', on)
+  }, [openLiveLinkFor])
+  /**
+   * The "Share live link…" row for one node — ONE builder behind the canvas node menu, the
+   * sessions-sidebar row of ANY project, and both boards' card menus (R49). The active project's
+   * node comes from the live canvas; any other project's from its stored copy: a link does not
+   * need the node on screen (core attaches join-only). Declared before `selectionItems`, which
+   * lists it in its deps (a stale closure otherwise).
+   */
+  const liveLinkMenuItems = useCallback(
+    (nodeId: string, projectId?: string): MenuItem[] => {
+      const store = useProjects.getState()
+      // The composition (which project, which node, whose facts) is lib/liveLinkEntry's, where it is
+      // behaviour-tested: the facts are the NODE's project's, never the active tab's (D2/M1).
+      return liveLinkMenuItemsFor({
+        nodeId,
+        projectId,
+        activeProjectId: store.activeProjectId,
+        live: nodesRef.current,
+        stored: (pid) => store.getProject(pid)?.nodes,
+        hidden: useSettings.getState().settings.hiddenNodeMenuItems,
+        facts: liveLinkFacts,
+        icon: <IconBroadcast />,
+        open: openLiveLinkFor
+      })
+    },
+    [liveLinkFacts, openLiveLinkFor]
+  )
+  /**
+   * R47: before core looks the node up, publish pending edits of the canvas on screen — a node
+   * opened seconds ago is not in the saved project yet and would answer `node-missing`. The same
+   * rule a board comment's delivery uses (`syncMessageScope`): never saved over an unresolved
+   * external-edit conflict. A background project's node needs no flush: its stored copy is what was
+   * last written.
+   */
+  const liveLinkPrepareFor = useCallback(
+    (target: LiveLinkTarget) => (): Promise<string | null> =>
+      liveLinkPrepare({
+        needed:
+          target.projectId === useProjects.getState().activeProjectId &&
+          dirtyRef.current &&
+          nodesRef.current.some((n) => n.id === target.nodeId),
+        conflict: !!conflictRef.current,
+        save: persist
+      }),
+    [persist]
+  )
+
+  /** R63: the create dialog's "only while open" note reads the LOCAL core's session protection — the
+   *  core that hosts the link (never a relay tab's peer). Stable, so the dialog reads it once. */
+  const readLocalPersistence = useCallback(() => localSession.api.pty.tmuxStatus(), [])
+  /** Where the dialog's node runs — R63 (`remoteNode`) and the machine the Control warning names
+   *  (`sshTarget`) — from the NODE's own SSH binding first, then its project's (lib/liveLinkEntry).
+   *  The node is read from the live canvas for the active project, else the stored copy. */
+  const liveLinkRemoteFor = useCallback((target: LiveLinkTarget) => {
+    const store = useProjects.getState()
+    const project = store.getProject(target.projectId)
+    return liveLinkRemoteFacts({
+      nodeId: target.nodeId,
+      projectId: target.projectId,
+      activeProjectId: store.activeProjectId,
+      live: nodesRef.current,
+      stored: project?.nodes,
+      projectSsh: project?.ssh?.server
+    })
+  }, [])
+
+  /** R48: "Stop all" revokes every link of the LICENSE — other machines' included — and cannot be
+   *  undone, so the palette asks first, with the same sentence and danger button as Settings. R62:
+   *  what it reached is ALWAYS said — a success too, since with no link listed here nothing else on
+   *  screen changes, and a server call that failed leaves other machines' links running. */
+  const confirmStopAllLiveLinks = useCallback(
+    () =>
+      setConfirm(
+        stopAllConfirm({
+          close: () => setConfirm(null),
+          stop: () =>
+            void stopAllLiveLinks(() => window.nodeTerminal.watchLink.revokeAll()).then((r) =>
+              setNotice({ kind: r.ok ? 'info' : 'error', text: r.text })
+            )
+        })
+      ),
+    [setConfirm]
+  )
 
   /** Re-runs the active-project load effect by bumping the store's `reloadNonce`.
    *
@@ -3351,20 +4230,24 @@ export function Canvas() {
           source: e.source,
           target: e.target
         })),
-        liveBridges: linkEdgesRef.current.map((e) => ({
-          id: e.id,
-          source: e.source,
-          target: e.target
-        }))
+        liveBridges: linkEdgesRef.current.map(edgeToBridge)
       })
       const adopted = adoptNodesSilently(plan.added)
       // Only when the merge actually moved something: a fresh array of identical edges re-renders
       // every edge on the canvas (displayEdges recomputes colour and the waiting look per edge)
       // for no change at all, and these arrive in bursts.
-      if (plan.ropesChanged)
-        setControlEdges(plan.ropes.map((r) => ropeEdge(r.id, r.source, r.target)))
-      if (plan.bridgesChanged)
-        setLinkEdges(plan.bridges.map((b) => ({ id: b.id, source: b.source, target: b.target })))
+      // The refs move synchronously with their setters, as on a load: a peer's edge op landing
+      // before the re-render must build on the MERGED edges, not overwrite them with the old ones.
+      if (plan.ropesChanged) {
+        const ropes = plan.ropes.map((r) => ropeEdge(r.id, r.source, r.target))
+        controlEdgesRef.current = ropes
+        setControlEdges(ropes)
+      }
+      if (plan.bridgesChanged) {
+        const bridges: Edge[] = plan.bridges.map(bridgeToEdge)
+        linkEdgesRef.current = bridges
+        setLinkEdges(bridges)
+      }
       // The store copy is our disk baseline, and the server has already written this file — so it
       // moves to the incoming version exactly as the 'merge' branch above does.
       useProjects.getState().replaceProject(project)
@@ -3531,6 +4414,18 @@ export function Canvas() {
   // the SAS-approval effect above — one feeds the dialog, this one feeds the live/pending seats store.
   useTeamAccessEvents()
 
+  /**
+   * Apply ONE op to a project's STORED copy, through the store reducer (`applyCanvasOp`) — never
+   * through `setProjectKanban`, whose publish hook would cast it again — and save only when that copy
+   * actually changed. The path for a peer's op on a project React Flow does not hold, for EVERY peer
+   * board op, and for the kanban publisher's local repair (ruling R2). The body is
+   * `applyToStoredCopy` (./stored-publish), behaviour-tested in kanban-sync.test.ts.
+   */
+  const applyToStored = useCallback(
+    (projectId: string, mutation: CanvasMutation): void => applyToStoredCopy(projectId, mutation, markDirty),
+    [markDirty]
+  )
+
   // ---- canvas sync (team) ----
   // Emitting side: diff each settled node snapshot against the last one we published and cast the
   // mutations on `canvas:mut`. The core reflector (src/core/canvas-sync.ts) fans each one out to
@@ -3547,6 +4442,7 @@ export function Canvas() {
   // the reflector's order, so it wins on every other client too).
   useEffect(() => {
     const src = `cv-${Math.random().toString(36).slice(2, 10)}`
+    canvasSrcRef.current = src
     const order = createCanvasOrder(src)
     orderRef.current = order
     // Solo gate: publish only once someone else is attached. The presence hub's peer table includes
@@ -3577,11 +4473,23 @@ export function Canvas() {
     // below re-derives it immediately from THIS session's presence. (No-op on a local→local switch:
     // the api is unchanged, so the effect does not re-run and the gate — like `order` — survives.)
     hasPeersRef.current = false
+    // The governed set, per core like the peer gate: start clean on every (re-)bind, ask this core,
+    // then follow its changes (collab-sync `followGoverned`, which also says what is assumed before
+    // the first answer). Created before the first presence read, which may ask it to refresh.
+    governedRef.current = NO_PROJECTS
+    const governed = followGoverned(activeSession.api, (projects) => {
+      governedRef.current = projects
+    })
     const reconnected = createReconnectWatch(activePresence.store.getState().myId)
     const readPresence = (): void => {
       hasPeersRef.current =
         hasPeersRef.current || canvasSyncTarget(activeSession, activePresence.store.getState()).hasPeers
-      if (reconnected(activePresence.store.getState().myId)) order.reset()
+      // A reconnect: forget the stale order, and ask again which projects are governed — a change
+      // announced while we were away never reached us.
+      if (reconnected(activePresence.store.getState().myId)) {
+        order.reset()
+        governed.refresh()
+      }
     }
     readPresence()
     const unsub = activePresence.store.subscribe(readPresence)
@@ -3590,38 +4498,126 @@ export function Canvas() {
     // ~20 Hz, so the size check re-serialized the one oversized node 20×/s, at a cost proportional to
     // its size. Same verdict, paid again only when the node actually changes (@shared/canvas-mutations).
     const guard = createMutationGuard()
+    /**
+     * The node ids live in `projectId` — what the kanban publisher's prune rule asks (a card whose
+     * node is not live is pruned locally and its removal NEVER cast). One project's set, never a mix
+     * (`boardLiveNodeIds`): the project React Flow holds answers from the epoch pair (`nodesRef` is
+     * that project's canvas exactly while `nodesProjectIdRef` names it — useNodesEpoch), every other
+     * project from its stored copy (a project mid-load is still the store's until the load installs
+     * it). The Omni board's active lane prunes against React Flow too (`globalKanbanLive`), so it
+     * needs no case of its own.
+     */
+    const liveNodeIdsFor = (projectId: string): ReadonlySet<string> =>
+      boardLiveNodeIds({
+        rendered: nodesProjectIdRef.current === projectId ? nodesRef.current.map((n) => n.id) : null,
+        stored: (useProjects.getState().getProject(projectId)?.nodes ?? []).map((n) => n.id)
+      })
+    /**
+     * THE ONE CAST on canvas:mut, for every family this Canvas publishes — nodes and edges (the
+     * canvas publisher, for the active project) and board ops (the kanban publisher, for whichever
+     * project a board write touched: the Omni board and node labels write background projects too).
+     *
+     * Only a project on the core this effect is bound to. `order` hears ONE core's echoes — the
+     * receive effect below subscribes `activeSession.api` and nothing else — so rule 1 (our echo is
+     * our ack) holds only there, and `seen` is a position in THAT core's `seq`. Cast anywhere else, a
+     * pending entry would wait for an echo nobody listens to, and `seen` would be judged against
+     * another core's counter. `sessionForProject(projectId)` is the session the project belongs to
+     * (a relay tab → its host), so on a match the cast target below IS that session's api.
+     */
+    const castFor = (projectId: string, m: CanvasMutation): boolean => {
+      if (sessionForProject(projectId).api !== activeSession.api) return false
+      // Stamp our causal position FIRST (canvas-order rule 4: what we had applied when we cast —
+      // it is what lets a teammate's delete beat this frame instead of being resurrected by it),
+      // so the size guard below judges the EXACT payload that goes on the wire. `stamp` is pure:
+      // a refusal still records no pending entry.
+      const stamped = order.stamp({ ...m, src })
+      // THE RE-CREATION GATE (canvas-order `hasPendingRemove`): our own remove of this key has not
+      // come back yet, so it is not in our `seen` — a re-creation cast now (a link redrawn, a node
+      // ⌘Z'd, within one round trip) would be dropped by every peer as a stale frame while we keep
+      // showing it. Held = owed: the publisher keeps it, and the receive handler's release casts it
+      // the moment the remove's echo lands. Never a remove itself (a remove is never stale).
+      // The key carries the project it is cast into: a board's two order ops are per-project
+      // singletons in the ONE order this Canvas keeps for every loaded project (ruling R4).
+      if (!isRemoveOp(stamped) && order.hasPendingRemove(mutationKey(stamped, projectId))) return false
+      // The reflector REFUSES an oversized / malformed mutation at ingest, silently: no peer ever
+      // sees it and there is no negative ack. Ask the same predicate FIRST, so a refusal costs us
+      // neither a pending entry (which would deafen this node to its peers for the whole TTL — a
+      // peer's delete landing in that window would be lost, and our next whole-file save would
+      // resurrect their node) nor the retry (the publisher keeps the node in its baseline). The
+      // only thing that can legitimately blow the cap is free text, i.e. a sticky's body — so say
+      // so, instead of letting the note silently never sync. ONLY for a node upsert, though: an
+      // edge op (or a remove) is refused only for a malformed / over-long id, and "this note is
+      // too large" would name a cause nobody measured.
+      if (!guard(stamped)) {
+        if (stamped.op === 'upsert') setSyncNote(
+          'This note is too large to share with your teammates (over 250 KB). It stays on your ' +
+            'canvas, but they will not see it until you shorten it.'
+        )
+        else console.warn('[canvas-sync] refused an unsendable mutation', stamped.op)
+        return false
+      }
+      order.onLocal(stamped, projectId)
+      // Cast to the project's session's core — a relay tab publishes to the relay HOST, not to its
+      // own local core. Byte-identical on a local tab (`activeSession.api` IS `window.nodeTerminal`).
+      // `canvasSyncTarget` decides the GATE (hasPeers) at bind time; the cast target is just the
+      // session's api, so reach it directly — no per-cast allocation on this ~20 Hz path.
+      activeSession.api.canvas.mutate(projectId, stamped)
+      return true
+    }
+    /**
+     * THE ONE PUBLISH GATE, asked by the node publisher (for the active project) and the kanban
+     * publisher (for the project a board write touched). Someone else must be attached (the solo
+     * gate) OR the project must be governed by a canvas authority, which writes a shared project's
+     * content only from the ops it hears (collab-sync `shouldPublish`, docs/hosted-team-relay.md);
+     * the project must be on the core this effect casts to (see `castFor`); and a hosted
+     * Viewer/Commenter publishes nothing: the host refuses canvas:mut for them (R5).
+     */
+    const shouldPublishFor = (projectId: string): boolean =>
+      // The peer check FIRST: the node publisher asks this at ~20 Hz while a node is dragged, and a
+      // solo canvas must pay for nothing more than it did before the board shared this gate (one
+      // Set lookup when it is alone; the desktop's governed set is always empty).
+      shouldPublish(hasPeersRef.current, governedRef.current, projectId) &&
+      sessionForProject(projectId).api === activeSession.api &&
+      !isHostedReadOnly(activeSession.id)
     const pub = createCanvasPublisher(
       (m) => {
         const projectId = useProjects.getState().activeProjectId
         if (!projectId) return false // no active canvas: nothing was cast — retry on the next publish
-        // The reflector REFUSES an oversized / malformed mutation at ingest, silently: no peer ever
-        // sees it and there is no negative ack. Ask the same predicate FIRST, so a refusal costs us
-        // neither a pending entry (which would deafen this node to its peers for the whole TTL — a
-        // peer's delete landing in that window would be lost, and our next whole-file save would
-        // resurrect their node) nor the retry (the publisher keeps the node in its baseline). The
-        // only thing that can legitimately blow the cap is free text, i.e. a sticky's body — so say
-        // so, instead of letting the note silently never sync.
-        if (!guard(m)) {
-          setSyncNote(
-            'This note is too large to share with your teammates (over 250 KB). It stays on your ' +
-              'canvas, but they will not see it until you shorten it.'
-          )
-          return false
-        }
-        order.onLocal(m)
-        // Cast to the ACTIVE session's core — a relay tab publishes to the relay HOST, not to B's
-        // own local core (the bug this fixes). Byte-identical on a local tab (`activeSession.api`
-        // IS `window.nodeTerminal`). `canvasSyncTarget` decides the GATE (hasPeers) at bind time;
-        // the cast target is just the session's api, so reach it directly — no per-cast allocation
-        // on this ~20 Hz path.
-        activeSession.api.canvas.mutate(projectId, m)
-        return true
+        return castFor(projectId, m)
       },
-      { src, shouldPublish: () => hasPeersRef.current }
+      { src, shouldPublish: () => shouldPublishFor(useProjects.getState().activeProjectId) }
     )
     publisherRef.current = pub
+    // Boards (spec §5, §11.3): every board write goes through `setProjectKanban`, and the store
+    // calls this hook after it — so the board, the card modal, the Omni board, node labels and the
+    // `assign` verb all publish here, through the same cast and the same gate as the nodes. A peer's
+    // board op is applied with the store REDUCER (the receive effect below), which never calls the
+    // hook: nothing received is ever published again.
+    const kanbanPublisher = createKanbanPublisher({
+      send: (projectId, m) => castFor(projectId, m),
+      liveNodeIds: (projectId) => liveNodeIdsFor(projectId),
+      shouldPublish: (projectId) => shouldPublishFor(projectId),
+      applyLocal: (projectId, m) => applyToStored(projectId, m)
+    })
+    setKanbanPublishHook((id, prev, next) => kanbanPublisher.publish(id, prev, next))
+    // Own node/edge writes into a project that is NOT on screen (a ⌘⇧T reopen, a cold open, an
+    // off-canvas display node, a headless launch patch) reach the store only, never React Flow, so
+    // the node publisher above never casts them — and a governed project's save overlay would drop
+    // them from disk (canvas/stored-publish.ts). Same cast, same gate.
+    const storedPublisher = createStoredCanvasPublisher({
+      renderedProjectId: () => nodesProjectIdRef.current,
+      isGoverned: (projectId) => governedRef.current.has(projectId),
+      shouldPublish: (projectId) => shouldPublishFor(projectId),
+      send: (projectId, m) => castFor(projectId, m)
+    })
+    storedCanvasPublishRef.current = storedPublisher
+    setStoredCanvasPublishHook(storedPublisher)
     return () => {
+      setKanbanPublishHook(null)
+      setStoredCanvasPublishHook(null)
+      storedCanvasPublishRef.current = null
       unsub()
+      governed.release()
       pub.dispose()
       publisherRef.current = null
       orderRef.current = null
@@ -3629,7 +4625,8 @@ export function Canvas() {
     // Keyed on the api OBJECT (stable per core): a local↔relay switch re-binds order + subscription
     // on the new core; a local→local switch keeps the SAME api so the effect does NOT re-run and the
     // per-node order/reconnect state survives the tab switch (the documented invariant).
-  }, [activeSession.api])
+    // `applyToStored` is stable for the Canvas's lifetime (it depends on `markDirty` alone).
+  }, [activeSession.api, applyToStored])
 
   // Publish on every settled node change. While dragging we throttle to ~20 Hz (position frames);
   // the drag-stop handlers flush, and every other change (add / remove / color / title / collapse /
@@ -3642,13 +4639,18 @@ export function Canvas() {
   useEffect(() => {
     const pub = publisherRef.current
     if (!pub) return
-    const states = publishableLater(nodes)
+    const states = publishableLater(nodes, { bridges: linkEdges, ropes: controlEdges })
     if (loadingRef.current) {
       pub.adopt(states)
       return
     }
     pub.publish(states, { throttle: draggingRef.current })
-  }, [nodes, publishableLater])
+    // Edges are in the deps for the same reason the publisher diffs them: drawing (or deleting) a
+    // context link / rope never touches `nodes`, so without this the edit would never be published
+    // — and the peer's next whole-file save would delete it. React Flow also re-creates these
+    // arrays on a mere SELECTION change; that costs one diff which yields no mutation (the diff
+    // compares id/source/target only), and a solo user does not even pay that (the solo gate).
+  }, [nodes, linkEdges, controlEdges, publishableLater])
 
   // Receiving side: apply an incoming mutation. Deliberately separate from the relay
   // `remoteHost.onApplyMutation` effect above — that one is host↔client, this one is peer↔peer.
@@ -3676,10 +4678,105 @@ export function Canvas() {
     // mount-time local one (the bug). Byte-identical on a local tab (`activeSession.api` IS
     // `window.nodeTerminal`). Re-keyed on the api OBJECT below, in lockstep with the publisher, so a
     // tab switch tears down + re-binds both together (and a local→local switch does neither).
-    return activeSession.api.canvas.onMutation((projectId, mutation) => {
-      hasPeersRef.current = true // proof of a peer, whatever the presence table says
-      if (!orderRef.current?.accept(mutation)) return
-      if (projectId !== useProjects.getState().activeProjectId) {
+    //
+    // The re-creation gate's release: the send callback holds a re-creation of a key whose remove of
+    // ours is unacked, and nothing else would ever cast it — our own echo is an ack, it changes no
+    // React state, so the [nodes] publish effect does not run. So the echo that clears the gate
+    // publishes, AFTER this handler (a repaired remove is applied first), and only when something is
+    // actually owed (a bulk delete's acks must not each serialize the canvas).
+    const releaseHeld = (): void => {
+      const pub = publisherRef.current
+      if (!pub || !pub.hasOwed() || loadingRef.current) return
+      pub.publish(publishableLater(nodesRef.current))
+    }
+    // A relay tab's mutations come from ANOTHER machine's core, which can put anything on the wire,
+    // so its `origin: 'core'` vouches for nothing here: drop it, and the node's held launch stays
+    // ours (strip theirs, carry our own — @shared/node-exec). Nor may a relay peer's node bring a
+    // dial-capable SSH connection onto this machine (session/relay-ssh.ts).
+    const relay = activeSession.source === 'relay'
+    return activeSession.api.canvas.onMutation((projectId, received) => {
+      const mutation = receivedCanvasMutation(received, relay)
+      // Proof of a peer, whatever the presence table says — but only a cast from ANOTHER client
+      // (`provesPeer`): our own echo is our ack, and a lone client that casts on a governed project
+      // must not start publishing every project on this core.
+      if (provesPeer(mutation, canvasSrcRef.current)) hasPeersRef.current = true
+      const order = orderRef.current
+      if (!order) return
+      // Counted over EVERY key, before and after: an echo of ours releases its own key's gate, and
+      // also any EARLIER remove of ours whose echo was lost on the way back (canvas-order, FIFO).
+      const heldBefore = order.pendingRemoveCount()
+      const apply = order.accept(mutation, projectId)
+      if (order.pendingRemoveCount() < heldBefore) queueMicrotask(releaseHeld)
+      if (!apply) return
+      // ---- the board (kanban) ----
+      // Into the projects STORE, for the active project and a background one alike: the board, the
+      // column pills and the card modal all read the store live, and React Flow holds no board. The
+      // store reducer, never `setProjectKanban` — its publish hook would re-cast a peer's op as ours
+      // — and no board-log entry: only the client that made the change records it (spec §5).
+      if (isKanbanOp(mutation)) {
+        applyToStored(projectId, mutation)
+        return
+      }
+      // ---- edges (context links + "spawned by" ropes) ----
+      // They live outside React Flow's `nodes` array, in their own state, so they take their own
+      // apply path — but everything around it is the node path's contract, unchanged: the ordering
+      // gate above has already decided this mutation wins, `adopt` is still the loop guard, and a
+      // background project is still patched in the store so our next save cannot delete the edge.
+      if (isEdgeMutation(mutation)) {
+        // Live only while React Flow holds that project (the epoch tag), not merely while it is the
+        // active one — the same rule as the node branch below (`liveCanvasHolds`).
+        if (!liveCanvasHolds(nodesProjectIdRef.current, useProjects.getState().activeProjectId, projectId)) {
+          applyToStored(projectId, mutation)
+          return
+        }
+        // One id is one edge (`applyEdgeMutationToScene`): an upsert of one kind also takes that id
+        // out of the other list, and a remove drops it from both — the same identity the ordering
+        // gate above keys on (`mutationKey` leaves the kind out).
+        const prevBridges = linkEdgesRef.current
+        const prevRopes = controlEdgesRef.current
+        const base = { bridges: prevBridges.map(edgeToBridge), ropes: prevRopes.map(toBridgeLink) }
+        const next = applyEdgeMutationToScene(base, mutation)
+        // Nothing to do — a remove for an edge we do not have, or the edge we already hold (every
+        // Server Edition tab re-casts a server-written edge): no setState, no markDirty, no save.
+        if (next.bridges === base.bridges && next.ropes === base.ropes) return
+        // Rebuilt EDGE-BY-EDGE, reusing the existing object whenever its three ids are unchanged —
+        // the same discipline `applyMutationToFlow` follows for nodes, and for the same reason: a
+        // freshly built object loses `selected`, so re-creating the whole list would wipe the
+        // user's edge selection every time a teammate touched any OTHER edge.
+        const keep = <T extends Edge>(prev: T[], link: BridgeLink): T | undefined => {
+          const e = prev.find((x) => x.id === link.id)
+          return e && e.source === link.source && e.target === link.target ? e : undefined
+        }
+        if (next.bridges !== base.bridges) {
+          // No `type`: a bridge carries none in state — `displayEdges` makes every link `floating`.
+          // A bridge is also kept only while its one-way `reader` (issue #852) is unchanged: a peer
+          // flipping the direction must reach this canvas, not be swallowed as "same three ids".
+          const edges = next.bridges.map((b) => {
+            const held = keep(prevBridges, b)
+            if (!held) return bridgeToEdge(b)
+            return edgeToBridge(held).reader === b.reader ? held : { ...bridgeToEdge(b), selected: held.selected }
+          })
+          linkEdgesRef.current = edges
+          setLinkEdges(edges)
+        }
+        if (next.ropes !== base.ropes) {
+          // Nothing but the three ids travels: a rope's colour and its waiting look are derived at
+          // render time from this client's own nodes (`displayEdges` / `ropeVisual`).
+          const edges = next.ropes.map((r) => keep(prevRopes, r) ?? ropeEdge(r.id, r.source, r.target))
+          controlEdgesRef.current = edges
+          setControlEdges(edges)
+        }
+        // The loop guard, AFTER both refs moved: publishableLater captures them as of this call.
+        publisherRef.current?.adopt(publishableLater(nodesRef.current))
+        markDirty()
+        return
+      }
+      // Live only while React Flow holds that project's canvas (`liveCanvasHolds` — the epoch tag
+      // AND the active id). During a switch the store already says B while React Flow still holds
+      // A, or nothing after a bail-out; B's op applied to that array ended the canvas on A's nodes
+      // plus the op, tagged B, and the next commit wrote them into B's file (Task 2 review, risk
+      // E). In that case B's serialized nodes are the right target: the load reads them.
+      if (!liveCanvasHolds(nodesProjectIdRef.current, useProjects.getState().activeProjectId, projectId)) {
         // Not on screen (a parked / background project): no terminal is mounted, but one may be
         // PARKED from a recent project switch — dispose it, as an active-project remove does.
         if (mutation.op === 'remove') {
@@ -3692,14 +4789,15 @@ export function Canvas() {
           forgetArmed(mutation.id)
           abandonLaunch(mutation.id)
         }
-        if (useProjects.getState().applyNodeMutation(projectId, mutation)) markDirty()
+        applyToStored(projectId, mutation)
         return
       }
       // PATCH THE LIVE ARRAY — do not round-trip the canvas through the (lossy) serializers. That
       // wiped your selection, deleted your relay-remote nodes and re-rendered every node component,
       // ~20 times a second while a teammate dragged. See applyMutationToFlow.
-      const flow = applyMutationToFlow(nodesRef.current, mutation)
-      if (flow === nodesRef.current) return // nothing to do (a remove for a node we do not have)
+      const base = nodesRef.current
+      const flow = applyMutationToFlow(base, mutation)
+      if (flow === base) return // nothing to do (a remove for a node we do not have)
       if (mutation.op === 'remove') {
         // The peer's delete must also dispose OUR terminal co-state for that node — otherwise the
         // module-level state survives the node, and if the owner UNDOES the delete we are left
@@ -3727,10 +4825,13 @@ export function Canvas() {
       // first (i.e. constantly, while anyone else was dragging). Rebasing keeps the difference that
       // IS yours, and adds nothing that is theirs.
       committedRef.current = applyMutationToFlow(committedRef.current, mutation)
-      setNodes(flow)
+      // FUNCTIONAL, a second guard behind the epoch refs: applied to whatever the state is when it
+      // lands. A plain `setNodes(flow)` overwrote every update queued since the last render — a local
+      // edit mid-drag, or the load's own `setNodes` if the ref were ever stale again.
+      setNodes(rebaseOnLatest(base, flow, (ns) => applyMutationToFlow(ns as CanvasNode[], mutation)))
       markDirty()
     })
-  }, [activeSession.api, setNodes, markDirty, publishableLater])
+  }, [activeSession.api, setNodes, setLinkEdges, setControlEdges, markDirty, publishableLater, applyToStored, activeSession.source])
 
   // Record an undo snapshot when the canvas settles (debounced; skips drag frames/loads).
   useEffect(() => {
@@ -3859,6 +4960,15 @@ export function Canvas() {
         }
         return true
       })
+      // Nothing left for the managed state: return WITHOUT calling onNodesChange. Its
+      // applyNodeChanges returns a NEW array even for an empty change list, and a new `nodes`
+      // rebuilds every ephemeral card (useMemo keyed on `nodes`) as a fresh object without
+      // `measured` — so React Flow resets its handleBounds, re-observes it, and its ResizeObserver
+      // (force: true) emits another `dimensions` change for that card, filtered out right here.
+      // MEASURED with one subagent card on a 46-node canvas: that loop re-rendered the whole
+      // Canvas every frame (60 unobserve/observe per second, ~35% of the renderer's main thread,
+      // ~110% renderer+GPU CPU with nothing happening). canvas-empty-changes.test.ts pins it.
+      if (managed.length === 0) return
       // Re-snap what the resizer proposes before it is applied, so a resize tracks the grid
       // during the drag instead of correcting itself on release (see lib/resizeSnap.ts).
       const snapSettings = useSettings.getState().settings
@@ -3898,6 +5008,21 @@ export function Canvas() {
     [agentIdOf]
   )
 
+  // One-shot discovery note into an idle agent endpoint that can now read `otherId` (skip a node
+  // mid-turn so we don't interrupt it). Claude gets the skill pointer; codex/gemini the CLI inline.
+  const announceContextLink = useCallback(
+    async (selfId: string, otherId: string) => {
+      if (useAgentStatus.getState().byId[selfId]?.state === 'working') return
+      const title = (nodesRef.current.find((n) => n.id === otherId)?.data.title as string) || 'a linked node'
+      const { shimPath } = await window.nodeTerminal.contextLink.info()
+      void api.pty.sendText(
+        selfId,
+        buildContextLinkNote(agentIdOf(selfId), title, shimPath)
+      ).then(reportTextDelivery)
+    },
+    [agentIdOf]
+  )
+
   // Draw a link: context (two agent nodes read each other) or note (sticky text becomes
   // the terminal's context).
   const onConnect = useCallback(
@@ -3924,21 +5049,11 @@ export function Canvas() {
       )
       markDirty()
       const status = useAgentStatus.getState().byId
-      const titleOf = (id: string) =>
-        (nodes.find((n) => n.id === id)?.data.title as string) || 'a linked node'
       if (kind === 'context') {
         // Discovery: tell each idle endpoint it is now linked (skip a node mid-turn so we
         // don't interrupt it). Claude gets the skill pointer; codex/gemini get the CLI inline.
-        const note = async (selfId: string, otherId: string) => {
-          if (status[selfId]?.state === 'working') return
-          const { shimPath } = await window.nodeTerminal.contextLink.info()
-          void api.pty.sendText(
-            selfId,
-            buildContextLinkNote(agentIdOf(selfId), titleOf(otherId), shimPath)
-          ).then(reportTextDelivery)
-        }
-        void note(source, target)
-        void note(target, source)
+        void announceContextLink(source, target)
+        void announceContextLink(target, source)
         return
       }
       // Note link: push the note text once into the terminal — agent sessions only.
@@ -3954,7 +5069,69 @@ export function Canvas() {
       )
       if (msg) void api.pty.sendText(target, msg).then(reportTextDelivery)
     },
-    [linkEndpointOf, agentIdOf, setLinkEdges, markDirty, nodes]
+    [linkEndpointOf, agentIdOf, setLinkEdges, markDirty, nodes, announceContextLink]
+  )
+
+  // Right-click a context link: pick its direction (issue #852) or remove it. Direction is a
+  // property of the persisted bridge (`reader`), and the link map main authorizes reads from is
+  // rebuilt from it by useContextLinkSync — so a flip changes who may read immediately, exactly as
+  // drawing or removing a link does. An endpoint that GAINS read access gets the same one-shot
+  // discovery note a freshly drawn link sends; one that loses it gets nothing, like a removal.
+  // Note links (sticky → terminal) are one-way by nature and get no menu.
+  const onEdgeContextMenu = useCallback(
+    (e: React.MouseEvent, edge: Edge) => {
+      // A rope drawn over a context link (open-agent / spawn-team / --after) hides that link and
+      // keeps the pixels, so its right-click must reach the covered link by endpoint pair — the
+      // same rule the removal paths use. A rope with nothing under it gets no menu.
+      const link = contextLinkForEdge(edge.id, linkEdgesRef.current, controlEdgesRef.current)
+      if (!link) return
+      const viaRope = link.id !== edge.id
+      const nodeOf = (id: string) => nodesRef.current.find((n) => n.id === id)
+      if (nodeOf(link.source)?.type === 'sticky' || nodeOf(link.target)?.type === 'sticky') return
+      e.preventDefault()
+      const titleOf = (id: string) => (nodeOf(id)?.data.title as string) || id
+      const current = edgeToBridge(link)
+      const setReader = (reader: string | null) => {
+        const next = withLinkReader(current, reader)
+        setLinkEdges((es) =>
+          es.map((x) => (x.id === link.id ? { ...bridgeToEdge(next), selected: x.selected } : x))
+        )
+        markDirty()
+        for (const id of gainedReaders(current, next)) {
+          void announceContextLink(id, id === next.source ? next.target : next.source)
+        }
+      }
+      const a = titleOf(link.source)
+      const b = titleOf(link.target)
+      const option = (label: string, reader: string | null) => {
+        const active = isCurrentLinkDirection(current, reader)
+        return {
+          label: `${active ? '✓ ' : ''}${label}`,
+          onClick: () => setReader(reader),
+          ...(active ? { disabled: true, hint: 'Current direction' } : {})
+        }
+      }
+      setMenu({
+        x: e.clientX,
+        y: e.clientY,
+        items: [
+          { type: 'label', label: 'Context link — who reads whom' },
+          option(`${a} ⇄ ${b} (both read)`, null),
+          option(`${a} reads ${b} only`, link.source),
+          option(`${b} reads ${a} only`, link.target),
+          { type: 'separator' },
+          {
+            label: viaRope ? 'Remove context link (keeps the rope)' : 'Remove link',
+            danger: true,
+            onClick: () => {
+              setLinkEdges((es) => es.filter((x) => x.id !== link.id))
+              markDirty()
+            }
+          }
+        ]
+      })
+    },
+    [setLinkEdges, markDirty, announceContextLink]
   )
 
   // Of these ropes, the ones that are NOT live waits. A waiting rope's removal means "stop waiting
@@ -4038,13 +5215,18 @@ export function Canvas() {
     // identity), and most canvases have no ropes at all.
     if (!controlEdgesRef.current.length) return
     const ids = new Set(nodes.map((n) => n.id))
-    setControlEdges((es) => {
-      const valid = es.filter((e) => ids.has(e.source) && ids.has(e.target))
-      return valid.length === es.length ? es : valid
-    })
+    setControlEdges((es) => pruneRopes(es, ids))
   }, [nodes])
 
-  useContextLinkSync({ projectId: nodesProjectIdRef.current, nodes, edges: linkEdges })
+  // The RENDERED epoch, not the ref: in a project switch's window the ref already names the incoming
+  // project while `nodes` / `linkEdges` are still the outgoing one's (see useNodesEpoch), and this map
+  // authorizes context reads. Persisted-shape bridges: the one-way `reader` (issue #852) lives in
+  // edge.data on the canvas.
+  const linkBridges = useMemo(() => linkEdges.map(edgeToBridge), [linkEdges])
+  useContextLinkSync({ projectId: renderedProjectId, nodes, edges: linkBridges })
+  // Phone chat: tell the core's agent-status mirror which session each node was last running, for
+  // nodes it learned nothing about this run (see useMirrorIdentitySeed).
+  useMirrorIdentitySeed()
 
   // Pruning is separate from publication: node geometry changes must not postpone link writes.
   useEffect(() => {
@@ -4216,9 +5398,13 @@ export function Canvas() {
    * board) — otherwise every one lands on the view center and piles into a stack you only discover
    * when you switch back to the canvas. Returns undefined only if the view isn't measured yet.
    */
-  const emptyNodePos = useCallback((): { x: number; y: number } | undefined => {
-    const preferred = viewCenter()
-    if (!preferred) return undefined
+  // `box` places something other than a default-sized node — a worktree frame, say. For a box the
+  // answer is a TOP-LEFT that centres it on the view (`freeSpot` answers top-lefts); without one
+  // the historical point is returned unchanged.
+  const emptyNodePos = useCallback((box?: { w: number; h: number }): { x: number; y: number } | undefined => {
+    const center = viewCenter()
+    if (!center) return undefined
+    const preferred = box ? { x: center.x - box.w / 2, y: center.y - box.h / 2 } : center
     const s = useSettings.getState().settings
     const w = s.defaultNodeWidth || 640
     const h = s.defaultNodeHeight || 440
@@ -4233,7 +5419,7 @@ export function Canvas() {
         w: (n.measured?.width as number | undefined) ?? (n.width as number | undefined) ?? w,
         h: (n.measured?.height as number | undefined) ?? (n.height as number | undefined) ?? h
       }))
-    return freeSpot(boxes, preferred, { w, h })
+    return freeSpot(boxes, preferred, box ?? { w, h })
   }, [viewCenter])
 
   /** The checkout a Source Control action refers to. The panel hands its ACTIVE SCOPE's cwd
@@ -4438,18 +5624,32 @@ export function Canvas() {
   // `reconnectProjectId` (Stage 4 Task 7): when reconnecting an offline tab, bind the fresh session
   // to the EXISTING project id (reuse the tab, clear its "unavailable" grey) instead of adding a new
   // one — so a socket drop → greyed reconnectable tab, never a duplicate.
+  // `hosted` (a hosted team's join code): build the tab with its hosted api, wait up to the host's
+  // own ten-minute pending window for an owner, switch to it only when asked, and hand a failure
+  // back to the caller (the hosted joiner decides whether to retry or say so) instead of alerting.
+  // A hosted team's one connection serves one tab per project it shares (`teamTabs`), and follows
+  // the host's share changes for as long as it lives.
+  // Absent = a pairing offer, exactly as before. Resolves with the outcome only for `hosted`.
   const mountRemoteMirror = useCallback(
     (
       connectionId: string,
       label = 'Remote host',
       reconnectProjectId?: string,
-      staleSessionId?: string
-    ) => {
-      if (relayTabsRef.current.has(connectionId)) return
-      void openRelayTab(connectionId, label, {
+      staleSessionId?: string,
+      hosted?: HostedMountOpts
+    ): Promise<HostedMountOutcome | null> => {
+      if (relayTabsRef.current.has(connectionId)) return Promise.resolve(null)
+      return openRelayTab(connectionId, label, {
         relayClient: window.nodeTerminal.relayClient,
         addProject: reconnectProjectId
-          ? () => ({ id: reconnectProjectId }) // reconnect: reuse the existing tab, don't spawn one
+          ? () => {
+              // A hosted reconnect whose tab was closed or deleted while it connected must never
+              // bind to it (or un-grey it): refused here, the new session is disposed (R40).
+              if (hosted && !isOpenTab(reconnectProjectId)) {
+                throw new Error('The tab this reconnect was for is closed.')
+              }
+              return { id: reconnectProjectId } // reconnect: reuse the existing tab, don't spawn one
+            }
           : (name) => useProjects.getState().addProject(name),
         // First connect adopts the host's shared project (its nodes, fresh id). On reconnect the
         // existing tab (with its nodes) is reused via addProject above, so no adopt lever is passed.
@@ -4457,17 +5657,49 @@ export function Canvas() {
           ? undefined
           : (p) => useProjects.getState().adoptProject(p),
         setActiveProject: (id) => useProjects.getState().setActive(id),
+        ...(hosted
+          ? {
+              hosted: true,
+              timeoutMs: HOSTED_APPROVAL_WAIT_MS,
+              activate: hosted.activate,
+              // One tab per project the team shares, under the host's own ids. A reconnect reuses
+              // the tabs the stale (offline) session still holds, greyed, by id.
+              placeProjects: (projects: Project[]) => {
+                const existing = staleSessionId ? projectIdsBoundToSession(staleSessionId) : []
+                // A reconnect whose team tabs were ALL closed meanwhile must not bring them back (R40).
+                if (reconnectProjectId && !existing.some((id) => isOpenTab(id))) {
+                  throw new Error('The tab this reconnect was for is closed.')
+                }
+                return teamTabs.place({ hostId: hosted.hostId, label }, projects, existing, {
+                  keepActive: !hosted.activate
+                })
+              },
+              ...(hosted.focusProjectId ? { focusProjectId: hosted.focusProjectId } : {}),
+            }
+          : {}),
       })
-        .then((tab) => {
+        .then((tab): HostedMountOutcome | null => {
           relayTabsRef.current.set(connectionId, tab)
+          // The session's api, read ONCE while the mount's tab is surely bound to it: a share event
+          // may close that tab later, and resolving through it then would answer the local session.
+          const bound = sessionForProject(tab.projectId)
+          const api = bound.id === tab.sessionId ? bound.api : null
           if (reconnectProjectId) {
             // The fresh session is now bound to the tab (openRelayTab rebound the SAME project id),
             // so it is finally safe to drop the stale offline session it replaced. Disposing only
             // AFTER a successful rebind is what keeps a FAILED reconnect reconnectable: if approval
             // never lands, the offline session stays bound and the tab stays greyed-clickable.
-            if (staleSessionId) disposeSession(staleSessionId)
-            // Back online: un-grey the reused tab.
-            useProjects.getState().setProjectUnavailable(reconnectProjectId, false)
+            if (staleSessionId) {
+              disposeSession(staleSessionId)
+              if (hosted) useHostedTeams.getState().forget(staleSessionId)
+            }
+            // Back online: un-grey every tab the connection serves (a hosted team's are several).
+            for (const id of tab.projectIds) useProjects.getState().setProjectUnavailable(id, false)
+          }
+          // A background (unrequested) reconnect did not switch tabs — but if one of its tabs is
+          // on screen, the active session must follow the rebind (disposing the stale one reset it).
+          if (hosted && !hosted.activate && tab.projectIds.includes(useProjects.getState().activeProjectId)) {
+            setActiveSession(tab.sessionId)
           }
           // A host/relay drop AFTER approval is INVOLUNTARY (not a user close): grey the tab to
           // "unavailable" and take its session offline (presence teardown runs once) — but KEEP the
@@ -4479,14 +5711,63 @@ export function Canvas() {
               setProjectUnavailable: (id, v) => useProjects.getState().setProjectUnavailable(id, v),
             })
           })
+          // A hosted team follows the host's share changes while this connection lives: a project
+          // it stops sharing loses its tab, a newly shared one gains one (without taking the screen).
+          // Held by the session, so the subscription ends with it (a drop, a close).
+          if (hosted && api?.hosted) {
+            const hostId = hosted.hostId
+            const teamTabIds = (): string[] =>
+              useProjects
+                .getState()
+                .projects.filter((x) => !x.closed && teamTabs.teamOf(x.id) === hostId)
+                .map((x) => x.id)
+            // The tabs the joiner was last told this connection serves. Events overlap (each commits
+            // its close half before awaiting its load), so an earlier event can settle after a later
+            // one closed tabs: each reconcile diffs the store against this set, never against a
+            // snapshot from when its own event began.
+            let known = [...tab.projectIds]
+            const off = api.hosted.onSharedChanged((p) => {
+              const ids = Array.isArray(p?.projectIds) ? p.projectIds : []
+              // What the event changed is read back from the store once it settles. It can reject
+              // (the load failed, the session went away mid-load) and still have closed tabs, so
+              // its resolved value alone does not say what the joiner must follow.
+              void teamTabs
+                .sharedChanged(
+                  { hostId, label, sessionId: tab.sessionId },
+                  ids,
+                  async () => (await api.workspace.load()).projects.map(sanitizeRelayProject),
+                  { keepActive: true }
+                )
+                .catch(() => {}) // never the user's error: the tabs that stand are in the store
+                .then(() => {
+                  const r = reconcileTeamTabs(known, teamTabIds())
+                  known = r.known
+                  const joiner = hostedJoinerRef.current
+                  if (!joiner) return
+                  if (r.added.length) joiner.tabsAdded(hostId, r.added)
+                  // Never tabClosed: a share event does not end the team. Closing its last tab does
+                  // (disposeRelayTabForProject).
+                  for (const id of r.removed) joiner.tabRemoved(id, r.known[0])
+                })
+            })
+            try {
+              holdSessionTeardown(tab.sessionId, off)
+            } catch {
+              off() // the session is already gone: nothing to follow
+            }
+          }
+          return hosted ? { projectId: tab.projectId, projectIds: tab.projectIds } : null
         })
-        .catch((err) => {
+        .catch((err): HostedMountOutcome | null => {
           // A user who declined the SAS triggered this close themselves — don't cry error.
-          if (cancelledConnsRef.current.delete(connectionId)) return
+          const declined = cancelledConnsRef.current.delete(connectionId)
+          if (hosted) return { error: err, declined }
+          if (declined) return null
           window.alert(`Remote session did not open: ${(err as Error).message}`)
+          return null
         })
     },
-    []
+    [teamTabs]
   )
 
   // Surface the SAS so this human can verify it matches the host's before confirming (the
@@ -4495,21 +5776,105 @@ export function Canvas() {
   // relay-api.ts gotcha 2). Shared by the first connect and the Task 7 reconnect (which passes the
   // existing project id so the fresh session rebinds the SAME tab).
   const confirmAndMount = useCallback(
-    (connectionId: string, label: string, reconnectProjectId?: string, staleSessionId?: string) => {
+    (
+      connectionId: string,
+      label: string,
+      reconnectProjectId?: string,
+      staleSessionId?: string,
+      hosted?: HostedMountOpts
+    ): Promise<HostedMountOutcome | null> => {
       const unSas = window.nodeTerminal.relayClient.onSas(connectionId, (sas) => {
         unSas()
-        if (sas && window.confirm(`Verify this code matches the one shown on the host:\n\n${sas}`)) {
+        // A hosted team's owner is not at a host screen: they read the same code in their approval
+        // dialog, so the joiner reads it to them (a call, a chat).
+        const question = hosted
+          ? `Read this code to an owner of ${label || 'the team'} (call or chat) — they see the same code before approving this device:\n\n${sas}`
+          : `Verify this code matches the one shown on the host:\n\n${sas}`
+        if (sas && window.confirm(question)) {
           window.nodeTerminal.relayClient.confirm(connectionId)
+          // Nothing left for this user to do: the owner's wait starts now (the joiner says so).
+          hosted?.onSasConfirmed?.()
         } else {
           // Deliberate decline: mark it so the bootstrap's close-reject isn't surfaced as an error.
           cancelledConnsRef.current.add(connectionId)
           window.nodeTerminal.relayClient.disconnect(connectionId)
+          // Main never reports a close it was asked for; a hosted wait would otherwise run on.
+          if (hosted) emitLocalRelayClose(connectionId)
         }
       })
-      mountRemoteMirror(connectionId, label, reconnectProjectId, staleSessionId)
+      return mountRemoteMirror(connectionId, label, reconnectProjectId, staleSessionId, hosted)
     },
     [mountRemoteMirror]
   )
+
+  // Hosted teams (a Server Edition hosting over the relay, joined by a `nodeterm://join` code): the
+  // ONE owner of every (re)join — boot, a dropped tab, a click on a greyed tab, a pasted code — so a
+  // team never has two attempts or two connections at once (lib/hostedJoin.ts). Created once
+  // (`hostedJoinerRef` is declared beside relayTabsRef); it reconnects every approved bookmark at
+  // boot. The Server Edition's `relayHosted` answers no bookmarks, so there it does nothing.
+  useEffect(() => {
+    const joiner = createHostedJoiner({
+      connect: (code) => window.nodeTerminal.relayClient.connect(code),
+      // Main's close (a drop, a refusal) or our own (a closed tab, a declined SAS: main never reports
+      // those) — either way the team's connection is over.
+      onClosed: (id, listener) => {
+        const unMain = window.nodeTerminal.relayClient.onClosed(id, listener)
+        const unLocal = onLocalRelayClose(id, () => listener())
+        return () => {
+          unMain()
+          unLocal()
+        }
+      },
+      onApproved: (id, listener) => window.nodeTerminal.relayClient.onApproved(id, listener),
+      onSas: (id, listener) => window.nodeTerminal.relayClient.onSas(id, () => listener()),
+      // A connection the joiner gives up on (its tab closed mid-approval, a cancelled late connect):
+      // main never reports a close it was asked for, so it is announced here too.
+      disconnect: (id) => {
+        window.nodeTerminal.relayClient.disconnect(id)
+        emitLocalRelayClose(id)
+      },
+      bookmarks: async () => (await window.nodeTerminal.relayHosted?.bookmarks()) ?? [],
+      removeBookmark: (hostId) => window.nodeTerminal.relayHosted.removeBookmark(hostId),
+      mount: (connectionId, req, hooks) => {
+        const bound = req.reconnectProjectId ? sessionForProject(req.reconnectProjectId) : null
+        return confirmAndMount(
+          connectionId,
+          req.label || 'Hosted team',
+          req.reconnectProjectId,
+          bound?.source === 'relay' ? bound.id : undefined,
+          {
+            // Only a reconnect the user asked for takes the screen (or one with nothing on it).
+            activate: req.manual || !useProjects.getState().activeProjectId,
+            onSasConfirmed: hooks.sasConfirmed,
+            hostId: req.hostId,
+            // Where it lands when it does: the project just shared, else the tab a reconnect is for
+            // (a click on one of a team's greyed tabs keeps the user on that tab).
+            focusProjectId: req.focusProjectId ?? req.reconnectProjectId
+          }
+        ).then((o): HostedMountOutcome => o ?? { error: new Error('That connection is already open.'), declined: true })
+      },
+      tabOpen: isOpenTab,
+      notify: (n) => setNotice(n),
+      clearNotice: (text) => setNotice((n) => (n?.text === text ? null : n)),
+      promptForCode: (label) => promptDialog({ message: `Paste an invite code for ${label || 'the team'}:` }),
+      setTimer: (fn, ms) => setTimeout(fn, ms),
+      clearTimer: (t) => clearTimeout(t as ReturnType<typeof setTimeout>)
+    })
+    hostedJoinerRef.current = joiner
+    void joiner.bootReconnect()
+    return () => {
+      hostedJoinerRef.current = null
+      joiner.dispose()
+    }
+  }, [confirmAndMount])
+
+  // The share flow's join: a team this desktop just set up over ssh, whose bookmark it seeded
+  // pre-approved. Through the team's one attempt owner (retrying while the relay comes up, with no
+  // SAS), landing on the project that was shared. `busy` = this desktop is already connected to that
+  // team (nothing mounts; the caller lands on the project itself); null = no joiner yet.
+  const joinApprovedTeam = useCallback((code: string, focusProjectId?: string): 'started' | 'busy' | null => {
+    return hostedJoinerRef.current?.joinApproved(code, focusProjectId ? { focusProjectId } : undefined) ?? null
+  }, [])
 
   // Connect to a host from an already-collected pairing offer: open the relay socket, then run the
   // shared SAS-compare + mount flow. The SINGLE place `relayClient.connect` + `confirmAndMount` live,
@@ -4517,6 +5882,12 @@ export function Canvas() {
   // `nodeterm:open-remote-terminal` event) reuses it instead of re-implementing the SAS handshake.
   const connectOffer = useCallback(
     async (offer: string) => {
+      // A hosted team's join code goes through its team's one attempt owner (never a second
+      // connect for the same team). A pairing offer takes the path below, unchanged.
+      if (isJoinCode(offer) && hostedJoinerRef.current) {
+        hostedJoinerRef.current.joinWithCode(offer)
+        return
+      }
       try {
         const connectionId = await window.nodeTerminal.relayClient.connect(offer)
         confirmAndMount(connectionId, 'Remote host')
@@ -4542,11 +5913,22 @@ export function Canvas() {
   // path), so a cancelled/failed reconnect leaves the offline tab still bound and reconnectable.
   const reconnectRelay = useCallback(
     (projectId: string) => {
+      // A hosted team's tab reconnects from its bookmark: no code to paste.
+      if (hostedJoinerRef.current?.reconnectTab(projectId)) return
       const label = useProjects.getState().getProject(projectId)?.name ?? 'Remote host'
       const bound = sessionForProject(projectId)
       const staleSessionId = bound.source === 'relay' ? bound.id : undefined
       void reconnectRelayTab(projectId, {
-        promptForOffer: () => promptDialog({ message: "Paste the host's new pairing code:" }),
+        promptForOffer: async () => {
+          const offer = await promptDialog({ message: "Paste the host's new pairing code:" })
+          // A join code pasted here goes to the joiner, which refuses it: only a Team Access tab
+          // reaches this prompt, and a team must not be mounted into it (R46).
+          if (offer && isJoinCode(offer) && hostedJoinerRef.current) {
+            hostedJoinerRef.current.joinWithCode(offer, projectId)
+            return null
+          }
+          return offer
+        },
         connect: (offer) => window.nodeTerminal.relayClient.connect(offer),
         mount: (connectionId, projId) => confirmAndMount(connectionId, label, projId, staleSessionId),
         onError: (message) => window.alert(`Could not reconnect: ${message}`),
@@ -4555,26 +5937,40 @@ export function Canvas() {
     [confirmAndMount]
   )
 
-  /** Open a file as a code editor node on the canvas. `sshFs` must be passed explicitly by the
+  /** Open a file in the appropriate canvas viewer. Markdown/text, images and PDFs use EditorNode
+   *  (which already provides their previews), audio/video use VideoNode, and a LOCAL .html opened
+   *  with `renderHtml` (a terminal link / card preview — never Explorer or ⌘K, where the user is
+   *  editing the source) renders in a WebNode: a sandboxed <webview>, no node integration, the
+   *  same surface `show-web --file` uses. `sshFs` must be passed explicitly by the
    *  caller: only genuinely-remote, Explorer-opened files in an SSH project pass `true`; native
    *  dialog / quick-open paths are LOCAL and stay local (so their ⌘S never writes to the host).
    *  A file that is already open focuses its existing node instead of stacking a duplicate;
    *  a fresh node is born `selected` so React Flow elevates it above the node stack. */
   const openFile = useCallback(
-    (filePath: string, center?: { x: number; y: number }, sshFs?: boolean) => {
+    (
+      filePath: string,
+      center?: { x: number; y: number },
+      sshFs?: boolean,
+      opts: { renderHtml?: boolean } = {}
+    ) => {
       const existing = nodesRef.current.find(
-        (n) => (n.type === 'editor' || n.type === 'video') && n.data?.filePath === filePath
+        (n) =>
+          (n.type === 'editor' || n.type === 'video' || n.type === 'web') &&
+          n.data?.filePath === filePath
       )
       if (existing) {
         focusNodeRef.current(existing.id)
         return
       }
+      const viewerKind = fileViewerKind(filePath, { sshFs, renderHtml: opts.renderHtml })
       setNodes((ns) => [
         ...ns.map((n) => (n.selected ? { ...n, selected: false } : n)),
         {
-          ...(isMediaFile(filePath)
-            ? createVideoNode(ns.length, filePath, center ?? viewCenter(), sshFs)
-            : createEditorNode(ns.length, filePath, center ?? viewCenter(), sshFs)),
+          ...(viewerKind === 'web'
+            ? createWebNode(ns.length, { filePath }, center ?? viewCenter())
+            : viewerKind === 'video'
+              ? createVideoNode(ns.length, filePath, center ?? viewCenter(), sshFs)
+              : createEditorNode(ns.length, filePath, center ?? viewCenter(), sshFs)),
           selected: true
         }
       ])
@@ -4745,15 +6141,29 @@ export function Canvas() {
   }, [showExplorer])
 
   // Cmd+click file links inside terminal output (TerminalNode dispatches these — it has no
-  // direct line to the canvas). Files open as editor nodes; directories reveal in Explorer.
+  // direct line to the canvas). A link activated from a Kanban card must also uncover the canvas:
+  // creating a selected viewer behind the full-page board would make a successful click look dead.
   useEffect(() => {
+    const uncoverCanvas = (): void => {
+      const projectId = useProjects.getState().activeProjectId
+      if (isGlobalKanbanOpen() || isKanbanOpen(projectId)) showCanvas(projectId)
+    }
     const onOpen = (e: Event): void => {
-      const d = (e as CustomEvent<{ path: string; ssh?: boolean }>).detail
-      if (d?.path) openFile(d.path, undefined, d.ssh)
+      const d = (e as CustomEvent<{ path: string; ssh?: boolean; view?: boolean }>).detail
+      if (d?.path) {
+        uncoverCanvas()
+        // `view` = a terminal link / card preview asking to SEE the file: a local .html renders as a
+        // page. Explorer, ⌘K and the files node leave it unset and keep editing the source. A
+        // browser tab has no <webview>, so it always gets the editor.
+        openFile(d.path, undefined, d.ssh, { renderHtml: !!d.view && !isBrowserRuntime() })
+      }
     }
     const onReveal = (e: Event): void => {
       const d = (e as CustomEvent<{ path: string }>).detail
-      if (d?.path) revealProjectFile(d.path)
+      if (d?.path) {
+        uncoverCanvas()
+        revealProjectFile(d.path)
+      }
     }
     // A file-manager node asking for a terminal in the folder it is showing. Same
     // no-direct-line-to-the-canvas pattern as the two above.
@@ -5180,8 +6590,7 @@ export function Canvas() {
       // so the user actually sees the login node they must interact with. Same rationale as the
       // Settings-overlay close in the add-account listeners above.
       if (pid) {
-        if (isGlobalKanbanOpen()) useViewMode.getState().toggleGlobalKanban()
-        else if (isKanbanOpen(pid)) useViewMode.getState().toggle(pid)
+        if (isGlobalKanbanOpen() || isKanbanOpen(pid)) showCanvas(pid)
       }
       // Also reachable from the system row in Settings → Accounts (its "Sign in / switch"
       // button) — the full-screen overlay would hide the login node otherwise, same as the
@@ -5208,6 +6617,31 @@ export function Canvas() {
       .projects.find((p) => p.ssh && sshHostKey(p.ssh.server) === host && conn[p.id])?.id
   }, [])
 
+  /**
+   * The refusals `addAgentNode` makes before it builds anything, asked AHEAD of it by a caller that
+   * does something expensive on the node's behalf first — the issue card's "Start with agent in a
+   * new worktree" runs `git worktree add` before the agent exists, and a refusal after that would
+   * leave a fresh worktree with no agent in it. Same functions, same wording, same inputs.
+   */
+  const agentCreateRefusal = useCallback(
+    (agentId: AgentId, accountId?: string | null): string | null => {
+      if (!canCreateOnCanvas(nodesProjectIdRef.current, useProjects.getState().activeProjectId)) {
+        return CANVAS_NOT_ACTIVE_NOTICE
+      }
+      if (agentId !== 'codex') return null
+      const decision = resolveNewCodexNodeAccount(
+        accountId ?? undefined,
+        useSettings.getState().settings.codexAccounts,
+        connectedProjectIdForHost
+      )
+      if (decision.create) return null
+      return decision.reason === 'no-connection'
+        ? CODEX_ACCOUNT_NO_CONNECTION_NOTICE
+        : CODEX_ACCOUNT_GONE_NOTICE
+    },
+    [connectedProjectIdForHost]
+  )
+
   const addAgentNode = useCallback(
     (
       agentId: AgentId,
@@ -5216,8 +6650,15 @@ export function Canvas() {
       // `null` = the user EXPLICITLY picked the System account row: resolveNewNodeAccount then
       // skips the project default instead of treating the pick as "no pick" (#419).
       accountId?: string | null,
-      initialPrompt?: string
-    ) => {
+      initialPrompt?: string,
+      // A GitHub issue binding (Start with agent on an issue card). Stamped on the node AFTER the
+      // factory: it drives chips and run history only — the launch prompt was already composed
+      // from it by `issueLaunchPrompt`, the one place a reference may become text in a pane.
+      // `awaitSetupGroup` holds the launch for that worktree frame's setup script (the issue card's
+      // "Start with agent in a new worktree" opens the agent in the same tick as the frame) — the
+      // same `PendingLaunch` hold a control open into a preparing frame gets (`setupHoldGroup`).
+      extra?: { issueRef?: IssueRef; awaitSetupGroup?: string }
+    ): { node: CanvasNode; placed: CanvasNode; projectId: string } | undefined => {
       // Resolve the target project LIVE, at click time — never from this callback's render
       // closure. Menu onClick closures outlive the render that built them (`setMenu` freezes
       // them into state), and the sessions-sidebar "+" deliberately switches projects before
@@ -5229,10 +6670,7 @@ export function Canvas() {
         console.warn(
           `[nodeterm] node-create refused: canvas holds ${nodesProjectIdRef.current ?? 'nothing'} but the active project is ${targetProjectId || 'none'}`
         )
-        setNotice({
-          kind: 'error',
-          text: 'Could not create the node: the canvas on screen is not the active project’s. Switch tabs once and try again.'
-        })
+        setNotice({ kind: 'error', text: CANVAS_NOT_ACTIVE_NOTICE })
         return
       }
       const project = useProjects.getState().getProject(targetProjectId)
@@ -5264,8 +6702,8 @@ export function Canvas() {
             kind: 'error',
             text:
               decision.reason === 'no-connection'
-                ? 'That Codex account lives on a host that is not connected — connect its SSH project first.'
-                : 'That Codex account is no longer available. Nothing was created.'
+                ? CODEX_ACCOUNT_NO_CONNECTION_NOTICE
+                : CODEX_ACCOUNT_GONE_NOTICE
           })
           return
         }
@@ -5293,35 +6731,51 @@ export function Canvas() {
       console.info(
         `[nodeterm] node-create agent=${agentId} project=${targetProjectId} group=${groupId ?? '-'} cwd=${cwd ?? '-'}`
       )
-      setNodes((ns) => {
-        // The default gateway model applies ONLY when the launch mode asks for it
-        // (`agentLaunchMode === 'gateway-model'`). 'gateway' launches with the CLI's own default
-        // model, and 'subscription' strips the gateway entirely so its model is moot. Gated on
-        // `canSwitchModel` (base-resolved) so a non-capable agent is left model-less.
-        const settings = useSettings.getState().settings
-        const model =
-          settings.agentLaunchMode === 'gateway-model' &&
-          settings.modelGatewayDefaultModel &&
-          canSwitchModel(agentId)
-            ? settings.modelGatewayDefaultModel
-            : undefined
-        const node = createAgentNode(
-          agentId,
-          ns.length,
-          cwd,
-          center ?? emptyNodePos(),
-          initialPrompt,
-          project?.ssh,
-          account,
-          activePermissionMode(agentId),
-          // Same funnel as the account above: the active project owns the node, so its own
-          // `.nodeterm/settings.json` launch command layers over the global one.
-          targetProjectId,
-          model
-        )
-        return [...ns, groupId ? parentInto(node, groupId) : node]
-      })
+      // The default gateway model applies ONLY when the launch mode asks for it
+      // (`agentLaunchMode === 'gateway-model'`). 'gateway' launches with the CLI's own default
+      // model, and 'subscription' strips the gateway entirely so its model is moot. Gated on
+      // `canSwitchModel` (base-resolved) so a non-capable agent is left model-less.
+      const settings = useSettings.getState().settings
+      const model =
+        settings.agentLaunchMode === 'gateway-model' &&
+        settings.modelGatewayDefaultModel &&
+        canSwitchModel(agentId)
+          ? settings.modelGatewayDefaultModel
+          : undefined
+      // Built OUTSIDE the setNodes updater so the caller gets the node back (the board assigns the
+      // new card to a column and files its run history under it); `createNodeInColumn` does the same.
+      const created = createAgentNode(
+        agentId,
+        nodesRef.current.length,
+        cwd,
+        center ?? emptyNodePos(),
+        initialPrompt,
+        project?.ssh,
+        account,
+        activePermissionMode(agentId),
+        // Same funnel as the account above: the active project owns the node, so its own
+        // `.nodeterm/settings.json` launch command layers over the global one.
+        targetProjectId,
+        model
+      )
+      const issueRef = normalizeIssueRef(extra?.issueRef)
+      const bound = issueRef ? { ...created, data: { ...created.data, issueRef } } : created
+      const node = extra?.awaitSetupGroup ? queueControlLaunch(bound, [], extra.awaitSetupGroup) : bound
+      // The hold is armed by THIS process on the user's own click, so the fork's consent gate must
+      // let it fire once the frame's setup finishes — unrecorded, it would sit QUEUED until ▶ as if
+      // it had been loaded from the project file (see wasArmedThisSession).
+      if (node !== bound) markArmedThisSession(node.id, node.data.pendingLaunch as PendingLaunch | undefined)
+      // Parented HERE, not inside the updater: the updater runs at render time, and a render that
+      // a zustand write flushes first (SyncLane, skipping this DefaultLane update) mirrors
+      // `nodesRef` back to state — which does not hold a frame `attachWorktree` created this tick.
+      const placed = groupId ? parentInto(node, groupId) : node
+      setNodes((ns) => [...ns, placed])
       markDirty()
+      // The project this node was charged to — the caller files anything else about the node (a
+      // board card, its run history) against THIS id, never a second live read of the store.
+      // `placed` is the node exactly as inserted (frame parenting included) — what a caller casting
+      // it ahead of its board card must send (`castNewNodeNow`).
+      return { node, placed, projectId: targetProjectId }
     },
     [
       setNodes,
@@ -5332,6 +6786,30 @@ export function Canvas() {
       connectedProjectIdForHost
     ]
   )
+
+  // A terminal node asking for an agent node BESIDE it — today only the Gemini-retirement banner
+  // ("Open Antigravity", terminal/gemini-retired.ts). Same no-direct-line-to-the-canvas pattern as
+  // `nodeterm:open-terminal`. The new node joins the source's frame (so a bound worktree's cwd is
+  // inherited through `cwdForNewNodeIn`) and is centred one node-width to its right; a source that
+  // has left the canvas, or an id that is not a builtin agent, opens nothing.
+  useEffect(() => {
+    const onOpenAgent = (e: Event): void => {
+      const d = (e as CustomEvent<{ agentId?: string; nearNodeId?: string }>).detail
+      const agentId = BUILTIN_AGENT_IDS.find((a) => a === d?.agentId)
+      if (!agentId) return
+      const all = nodesRef.current
+      const source = all.find((n) => n.id === d?.nearNodeId)
+      const rect = source
+        ? nodeFitRect(source as FocusableNode, all as FocusableNode[])
+        : null
+      const center = rect
+        ? { x: rect.x + rect.width * 1.5 + 40, y: rect.y + rect.height / 2 }
+        : undefined
+      addAgentNode(agentId, center, source?.parentId)
+    }
+    window.addEventListener('nodeterm:open-agent', onOpenAgent)
+    return () => window.removeEventListener('nodeterm:open-agent', onOpenAgent)
+  }, [addAgentNode, nodesRef])
 
   // "Spawn a team…" (issue #78): the dialog collects the task; this opens ONE conductor node
   // pre-prompted with it. The conductor's own manage-nodeterm-canvas skill does the role split
@@ -5759,6 +7237,21 @@ export function Canvas() {
   )
 
   // ---- multi-node actions (context menu) ----
+  /** File `run-ended` under a closed node's issue card, with the last state it was seen in. Every
+   *  node-removal funnel calls this BEFORE it drops the node's agent status (the last instant the
+   *  live session id and state exist). A node with no valid binding logs nothing. */
+  const logIssueRunEnded = useCallback(
+    (
+      projectId: string,
+      node: { id: string; title?: string; agentId?: string; agentSessionId?: string; issueRef?: unknown }
+    ) => {
+      if (!node.issueRef) return
+      const entry = runEndedEntry(node.issueRef, node, useAgentStatus.getState().byId[node.id])
+      if (entry) useBoardLog.getState().append(sessionForProject(projectId).api, projectId, entry)
+    },
+    []
+  )
+
   const deleteNodes = useCallback(
     (ids: string[], opts?: { record?: boolean }) => {
       const set = new Set(ids)
@@ -5826,6 +7319,17 @@ export function Canvas() {
       }
       nodesRef.current.forEach((n) => {
         if (!set.has(n.id)) return
+        // A session started on a GitHub issue: its run ends HERE (a turn ending never does). Read
+        // before `useAgentStatus.remove` below — the last observed state goes with it.
+        if (n.data.issueRef) {
+          logIssueRunEnded(useProjects.getState().activeProjectId ?? '', {
+            id: n.id,
+            title: n.data.title as string | undefined,
+            agentId: n.data.agentId as string | undefined,
+            agentSessionId: n.data.agentSessionId as string | undefined,
+            issueRef: n.data.issueRef
+          })
+        }
         // Permanent delete: the upcoming unmount must dispose the xterm, not park it (the
         // session is being destroyed right here). Also drops an already-parked entry.
         if (n.type === 'terminal')
@@ -5887,7 +7391,36 @@ export function Canvas() {
         )
       }
     },
-    [setNodes, markDirty, refreshWorktreeStore, releaseWorktreeBinding]
+    [setNodes, markDirty, refreshWorktreeStore, releaseWorktreeBinding, logIssueRunEnded]
+  )
+
+  /**
+   * `commitCanvas` for a project that is NOT on screen, published like every own store writer
+   * (`ownWrite` in state/projects.ts): `commitCanvas` itself never casts — it is also the active
+   * project's serialization, which the node publisher already covers — so a governed project's save
+   * overlay would otherwise drop the fork's off-screen control writes and stored closes from disk
+   * (upstream N2). The publisher skips the rendered project and any project nobody governs.
+   */
+  const commitStoredCanvas = useCallback(
+    (
+      projectId: string,
+      nodes: CanvasNodeState[],
+      viewport: Project['viewport'],
+      bridges?: BridgeLink[],
+      ropes?: BridgeLink[]
+    ): void => {
+      const before = useProjects.getState().getProject(projectId)
+      useProjects.getState().commitCanvas(projectId, nodes, viewport, bridges, ropes)
+      const after = useProjects.getState().getProject(projectId)
+      if (!before || !after || before === after) return
+      storedCanvasPublishRef.current?.(projectId, () =>
+        diffToMutations(
+          { nodes: before.nodes, bridges: before.bridges ?? [], ropes: before.ropes ?? [] },
+          { nodes: after.nodes, bridges: after.bridges ?? [], ropes: after.ropes ?? [] }
+        )
+      )
+    },
+    []
   )
 
   /**
@@ -5901,7 +7434,8 @@ export function Canvas() {
    * cwd repair, git registration prune) runs against `useWorktrees`, which tracks the ACTIVE
    * project only, so the control surface's `close` REFUSES a bound frame off screen and the
    * sessions sidebar only ever closes single terminal nodes.
-   * Shared by the sessions sidebar's cross-project close and the store-backed control surface.
+   * Shared by the sessions sidebar's cross-project close, the Omni board's off-canvas delete and
+   * the store-backed control surface (upstream's `closeStoredNodes`, folded in here).
    */
   const deleteStoredNodes = useCallback(
     (projectId: string, ids: string[]) => {
@@ -5956,6 +7490,10 @@ export function Canvas() {
           disposeTerminalOnUnmount(sessionForProject(projectId).id, n.id) // may be parked from a switch
           transport.destroy(n.id)
         }
+        // A session started on a GitHub issue: its run ends HERE. Read before the status removal
+        // below — the last observed state goes with it (upstream's closeStoredNodes did the same).
+        const stored = project.nodes.find((x) => x.id === n.id)
+        if (stored?.issueRef) logIssueRunEnded(projectId, stored)
         useAgentStatus.getState().remove(n.id)
         useAgentNodes.getState().clearForParent(n.id)
         useAgentNodes.getState().clearLoop(n.id)
@@ -5981,7 +7519,7 @@ export function Canvas() {
             : n
         )
       const names = (b: BridgeLink) => set.has(b.source) || set.has(b.target)
-      st.commitCanvas(
+      commitStoredCanvas(
         projectId,
         flowToNodeStates(remaining),
         project.viewport,
@@ -5998,7 +7536,7 @@ export function Canvas() {
       }
       void persist() // not a bare writeDisk — see the store surface's markDirty
     },
-    [deleteNodes, persist]
+    [deleteNodes, persist, logIssueRunEnded, commitStoredCanvas]
   )
 
   /** `canvas.deleteSelection` (Delete / Backspace): confirm-then-delete the selected nodes, or —
@@ -6289,24 +7827,27 @@ export function Canvas() {
   // carries no cwd of its own — the worktree's path is what its children inherit
   // (`cwdForNewNodeIn`), so the frame IS the binding.
   const attachWorktree = useCallback(
-    (
-      target: { groupId: string | null; at?: { x: number; y: number }; size?: { width: number; height: number } },
-      wt: GroupWorktree
-    ): string => {
+    (target: WorktreeAttachTarget, wt: GroupWorktree): string => {
       let groupId = target.groupId
       if (groupId) {
-        setNodes((ns) =>
+        const bind = (ns: CanvasNode[]): CanvasNode[] =>
           ns.map((n) => (n.id === groupId ? { ...n, data: { ...n.data, worktree: wt } } : n))
-        )
+        // The ref too, not only state: a caller that opens a node into this frame in the SAME tick
+        // (the issue card's "Start with agent in a new worktree") resolves the frame's cwd and
+        // position through `nodesRef`, which otherwise catches up only at the next render.
+        nodesRef.current = bind(nodesRef.current)
+        setNodes((ns) => bind(ns as CanvasNode[]))
       } else {
         const group = createGroupNode(
           target.at ?? viewCenter() ?? { x: 0, y: 0 },
-          WORKTREE_GROUP_SIZE,
+          target.size ?? WORKTREE_GROUP_SIZE,
           nodesRef.current.length
         )
-        group.data = { ...group.data, title: wt.branch, worktree: wt }
+        group.data = { ...group.data, title: target.title ?? wt.branch, worktree: wt }
         groupId = group.id
-        // Parents must come first — React Flow requires a group before its children.
+        // Parents must come first — React Flow requires a group before its children. The ref gets
+        // it at once for the same reason as the bind branch above.
+        nodesRef.current = [group, ...nodesRef.current]
         setNodes((ns) => [group, ...(ns as CanvasNode[])])
       }
       markDirty()
@@ -6319,12 +7860,24 @@ export function Canvas() {
       // BEFORE the setup script runs, so a setup `npm install` sees those links. Fire-and-forget re
       // the bind (it never blocks the frame), but ORDERED before `startWorktreeSetup` — main reads
       // the sharedPaths list itself by projectId and validates `wt.path`, so a `[]`/reject is safe.
+      //
+      // The setup gate is closed from THIS moment, not only once `startWorktreeSetup` asks for the
+      // run: a node opened into the frame while the shared paths are still being linked (the issue
+      // card opens its agent in the same tick; an `open-agent --group` right after the
+      // `open-worktree` reply can land there too) must hold like one opened a moment later. The
+      // count is released in `finally`, after `startWorktreeSetup` took its own.
+      const setupGroupId = groupId
+      useProjectSetup.getState().markGroupPending(setupGroupId)
       void (async () => {
-        const projectId = useProjects.getState().activeProjectId
-        if (projectId) {
-          await window.nodeTerminal.worktree.materializeShared(projectId, wt.path).catch(() => {})
+        try {
+          const projectId = useProjects.getState().activeProjectId
+          if (projectId) {
+            await window.nodeTerminal.worktree.materializeShared(projectId, wt.path).catch(() => {})
+          }
+          startWorktreeSetup(setupGroupId, wt.path)
+        } finally {
+          useProjectSetup.getState().clearGroupPending(setupGroupId)
         }
-        startWorktreeSetup(groupId, wt.path)
       })()
       // The bound group's id (fresh one when created here) — nodesRef lags setNodes, so
       // callers that need the id (agent-control's open-worktree reply) take it from here.
@@ -6333,34 +7886,68 @@ export function Canvas() {
     [setNodes, markDirty, viewCenter, refreshWorktreeStore, startWorktreeSetup]
   )
 
+  /** What `createBoundWorktree` (lib/worktreeCreate) runs on: this session's git, the live active
+   *  project, and `attachWorktree`. One builder for all three callers. `attach` may be wrapped by a
+   *  caller that must open a node into the frame in the SAME tick (the issue action).
+   *
+   *  The default `attach` resolves `attachWorktree` through `worktreeControlRef` WHEN IT RUNS, after
+   *  the git await — never the instance of the render that built these deps. `attachWorktree`'s
+   *  store refresh closes over that render's active project, and `open-worktree` binds to whatever
+   *  canvas is on screen when git returns: a tab switch in between would otherwise refresh the
+   *  worktree store with the PREVIOUS project's folder against the new canvas's frames, and the
+   *  stale refresh wins the store's epoch — the hazard `worktreeControlRef` exists for. */
+  const worktreeCreateDeps = useCallback(
+    (
+      attach: CreateBoundWorktreeDeps['attach'] = (target, wt) =>
+        worktreeControlRef.current.attachWorktree(target, wt)
+    ): CreateBoundWorktreeDeps => ({
+      worktreeAdd: (repoPath, wtPath, branch, baseRef, isNew) =>
+        api.git.worktreeAdd(repoPath, wtPath, branch, baseRef, isNew),
+      activeProjectId: () => useProjects.getState().activeProjectId,
+      attach
+    }),
+    [api]
+  )
+
   const createWorktreeAndGroup = useCallback(
     async (v: WorktreeCreateValue) => {
       const target = worktreeDialog
       if (!target) return
+      // The dialog's suggested path can come from the git-shared settings file: a location it
+      // produced must stay beside the repository (@shared/worktree-location). A path the person
+      // typed is theirs — the rule judges only the one the shared setting derives for this branch.
+      const locationRefusal = sharedWorktreeLocationRefusal({
+        path: v.path,
+        repoRoot: v.repoPath,
+        branch: v.branch,
+        sharedBasePath: sharedBasePathOf(projectLaunchInfoNow(target.projectId)?.resolved.worktree)
+      })
+      if (locationRefusal) {
+        setWorktreeError(locationRefusal)
+        return
+      }
       setWorktreeBusy(true)
       setWorktreeError(null)
       // A REJECTED ipc is not the same as a failed op, and both have to land here. The Server
       // Edition reaches git over WS-RPC, and a socket that drops mid-create rejects this promise
-      // (`E_DISCONNECTED`) — without the catch the `await` threw straight out of the callback,
-      // `setWorktreeBusy(false)` never ran, and the dialog sat on "Creating…" with its own Cancel
-      // button disabled by `busy`: no error, no way out but Escape. Fail closed — clear busy, say so
-      // inline, and leave the dialog open so the user can retry. (The sibling READS in this feature
-      // catch for exactly this reason; the three destructive calls did not.)
-      const res = await api.git
-        .worktreeAdd(v.repoPath, v.path, v.branch, v.baseRef, v.mode === 'new')
-        .catch((e: unknown) => ({
-          ok: false as const,
-          message: `Could not create the worktree: ${e instanceof Error ? e.message : String(e)}`
-        }))
+      // (`E_DISCONNECTED`) — `createBoundWorktree` turns that into a failure instead of throwing
+      // out of this callback, where `setWorktreeBusy(false)` never ran and the dialog sat on
+      // "Creating…" with its own Cancel disabled. Fail closed — clear busy, say so inline, and
+      // leave the dialog open so the user can retry.
+      const res = await createBoundWorktree(worktreeCreateDeps(), v, {
+        target: () => target,
+        projectId: target.projectId
+      })
       setWorktreeBusy(false)
-      if (!res.ok) {
-        setWorktreeError(res.message) // inline, never window.alert
+      if (!res.ok && res.reason === 'git') {
+        // inline, never window.alert
+        setWorktreeError(res.rejected ? `Could not create the worktree: ${res.message}` : res.message)
         return
       }
       // The worktree exists now, but the canvas may have moved on during the await: binding it to
-      // whatever is on screen would attach ANOTHER repo's worktree to this project. Leave it as an
-      // orphan (the dialog will offer it again on its own project) and say so.
-      if (useProjects.getState().activeProjectId !== target.projectId) {
+      // whatever is on screen would attach ANOTHER repo's worktree to this project. Left as an
+      // orphan (the dialog will offer it again on its own project) — say so.
+      if (!res.ok) {
         setWorktreeDialog(null)
         setNotice({
           kind: 'info',
@@ -6368,11 +7955,9 @@ export function Canvas() {
         })
         return
       }
-      // We created this directory, so `createdByApp` is true — Remove may delete it.
-      attachWorktree(target, worktreeFromCreate(v))
       setWorktreeDialog(null)
     },
-    [attachWorktree, worktreeDialog]
+    [worktreeCreateDeps, worktreeDialog]
   )
 
   const bindExistingWorktree = useCallback(
@@ -6673,12 +8258,35 @@ export function Canvas() {
     return () => setWorktreeActionHandler(null)
   }, [onWorktreeAction])
 
+  /**
+   * Latest `travelToNode`, for the headless-start notice's "Go there" button (#925). Travel to a
+   * NODE is the user's own click on that button, never something a control verb does: there is
+   * deliberately no project-travel ref beside it, and there must not be one again — the
+   * agent-control dispatch may not activate a project tab (the fork's store `ControlSurface`
+   * answers a background project in place).
+   */
+  const travelToNodeRef = useRef<(nodeId: string) => void>(() => {})
+  // "Open recent": the resume-node creator, published by the callback below so the project-load
+  // effect (declared earlier) can finish a resume that had to switch projects first.
+  const resumeCreateRef = useRef<(conv: RecentConversation) => void>(() => {})
+  // #925 headless start: one in-flight set for the whole canvas (one start per node at a time),
+  // shared by `open-* --run-now` and `run`. The two below are published beside travelToNodeRef's
+  // assignment, for the same reason: the agent-control effect mounts ONCE.
+  const headlessInFlightRef = useRef(new Set<string>())
+  const startNodesHeadlessRef = useRef<
+    (project: Project, nodes: CanvasNodeState[]) => Promise<HeadlessStartBatch>
+  >(async () => ({ outcomes: [], unhidden: false }))
+  const runQueuedNodeRef = useRef<(project: Project, nodeId: string) => Promise<ControlReply>>(
+    async () => ({ ok: false, error: 'run: canvas not ready' })
+  )
+
   // Latest worktree callbacks for the agent-control handler. That effect mounts ONCE (empty
   // deps) and these callbacks' identities change with the active project (activeProjectId /
   // isSshProject in their deps) — calling the first-render closures would run against project
   // '' (refresh no-ops, wrong SSH gate). The ref always holds this render's instances.
   const worktreeControlRef = useRef({
     attachWorktree,
+    worktreeCreateDeps,
     releaseWorktreeBinding,
     clearWorktreeBinding,
     requestRemoveWorktree,
@@ -6687,6 +8295,7 @@ export function Canvas() {
   useEffect(() => {
     worktreeControlRef.current = {
       attachWorktree,
+      worktreeCreateDeps,
       releaseWorktreeBinding,
       clearWorktreeBinding,
       requestRemoveWorktree,
@@ -6933,7 +8542,18 @@ export function Canvas() {
         useAgentStatus.getState().byId[id]?.sessionId,
         node?.data.agentSessionId
       )
-      return agentId && sid ? resumeCommand(agentId, sid) : null
+      const line = agentId && sid ? resumeCommand(agentId, sid) : null
+      // A hand-typed resume must not start or join Codex's shared daemon either (codex-daemon.ts).
+      return line && agentId
+        ? withCodexNoDaemon(
+            line,
+            capabilityAgentId(agentId),
+            codexApprovalCaps(
+              node?.data.ssh || node?.data.sshRemoteTmux,
+              useProjects.getState().activeProjectId ?? undefined
+            )
+          )
+        : line
     }
     const targetLabel =
       targetAgentId == null
@@ -7280,20 +8900,24 @@ export function Canvas() {
 
   /**
    * The usage popover's bulk move: every Claude session on this canvas that runs on `from` (and on
-   * the popover's machine) is moved to `to`, ONE AT A TIME — each is the same quit → copy → recycle
-   * as the single switch, and running them in parallel would put N transcript copies and N pane
-   * recycles on one host at once. Busy sessions are skipped, never interrupted. One summary line.
+   * the popover's machine) is moved to `to`, ALL AT ONCE — each is the same quit → copy → recycle
+   * as the single switch (`startBulkSwitch` says why they are not serialized, and where an SSH
+   * host's load is paced instead). Busy sessions are skipped, never interrupted. One summary line.
    */
   const bulkSwitchRunning = useRef(false)
+  // The same move, as the popover sees it: its sessions keep their OLD account until each lands, so
+  // without this the source row re-offers them mid-move (see `MoveSessionsControl`).
+  const [accountMove, setAccountMove] = useState<AccountMoveProgress | null>(null)
   const moveAccountSessions = useCallback(
     async (from: string | undefined, to: string | undefined, toLabel: string) => {
       if (bulkSwitchRunning.current) return
       bulkSwitchRunning.current = true
       try {
         const byId = useAgentStatus.getState().byId
-        const scope = scopeFromKey(
-          usageScopeKey(useProjects.getState().getProject(useProjects.getState().activeProjectId))
+        const scopeKey = usageScopeKey(
+          useProjects.getState().getProject(useProjects.getState().activeProjectId)
         )
+        const scope = scopeFromKey(scopeKey)
         const { ready, busy } = bulkSwitchCandidates(
           nodesRef.current
             .filter((n) => n.type === 'terminal')
@@ -7308,15 +8932,22 @@ export function Canvas() {
           scope.kind === 'ssh' ? scope.hostKey : undefined
         )
         if (ready.length + busy.length === 0) return
+        setAccountMove({ from, count: ready.length, scopeKey })
         setNotice({
           kind: 'info',
           text: `Moving ${ready.length} ${ready.length === 1 ? 'session' : 'sessions'} to ${toLabel}…`
         })
-        const outcomes: ClaudeSwitchOutcome[] = []
-        for (const n of ready) outcomes.push(await runClaudeAccountSwitch(n.id, to))
+        // All at once, not one after another — see `startBulkSwitch`.
+        const outcomes = (
+          await startBulkSwitch(
+            ready.map((n) => n.id),
+            (id) => runClaudeAccountSwitch(id, to)
+          )
+        ).map((o): ClaudeSwitchOutcome => o ?? { kind: 'not-restarted', outcome: 'exit-timeout' })
         setNotice(summarizeBulkSwitch(outcomes, busy.length, toLabel))
       } finally {
         bulkSwitchRunning.current = false
+        setAccountMove(null)
       }
     },
     [runClaudeAccountSwitch]
@@ -8331,21 +9962,113 @@ export function Canvas() {
     [commitActiveToStore, writeDisk]
   )
 
+  // Reopen a previously closed project and make it active — the active-project effect reloads its
+  // serialized nodes, whose TerminalNodes reattach to the surviving tmux sessions (or cold-restore).
+  // The unchecked form asks nothing first: it is also "Share with team"'s own undo, which must put
+  // the project back without a question. Declared here, beside switchProject and for the same TDZ
+  // reason: the ⇧⌘T plan executor just below reopens through the guarded form.
+  //
+  // A relay (team) tab is refused here, the one funnel every reopen goes through: once closed its
+  // relay session is gone, and `sessionForProject` would fall back to the LOCAL session, mounting
+  // the host's node ids on this machine's core (local shells, an agent cold-resume). False = refused.
+  const reopenProjectUnchecked = useCallback(
+    (id: string): boolean => {
+      if (useProjects.getState().getProject(id)?.remote) {
+        setNotice({ kind: 'info', text: CLOSED_TEAM_TAB_NOTICE })
+        return false
+      }
+      commitActiveToStore()
+      useProjects.getState().reopenProject(id)
+      setWelcomeOpen(false)
+      void writeDisk()
+      return true
+    },
+    [commitActiveToStore, writeDisk]
+  )
+
+  /** Ask before opening a project this desktop handed to a hosted team: the server's core writes
+   *  that canvas now, and opening it here too makes a second writer that overwrites it. True = go
+   *  ahead, and going ahead takes the project back — the mark is cleared, so this desktop saves and
+   *  mirrors it again (the caller saves), and its agent nodes skip their next automatic resume. A
+   *  project that was never handed off answers true. */
+  const confirmHandedOffReopen = useCallback(
+    async (id: string): Promise<boolean> => {
+      const marked = useProjects.getState().getProject(id)?.handedOffTo
+      if (!marked) return true
+      const hostId = marked.hostId
+      // The team's name from this device's bookmark of it. Only a label, so every failure (no
+      // relay on this surface, an IPC error, no bookmark for that team) falls back to null.
+      let label: string | null = null
+      if (hostId) {
+        try {
+          const list = await window.nodeTerminal.relayHosted?.bookmarks()
+          label = (Array.isArray(list) ? list : []).find((b) => b.hostId === hostId)?.label ?? null
+        } catch {
+          label = null
+        }
+      }
+      // Read again after the lookup: the project may have been deleted or taken back meanwhile.
+      const project = useProjects.getState().getProject(id)
+      if (!project) return false
+      const message = handedOffWarning(project, label)
+      if (!message) return true
+      // One actionable dialog at a time (`confirmFlags`): replacing an open one would drop its
+      // answer. Say why nothing opened rather than doing nothing.
+      if (confirmBusy()) {
+        setNotice({ kind: 'error', text: `Answer the open dialog first, then open ${project.name} again.` })
+        return false
+      }
+      const ok = await new Promise<boolean>((resolve) =>
+        setConfirm({
+          message,
+          confirmLabel: 'Open here anyway',
+          danger: true,
+          onConfirm: () => {
+            setConfirm(null)
+            resolve(true)
+          },
+          // The dialog's cancel path closes it after this runs.
+          onCancel: () => resolve(false)
+        })
+      )
+      if (ok) {
+        useProjects.getState().setHandedOffTo(id, undefined)
+        // Its agents would resume the conversations the team's server is running: each one skips
+        // its automatic cold-resume once, and says why (terminal/handed-off-resume.ts).
+        skipNextColdResumeFor(useProjects.getState().getProject(id)?.nodes ?? [])
+      }
+      return ok
+    },
+    [confirmBusy, setConfirm]
+  )
+
+  /** The reopen every human path uses (Welcome's and the sidebar's "Recently closed", ⇧⌘T, ⌘K,
+   *  travel, "Open recent", Set folder…). A handed-off project asks first; any other reopens at
+   *  once, synchronously, exactly as before the question existed. Resolves false when the user
+   *  declined or the reopen was refused (a team tab), so a caller that staged follow-up work (a
+   *  focus, a resume) can drop it. */
+  const reopenProject = useCallback(
+    (id: string): Promise<boolean> => {
+      if (!useProjects.getState().getProject(id)?.handedOffTo) {
+        return Promise.resolve(reopenProjectUnchecked(id))
+      }
+      return confirmHandedOffReopen(id).then((ok) => ok && reopenProjectUnchecked(id))
+    },
+    [confirmHandedOffReopen, reopenProjectUnchecked]
+  )
+
   /** Executes a `ReopenPlan` already decided by `planReopen` — the side-effecting half shared by
    *  `Cmd+Shift+T` (`reopenLastClosedCommand`) and reopening a persisted closed-session entry
-   *  from the sidebar (`reopenClosedSessionCommand`). Returns whether it did anything ('skip'
-   *  plans are the caller's problem — this function never receives one). */
+   *  from the sidebar (`reopenClosedSessionCommand`). Returns whether it did anything ('skip' and
+   *  'refuse' plans are the caller's problem — this function never receives one). */
   const executeReopenPlan = useCallback(
-    (plan: Exclude<ReopenPlan, { action: 'skip' }>): boolean => {
+    (plan: Exclude<ReopenPlan, { action: 'skip' } | { action: 'refuse' }>): boolean => {
       switch (plan.action) {
         case 'reopenProject':
-          // A project switch — commit the live canvas back to the store first, or whatever the
-          // user was looking at is silently lost (the same invariant every other project switch/
-          // add/delete in this file honors via commitActiveToStore()).
-          commitActiveToStore()
-          useProjects.getState().reopenProject(plan.projectId)
-          setWelcomeOpen(false)
-          void writeDisk()
+          // The guarded reopen: it commits the live canvas back to the store first (or whatever
+          // the user was looking at is silently lost) and, for a project handed to a hosted team,
+          // asks before this desktop writes it again. Any other project reopens synchronously.
+          void reopenProject(plan.projectId)
           return true
         case 'insertActive':
           setNodes((ns) => [...ns, ...plan.nodes])
@@ -8360,7 +10083,7 @@ export function Canvas() {
           for (const node of plan.nodes) {
             useProjects
               .getState()
-              .applyNodeMutation(plan.projectId, {
+              .applyOwnNodeMutation(plan.projectId, {
                 op: 'upsert',
                 // Cold-open arming happens HERE, by this process: consent to auto-fire (see
                 // wasArmedThisSession) is recorded at the call site, not in the pure helper.
@@ -8368,18 +10091,14 @@ export function Canvas() {
               })
           }
           void writeDisk()
-          if (plan.reopenProjectAfter) {
-            commitActiveToStore()
-            useProjects.getState().reopenProject(plan.projectId)
-            setWelcomeOpen(false)
-            void writeDisk()
-          } else {
-            switchProject(plan.projectId)
-          }
+          // A closed project goes through the guarded reopen, which asks first when it was handed
+          // to a hosted team. Declining leaves it closed; the restored nodes stay in its store copy.
+          if (plan.reopenProjectAfter) void reopenProject(plan.projectId)
+          else switchProject(plan.projectId)
           return true
       }
     },
-    [switchProject, setNodes, markDirty, writeDisk, commitActiveToStore]
+    [switchProject, reopenProject, setNodes, markDirty, writeDisk]
   )
 
   /** `app.reopenLastClosed` (Cmd+Shift+T): pops the shared close-history stack and reopens a
@@ -8394,20 +10113,6 @@ export function Canvas() {
     for (;;) {
       const entry = useReopenHistory.getState().popNext()
       if (!entry) return false
-
-      // The persisted twin of this batch (the sidebar's "Recently closed" rows the SAME delete
-      // recorded) must be consumed too — whether this entry ends up restored or skipped as stale,
-      // the ⇧⌘T stack is done with it either way, and leaving the sidebar row behind would let a
-      // later click there restore a duplicate. `writeDisk` runs unconditionally because
-      // `entry.projectId` may not be the active project, whose autosave debounce wouldn't cover it.
-      if (entry.kind === 'nodes') {
-        for (const n of entry.nodes) {
-          if (n.closedSessionId) {
-            useProjects.getState().discardClosedSession(entry.projectId, n.closedSessionId)
-          }
-        }
-        void writeDisk()
-      }
 
       const { projects, activeProjectId } = useProjects.getState()
       const project = projects.find((p) => p.id === entry.projectId)
@@ -8425,6 +10130,28 @@ export function Canvas() {
             permissionModeFor: (agentId) => projectPermissionMode(project, agentId)
           })
       )
+      // A closed team tab: nothing is written into it or reopened, and the entry is dropped. Put
+      // back on top it would answer every later ⇧⌘T with this notice and hide every older entry,
+      // and a closed team tab does not come back through ⇧⌘T anyway. A relay project is never
+      // saved, so it has no persisted twin to discard.
+      if (plan.action === 'refuse') {
+        setNotice({ kind: 'info', text: CLOSED_TEAM_TAB_NOTICE })
+        return true
+      }
+
+      // The persisted twin of this batch (the sidebar's "Recently closed" rows the SAME delete
+      // recorded) must be consumed too — whether this entry ends up restored or skipped as stale,
+      // the ⇧⌘T stack is done with it either way, and leaving the sidebar row behind would let a
+      // later click there restore a duplicate. `writeDisk` runs unconditionally because
+      // `entry.projectId` may not be the active project, whose autosave debounce wouldn't cover it.
+      if (entry.kind === 'nodes') {
+        for (const n of entry.nodes) {
+          if (n.closedSessionId) {
+            useProjects.getState().discardClosedSession(entry.projectId, n.closedSessionId)
+          }
+        }
+        void writeDisk()
+      }
 
       if (plan.action === 'skip') continue
       return executeReopenPlan(plan)
@@ -8455,6 +10182,12 @@ export function Canvas() {
 
   const reopenClosedSessionCommand = useCallback(
     (projectId: string, entryId: string): boolean => {
+      // Restoring a session into a closed team tab reopens that tab: refused before the entry is
+      // consumed (the sidebar does not list these rows; this catches a stale click).
+      if (isClosedTeamTab(useProjects.getState().getProject(projectId))) {
+        setNotice({ kind: 'info', text: CLOSED_TEAM_TAB_NOTICE })
+        return false
+      }
       const consumed = useProjects.getState().consumeClosedSession(projectId, entryId)
       if (!consumed) return false
       // The ⇧⌘T-stack twin of this entry (if the SAME delete also pushed one) must go too, or a
@@ -8484,7 +10217,7 @@ export function Canvas() {
             permissionModeFor: (agentId) => projectPermissionMode(project, agentId)
           })
       )
-      if (plan.action === 'skip') return false
+      if (plan.action === 'skip' || plan.action === 'refuse') return false
       return executeReopenPlan(plan)
     },
     [executeReopenPlan, writeDisk]
@@ -8810,6 +10543,13 @@ export function Canvas() {
       'canvas.goForward': () => { goForward(); return true },
       'canvas.fitAll': () => { fitAll(); return true },
       'canvas.tidy': () => { arrangeAllNodes(); return true },
+      // The kanban board's keys — the mounted board decides (and declines when the focused control
+      // owns the key, or when no per-project board is up: Omni registers none). lib/boardKeys.
+      'board.openCard': () => runBoardKey('open'),
+      'board.nextCard': () => runBoardKey('next'),
+      'board.prevCard': () => runBoardKey('prev'),
+      'board.columnLeft': () => runBoardKey('left'),
+      'board.columnRight': () => runBoardKey('right'),
       'canvas.deleteSelection': deleteSelectionCommand,
       'node.newTerminal': () => { addTerminal(); return true },
       'node.newAgent': () => {
@@ -8835,6 +10575,7 @@ export function Canvas() {
       'node.newAgent.grok': () => { addAgentNode('grok'); return true },
       'node.newAgent.copilot': () => { addAgentNode('copilot'); return true },
       'node.newAgent.pi': () => { addAgentNode('pi'); return true },
+      'node.newAgent.antigravity': () => { addAgentNode('antigravity'); return true },
       'node.newSticky': () => { addSticky(); return true },
       'node.newBrowser': () => { addBrowser(); return true },
       // Opening the URL prompt IS claiming the chord — a cancelled prompt creates nothing, but the
@@ -9010,11 +10751,64 @@ export function Canvas() {
   // the same module rather than re-derived. Server Edition has no menu and no intercept: there the
   // keydown branch above is the whole path (the browser's own ⌘0 means the same thing, so the two
   // agree rather than fight, and the bridge stubs this subscription out).
+  //
+  // Issue #915: with `terminalFontZoomKeys` on and a terminal focused, the same forwarded ⌘0 means
+  // "this terminal back to the global font size" instead. Asked FIRST — `zoomShortcutAllowed`
+  // refuses in a terminal anyway (text focus), so this is the only thing ⌘0 can mean there — and
+  // resolved from focus, because the forwarded signal names no node (FONT_ZOOM_NODE_ATTR is on
+  // both the canvas node's and the card modal's xterm host).
   useEffect(() => {
-    return window.nodeTerminal.onZoomActualSize(() => {
+    return window.nodeTerminal.onZoomActualSize((mods) => {
+      // Only the platform's reset chord (⌘0 on mac, Ctrl+0 elsewhere — main forwards either, and
+      // both together): any other forwarded ⌘/Ctrl+0 keeps exactly its pre-#915 meaning.
+      const target =
+        useSettings.getState().settings.terminalFontZoomKeys && forwardedResetMatches(mods, isMacPlatform())
+          ? fontZoomTargetNodeId(typeof document === 'undefined' ? null : document.activeElement)
+          : null
+      if (target) {
+        requestTerminalFontZoom(target, 'reset')
+        return
+      }
       if (zoomShortcutAllowed(liveZoomShortcutContext())) zoomTo100()
     })
   }, [zoomTo100])
+
+  // Per-terminal font size (issue #915): the ONE writer of `data.terminalFontSize`. Every entry
+  // point — the canvas terminal's and the card modal's xterm key handlers, and the forwarded ⌘0
+  // above — dispatches TERMINAL_FONT_ZOOM_EVENT, so the read-modify-write, the clamp and the
+  // persist happen here once. The node's live re-option effect (and the modal's) then sees the new
+  // size through `useXtermVisualSettings`, re-fits and reports the new grid to the pty. Read from
+  // `nodesRef` so the no-op case (already at a bound, reset with no override) costs no save. A
+  // node that is not on THIS canvas (a global-board card of another project) is left alone.
+  useEffect(() => {
+    const onFontZoom = (e: Event): void => {
+      const d = (e as CustomEvent<TerminalFontZoomRequest>).detail
+      if (!d?.nodeId) return
+      const node = nodesRef.current.find((n) => n.id === d.nodeId)
+      if (!node || node.type !== 'terminal') return
+      const prev = normalizeTerminalFontSize(node.data.terminalFontSize)
+      const next = nextTerminalFontSizeOverride(d.action, prev, useSettings.getState().settings.fontSize)
+      if (next === prev) return
+      setNodes((ns) =>
+        ns.map((n) => (n.id === d.nodeId ? { ...n, data: { ...n.data, terminalFontSize: next } } : n))
+      )
+      // Mirror into the projects store too (review round 3): the Omni board reads the ACTIVE
+      // project's card spawn from the store, not React Flow, so without this its focused terminal
+      // lagged until the next autosave commit — or never, while a conflict suspends autosave.
+      // Same epoch guard as `commitActiveToStore`; the next commit writes the identical value.
+      const activeId = useProjects.getState().activeProjectId
+      if (activeId && canCommitCanvas(nodesProjectIdRef.current, activeId)) {
+        useProjects.setState((st) => {
+          const projects = patchProjectFontSize(st.projects, activeId, d.nodeId, next)
+          // A no-op step returns the same array: hand back the same state so nothing re-renders.
+          return projects === st.projects ? st : { projects }
+        })
+      }
+      markDirty()
+    }
+    window.addEventListener(TERMINAL_FONT_ZOOM_EVENT, onFontZoom)
+    return () => window.removeEventListener(TERMINAL_FONT_ZOOM_EVENT, onFontZoom)
+  }, [setNodes, markDirty, nodesRef])
 
   // Apply the accent color as a CSS variable.
   useEffect(() => {
@@ -9198,7 +10992,10 @@ export function Canvas() {
                     hint: 'Rebuilds the view and re-attaches to the same session. Nothing running is interrupted.',
                     onClick: () => reloadTerminals(ids)
                   }
-                ])
+                ]),
+            // Share live link… — single terminal only; disabled with its reason where it cannot
+            // work, hideable as `live-link` (the shared builder applies both).
+            ...(ids.length === 1 ? liveLinkMenuItems(ids[0]) : [])
           ] as MenuItem[])
         : []),
       // Conversation actions — Branch, Transfer ▸ (targets, then models), Restart ▸, Pause — sit
@@ -9499,7 +11296,8 @@ export function Canvas() {
     gatewayModels,
     gatewayStatus,
     gatewayError,
-    session.source
+    session.source,
+    liveLinkMenuItems
   ])
 
   /** "New <agent>" creation entries shared by the pane, sidebar and group context menus.
@@ -9510,7 +11308,23 @@ export function Canvas() {
    *  a decision `isPinnedAgentEntry` makes from the id and the row's own shape, never from a
    *  hardcoded agent name here. */
   const agentCreationEntries = useCallback(
-    (at?: { x: number; y: number }, groupId?: string): AgentAddEntry[] => {
+    (
+      at?: { x: number; y: number },
+      groupId?: string,
+      // The same picker, pointed at another action: "Start with agent ▸" on a GitHub issue card
+      // reuses these rows (accounts, the ✓ default, the fail-closed Codex gate) instead of growing
+      // a fourth copy. Absent = the historical "New <agent>" rows that create a node at `at`.
+      pick?: {
+        onPick: (agentId: AgentId, accountId?: string | null) => void
+        label?: (agentLabel: string) => string
+      }
+    ): AgentAddEntry[] => {
+      const create = (aid: AgentId, acct?: string | null): void => {
+        if (pick) pick.onPick(aid, acct)
+        else addAgentNode(aid, at, groupId, acct)
+      }
+      const rowLabel = (agentLabel: string): string =>
+        pick?.label ? pick.label(agentLabel) : `New ${agentLabel}`
       const disabled = useSettings.getState().settings.disabledAgents
       // Read the active project LIVE from the store (not the closure value) so a menu built right
       // after a `switchProject` — e.g. the sessions-sidebar "+" opening this menu on a non-active
@@ -9574,19 +11388,19 @@ export function Canvas() {
         if (aid === 'claude' && (accounts.length > 0 || accountsHint)) {
           return {
             type: 'submenu',
-            label: `New ${AGENT_CONFIG[aid].label}`,
+            label: rowLabel(AGENT_CONFIG[aid].label),
             icon: <AgentIcon agentId={aid} />,
             children: [
               {
                 label: withDefaultMark(systemLabel),
                 icon: <AgentIcon agentId="claude" />,
-                onClick: () => addAgentNode('claude', at, groupId, null)
+                onClick: () => create('claude', null)
               },
               ...accounts.map(
                 (a): MenuItem => ({
                   label: withDefaultMark(a.label, a.id),
                   icon: <AgentIcon agentId="claude" />,
-                  onClick: () => addAgentNode('claude', at, groupId, a.id)
+                  onClick: () => create('claude', a.id)
                 })
               ),
               ...(accountsHint
@@ -9609,7 +11423,7 @@ export function Canvas() {
         if (aid === 'codex' && codexAccountsHere.length > 0) {
           return {
             type: 'submenu',
-            label: `New ${AGENT_CONFIG[aid].label}`,
+            label: rowLabel(AGENT_CONFIG[aid].label),
             icon: <AgentIcon agentId={aid} />,
             children: [
               {
@@ -9617,7 +11431,7 @@ export function Canvas() {
                 // default — the #419 rule the Claude row above follows.
                 label: withCodexDefaultMark(codexSystemLabel),
                 icon: <AgentIcon agentId="codex" />,
-                onClick: () => addAgentNode('codex', at, groupId, null)
+                onClick: () => create('codex', null)
               },
               ...codexAccountsHere.map((a): MenuItem => {
                 const sel = codexAccountSelectable(
@@ -9634,7 +11448,7 @@ export function Canvas() {
                     : sel.reason === 'no-connection'
                       ? 'This account lives on a host that is not connected — connect its SSH project first.'
                       : 'This account is no longer available.',
-                  onClick: () => addAgentNode('codex', at, groupId, a.id)
+                  onClick: () => create('codex', a.id)
                 }
               })
             ]
@@ -9646,28 +11460,29 @@ export function Canvas() {
         if (aid === 'pi' && piAccountsHere.length > 0) {
           return {
             type: 'submenu',
-            label: `New ${AGENT_CONFIG[aid].label}`,
+            label: rowLabel(AGENT_CONFIG[aid].label),
             icon: <AgentIcon agentId={aid} />,
             children: [
               {
                 label: 'System pi',
                 icon: <AgentIcon agentId="pi" />,
-                onClick: () => addAgentNode('pi', at, groupId)
+                onClick: () => create('pi')
               },
               ...piAccountsHere.map(
                 (a): MenuItem => ({
                   label: a.label,
                   icon: <AgentIcon agentId="pi" />,
-                  onClick: () => addAgentNode('pi', at, groupId, a.id)
+                  onClick: () => create('pi', a.id)
                 })
               )
             ]
           }
         }
         return {
-          label: `New ${AGENT_CONFIG[aid].label}`,
+          label: rowLabel(AGENT_CONFIG[aid].label),
           icon: <AgentIcon agentId={aid} />,
-          onClick: () => addAgentNode(aid, at, groupId)
+          hint: AGENT_CONFIG[aid].notice,
+          onClick: () => create(aid)
         }
       }
       return [
@@ -9681,9 +11496,9 @@ export function Canvas() {
             (c): AgentAddEntry => ({
               agentId: c.id,
               item: {
-                label: `New ${c.label}`,
+                label: rowLabel(c.label),
                 icon: <AgentIcon agentId={c.id} />,
-                onClick: () => addAgentNode(c.id, at, groupId)
+                onClick: () => create(c.id)
               }
             })
           )
@@ -10097,9 +11912,10 @@ export function Canvas() {
           zoomRafRef.current = null
           setZoomPct(Math.round(viewportRef.current.zoom * 100))
           setGroupLabelBoost(viewportRef.current.zoom)
-          // Feed the crisp gate (GPU text is a magnified bitmap past ~175%; the DOM renderer
-          // re-rasters and stays sharp). Idempotent + hysteresis inside, and the swaps it queues
-          // only run once the gesture settles — per-frame cost here is a float compare.
+          // Feed the crisp gate (GPU text is a magnified bitmap past ~175%, or past 100% on a
+          // low-DPI display; the DOM renderer re-rasters and stays sharp). Idempotent + hysteresis
+          // inside, and the swaps it queues only run once the gesture settles — per-frame cost
+          // here is a float compare.
           setWebglZoom(viewportRef.current.zoom)
         })
       }
@@ -10141,15 +11957,24 @@ export function Canvas() {
         useAgentStatus.getState().clearUnread(nodeId)
         return
       }
-      const owner = useProjects
-        .getState()
-        .projects.find((p) => p.nodes.some((n) => n.id === nodeId))
+      // `nodeOwner`, not the first project holding the id: a closed, handed-off SSH project shares
+      // its node ids with the team tab now serving them, and the tab is where the node lives.
+      const owner = nodeOwner(useProjects.getState().projects, nodeId)
       if (owner && owner.id !== useProjects.getState().activeProjectId) {
         pendingFocusRef.current = nodeId
-        switchProject(owner.id)
+        if (owner.closed) {
+          // A closed project is REOPENED (its tab restored), never activated behind a hidden tab,
+          // and through the guarded reopen: a project handed to a hosted team asks first, and a
+          // decline drops the staged focus.
+          void reopenProject(owner.id).then((ok) => {
+            if (!ok && pendingFocusRef.current === nodeId) pendingFocusRef.current = null
+          })
+        } else {
+          switchProject(owner.id)
+        }
       }
     },
-    [setNodes, goToNode, switchProject]
+    [setNodes, goToNode, switchProject, reopenProject]
   )
   focusNodeRef.current = focusNodeById
 
@@ -10161,18 +11986,52 @@ export function Canvas() {
     return () => window.removeEventListener('nodeterm:focus-node' as never, handler as never)
   }, [focusNodeById])
 
+  // Station-failure notices: mirror core's list (the orchestrator's STATION FAILED chip) and report
+  // this renderer's DROPPED verdicts, the one trigger fact core cannot measure. On the APP's api,
+  // never a session's: the default agent-status store and the stations core reports on are both
+  // this machine's (lib/stationNoticeWiring).
+  useEffect(() => installStationNoticeWiring(window.nodeTerminal), [])
+  // Station task outcomes (`report-outcome`): core's store mirrored for the `--after-success` gate.
+  useEffect(() => installStationOutcomeWiring(window.nodeTerminal), [])
+  useEffect(() => installStationHandoverWiring(window.nodeTerminal), [])
+  // Board dispatch's in-memory queue, reported to core for the `issues` control verb (display only).
+  useEffect(() => installBoardDispatchReportWiring(window.nodeTerminal), [])
+
   // Session board cards are derived LIVE from the canvas nodes; the board stores only assignments.
   // Only while the board is OPEN: `nodes` gets a fresh identity on every drag frame, so a closed
   // board was rebuilding a card object per node ~60×/s for a surface that is not mounted. The
   // board's own consumer is rendered under the same `kanbanOpen` flag, and the board-log's
   // `cardTitle` reads the nodes directly (see onKanbanChange), so nothing else depends on this
   // list existing while the canvas is what you are looking at.
+  // The worktree branch a card works on comes from its enclosing bound group — the link a pull
+  // request's head branch is matched against (lib/pullLinks.ts) — except on an SSH project, where
+  // branch links are not supported and no card carries one (kanbanSessionsFrom).
+  const activeProjectSsh = useProjects((s) => !!s.projects.find((p) => p.id === s.activeProjectId)?.ssh)
+  // Derived while EITHER board is up: the Omni overview feeds the active project's lane from these
+  // live cards too (GlobalKanbanLive), never from the store copy that lags the canvas.
   const kanbanSessions = useMemo(
-    () =>
-      perProjectKanbanOpen
-        ? nodes.map(toKanbanSession).filter((s): s is KanbanSession => s !== null)
-        : NO_KANBAN_SESSIONS,
-    [nodes, perProjectKanbanOpen]
+    () => kanbanOpen ? kanbanSessionsFrom(nodes, { ssh: activeProjectSsh }) : NO_KANBAN_SESSIONS,
+    [nodes, kanbanOpen, activeProjectSsh]
+  )
+
+  // Team progress (lib/teamProgress): the stations each session opened, read off the live control
+  // ropes — the first rope into a node is its opener's; a later one is an `--after` wait. Published
+  // to a small store so a terminal node's header draws the same ring its board card does. The
+  // previous map is threaded back in, so an unchanged team keeps its array identity and a node
+  // header (or card) subscribed to it does not re-render on every drag frame. A canvas without
+  // ropes — most of them — skips the node walk entirely.
+  const teamStationsRef = useRef<ReadonlyMap<string, readonly TeamStation[]>>()
+  const teamStations = useMemo(() => {
+    const next = canvasTeamStations(controlEdges, nodes, teamStationsRef.current)
+    teamStationsRef.current = next
+    return next
+  }, [controlEdges, nodes])
+  useEffect(() => {
+    useTeamStations.getState().set(teamStations)
+  }, [teamStations])
+  const globalKanbanLive = useMemo(
+    () => activeProjectId ? { projectId: activeProjectId, sessions: kanbanSessions, teams: teamStations } : null,
+    [activeProjectId, kanbanSessions, teamStations]
   )
 
   // Create a node from the board's per-column "+ New" menu: it lands on the canvas (view
@@ -10222,8 +12081,10 @@ export function Canvas() {
                 targetProjectId
               )
       setNodes((ns) => [...ns, node])
-      const board = project?.kanban ?? seedBoard
+      const board = project?.kanban ?? defaultKanban(targetProjectId)
       if (columnId) {
+        // The node goes on the wire BEFORE the card that names it (spec §2 batch order).
+        castNewNodeNow(targetProjectId, node)
         useProjects.getState().setProjectKanban(targetProjectId, assignNode(board, node.id, columnId, null))
       }
       markDirty()
@@ -10244,13 +12105,765 @@ export function Canvas() {
                 ?.label ??
               choice.agentId
       const title = (node.data.title as string) || kindLabel
-      useBoardLog.getState().append(api, targetProjectId, {
+      useBoardLog.getState().append(sessionForProject(targetProjectId).api, targetProjectId, {
         kind: 'event',
         nodeId: node.id,
         event: { type: 'card-created', to: toName, title }
       })
     },
-    [emptyNodePos, setNodes, markDirty, seedBoard, api]
+    [emptyNodePos, setNodes, markDirty, castNewNodeNow]
+  )
+
+  // ---- GitHub issue → agent session ("Start with agent ▸") ----
+  /**
+   * What every issue start does once its agent node exists: file the new session card under the
+   * issue card's column (board metadata only — the same unpruned direct write `createNodeInColumn`
+   * uses, for the same reason: the fresh node is not in the derived session list yet), log its
+   * `card-created`, and record `run-started` on the issue card's history. ONE place for both
+   * "Start with agent" and "Start with agent in a new worktree", so the two cannot file a run
+   * differently.
+   */
+  const fileIssueSession = useCallback(
+    (
+      columnId: string | null,
+      ref: IssueRef,
+      created: { node: CanvasNode; placed: CanvasNode; projectId: string },
+      agentId: AgentId
+    ) => {
+      const { node, projectId: targetProjectId } = created
+      const nodeId = node.id
+      // The project addAgentNode charged the node to (its guarded, live read) — not a second read.
+      const board = useProjects.getState().getProject(targetProjectId)?.kanban ?? defaultKanban(targetProjectId)
+      const column = columnId ? board.columns.find((c) => c.id === columnId) : undefined
+      if (column) {
+        // The node goes on the wire BEFORE the card that names it (spec §2 batch order).
+        castNewNodeNow(targetProjectId, created.placed)
+        useProjects.getState().setProjectKanban(targetProjectId, assignNode(board, nodeId, column.id, null))
+        markDirty()
+      }
+      const title =
+        (node.data.title as string | undefined) ||
+        agentConfig(agentId)?.label ||
+        useSettings.getState().settings.customAgents.find((a) => a.id === agentId)?.label ||
+        agentId
+      // The session card's own feed says where it came from, exactly like a "+ New" card…
+      useBoardLog.getState().append(sessionForProject(targetProjectId).api, targetProjectId, {
+        kind: 'event',
+        nodeId,
+        event: { type: 'card-created', to: column?.title ?? 'Ungrouped', title }
+      })
+      // …and the issue card's history records the run (with the session id nodeterm minted, when
+      // the agent's CLI takes one — otherwise none, never a guess).
+      const started = runStartedEntry(ref, {
+        id: nodeId,
+        title,
+        agentId,
+        agentSessionId: node.data.agentSessionId as string | undefined
+      })
+      if (started) useBoardLog.getState().append(sessionForProject(targetProjectId).api, targetProjectId, started)
+    },
+    [markDirty, castNewNodeNow]
+  )
+
+  /** The reference + first prompt of an issue start, or a notice saying why nothing started. The
+   *  reference comes from the card's GitHub URL and is validated before anything is created; a card
+   *  whose URL does not parse starts nothing. The issue's title and body never reach the prompt. */
+  const issueStartPrompt = useCallback(
+    (issue: GitHubIssueCardView): { ref: IssueRef; prompt: string } | undefined => {
+      const ref = issueRefFromHtmlUrl(issue.htmlUrl, issue.number)
+      const prompt = ref ? issueLaunchPrompt(ref) : undefined
+      if (!ref || !prompt) {
+        setNotice({
+          kind: 'error',
+          text: `Could not start an agent on #${issue.number}: its GitHub address could not be read. Nothing was started.`
+        })
+        return undefined
+      }
+      return { ref, prompt }
+    },
+    []
+  )
+
+  /**
+   * Start an agent on a GitHub issue card: a normal agent node in the project cwd, bound to the
+   * issue (`data.issueRef`), launched with a prompt that carries only the REFERENCE — the issue's
+   * title and body are attacker-writable on a public repository and never reach the pane; the
+   * agent reads them itself with `gh`. The new session card is filed under the issue card's column
+   * and the issue card's run history gets `run-started` (`fileIssueSession`).
+   */
+  const startIssueAgent = useCallback(
+    (issue: GitHubIssueCardView, agentId: AgentId, accountId?: string | null) => {
+      const start = issueStartPrompt(issue)
+      if (!start) return
+      const created = addAgentNode(agentId, undefined, undefined, accountId, start.prompt, {
+        issueRef: start.ref
+      })
+      if (!created) return // addAgentNode already said why
+      fileIssueSession(issue.columnId, start.ref, created, agentId)
+    },
+    [addAgentNode, issueStartPrompt, fileIssueSession]
+  )
+
+  /** The "Start with agent ▸" rows for one issue card: the canvas's own agent + account picker
+   *  (`agentCreationEntries`), relabelled and pointed at `startIssueAgent`. */
+  const issueAgentMenu = useCallback(
+    (issue: GitHubIssueCardView): MenuItem[] =>
+      agentCreationEntries(undefined, undefined, {
+        onPick: (aid, acct) => startIssueAgent(issue, aid, acct),
+        label: (agentLabel) => agentLabel
+      }).map((entry) => entry.item),
+    [agentCreationEntries, startIssueAgent]
+  )
+
+  // ---- Board dispatch: a card THIS person moves into the dispatch column starts its own run ----
+  // Decisions are lib/boardDispatch (pure, tested); consent is machine-local settings
+  // (@shared/board-dispatch); the queue is transient (state/boardDispatch). The run itself is
+  // exactly "Start with agent": `issueRef` binding, the reference-only launch prompt,
+  // `fileIssueSession` (card filed + `run-started`). On screen it goes through `addAgentNode`; for a
+  // project that is not on screen (a queued run whose slot freed later, or a project switch during
+  // the move's round trip) it is a cold open, already CLAIMED, plus the #925 headless start — so no
+  // dispatched node is ever left armed to start on its own later (the kill switch could not reach it).
+
+  /** Every node of a project as the dispatcher needs it: the live canvas for the active project,
+   *  the stored copy for any other. `pending` = a launch that will start BY ITSELF. */
+  const dispatchNodesOf = useCallback(
+    (projectId: string): Array<{ id: string; issueRef?: unknown; pending: boolean }> => {
+      const st = useProjects.getState()
+      const selfStarting = (p: unknown): boolean =>
+        !!p && typeof p === 'object' && !(p as PendingLaunch).manualOnly
+      if (st.activeProjectId === projectId && nodesProjectIdRef.current === projectId) {
+        return nodesRef.current.map((n) => ({
+          id: n.id,
+          issueRef: n.data.issueRef,
+          pending: selfStarting(n.data.pendingLaunch)
+        }))
+      }
+      return (st.getProject(projectId)?.nodes ?? []).map((n) => ({
+        id: n.id,
+        issueRef: n.issueRef,
+        pending: selfStarting(n.pendingLaunch)
+      }))
+    },
+    []
+  )
+
+  /** Sessions bound to this issue that still exist, in ANY project: one run per issue. */
+  const dispatchBoundRuns = useCallback(
+    (key: string): number => {
+      let count = 0
+      for (const p of useProjects.getState().projects) {
+        for (const n of dispatchNodesOf(p.id)) if (issueKey(n.issueRef) === key) count++
+      }
+      return count
+    },
+    [dispatchNodesOf]
+  )
+
+  /** Runs of this project holding a concurrency slot now, plus dispatches still starting. */
+  const dispatchOccupying = useCallback(
+    (projectId: string): number => {
+      const byId = useAgentStatus.getState().byId
+      const { startedAt, byKey } = useBoardDispatch.getState()
+      const now = Date.now()
+      let count = 0
+      for (const n of dispatchNodesOf(projectId)) {
+        if (!normalizeIssueRef(n.issueRef)) continue
+        if (occupiesSlot({ state: byId[n.id]?.state, pending: n.pending, startedAt: startedAt[n.id] }, now)) count++
+      }
+      for (const e of Object.values(byKey)) if (e.projectId === projectId && e.status === 'starting') count++
+      return count
+    },
+    [dispatchNodesOf]
+  )
+
+  const dispatchAgentOk = (agentId: string): boolean =>
+    dispatchableAgent(
+      agentId,
+      !!agentConfig(agentId) || useSettings.getState().settings.customAgents.some((c) => c.id === agentId)
+    )
+
+  /** The consent binding of a project's dispatch column as it is NOW (repository from the issue's
+   *  own reference — the board's repository). */
+  const dispatchBindingNow = (project: Project | undefined, columnId: string, ref: IssueRef | undefined) =>
+    dispatchBinding(
+      ref ? `${ref.owner}/${ref.repo}` : undefined,
+      project?.kanban?.columns.find((c) => c.id === columnId)?.title,
+      project?.kanban?.github?.columnMappings.find((m) => m.columnId === columnId)?.label
+    )
+
+  /** The project's run may start from here now: always on screen; off screen only where a headless
+   *  launcher exists (the desktop — the browser's renderer has none). */
+  const dispatchStartableNow = (projectId: string): boolean =>
+    !isBrowserRuntime() || useProjects.getState().activeProjectId === projectId
+
+  /** Start one dispatched run. Called ONLY by dispatchOnUserMove and drainDispatchQueue (pinned by
+   *  board-dispatch.guard.test). Never throws; every failure lands on the card. */
+  const dispatchStart = useCallback(
+    async (entry: DispatchCardEntry, config: BoardDispatchProject): Promise<void> => {
+      useBoardDispatch.getState().put({ ...entry, status: 'starting' })
+      const fail = (reason: string): void =>
+        useBoardDispatch.getState().put({ ...entry, status: 'refused', reason })
+      try {
+        const prompt = issueLaunchPrompt(entry.ref)
+        if (!prompt) return fail(DISPATCH_REFUSAL_TEXT['no-reference'])
+        const agentId = config.agentId as AgentId
+        const st = useProjects.getState()
+        const project = st.getProject(entry.projectId)
+        if (!project) return fail(DISPATCH_REFUSAL_TEXT['project-gone'])
+        if (project.ssh) return fail(DISPATCH_REFUSAL_TEXT['remote-project'])
+        if (project.closed) return fail(DISPATCH_REFUSAL_TEXT['project-closed'])
+        let nodeId: string
+        if (st.activeProjectId === project.id && canCreateOnCanvas(nodesProjectIdRef.current, project.id)) {
+          const created = addAgentNode(agentId, undefined, undefined, config.accountId, prompt, {
+            issueRef: entry.ref
+          })
+          if (!created) return fail('The agent could not be opened; the notice says why.')
+          fileIssueSession(entry.columnId, entry.ref, created, agentId)
+          nodeId = created.node.id
+        } else {
+          // Callers never send an off-screen start to a runtime without a headless launcher; this
+          // is the belt, so nothing is ever left armed there.
+          if (!dispatchStartableNow(project.id)) return fail('Open the project to dispatch this issue.')
+          // Not on screen: a cold open into the stored project (the control verbs' path), then the
+          // headless start. Defaults come from THAT project, never the one on screen.
+          const settings = useSettings.getState().settings
+          let account: string | undefined
+          if (agentId === 'codex') {
+            const decision = resolveNewCodexNodeAccount(
+              config.accountId,
+              settings.codexAccounts,
+              connectedProjectIdForHost
+            )
+            if (!decision.create) return fail('The dispatch Codex account is not usable.')
+            account = decision.accountId
+          } else {
+            account = resolveNewNodeAccount(config.accountId, project, settings.claudeAccounts)
+          }
+          const model =
+            settings.agentLaunchMode === 'gateway-model' &&
+            settings.modelGatewayDefaultModel &&
+            canSwitchModel(agentId)
+              ? settings.modelGatewayDefaultModel
+              : undefined
+          const stored = project.nodes
+          const built = createAgentNode(
+            agentId,
+            stored.length,
+            project.cwd,
+            { x: 0, y: 0 },
+            prompt,
+            undefined,
+            account,
+            projectPermissionMode(project, agentId),
+            project.id,
+            model
+          )
+          const node: CanvasNode = { ...built, data: { ...built.data, issueRef: entry.ref } }
+          const w = (node.width as number) ?? 640
+          const h = (node.height as number) ?? 440
+          const at = nextFreePosition(stored, { width: w, height: h })
+          node.position = { x: at.x - w / 2, y: at.y - h / 2 }
+          // Written ALREADY CLAIMED (the #925 write-ahead claim, manualOnly): in the same tick as the
+          // node, so there is no window in which opening the project could auto-start it beside the
+          // headless start, and whatever the headless start answers, the node never becomes armed
+          // to start by itself later — past a Pause, past a restart.
+          const [armed] = flowToNodeStates([armForColdOpen(node)])
+          st.applyOwnNodeMutation(project.id, {
+            op: 'upsert',
+            node: armed.pendingLaunch ? { ...armed, pendingLaunch: claimForHeadless(armed.pendingLaunch) } : armed
+          })
+          // `placed` is the stored node itself: the project is not the canvas React Flow holds, so
+          // `castNewNodeNow` casts nothing for it (a stored project's node is not the node publisher's).
+          fileIssueSession(entry.columnId, entry.ref, { node, placed: node, projectId: project.id }, agentId)
+          nodeId = node.id
+          const held = useProjects.getState().getProject(project.id)?.nodes.find((n) => n.id === nodeId)
+          if (held?.pendingLaunch) {
+            const fresh = useProjects.getState().getProject(project.id) ?? project
+            const batch = await startNodesHeadlessRef.current(fresh, [held])
+            const outcome = batch.outcomes[0]
+            if (outcome && !outcome.started) {
+              // Every failure leaves the pre-claimed launch waiting for Run now (never armed): the
+              // node keeps the issue's one run until it is run or closed.
+              setNotice({
+                kind: 'error',
+                sticky: true,
+                text: `Dispatched #${entry.number} in "${project.name}", but it could not start (${outcome.reason}). Use Run now on its node, or close the node to dispatch the issue again.`,
+                action: { label: 'Go there', run: () => travelToNodeRef.current(nodeId) }
+              })
+            }
+          } else {
+            void writeDisk()
+          }
+        }
+        const done = useBoardDispatch.getState()
+        done.markStarted(nodeId, Date.now())
+        done.remove(entry.key)
+      } catch (error) {
+        console.warn('[nodeterm] board dispatch failed', error)
+        fail('Starting the agent failed.')
+      }
+    },
+    [addAgentNode, fileIssueSession, connectedProjectIdForHost, writeDisk]
+  )
+
+  /** Board dispatch's ONE trigger: a GitHub card this person moved, with GitHub's answer
+   *  (KanbanView `onIssueMoved`). Pinned as the only caller by board-dispatch.guard.test. */
+  const dispatchOnUserMove = useCallback(
+    (projectId: string, issue: DispatchIssueCard, toColumnId: string | null, status: string) => {
+      const dispatch = sanitizeBoardDispatch(useSettings.getState().settings.boardDispatch)
+      const config = dispatch.projects[projectId]
+      if (!config) return
+      const project = useProjects.getState().getProject(projectId)
+      const ref = issueRefFromHtmlUrl(issue.htmlUrl, issue.number)
+      const key = issueKey(ref)
+      const current = key ? useBoardDispatch.getState().byKey[key] : undefined
+      const trigger = {
+        origin: 'user-move' as const,
+        projectId,
+        toColumnId,
+        moveStatus: status,
+        issue: { number: issue.number, htmlUrl: issue.htmlUrl, state: issue.state }
+      }
+      if (key && current && current.status !== 'starting' && moveWithdrawsDispatch(trigger, dispatch)) {
+        useBoardDispatch.getState().remove(key)
+        return
+      }
+      const decision = decideDispatch(
+        trigger,
+        {
+          dispatch,
+          project: project ? { remote: !!project.ssh, relay: !!project.remote } : undefined,
+          completionColumnId: project?.kanban?.github?.completionColumnId,
+          bindingNow: dispatchBindingNow(project, config.columnId, ref),
+          agentDispatchable: dispatchAgentOk(config.agentId),
+          boundRuns: key ? dispatchBoundRuns(key) : 0,
+          queuedOrStarting: current?.status === 'queued' || current?.status === 'starting',
+          occupying: dispatchOccupying(projectId)
+        }
+      )
+      if (decision.kind === 'ignore') return
+      const now = Date.now()
+      if (decision.kind === 'refuse') {
+        if (!key || !ref) {
+          setNotice({ kind: 'error', text: `#${issue.number} was not dispatched: ${DISPATCH_REFUSAL_TEXT[decision.reason]}` })
+          return
+        }
+        // A second drag of a card already on its way keeps its entry; everything else says why.
+        if (decision.reason === 'already-queued') return
+        useBoardDispatch.getState().put(
+          dispatchEntry({ key, projectId, ref, number: issue.number, columnId: config.columnId }, 'refused', now,
+            DISPATCH_REFUSAL_TEXT[decision.reason])
+        )
+        return
+      }
+      const entry = dispatchEntry(
+        { key: decision.key, projectId, ref: decision.ref, number: issue.number, columnId: config.columnId },
+        'queued',
+        now
+      )
+      // Over the cap — or a project that left the screen during the move's round trip in a runtime
+      // that cannot start it off screen (the drain starts it when it is shown again).
+      if (decision.kind === 'queue' || !dispatchStartableNow(projectId)) {
+        useBoardDispatch.getState().put(entry)
+        return
+      }
+      void dispatchStart(entry, config)
+    },
+    [dispatchBoundRuns, dispatchOccupying, dispatchStart]
+  )
+
+  /** The card as the host's issue list for the dispatch column holds it now (a local read of the
+   *  host's cache — no GitHub request). A failed read is `unreadable`, never absence. */
+  const dispatchReadCard = useCallback(
+    async (projectId: string, columnId: string, number: number): Promise<QueuedCardFact> => {
+      try {
+        let cursor: string | undefined
+        for (let page = 0; page < 10; page++) {
+          const res = await api.githubIssues.query({
+            projectId,
+            columnId,
+            pageSize: 50,
+            search: String(number),
+            ...(cursor ? { cursor } : {})
+          })
+          const hit = res.items.find((i) => i.number === number)
+          if (hit) return { kind: 'found', state: hit.state, columnId: hit.columnId }
+          if (!res.nextCursor) return { kind: 'absent' }
+          cursor = res.nextCursor
+        }
+        return { kind: 'unreadable' }
+      } catch {
+        return { kind: 'unreadable' }
+      }
+    },
+    [api]
+  )
+
+  /** Start what the queue's free slots allow, re-checking each issue first; drop entries whose
+   *  project stopped dispatching. Called ONLY by the drain timer below. */
+  const dispatchRechecking = useRef(new Set<string>())
+  const drainDispatchQueue = useCallback(() => {
+    const dispatch = sanitizeBoardDispatch(useSettings.getState().settings.boardDispatch)
+    const queue = useBoardDispatch.getState().queue()
+    for (const e of queueToDrop(queue, dispatch)) {
+      const entry = useBoardDispatch.getState().byKey[e.key]
+      if (!entry) continue
+      useBoardDispatch.getState().put({
+        ...entry,
+        status: 'refused',
+        reason: DISPATCH_REFUSAL_TEXT[dispatch.paused ? 'paused' : 'switched-off']
+      })
+    }
+    const candidates = queueToStart(
+      useBoardDispatch.getState().queue().filter((e) => !dispatchRechecking.current.has(e.key)),
+      dispatch,
+      dispatchOccupying,
+      (e) => dispatchStartableNow(e.projectId)
+    )
+    for (const e of candidates) {
+      dispatchRechecking.current.add(e.key)
+      void (async () => {
+        try {
+          const project = useProjects.getState().getProject(e.projectId)
+          const config = dispatch.projects[e.projectId]
+          const card = config ? await dispatchReadCard(e.projectId, config.columnId, e.number) : ({ kind: 'unreadable' } as const)
+          // Everything re-read AFTER the await: settings, the project and the queue entry itself.
+          const now = sanitizeBoardDispatch(useSettings.getState().settings.boardDispatch)
+          const cfg = now.projects[e.projectId]
+          const entry = useBoardDispatch.getState().byKey[e.key]
+          if (!entry || entry.status !== 'queued') return
+          const verdict = recheckQueued({
+            config: cfg,
+            paused: now.paused,
+            project: project ? { remote: !!project.ssh, relay: !!project.remote, closed: !!project.closed } : undefined,
+            bindingNow: cfg ? dispatchBindingNow(useProjects.getState().getProject(e.projectId), cfg.columnId, e.ref) : undefined,
+            agentDispatchable: cfg ? dispatchAgentOk(cfg.agentId) : false,
+            card
+          })
+          if (verdict.kind === 'wait') return
+          if (verdict.kind === 'drop') {
+            useBoardDispatch.getState().put({ ...entry, status: 'refused', reason: DISPATCH_REFUSAL_TEXT[verdict.reason] })
+            return
+          }
+          // The issue may have gained a run by hand while it waited.
+          if (dispatchBoundRuns(e.key) > 0) {
+            useBoardDispatch.getState().remove(e.key)
+            return
+          }
+          if (cfg) await dispatchStart(entry, cfg)
+        } finally {
+          dispatchRechecking.current.delete(e.key)
+        }
+      })()
+    }
+  }, [dispatchOccupying, dispatchBoundRuns, dispatchStart, dispatchReadCard])
+  const drainDispatchQueueRef = useRef(drainDispatchQueue)
+  useEffect(() => {
+    drainDispatchQueueRef.current = drainDispatchQueue
+  })
+  // Re-checked on a short timer ONLY while something is queued (a slot frees when a run's turn
+  // ends, which no single store change says cheaply), on every settings change (pause, off), and
+  // on a project switch (the browser starts only the project on screen).
+  const dispatchQueued = useBoardDispatch((s) => Object.values(s.byKey).some((e) => e.status === 'queued'))
+  const boardDispatchSettings = useSettings((s) => s.settings.boardDispatch)
+  useEffect(() => {
+    if (!dispatchQueued) return
+    drainDispatchQueueRef.current()
+    const timer = setInterval(() => drainDispatchQueueRef.current(), DISPATCH_DRAIN_MS)
+    return () => clearInterval(timer)
+  }, [dispatchQueued, boardDispatchSettings, activeProjectId])
+
+  // ---- GitHub issue → agent session in its OWN worktree ("Start with agent in a new worktree ▸") ----
+  /** The reuse-or-new question, when the issue already has a worktree (or its branch exists). */
+  const [issueWorktreeAsk, setIssueWorktreeAskState] = useState<IssueWorktreeAsk | null>(null)
+  // Tracked like every other confirm (`confirmFlags` / `confirmBusy()`): while it is open an agent's
+  // destructive verb is refused rather than stacked over it, and it does not open over another one.
+  const setIssueWorktreeAsk = useCallback((v: IssueWorktreeAsk | null) => {
+    confirmFlags.current.issueWorktree = !!v
+    setIssueWorktreeAskState(v)
+  }, [])
+  /** Issues with a start in flight (`runExclusive`) — planning AND a dialog-confirmed create. */
+  const issueWorktreeInFlightRef = useRef(new Set<string>())
+
+  /** Why "Start with agent in a new worktree" cannot run on the ACTIVE project, or null. Read at
+   *  click time (menus are built then), so it always describes the canvas on screen. */
+  const issueWorktreeUnavailable = useCallback((): string | null => {
+    const projectId = useProjects.getState().activeProjectId
+    const project = useProjects.getState().getProject(projectId ?? '')
+    return issueWorktreeRefusal({
+      relay: sessionForProject(projectId ?? '').source === 'relay',
+      ssh: !!project?.ssh,
+      cwd: project?.cwd,
+      repoRoot: useWorktrees.getState().repoRoot
+    })
+  }, [])
+
+  /**
+   * Open the issue's agent INTO a worktree frame, in the same tick the frame was made (or found).
+   * Synchronous on purpose: `attachWorktree` has just put the frame in `nodesRef`, and a render in
+   * between — a zustand write flushes one — would mirror the ref back to a node list without it,
+   * so the agent's cwd would fall back to the project folder. The slot is the control opens' grid
+   * (`frameAgentPlacement`), and the frame grows to hold the node as actually built.
+   */
+  const openIssueAgentInFrame = useCallback(
+    (
+      groupId: string,
+      issue: GitHubIssueCardView,
+      start: { ref: IssueRef; prompt: string },
+      agentId: AgentId,
+      accountId: string | null | undefined
+    ): boolean => {
+      const all = nodesRef.current
+      const group = all.find((n) => n.id === groupId)
+      if (!group) return false
+      const children = all.filter((n) => n.parentId === groupId).length
+      const origin = absolutePosition(group as FocusableNode, all as FocusableNode[])
+      const { center } = frameAgentPlacement(origin, children, terminalNodeSize())
+      const created = addAgentNode(
+        agentId,
+        center,
+        groupId,
+        accountId,
+        start.prompt,
+        // A frame whose setup script is still preparing the checkout holds the launch, exactly like
+        // a control open into it; a frame with nothing to prepare launches at once.
+        { issueRef: start.ref, awaitSetupGroup: setupHoldGroup(groupId) }
+      )
+      if (!created) return false // addAgentNode already said why
+      // Grow the frame to hold the node as BUILT (snap-to-grid can round its size up). Queued after
+      // the node's own insert, so both land in one render; `extent: 'parent'` then has room.
+      const built = created.node
+      const { frame } = frameAgentPlacement(origin, children, {
+        width: (built.width as number | undefined) ?? terminalNodeSize().width,
+        height: (built.height as number | undefined) ?? terminalNodeSize().height
+      })
+      const width = Math.max((group.width as number | undefined) ?? 0, frame.width)
+      const height = Math.max((group.height as number | undefined) ?? 0, frame.height)
+      if (width !== group.width || height !== group.height) {
+        const grow = (ns: CanvasNode[]): CanvasNode[] =>
+          ns.map((n) =>
+            n.id === groupId ? { ...n, width, height, style: { ...n.style, width, height } } : n
+          )
+        nodesRef.current = grow(nodesRef.current)
+        setNodes((ns) => grow(ns as CanvasNode[]))
+      }
+      fileIssueSession(issue.columnId, start.ref, created, agentId)
+      return true
+    },
+    [setNodes, addAgentNode, setupHoldGroup, fileIssueSession]
+  )
+
+  /**
+   * "Start with agent in a new worktree" on a GitHub issue card: a git worktree on a branch named
+   * `issue-<N>-<slug>` (at the configured worktree location, off the same base the New worktree
+   * dialog defaults to — the project's base-ref override, else the main checkout's branch), a group
+   * frame titled after the issue number bound to it, and the issue's agent opened inside — the same
+   * ref-only launch prompt and `issueRef` as "Start with agent". The frame's binding is what lets a
+   * pull request from that branch find this session card by branch.
+   *
+   * The branch is slugged from the issue TITLE, which anyone can write on a public repository, so
+   * `@shared/issue-worktree` owns every rule about it; nothing here builds a name. An existing
+   * worktree for the issue (or an existing branch of the same name) is offered for reuse beside a
+   * fresh `-2`; nothing on disk is ever overwritten.
+   */
+  const startIssueAgentInWorktree = useCallback(
+    async (issue: GitHubIssueCardView, agentId: AgentId, accountId?: string | null) => {
+      const refusal = issueWorktreeUnavailable()
+      if (refusal) {
+        setNotice({ kind: 'error', text: `Could not start on #${issue.number} in a new worktree: ${refusal}.` })
+        return
+      }
+      const start = issueStartPrompt(issue)
+      if (!start) return
+      const key = issueKey(start.ref) ?? `#${issue.number}`
+      const busy = (): void =>
+        setNotice({ kind: 'info', text: `A worktree for #${issue.number} is already being prepared.` })
+      /** Refuse BEFORE git whatever `addAgentNode` would refuse after it — a fresh worktree with no
+       *  agent in it is the one outcome this action must not leave behind. Asked again at a click. */
+      const agentRefused = (): boolean => {
+        const why = agentCreateRefusal(agentId, accountId)
+        if (why) setNotice({ kind: 'error', text: why })
+        return !!why
+      }
+      if (agentRefused()) return
+      const projectId = useProjects.getState().activeProjectId
+      const project = useProjects.getState().getProject(projectId ?? '')
+      const { repoRoot, entries, staleGroupIds } = useWorktrees.getState()
+      if (!projectId || !project || !repoRoot) return // issueWorktreeUnavailable already refused these
+      const projectMoved = (): boolean => {
+        if (useProjects.getState().activeProjectId === projectId) return false
+        setNotice({ kind: 'info', text: `The project changed, so nothing was started for #${issue.number}.` })
+        return true
+      }
+      // Same defaults as the New worktree dialog and `open-worktree`: a project override, else the
+      // main checkout's branch and the global location template.
+      const pw = projectLaunchInfoNow(project.id)?.resolved.worktree
+      const defaults = { basePath: pw?.basePath?.value, baseRef: pw?.baseRef?.value }
+      const baseRef = effectiveWorktreeBaseRef(defaults, entries)
+      const template = effectiveWorktreeTemplate(
+        defaults,
+        useSettings.getState().settings.worktreePathTemplate
+      )
+      const size = terminalNodeSize()
+      const { frame: need } = frameAgentPlacement({ x: 0, y: 0 }, 0, size)
+      const frame = {
+        width: Math.max(WORKTREE_GROUP_SIZE.width, need.width),
+        height: Math.max(WORKTREE_GROUP_SIZE.height, need.height)
+      }
+      const newFrame = (): WorktreeAttachTarget => ({
+        groupId: null,
+        at: emptyNodePos({ w: frame.width, h: frame.height }),
+        size: frame,
+        title: `Issue #${start.ref.number}`
+      })
+      /** Create (`mode: 'new'`, or check out an existing branch) and bind, then open the agent —
+       *  inside the attach, in the same tick as the frame. */
+      const create = async (
+        target: { branch: string; path: string },
+        mode: 'new' | 'existing',
+        renamedFrom?: string
+      ): Promise<void> => {
+        let opened = false
+        const out = await createBoundWorktree(
+          worktreeCreateDeps((t, wt) => {
+            const groupId = worktreeControlRef.current.attachWorktree(t, wt)
+            opened = openIssueAgentInFrame(groupId, issue, start, agentId, accountId)
+            return groupId
+          }),
+          { repoPath: repoRoot, mode, branch: target.branch, baseRef, path: target.path },
+          { target: newFrame, projectId }
+        )
+        if (!out.ok && out.reason === 'git') {
+          setNotice({ kind: 'error', text: `Could not create the worktree for #${issue.number}: ${out.message}` })
+          return
+        }
+        if (!out.ok) {
+          setNotice({
+            kind: 'info',
+            text: `Created worktree ${target.branch} at ${target.path}. The project changed, so no group or agent was started.`
+          })
+          return
+        }
+        if (!opened) return // the frame is bound; addAgentNode already said why the agent is not
+        const where = mode === 'new' ? `off ${baseRef} ` : ''
+        setNotice({
+          kind: 'info',
+          text: renamedFrom
+            ? `${issueWorktreeRenamedNotice(renamedFrom, target.branch)} It is ${where}at ${target.path}.`
+            : `Worktree ${target.branch} created ${where}at ${target.path}; the agent opens there.`
+        })
+      }
+      const ran = await runExclusive(issueWorktreeInFlightRef.current, key, async () => {
+        // Local branches, so a taken name is seen before git refuses it. An unreadable list comes
+        // back empty: git then has the last word, and its refusal is what the notice shows.
+        const status = await api.git.status(repoRoot).catch(() => null)
+        const plan = await planIssueWorktree(
+          {
+            number: start.ref.number,
+            title: issue.title,
+            repoRoot,
+            template,
+            entries,
+            branches: status?.branches ?? null,
+            // A name that exists on a remote is taken (→ `-k`), never checked out.
+            remoteBranches: status?.remoteBranches ?? [],
+            bound: issueWorktreeFrames(nodesRef.current, repoRoot, staleGroupIds),
+            sharedBasePath: sharedBasePathOf(pw)
+          },
+          (path) => api.fs.exists(path)
+        )
+        // The canvas may have moved on while git and the filesystem answered: everything below
+        // writes into the canvas on screen.
+        if (projectMoved()) return
+        if (plan.kind === 'refused') {
+          setNotice({ kind: 'error', text: `Could not start on #${issue.number} in a new worktree: ${plan.reason}` })
+          return
+        }
+        if (plan.kind === 'create') {
+          await create(plan.target, 'new', plan.renamedFrom)
+          return
+        }
+        const { existing, alternative } = plan
+        if (confirmBusy()) {
+          setNotice({
+            kind: 'info',
+            text: `Another confirmation is open — answer it, then start #${issue.number} again.`
+          })
+          return
+        }
+        const copy = issueWorktreeChoiceCopy(start.ref.number, existing, alternative, baseRef)
+        setIssueWorktreeAsk({
+          ...copy,
+          // Everything re-asked at the click: the dialog stays up for as long as the person reads it.
+          run: (choice) => {
+            if (projectMoved() || agentRefused()) return
+            if (choice === 'new' || existing.kind === 'branch') {
+              const target = choice === 'new' ? alternative : existing
+              if (!target) return
+              void runExclusive(issueWorktreeInFlightRef.current, key, () =>
+                create({ branch: target.branch, path: target.path }, choice === 'new' ? 'new' : 'existing')
+              ).then((started) => started || busy())
+              return
+            }
+            // A frame bound to this worktree now — the one the plan found, or one that adopted the
+            // orphan while the dialog was open — takes the agent. Never a second frame on one folder.
+            const live = issueWorktreeFrames(
+              nodesRef.current,
+              repoRoot,
+              useWorktrees.getState().staleGroupIds
+            ).find((b) => normWorktreePath(b.path) === normWorktreePath(existing.path))
+            if (live) {
+              openIssueAgentInFrame(live.groupId, issue, start, agentId, accountId)
+              return
+            }
+            // The frame the plan found is gone or no longer bound, or the unbound worktree is no
+            // longer listed (removed, or pruned): say so rather than bind a folder that may be gone.
+            const listed = useWorktrees
+              .getState()
+              .entries.find((e) => normWorktreePath(e.path) === normWorktreePath(existing.path))
+            if (existing.kind === 'bound' || !listed || listed.prunable || !listed.branch) {
+              setNotice({
+                kind: 'error',
+                text: `The worktree for #${issue.number} at ${existing.path} is gone or no longer bound. Nothing was started.`
+              })
+              return
+            }
+            // An unbound worktree on disk: adopt it (the app did not create it, so Remove will
+            // never delete it), then open the agent inside, in the same tick.
+            const wt = worktreeFromEntry(listed, repoRoot, resolveBaseRef(useWorktrees.getState().entries))
+            if (!wt) return
+            const groupId = worktreeControlRef.current.attachWorktree(newFrame(), wt)
+            openIssueAgentInFrame(groupId, issue, start, agentId, accountId)
+          }
+        })
+      })
+      if (!ran) busy()
+    },
+    [
+      issueWorktreeUnavailable,
+      issueStartPrompt,
+      agentCreateRefusal,
+      api,
+      emptyNodePos,
+      worktreeCreateDeps,
+      openIssueAgentInFrame
+    ]
+  )
+
+  /** The "Start with agent in a new worktree ▸" rows (the same agent + account picker), or the
+   *  reason the action cannot run on this project — the board shows that DISABLED, never hidden. */
+  const issueWorktreeMenu = useCallback(
+    (issue: GitHubIssueCardView): IssueWorktreeMenuAnswer => {
+      const refusal = issueWorktreeUnavailable()
+      if (refusal) return { refusal }
+      return {
+        items: agentCreationEntries(undefined, undefined, {
+          onPick: (aid, acct) => void startIssueAgentInWorktree(issue, aid, acct),
+          label: (agentLabel) => agentLabel
+        }).map((entry) => entry.item)
+      }
+    },
+    [agentCreationEntries, issueWorktreeUnavailable, startIssueAgentInWorktree]
   )
 
     // Global kanban swimlane "New session" path — creates a node in the target project's
@@ -10311,6 +12924,8 @@ export function Canvas() {
   // whole board on every Canvas render.
   const setKanbanModalNode = useCallback((id: string | null) => {
     kanbanModalNodeRef.current = id
+    // The Live chat drawer opened from the card's LIVE chip must sit above the modal (`raised`).
+    setCardModalOpen(id !== null)
     // The one place the "is anyone looking at this session" predicate learns about the modal —
     // every asker (the sweep's plan, the node's fire-time re-ask, the nudge) reads it through
     // `isNodeWatched`, so the modal clause cannot go missing from one of them.
@@ -10367,8 +12982,20 @@ export function Canvas() {
       // No live node — open a resume node in the active project, using the transcript's cwd. The
       // resume line goes through that project's launch command, like every other launch it owns.
       const activeId = useProjects.getState().activeProjectId
-      const cmd = resumeCommand('claude', hit.sessionId, false, agentLaunchOverride('claude', activeId))
-      if (!cmd) return
+      if (!canResumeWith('claude', hit.sessionId)) return
+      const hitAccount = hit.accountId
+      if (
+        hitAccount &&
+        !(useSettings.getState().settings.claudeAccounts ?? []).some(
+          (a) => a.id === hitAccount && !a.host && !a.pending
+        )
+      ) {
+        setNotice({ kind: 'error', text: RESUME_REFUSALS.accountGone })
+        return
+      }
+      // The factory's resume path: the same assembler cold restore uses (launch override, permission
+      // flag), and the node persists THIS id — not a freshly minted one it never ran — so a later
+      // cold restore resumes the same conversation.
       const node = createAgentNode(
         'claude',
         nodesRef.current.length,
@@ -10376,15 +13003,15 @@ export function Canvas() {
         viewCenter(),
         undefined,
         undefined,
+        // The account whose root holds this transcript — the system login would not find it. A
+        // hit naming an account that has since been removed or is not local is refused.
+        hitAccount,
+        activePermissionMode('claude'),
+        activeId,
         undefined,
         undefined,
-        activeId
+        hit.sessionId
       )
-      // The resume command replaces (never wraps) the factory's command, so it is flagged once.
-      node.data = {
-        ...node.data,
-        initialCommand: withPermissionMode(cmd, 'claude', activePermissionMode())
-      }
       node.selected = true
       setNodes((ns) => [...ns.map((n) => ({ ...n, selected: false })), node])
       markDirty()
@@ -10497,6 +13124,43 @@ export function Canvas() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // The phone Chat verbs' renderer round-trip (main/remote/host-chat.ts). Main resolved the node
+  // host-side and asks the two things only this renderer owns: the node's agent status, and — for
+  // a send — the ⌘M composer's own gate, run against the store AT SEND TIME before `sendText`.
+  // Pure rules in lib/hostChatQuery.ts. Desktop only: the bridges' subscription is inert.
+  useEffect(() => {
+    return api.onHostChatQuery((q) => {
+      if (q.kind === 'status') {
+        api.sendHostChatReply({
+          requestId: q.requestId,
+          kind: 'status',
+          status: hostChatStatus(useAgentStatus.getState().byId[q.nodeId])
+        })
+        return
+      }
+      if (q.kind === 'session') {
+        api.sendHostChatReply({
+          requestId: q.requestId,
+          kind: 'session',
+          ...hostChatSession(useAgentStatus.getState().byId[q.nodeId])
+        })
+        return
+      }
+      void hostChatSend(q, {
+        getStatus: (id) => useAgentStatus.getState().byId[id],
+        sendText: (id, text) => api.pty.sendText(id, text),
+        now: Date.now,
+        // The kernel's say on whether the agent is still in the pane (codex announces no quit).
+        paneRefusal: (id, agentId) =>
+          chatPaneRefusal(agentId, id, {
+            paneOwner: (n) => api.pty.paneOwner(n),
+            customAgents: useSettings.getState().settings.customAgents
+          })
+      }).then((out) => api.sendHostChatReply({ requestId: q.requestId, kind: 'send', ...out }))
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   // Apply canvas-control commands issued by a control-capable agent's `nodeterm` CLI. Reads the
   // LATEST nodes via nodesRef (so the effect deps stay []), validates the source as the real
   // authorization boundary, then applies the verb. Non-destructive verbs (list/open-*/show-*)
@@ -10513,6 +13177,193 @@ export function Canvas() {
       // each runs the SAME validation as a real call and stops just before the mutation.
       const dryRun = dryRunRequested(args)
       const DRY_RUN_PREFIX = 'DRY RUN — nothing was opened or changed.'
+
+      // `--issue` (open-agent / open-claude): the GitHub issue the new session is started on. Its
+      // SHAPE was refused in main (`issueFlagRefusal`); what `#N` means is this renderer's question,
+      // answered against the project the new node OPENS IN — the repository its kanban board syncs
+      // with (configured, else detected from its git remote: the answer the issue lane itself uses,
+      // asked of the core that owns the project). No board repository = `#N` is refused and told
+      // the full form; nothing is guessed. The issue's own text is never fetched here: the launch
+      // prompt carries only the reference (`issueLaunchPrompt`).
+      /** The node, bound to the issue (display + run history only — its launch line is already built). */
+      const bindIssue = (node: CanvasNode, ref: IssueRef | undefined): CanvasNode =>
+        ref ? { ...node, data: { ...node.data, issueRef: ref } } : node
+      /** `run-started` on the issue card's history for each node just opened on it. */
+      const logRunsStarted = (projectId: string | undefined, nodes: readonly CanvasNode[], ref: IssueRef | undefined) => {
+        if (!ref || !projectId) return
+        for (const n of nodes) {
+          const entry = runStartedEntry(ref, {
+            id: n.id,
+            title: n.data.title as string | undefined,
+            agentId: n.data.agentId as string | undefined,
+            agentSessionId: n.data.agentSessionId as string | undefined
+          })
+          if (entry) useBoardLog.getState().append(sessionForProject(projectId).api, projectId, entry)
+        }
+      }
+      // Resolved ONCE, HERE — before any open path below snapshots the projects store. A `#N` may
+      // cost a host round trip (the GitHub host controller runs `git remote` and `gh auth`), and
+      // every path reads the store synchronously after this point: an await inside a path let a tab
+      // switch in that window write the new node into the project that had just become active (the
+      // #443 class) or report a node as queued that the next commit dropped. The project `#N` is
+      // resolved against is the one the node opens in: the `--project` target, else the source's own
+      // project (the live canvas's when the source is on it, else the stored project owning it).
+      // The authorization belt runs FIRST (`resolveIssueFlagForCall`): a caller the paths would
+      // refuse gets their refusal and never makes the host look up a project's board.
+      const issueOpen = verb === 'open-agent' || verb === 'open-claude'
+      const openVerb = verb === 'open-terminal' || issueOpen
+      const issuePre: IssueFlagResult = issueOpen
+        ? await resolveIssueFlagForCall(
+            {
+              raw: args.issue,
+              verb,
+              targetId: args.project,
+              sourceNodeId,
+              liveNodes: nodesRef.current,
+              projects: useProjects.getState().projects,
+              activeProjectId: useProjects.getState().activeProjectId
+            },
+            (id) => api.githubControl.status(id).then((view) => view.project?.repository ?? null)
+          )
+        : { ok: true }
+      if (!issuePre.ok) {
+        reply({ ok: false, error: issuePre.error })
+        return
+      }
+      const issueRefPre = issuePre.ref
+      // The prompt every agent open types, decided ONCE, HERE, for the same reason as `issuePre`
+      // (#706, `launchPromptFor`): an over-budget `--prompt` becomes a file the pane's own shell
+      // reads, on EVERY open path — live, cold and `--project`. Two of the three typed it inline,
+      // so the docs' "a long --prompt is safe on a local project" held only on screen; deciding it
+      // inside a path would also put an await after that path had read the projects store.
+      // "Local" is judged by the project the node OPENS in (the one `#N` was resolved against): an
+      // SSH project's pane runs on the host, where a file written here does not exist. A dry run
+      // writes nothing, and a call passing both flags is refused by its path before this is read.
+      // Which project that is comes from the SAME authorization belt `#N` runs behind
+      // (`issueFlagScope`): a caller the paths will refuse gets no project here, so nothing is
+      // spilled for it — its path refuses it with the same sentence.
+      const openScopePre = openVerb
+        ? issueFlagScope({
+            targetId: args.project,
+            sourceNodeId,
+            liveNodes: nodesRef.current,
+            projects: useProjects.getState().projects,
+            activeProjectId: useProjects.getState().activeProjectId
+          })
+        : undefined
+      const openProjectPre = openScopePre?.ok
+        ? useProjects.getState().getProject(openScopePre.projectId)
+        : undefined
+      const openPromptFileArg = (args['prompt-file'] ?? '').trim() || undefined
+      const spillIo = {
+        saveUpload: (name: string, data: string) => api.files.saveUpload(name, data),
+        encodeBase64: encodeUtf8Base64
+      }
+      const openPrompt: { prompt?: string; promptFile?: string } =
+        issueOpen && openScopePre?.ok && !dryRun && !(args.prompt && openPromptFileArg)
+          ? await launchPromptFor(
+              {
+                // An issue-bound session's prompt is the REFERENCE line, with the caller's own
+                // `--prompt` after it. `--prompt-file` is the whole brief and passes through.
+                prompt: issueRefPre ? issueLaunchPrompt(issueRefPre, args.prompt) : args.prompt,
+                promptFile: openPromptFileArg,
+                localFs: !openProjectPre?.ssh
+              },
+              spillIo
+            )
+          : {}
+      // `--after-pr` (see @shared/pr-wait, lib/prWait): which pull requests of the board's repository
+      // the new node(s) also wait on. Resolved HERE for the same two reasons as `issuePre` — it costs
+      // host round trips (the GitHub controller, the harvested PR list), and it must be answered for
+      // the project the node OPENS in. Main refused a malformed value; this is where "that project's
+      // repository has no pull request #N", "its board is not connected to GitHub" and "that PR is
+      // closed" are refused, with the dry run getting the same answer as a real call.
+      // Behind the same belt as `#N`: the lookup asks the host whether a project's board exists and
+      // which pull requests its repository has, so a caller the paths would refuse gets their
+      // refusal here and nobody is asked.
+      const prWaitPre: PrWaitArmResult = !openVerb
+        ? { ok: true, alreadyMerged: [] }
+        : args['after-pr'] !== undefined && openScopePre && !openScopePre.ok
+          ? { ok: false, error: openScopePre.error }
+          : await resolvePrWaitFor(args['after-pr'], args['pr-deadline'], verb, {
+              project: openProjectPre,
+              controlStatus: (id) =>
+                api.githubControl
+                  .status(id)
+                  .then((view) =>
+                    view.project ? { repository: view.project.repository, approved: view.project.approved } : null
+                  ),
+              lookupPulls: (id, numbers) =>
+                lookupPullRequests(
+                  api.githubIssues,
+                  id,
+                  (openProjectPre?.kanban?.columns ?? []).map((c) => c.id),
+                  numbers
+                ),
+              hostNow: (id) => api.githubIssues.pullStatus(id).then((b) => b.now),
+              now: () => Date.now()
+            })
+      if (!prWaitPre.ok) {
+        reply({ ok: false, error: prWaitPre.error })
+        return
+      }
+      const prHoldPre = prWaitPre.hold
+      // What the replies add: the wait, and any `:merged` wait that was already met when armed.
+      const prReplyLines = [
+        ...(prHoldPre ? [prWaitReplyLine(prHoldPre)] : []),
+        ...(prWaitPre.alreadyMerged.length
+          ? [`already merged, so not waited on: ${prWaitPre.alreadyMerged.map((n) => `PR #${n}`).join(', ')}`]
+          : [])
+      ]
+      const prReplyText = prReplyLines.map((l) => `\n${l}`).join('')
+      const prResult = prHoldPre
+        ? {
+            afterPr: {
+              repository: prHoldPre.repository,
+              waits: prHoldPre.waits,
+              deadline: new Date(prHoldPre.deadlineAt).toISOString()
+            }
+          }
+        : {}
+      // `--after-success` (@shared/station-outcome): stations the new node(s) also need a REPORTED
+      // SUCCESS from. Main already ran the shape gate (and refused the `--after <id>:ok` form); this
+      // is the renderer's belt, never the only gate. The ids are then FOLDED INTO `after` — a success
+      // wait is `--after` plus the station's report — so every existing `--after` rule applies to
+      // them unchanged on every open path: the station must exist and report status, the dependency
+      // rope is drawn and its delete is the escape, `--run-now` / `--project` refuse. The one thing
+      // added is checked where `--after` is checked: the station must be able to REPORT.
+      const successGatePre = openVerb ? afterSuccessFlagRefusal(verb, args) : null
+      if (successGatePre) {
+        reply({ ok: false, error: successGatePre })
+        return
+      }
+      const successParsedPre =
+        openVerb && args['after-success'] !== undefined ? parseAfterSuccessArg(args['after-success']) : undefined
+      const successIdsPre = successParsedPre?.ok ? successParsedPre.ids : []
+      const successDeadlinePre = parseSuccessDeadlineArg(args['success-deadline'])
+      const successHoldPre: SuccessWaitHold | undefined =
+        successIdsPre.length && successDeadlinePre.ok
+          ? { deps: successIdsPre, deadlineAt: Date.now() + successDeadlinePre.ms }
+          : undefined
+      if (successIdsPre.length) {
+        const plainAfter = (args.after ?? '').split(',').map((d) => d.trim()).filter(Boolean)
+        args = { ...args, after: [...new Set([...plainAfter, ...successIdsPre])].join(',') }
+      }
+      const successReplyLines = successHoldPre
+        ? [
+            `waits for a reported success from: ${successHoldPre.deps.join(', ')} ` +
+              `(until ${new Date(successHoldPre.deadlineAt).toISOString()})`
+          ]
+        : []
+      const successReplyText = successReplyLines.map((l) => `\n${l}`).join('')
+      const successResult = successHoldPre
+        ? {
+            afterSuccess: {
+              deps: successHoldPre.deps,
+              deadline: new Date(successHoldPre.deadlineAt).toISOString()
+            }
+          }
+        : {}
 
       // ── Agent messaging (`send`/`reply`) — handled BEFORE the source-routing machinery ──────
       // Dispatched before routing (lib/controlRouting): routing by source must never travel
@@ -10668,7 +13519,8 @@ export function Canvas() {
           srcTitle: opTitle,
           resolvedCwd,
           probedName: opProbed?.name,
-          requestedName: args.name
+          // Cut as registerProject will cut it (issue #940); blank still means "no --name".
+          requestedName: args.name === undefined ? undefined : clampProjectName(args.name) || undefined
         })
         if (opPlan.kind === 'silent') {
           // This caller already passed a human decision for this project (Q1): idempotent, quiet.
@@ -10698,6 +13550,23 @@ export function Canvas() {
           },
           onCancel: () => reply({ ok: false, error: 'denied by user' })
         })
+        return
+      }
+
+      // #925: "start now" and "start when X is done" contradict each other. Refused uniformly,
+      // before any node is built, on every open verb and every route (dry run included).
+      if (
+        (verb === 'open-terminal' || verb === 'open-claude' || verb === 'open-agent') &&
+        runNowRequested(args) &&
+        args.after
+      ) {
+        reply({ ok: false, error: RUN_NOW_AFTER_REFUSAL })
+        return
+      }
+      // …and "start when the pull request is ready" contradicts it the same way. Main's shape gate
+      // already refused this pair; the renderer never trusts that the gate in front of it ran.
+      if (openVerb && runNowRequested(args) && args['after-pr'] !== undefined) {
+        reply({ ok: false, error: RUN_NOW_AFTER_PR_REFUSAL })
         return
       }
 
@@ -10732,44 +13601,48 @@ export function Canvas() {
           return
         }
         const tgStore = useProjects.getState()
-        const tgLiveSrc = nodesRef.current.find((n) => n.id === sourceNodeId)
-        const tgStoredSrc = tgStore.projects
-          .flatMap((p) => p.nodes.map((n) => ({ node: n, projectId: p.id })))
-          .find((x) => x.node.id === sourceNodeId)
-        const callerProjectId = tgLiveSrc ? tgStore.activeProjectId : tgStoredSrc?.projectId
-        if (targetId !== callerProjectId) {
-          if (!tgLiveSrc && !tgStoredSrc) {
-            reply({ ok: false, error: 'source node is not in any open project' })
-            return
-          }
-          if (!sourceIsControlCapable(tgLiveSrc?.data.agentId ?? tgStoredSrc?.node.agentId)) {
-            reply({ ok: false, error: 'source node is not a control-capable agent' })
-            return
-          }
-          // Belt only — main already refused every stranger id with one byte-identical sentence
-          // (no existence oracle). This fires for a target main authorized that this renderer's
-          // store cannot see yet (mid-hydration), so it is worded transient.
-          const target = tgStore.getProject(targetId)
-          if (!target) {
-            reply({
-              ok: false,
-              error: 'project-target-refused: the target project is not available here — try again'
-            })
-            return
-          }
-          // Belt for the SSH invariant: a granted SSH id cannot exist (grants are minted only by
-          // local open-project) and main refuses ungranted ones — but if that ever breaks, the
-          // target is refused, not opened. A relay tab is another machine's project entirely.
-          if (target.ssh || target.remote) {
-            reply({
-              ok: false,
-              error:
-                'project-target-ssh-unsupported: opening sessions into an SSH project is not supported — do not retry'
-            })
-            return
-          }
+        // The source and target belt is ONE definition, shared with `run --project`
+        // (resolveProjectTarget, lib/projectOpen — the order and every sentence are pinned there).
+        // `own` falls through to the legacy path below.
+        const tgResolved = resolveProjectTarget({
+          targetId,
+          sourceNodeId,
+          liveNodes: nodesRef.current,
+          projects: tgStore.projects,
+          activeProjectId: tgStore.activeProjectId,
+          sshVerbWord: 'opening'
+        })
+        if (tgResolved.kind === 'refused') {
+          reply({ ok: false, error: tgResolved.error })
+          return
+        }
+        if (tgResolved.kind === 'target') {
+          const target = tgResolved.project
           const tgAgentId = (verb === 'open-agent' ? args.agent : 'claude') as AgentId
           const tgIsTerminal = verb === 'open-terminal'
+          // `#N` was resolved against the TARGET project above (`issuePre`) — the node opens there,
+          // and so was `openPrompt` (the target is local here: SSH and relay targets are refused).
+          const tgIssueRef = tgIsTerminal ? undefined : issueRefPre
+          // `--prompt-file` used to be DROPPED on this path without a word, so the session started
+          // with no brief at all. Validated exactly as the live and cold paths do; the file is read
+          // from this machine's filesystem, which is the target's (resolveProjectTarget refused an
+          // SSH or relay one above).
+          if (!tgIsTerminal && openPromptFileArg) {
+            if (args.prompt) {
+              reply({ ok: false, error: `${verb}: pass either --prompt or --prompt-file, not both` })
+              return
+            }
+            const pfErr = promptFilePathError(openPromptFileArg)
+            if (pfErr) {
+              reply({ ok: false, error: `${verb}: --prompt-file ${pfErr}` })
+              return
+            }
+            const pfExists = await api.fs.exists(openPromptFileArg).catch(() => true)
+            if (!pfExists) {
+              reply({ ok: false, error: `${verb}: --prompt-file not found: ${openPromptFileArg}` })
+              return
+            }
+          }
           const tgCount = Math.max(
             1,
             Math.min(tgIsTerminal ? 8 : 5, parseInt(args.count || '1', 10) || 1)
@@ -10787,29 +13660,39 @@ export function Canvas() {
               ? undefined
               : resolveNewNodeAccount(undefined, target, useSettings.getState().settings.claudeAccounts)
           const tgMode = tgIsTerminal ? undefined : projectPermissionMode(target, tgAgentId)
-          const tgActive = target.id === tgStore.activeProjectId
+          // Read AFTER the `--prompt-file` await above: a tab switch in that window decides whether
+          // the node belongs on the live canvas or in the store (the #443 class).
+          const tgActive = target.id === useProjects.getState().activeProjectId
           // Placement: below the lowest existing node in the TARGET (a slot under the SOURCE is
           // meaningless in a project that does not contain the source). The live canvas is the
           // truthful node set for the active project, the serialized store for any other.
-          const tgPlacedNodes = tgActive ? nodesRef.current : target.nodes
+          const tgStoredNodes = useProjects.getState().getProject(target.id)?.nodes ?? target.nodes
+          const tgPlacedNodes = tgActive ? nodesRef.current : tgStoredNodes
           const tgMade: CanvasNode[] = []
           let tgBase = { x: 0, y: 0 }
-          const tgIndexBase = tgActive ? nodesRef.current.length : target.nodes.length
+          const tgIndexBase = tgActive ? nodesRef.current.length : tgStoredNodes.length
           for (let i = 0; i < tgCount; i++) {
             const node = tgIsTerminal
               ? createTerminalNode(tgIndexBase + i, tgCwd, { x: 0, y: 0 }, args.cmd)
-              : createAgentNode(
-                  tgAgentId,
-                  tgIndexBase + i,
-                  tgCwd,
-                  { x: 0, y: 0 },
-                  args.prompt,
-                  undefined,
-                  tgAccount,
-                  tgMode,
-                  // The TARGET project: its `.nodeterm/settings.json` launch override applies to
-                  // what runs in it, not the caller's.
-                  target.id
+              : bindIssue(
+                  createAgentNode(
+                    tgAgentId,
+                    tgIndexBase + i,
+                    tgCwd,
+                    { x: 0, y: 0 },
+                    openPrompt.prompt,
+                    undefined,
+                    tgAccount,
+                    tgMode,
+                    // The TARGET project: its `.nodeterm/settings.json` launch override applies to
+                    // what runs in it, not the caller's.
+                    target.id,
+                    // `--model` was dropped here too, like `--prompt-file`: honoured as on every
+                    // other open path (`withAgentModel` re-validates it at the interpolation site).
+                    args.model,
+                    openPrompt.promptFile
+                  ),
+                  tgIssueRef
                 )
             const w = (node.width as number) ?? 640
             const h = (node.height as number) ?? 440
@@ -10819,6 +13702,7 @@ export function Canvas() {
           }
           const tgIds = tgMade.map((n) => n.id)
           const tgWhat = tgIsTerminal ? 'terminal' : tgAgentId
+          logRunsStarted(target.id, tgMade, tgIssueRef)
           // No ropes and no context-links in either branch: both are per-project arrays, and an
           // edge to a node in another project has no representation (v1 — #284's linking half).
           // The skill text names the workaround (open a reader agent inside the target project).
@@ -10827,14 +13711,15 @@ export function Canvas() {
             // live insertion still precedes PTY readiness: keep the launch queued (armed by THIS
             // process, so the fork's consent gate lets it auto-fire).
             const tgQueuedIds = tgMade.filter((n) => !!n.data.initialCommand).map((n) => n.id)
-            setNodes((ns) => [...ns, ...tgMade.map((node) => queueControlLaunchHere(node))])
+            setNodes((ns) => [...ns, ...tgMade.map((node) => withPrHold(withLaunchBrief(queueControlLaunchHere(node), openPrompt.promptFile), prHoldPre))])
             markDirty()
             reply({
               ok: true,
               message: `opened ${tgCount} ${tgWhat} session(s) in "${target.name}" (${tgIds.join(', ')})` +
-                (tgQueuedIds.length ? ' — queued; awaiting launch delivery' : ''),
+                (tgQueuedIds.length ? ' — queued; awaiting launch delivery' : '') +
+                prReplyText,
               // Being on screen is not proof of launch delivery.
-              result: { ids: tgIds, id: tgIds[0], projectId: target.id, queued: tgQueuedIds.length > 0, queuedIds: tgQueuedIds }
+              result: { ids: tgIds, id: tgIds[0], projectId: target.id, queued: tgQueuedIds.length > 0, queuedIds: tgQueuedIds, ...prResult }
             })
             return
           }
@@ -10845,19 +13730,20 @@ export function Canvas() {
           // starts when that project's canvas is next shown (mount spawns the PTY, the
           // armed-launch effect delivers with its retry loop — Task 2.0's measured round-trip).
           for (const node of tgMade) {
-            tgStore.applyNodeMutation(target.id, {
+            tgStore.applyOwnNodeMutation(target.id, {
               op: 'upsert',
               // Armed by THIS process too (consort re-review SERIOUS): without the consent record the
               // node would sit QUEUED in the other project despite the "starts when viewed" reply.
-              node: flowToNodeStates([armColdOpenHere(node)])[0]
+              node: flowToNodeStates([withPrHold(withLaunchBrief(armColdOpenHere(node), openPrompt.promptFile), prHoldPre)])[0]
             })
           }
           void persist() // not a bare writeDisk — see the store surface's markDirty
-          reply({
-            ok: true,
-            message:
-              `opened ${tgCount} ${tgWhat} session(s) in "${target.name}" (${tgIds.join(', ')}) — ` +
-              'queued; starts when that project is next viewed',
+          const tgReply = {
+            ok: true as const,
+            // ONE sentence for "queued into a project you are not looking at", shared with the
+            // own-project cold open below (lib/coldOpen) so an orchestrator never meets two
+            // phrasings for one outcome.
+            message: coldOpenMessage(tgCount, tgWhat, target.name, tgIds) + prReplyText,
             // Every node on this branch is armed by `armForColdOpen`, so the whole batch is
             // QUEUED. Said in the reply as a field, not only in the sentence, so an orchestrator
             // does not have to report a session as started when it is not (#569 item 1).
@@ -10866,13 +13752,51 @@ export function Canvas() {
               id: tgIds[0],
               projectId: target.id,
               queued: true,
-              queuedIds: tgIds
-            }
-          })
+              queuedIds: tgIds,
+              ...prResult
+            } as Record<string, unknown>
+          }
+          // #925 `--run-now`: start the held launches now, headless. The nodes were upserted
+          // above in this same tick, so the claim reads them from the store copy. A batch with
+          // nothing held (a bare `open-terminal`) has nothing to start: the plain reply stands.
+          const tgHeld = runNowRequested(args)
+            ? tgIds
+                .map((id) => useProjects.getState().getProject(target.id)?.nodes.find((n) => n.id === id))
+                .filter((n): n is CanvasNodeState => !!n?.pendingLaunch)
+            : []
+          if (tgHeld.length) {
+            reply(mergeRunNow(tgReply, await startNodesHeadlessRef.current(target, tgHeld)))
+            return
+          }
+          reply(tgReply)
           return
         }
         // targetId === the caller's own project: fall through to the legacy path unchanged
         // (B3a — behaves exactly as if --project were omitted).
+      }
+
+      // #925: `run --node <id> --project <other>`. Main has already gated the id (own or granted,
+      // PROJECT_TARGETABLE_VERBS); this resolves it, in that project only. The caller's own
+      // project falls through to the normal routing and the `case 'run'` below.
+      if (verb === 'run' && args.project !== undefined) {
+        const runStore = useProjects.getState()
+        // The SAME belt the `--project` open block runs (resolveProjectTarget), in `run`'s words.
+        const runResolved = resolveProjectTarget({
+          targetId: args.project,
+          sourceNodeId,
+          liveNodes: nodesRef.current,
+          projects: runStore.projects,
+          activeProjectId: runStore.activeProjectId,
+          sshVerbWord: 'starting'
+        })
+        if (runResolved.kind === 'refused') {
+          reply({ ok: false, error: runResolved.error })
+          return
+        }
+        if (runResolved.kind === 'target') {
+          reply(await runQueuedNodeRef.current(runResolved.project, args.node ?? ''))
+          return
+        }
       }
       // ── end of the early-handled (store-answered) verbs ─────────────────────────────────────
 
@@ -10898,12 +13822,14 @@ export function Canvas() {
         nodes: () => nodesRef.current,
         setNodes: (next) => setNodes(next),
         ropes: () => controlEdgesRef.current,
-        addRope: (source, target) =>
-          setControlEdges((es) => [...es, ropeEdge(`ctrl-${source}-${target}`, source, target)]),
+        addRope: (source, target, _color, id) =>
+          setControlEdges((es) => [...es, ropeEdge(id ?? `ctrl-${source}-${target}`, source, target)]),
         pruneRopes: (gone) =>
           setControlEdges((es) => es.filter((e) => !gone.has(e.source) && !gone.has(e.target))),
         bridges: () => linkEdgesRef.current,
-        addBridges: (edges) => setLinkEdges((es) => [...es, ...edges.map((e) => ({ ...e, type: 'default' }))]),
+        // Only through `appendBridgeEdges`: a one-way link's reader (#852) rides `edge.data`, never
+        // top-level, or the next publication would make the link two-way (review P1).
+        addBridges: (edges) => setLinkEdges((es) => appendBridgeEdges(es, edges)),
         markDirty,
         deleteNodes: (ids) => deleteNodes(ids),
         agentIdOf,
@@ -10935,15 +13861,13 @@ export function Canvas() {
           if (nowActive) commitActiveToStore()
           const p = project()
           if (!p) return
-          useProjects
-            .getState()
-            .commitCanvas(
-              projectId,
-              patch.nodes ? flowToNodeStates(patch.nodes(nodeStatesToFlow(p.nodes))) : p.nodes,
-              p.viewport,
-              patch.bridges?.(p.bridges ?? []),
-              patch.ropes?.(p.ropes ?? [])
-            )
+          // Off screen through `commitStoredCanvas` (published as an own write); a project the user
+          // switched to meanwhile is the live canvas's to publish, so it keeps the bare commit.
+          const nextNodes = patch.nodes ? flowToNodeStates(patch.nodes(nodeStatesToFlow(p.nodes))) : p.nodes
+          const nextBridges = patch.bridges?.(p.bridges ?? [])
+          const nextRopes = patch.ropes?.(p.ropes ?? [])
+          if (nowActive) useProjects.getState().commitCanvas(projectId, nextNodes, p.viewport, nextBridges, nextRopes)
+          else commitStoredCanvas(projectId, nextNodes, p.viewport, nextBridges, nextRopes)
           if (nowActive) reloadActiveProject()
         }
         // The live `agentIdOf` minus the legacy tags fallback (`nodeStatesToFlow` already
@@ -10979,14 +13903,16 @@ export function Canvas() {
               }
             }),
           ropes: () => project()?.ropes ?? [],
-          addRope: (source, target) =>
-            commit({ ropes: (cur) => [...cur, { id: `ctrl-${source}-${target}`, source, target }] }),
+          addRope: (source, target, _color, id) =>
+            commit({ ropes: (cur) => [...cur, { id: id ?? `ctrl-${source}-${target}`, source, target }] }),
           pruneRopes: (gone) =>
             commit({ ropes: (cur) => cur.filter((r) => !gone.has(r.source) && !gone.has(r.target)) }),
           bridges: () => project()?.bridges ?? [],
           addBridges: (edges) =>
             commit({
-              bridges: (cur) => [...cur, ...edges.map(({ id, source, target }) => ({ id, source, target }))]
+              // Persisted shape incl. a one-way link's `reader` (#852) — dropping it would make the
+              // link two-way on disk.
+              bridges: (cur) => [...cur, ...edges.map((e) => edgeToBridge(bridgeToEdge(e)))]
             }),
           // `persist`, never a bare `writeDisk`: the whole-workspace save also carries the ACTIVE
           // project's store copy, and `writeDisk` clears `dirty` when no edit raced it — so a
@@ -11175,12 +14101,7 @@ export function Canvas() {
       const spillLongPrompt = async (
         prompt: string | undefined
       ): Promise<{ prompt?: string; promptFile?: string }> => {
-        if (!shouldSpillPrompt(prompt, !ctlSsh)) return { prompt }
-        const path = await spillPromptToFile(prompt as string, {
-          saveUpload: (n, d) => api.files.saveUpload(n, d),
-          encodeBase64: encodeUtf8Base64
-        })
-        return path ? { promptFile: path } : { prompt }
+        return launchPromptFor({ prompt, localFs: !ctlSsh }, spillIo)
       }
       // Place opened nodes BELOW the source and rope them to it (source flow-out → target
       // flow-in), mirroring how subagent/loop nodes attach — so they read as "hanging off" the
@@ -11258,7 +14179,13 @@ export function Canvas() {
           position: { x: node.position.x - gp.x, y: node.position.y - gp.y }
         }
       }
-      const connect = (newId: string) => surface.addRope(sourceNodeId, newId, edgeColor)
+      // The opener's rope, and — in the same breath — the opener's name on the node. The two are
+      // what the station-failure notice asks before it tells anyone anything (lib/stationOpener).
+      // Every open path (addAndConnect, verify, spawn-team) funnels through here, on either surface.
+      const connect = (newId: string) => {
+        surface.setNodes((ns) => stampOpenedBy(ns, newId, sourceNodeId))
+        surface.addRope(sourceNodeId, newId, edgeColor)
+      }
       // Draw real CONTEXT links (persisted `bridges`), not the display-only ropes `connect`
       // draws — a rope is lineage decoration, a bridge is what get-linked-context reads. This
       // is what lets an orchestrator fan IN: read back what the nodes it opened produced.
@@ -11277,9 +14204,13 @@ export function Canvas() {
       const bridgeTo = (
         fromId: string,
         targetIds: string[],
-        lookup: (id: string) => LinkEndpoint | null = linkEndpointOf
+        // The SURFACE's resolver: on screen it is `linkEndpointOf` verbatim; off screen it reads the
+        // owning project's serialized nodes, where the live canvas would resolve nothing (or a
+        // same-named node of whatever the user is looking at).
+        lookup: (id: string) => LinkEndpoint | null = surface.linkEndpointOf,
+        options: { oneWay?: boolean } = {}
       ) => {
-        const plan = planBridges(fromId, targetIds, lookup, [...surface.bridges(), ...drawn])
+        const plan = planBridges(fromId, targetIds, lookup, [...surface.bridges(), ...drawn], options)
         if (plan.edges.length) {
           drawn.push(...plan.edges)
           surface.addBridges(plan.edges)
@@ -11355,6 +14286,21 @@ export function Canvas() {
             })
             return null
           }
+          // Same guardrail, one layer down: this agent reports status only on THIS machine (no
+          // hook installer on an SSH host yet), so on an SSH project it would never say "done".
+          if (ctlSsh && !hasHooksOverSsh(depAgent)) {
+            reply({
+              ok: false,
+              error: `${verb}: --after ${depId} runs an agent that reports no status in SSH projects yet`
+            })
+            return null
+          }
+          // `--after-success` (folded into `after` above): the station must also be able to
+          // REPORT, or the wait could only ever end at its deadline.
+          if (successIdsPre.includes(depId) && !sourceIsControlCapable(depAgent)) {
+            reply({ ok: false, error: successDepRefusal(verb, depId) })
+            return null
+          }
         }
         return ids
       }
@@ -11367,13 +14313,14 @@ export function Canvas() {
       // Through `surface.addRope`, NEVER a bare `setControlEdges`: upstream wrote these ropes
       // straight to the active canvas' control edges (it had no off-screen surface), which would
       // land an off-screen source's dep ropes on the USER'S active project instead of the source's
-      // own (the exact reach-around control-no-travel.source.test.ts pins against). `surface.addRope`
-      // mints the same `ctrl-<dep>-<node>` id — live it hits controlEdges, off screen it commits to
-      // the owning project's store.
+      // own (the exact reach-around control-no-travel.source.test.ts pins against). The id is
+      // upstream's wait-rope id (`waitRopeId`, lib/edgeModel) so a wait is never mistaken for an
+      // opener rope — live it hits controlEdges, off screen it commits to the owning project's store.
       const ropeDeps = (ids: string[], after: string[] | undefined): void => {
         if (!after?.length) return
         for (const nid of ids)
-          for (const dep of after) if (dep !== sourceNodeId) surface.addRope(dep, nid, edgeColor)
+          for (const dep of after)
+            if (dep !== sourceNodeId) surface.addRope(dep, nid, edgeColor, waitRopeId(dep, nid))
       }
       // The managed account a spawned node inherits from the opener/target — carried over ONLY
       // within the SAME provider (`inheritableAccountId`): a Claude conductor's account must never
@@ -11408,25 +14355,63 @@ export function Canvas() {
       const armAfter = (
         node: CanvasNode,
         after: string[],
-        intoGroup?: string | null
+        intoGroup?: string | null,
+        // The file the launch reads its prompt from, checked again right before delivery.
+        promptFile?: string
       ): CanvasNode => {
         const command = node.data.initialCommand as string | undefined
         if (!command) return node
-        // A group counts while its launch is still PENDING (the ack — and with it `waitForSetup` —
-        // has not come back yet; holding is the safe side of that unknown, and a non-waiting ack
-        // releases these again) or while its acked run said `waitForSetup` and has not finished.
-        const holdsForSetup =
-          !!intoGroup &&
-          (useProjectSetup.getState().pendingForGroup(intoGroup) > 0 ||
-            setupWaitGroupsRef.current.has(intoGroup)) &&
-          !setupDoneForGroup(intoGroup)
-        const awaitSetupGroup = holdsForSetup ? intoGroup ?? undefined : undefined
+        const awaitSetupGroup = setupHoldGroup(intoGroup)
         // Always retain the command until the PTY-ready delivery loop acknowledges it.
         // Node creation (even on screen) is not command delivery. On screen or off (a store
         // surface: the launch fires when that project is next viewed), the hold is armed HERE,
         // by this process, on the user's own canvas-control call — the one provenance that may
-        // auto-fire (see `wasArmedThisSession`; a loaded/peer launch needs ▶ Run now).
-        return queueControlLaunchHere(node, after, awaitSetupGroup)
+        // auto-fire (see `wasArmedThisSession`; a loaded/peer launch needs ▶ Run now). The brief
+        // file, the `--after-pr` and the `--after-success` waits ride the same held launch.
+        return withSuccessHold(
+          withPrHold(
+            withLaunchBrief(queueControlLaunchHere(node, after, awaitSetupGroup), promptFile),
+            prHoldPre
+          ),
+          successHoldPre
+        )
+      }
+      // The reply of an open verb, plus upstream's #925 `--run-now` on the STORE surface: a session
+      // opened off screen is queued until that project is next viewed, and `--run-now` starts it
+      // now, headless, instead (`startNodesHeadlessRef`, lib/headlessRun) — the fork's surface twin
+      // of upstream's cold-open branch. On screen the held launch fires on its own, so the flag has
+      // nothing to add. `--after`/`--after-pr` were refused with `--run-now` up front; a launch
+      // still held for a worktree's setup script is left to start on view rather than skip it.
+      // The nodes were committed to the owning project's store in this same tick, so the start
+      // reads them from there.
+      const replyOpened = async (
+        base: { ok: true; message: string; result: Record<string, unknown> },
+        ids: readonly string[]
+      ): Promise<void> => {
+        if (surface.live || !runNowRequested(args)) {
+          reply(base)
+          return
+        }
+        const owner = surface.project()
+        const held = (owner?.nodes ?? []).filter(
+          (n) =>
+            ids.includes(n.id) &&
+            !!n.pendingLaunch &&
+            !n.pendingLaunch.awaitSetupGroup &&
+            !n.pendingLaunch.after?.length
+        )
+        if (!owner || !held.length) {
+          reply(base)
+          return
+        }
+        const batch = await startNodesHeadlessRef.current(owner, held)
+        const started = batch.outcomes.filter((o) => o.started).length
+        // The surface's "starts when that project is next viewed" stays true only for what did not start.
+        const head =
+          started === ids.length && surface.queuedNote
+            ? { ...base, message: base.message.replace(surface.queuedNote, '') }
+            : base
+        reply(mergeRunNow(head, batch))
       }
       // Open `count` nodes INTO a group frame: grow the frame FIRST (extent:'parent' would
       // clamp children landing outside it), then drop each node into the next grid slot
@@ -11477,8 +14462,9 @@ export function Canvas() {
             // launch/agent-status states (#827/#811) on top of the #521 error marker.
             const list = storedNodeListing(surface.nodes().map((n) => ({
               id: n.id, kind: n.type, title: n.data.title as string,
-              pendingLaunch: n.data.pendingLaunch, agentId: n.data.agentId as string | undefined
-            })), st, useLaunchDelivery.getState().byId)
+              pendingLaunch: n.data.pendingLaunch, agentId: n.data.agentId as string | undefined,
+              issueRef: n.data.issueRef
+            })), st, useLaunchDelivery.getState().byId, Date.now(), useStationOutcomes.getState().byId, useStationHandovers.getState().byId)
             reply({ ok: true, result: list, message: controlListingText(list) })
             return
           }
@@ -11501,14 +14487,18 @@ export function Canvas() {
                     (intoGroupId ? ` in group ${intoGroupId}` : '') +
                     (termCwd ? `, cwd ${termCwd}` : '') +
                     (args.cmd ? `, running: ${args.cmd}` : ''),
-                  ...(after?.length ? [`armed to wait for: ${after.join(', ')}`] : [])
+                  ...(after?.length ? [`armed to wait for: ${after.join(', ')}`] : []),
+                  ...prReplyLines,
+                  ...successReplyLines
                 ].join('\n'),
                 result: {
                   dryRun: true,
                   count,
                   group: intoGroupId ?? null,
                   cwd: termCwd ?? null,
-                  after: after ?? []
+                  after: after ?? [],
+                  ...prResult,
+                  ...successResult
                 }
               })
               return
@@ -11535,16 +14525,21 @@ export function Canvas() {
             ropeDeps(ids, after)
             const openResult = openBatch.result(after ?? [])
             const { queuedIds } = openResult
-            reply({
-              ok: true,
-              message:
-                `opened ${count} terminal(s): ${ids.join(', ')}` +
-                // Off screen the surface's own note says when it starts; do not say it twice.
-                (queuedIds.length && surface.live ? '\nqueued; awaiting launch delivery' : '') +
-                (after?.length ? `\nwaiting for ${after.join(', ')} before running` : '') +
-                surface.queuedNote,
-              result: openResult
-            })
+            await replyOpened(
+              {
+                ok: true,
+                message:
+                  `opened ${count} terminal(s): ${ids.join(', ')}` +
+                  // Off screen the surface's own note says when it starts; do not say it twice.
+                  (queuedIds.length && surface.live ? '\nqueued; awaiting launch delivery' : '') +
+                  (after?.length ? `\nwaiting for ${after.join(', ')} before running` : '') +
+                  prReplyText +
+                  successReplyText +
+                  surface.queuedNote,
+                result: { ...openResult, ...prResult, ...successResult }
+              },
+              ids
+            )
             return
           }
           case 'open-claude':
@@ -11635,6 +14630,8 @@ export function Canvas() {
               }
             }
             const agentCwd = args.cwd || groupCwd || srcCwd
+            // `#N` was resolved above (`issuePre`), before anything here read the store.
+            const issueRef = issueRefPre
             if (dryRun) {
               // The dry run is deliberately STRICTER than the real open here: an unknown agent id
               // today opens a node whose launch command is the typo, failing only inside its pane
@@ -11662,7 +14659,10 @@ export function Canvas() {
                       : args.prompt
                         ? `, prompt: "${args.prompt.slice(0, 80)}${args.prompt.length > 80 ? '…' : ''}"`
                         : ''),
+                  ...(issueRef ? [`bound to GitHub issue ${formatIssueRef(issueRef)}`] : []),
                   ...(after?.length ? [`armed to wait for: ${after.join(', ')}`] : []),
+                  ...prReplyLines,
+                  ...successReplyLines,
                   'Each session would be connected + context-linked to you.'
                 ].join('\n'),
                 result: {
@@ -11671,7 +14671,10 @@ export function Canvas() {
                   count,
                   group: intoGroupId ?? null,
                   cwd: agentCwd ?? null,
-                  after: after ?? []
+                  after: after ?? [],
+                  ...(issueRef ? { issue: formatIssueRef(issueRef) } : {}),
+                  ...prResult,
+                  ...successResult
                 }
               })
               return
@@ -11679,10 +14682,11 @@ export function Canvas() {
             // See the same list in open-terminal: which of these nodes end up ARMED is
             // `armAfter`'s per-node decision, recorded as it builds them.
             const openBatch = createControlOpenBatch()
-            // A `--prompt` over the typed-line budget is spilled to a file and delivered through
-            // the same `"$(cat …)"` substitution `--prompt-file` uses (#706). An explicit
-            // `--prompt-file` already took that route and is passed through untouched.
-            const promptLaunch = await spillLongPrompt(promptFile ? undefined : args.prompt)
+            // The prompt was decided above (`openPrompt`, #706): an over-budget `--prompt` rides a
+            // spilled file through the same `"$(cat …)"` substitution `--prompt-file` uses, an
+            // issue-bound session's prompt leads with the REFERENCE line, and an explicit
+            // `--prompt-file` (the whole brief) is passed through untouched.
+            const issueNodes: CanvasNode[] = []
             const make = (i: number): CanvasNode => {
               const node = armAfter(
                 createAgentNode(
@@ -11690,7 +14694,7 @@ export function Canvas() {
                   surface.nodes().length + i,
                   agentCwd,
                   { x: 0, y: 0 },
-                  promptLaunch.prompt,
+                  openPrompt.prompt,
                   sshFor(agentCwd),
                   account,
                   surface.permissionMode(agentId),
@@ -11701,12 +14705,15 @@ export function Canvas() {
                   // interpolation site and emits nothing for an agent outside MODEL_SWITCH_CAPABLE,
                   // so an unsupported agent's command line stays byte-identical.
                   args.model,
-                  promptFile ?? promptLaunch.promptFile
+                  openPrompt.promptFile
                 ),
                 after ?? [],
-                intoGroupId
+                intoGroupId,
+                openPrompt.promptFile
               )
-              return openBatch.add(intoGroupId ? node : dropBelow(node))
+              const bound = bindIssue(node, issueRef)
+              if (issueRef) issueNodes.push(bound)
+              return openBatch.add(intoGroupId ? bound : dropBelow(bound))
             }
             const ids = intoGroupId
               ? addGrouped(intoGroupId, count, make)
@@ -11717,6 +14724,7 @@ export function Canvas() {
             if (wantAutoClose)
               for (const id of ids)
                 autoCloseArmedRef.current.set(id, { opener: sourceNodeId, explicit: autoCloseChoice.explicit })
+            logRunsStarted(ctlProject?.id, issueNodes, issueRef)
             const openResult = openBatch.result(after ?? [])
             const { queuedIds } = openResult
             // Context-link the new session(s) back to the opener (same rationale as spawn-team:
@@ -11735,25 +14743,34 @@ export function Canvas() {
             const depLinked = (after ?? []).length
               ? ids.flatMap((nid) => bridgeTo(nid, after ?? [], openedEndpoint).linked)
               : []
-            reply({
-              ok: true,
-              message:
-                `opened ${count} ${agentId} session(s): ${ids.join(', ')}` +
-                // Off screen the surface's own note says when it starts; do not say it twice.
-                (queuedIds.length && surface.live ? '\nqueued; awaiting launch delivery' : '') +
-                (bridged.length ? `\ncontext-linked to you: ${bridged.join(', ')}` : '') +
-                (after?.length
-                  ? `\nwaiting for ${after.join(', ')} before running` +
-                    (depLinked.length ? ` (and linked to read them)` : '')
-                  : '') +
-                (wantAutoClose ? '\nauto-close armed: closes once done AND read by you (pass --auto-close no to keep it)' : '') +
-                surface.queuedNote,
-              result: {
-                ...openResult,
-                linked: bridged,
-                autoClose: wantAutoClose
-              }
-            })
+            await replyOpened(
+              {
+                ok: true,
+                message:
+                  `opened ${count} ${agentId} session(s): ${ids.join(', ')}` +
+                  // Off screen the surface's own note says when it starts; do not say it twice.
+                  (queuedIds.length && surface.live ? '\nqueued; awaiting launch delivery' : '') +
+                  (bridged.length ? `\ncontext-linked to you: ${bridged.join(', ')}` : '') +
+                  (issueRef ? `\nbound to GitHub issue ${formatIssueRef(issueRef)}` : '') +
+                  (after?.length
+                    ? `\nwaiting for ${after.join(', ')} before running` +
+                      (depLinked.length ? ` (and linked to read them)` : '')
+                    : '') +
+                  (wantAutoClose ? '\nauto-close armed: closes once done AND read by you (pass --auto-close no to keep it)' : '') +
+                  prReplyText +
+                  successReplyText +
+                  surface.queuedNote,
+                result: {
+                  ...openResult,
+                  linked: bridged,
+                  autoClose: wantAutoClose,
+                  ...(issueRef ? { issue: formatIssueRef(issueRef) } : {}),
+                  ...prResult,
+                  ...successResult
+                }
+              },
+              ids
+            )
             return
           }
           case 'show-image': {
@@ -12010,7 +15027,10 @@ export function Canvas() {
               reply({ ok: false, error: `link: --from ${from}: ${LINK_ENDPOINT_NOT_FOUND}` })
               return
             }
-            const { linked, skipped } = bridgeTo(from, targets)
+            // `--one-way` (issue #852): only --from reads the targets. Valueless flag — the shim
+            // sends it as `arg.one-way=` (present, empty).
+            const oneWay = 'one-way' in args
+            const { linked, skipped } = bridgeTo(from, targets, undefined, { oneWay })
             if (linked.length === 0) {
               reply({
                 ok: false,
@@ -12023,7 +15043,9 @@ export function Canvas() {
               : ''
             reply({
               ok: true,
-              message: `linked ${from} ↔ ${linked.join(', ')}${note}`,
+              message: oneWay
+                ? `linked one-way: ${from} reads ${linked.join(', ')}${note}`
+                : `linked ${from} ↔ ${linked.join(', ')}${note}`,
               result: { from, linked, skipped }
             })
             return
@@ -12126,7 +15148,9 @@ export function Canvas() {
               )
               return armAfter(
                 { ...node, data: { ...node.data, title: `Verify: ${lens}`, titleAuto: false } },
-                [targetId]
+                [targetId],
+                undefined,
+                lensLaunches[i].promptFile
               )
             })
             const reviewerIds = reviewers.map((r) => r.id)
@@ -12156,7 +15180,9 @@ export function Canvas() {
                     )
                     return { ...j, data: { ...j.data, title: 'Verify: verdict', titleAuto: false } }
                   })(),
-                  reviewerIds
+                  reviewerIds,
+                  undefined,
+                  judgeLaunch.promptFile
                 )
               : null
             const panelIds = [...reviewerIds, ...(judge ? [judge.id] : [])]
@@ -12398,6 +15424,8 @@ export function Canvas() {
             const teamGroup = next.find(
               (node) => node.type === 'group' && !existingGroupIds.has(node.id)
             )!
+            // The frame already sits in the team's slot (`teamSlot` above, the fork's spawn
+            // placement): `groupSelectedNodes` drew it around the grid laid out there.
             next = next.map((nd) =>
               nd.id === teamGroup.id ? { ...nd, data: { ...nd.data, title: args.label || 'Team' } } : nd
             )
@@ -12530,6 +15558,19 @@ export function Canvas() {
               reply({ ok: false, error: 'open-worktree: could not derive a worktree path — pass --path' })
               return
             }
+            // A location the git-shared settings file produced must stay beside the repository
+            // (@shared/worktree-location). An explicit `--path` is the caller's own and not judged.
+            // Before the dry run, which must refuse what the real call refuses.
+            const locationRefusal = sharedWorktreeLocationRefusal({
+              path: wtPath,
+              repoRoot,
+              branch,
+              sharedBasePath: args.path?.trim() ? undefined : sharedBasePathOf(pw)
+            })
+            if (locationRefusal) {
+              reply({ ok: false, error: `open-worktree: ${locationRefusal}` })
+              return
+            }
             if (dryRun) {
               reply({
                 ok: true,
@@ -12556,26 +15597,31 @@ export function Canvas() {
               })
               return
             }
-            const res = await api.git
-              .worktreeAdd(repoRoot, wtPath, branch, baseRef, true)
-              .catch((e: unknown) => ({
-                ok: false as const,
-                message: e instanceof Error ? e.message : String(e)
-              }))
-            if (!res.ok) {
-              reply({ ok: false, error: `open-worktree: ${res.message}` })
+            // The shared create-and-bind (lib/worktreeCreate), WITHOUT its project-changed refusal:
+            // this verb has always bound to the canvas on screen when git returns.
+            const created = await createBoundWorktree(
+              worktreeControlRef.current.worktreeCreateDeps(),
+              { repoPath: repoRoot, mode: 'new', branch, baseRef, path: wtPath },
+              {
+                // A fresh frame takes the next free slot under the source like any spawned node
+                // (`slotFor`, lib/spawnPlacement), so several open-worktree calls land side by side
+                // and never on an existing frame. `createGroupNode` (via attachWorktree) takes the
+                // frame's TOP-LEFT, so the slot is passed verbatim — offsetting it as a centre put
+                // the real frame half a frame right and down of the box the walk had tested (consort
+                // medium, 2026-09-08). Asked only once git succeeded, against the canvas as it is then.
+                target: () => ({
+                  groupId: bindGroupId,
+                  at: bindGroupId
+                    ? undefined
+                    : slotFor({ w: WORKTREE_GROUP_SIZE.width, h: WORKTREE_GROUP_SIZE.height })
+                })
+              }
+            )
+            if (!created.ok) {
+              reply({ ok: false, error: `open-worktree: ${created.reason === 'git' ? created.message : 'the project changed'}` })
               return
             }
-            // The frame takes the next free slot under the source like any spawned node, so
-            // several open-worktree calls land side by side and never on an existing frame.
-            // `createGroupNode` (via attachWorktree) takes the frame's TOP-LEFT, so the slot is
-            // passed verbatim — offsetting it as a centre put the real frame half a frame right and
-            // down of the box the walk had tested (consort medium, 2026-09-08).
-            const frameAt = slotFor({ w: WORKTREE_GROUP_SIZE.width, h: WORKTREE_GROUP_SIZE.height })
-            const groupId = worktreeControlRef.current.attachWorktree(
-              { groupId: bindGroupId, at: frameAt },
-              worktreeFromCreate({ repoPath: repoRoot, mode: 'new', branch, baseRef, path: wtPath })
-            )
+            const groupId = created.groupId
             reply({
               ok: true,
               message: `opened worktree ${branch} (off ${baseRef || 'the repo default branch'}${baseNote}) at ${wtPath} in group ${groupId}`,
@@ -12824,8 +15870,13 @@ export function Canvas() {
               // still waiting on its verification (command-delivery.ts). The dialog makes that
               // rare, not impossible — the human confirms on their own clock, not the pane's.
               let thrown: string | null = null
+              // When the text STARTED going into the pane — after the human's confirm. Core's
+              // hand-over tracker stamps the new work with it (core/station-handover.ts): a turn
+              // that began while the dialog was open is not an answer to this text.
+              let typedAt: number | undefined
               const outcome = await guardConcurrentRestart(args.node, async () => {
                 try {
+                  typedAt = Date.now()
                   const ok = await api.pty.sendText(args.node, args.text ?? '')
                   if (ok === 'pasted-not-submitted') thrown = TEXT_NOT_SUBMITTED
                   return ok === true ? ('sent' as const) : ('failed' as const)
@@ -12844,7 +15895,8 @@ export function Canvas() {
               reply({
                 ok: outcome === 'sent',
                 message: outcome === 'sent' ? 'sent' : 'failed',
-                error: outcome === 'sent' ? undefined : (thrown ?? 'sendText failed')
+                error: outcome === 'sent' ? undefined : (thrown ?? 'sendText failed'),
+                ...(typedAt !== undefined ? { result: { typedAt } } : {})
               })
             }
             // Has the user waived this verb's dialog (this app run / permanently / while their own
@@ -12904,6 +15956,19 @@ export function Canvas() {
               },
               onCancel: () => reply({ ok: false, error: 'denied by user' })
             })
+            return
+          }
+          case 'run': {
+            // #925, the CLI twin of a QUEUED node's Run now. `--node` resolves ONLY in the
+            // caller's own project: live when it is on screen, else its serialized copy through the
+            // store surface (`ControlSurface`; nothing travels). Another project takes `--project`,
+            // answered by the early block above.
+            const runProject = surface.project()
+            if (!runProject) {
+              reply({ ok: false, error: "run: the caller's project is not available" })
+              return
+            }
+            reply(await runQueuedNodeRef.current(runProject, args.node ?? ''))
             return
           }
           case 'close': {
@@ -13106,7 +16171,7 @@ export function Canvas() {
             // Read prev fresh so the board-log diff below has the SAME base the write mutates —
             // a lazy-default board is materialized here (as the first UI edit would) so the
             // resolved column ids are stable across the write and the diff.
-            const prev = store.getProject(pid)?.kanban ?? defaultKanban()
+            const prev = store.getProject(pid)?.kanban ?? defaultKanban(pid)
             // Resolve --column by id or (case-insensitive) title; empty / "ungrouped" → null
             // (unassign). `undefined` = no such column, so report what IS available.
             const rawCol = (args.column ?? '').trim()
@@ -13131,7 +16196,32 @@ export function Canvas() {
               return card ? card.title || 'Untitled' : ''
             }
             for (const { nodeId: nid, event } of boardLogEvents(prev, next, cardTitle)) {
-              useBoardLog.getState().append(api, pid, { kind: 'event', nodeId: nid, event })
+              useBoardLog.getState().append(sessionForProject(pid).api, pid, { kind: 'event', nodeId: nid, event })
+            }
+            // Handoff pings (lib/handoffPings): an agent filing a card ASSIGNED TO THIS USER into a
+            // handoff column (a done column, or a started one past the first) tells them — through the
+            // existing notification consent, background-only rule and per-node cooldown. Arming the
+            // fold lets the Stop hook that follows seconds later not notify the same moment twice.
+            // A side effect of a move that has already been written: whatever goes wrong here must
+            // never cost the verb its reply (an agent waiting on `assign` would hang on it).
+            try {
+              const notifyPrefs = useSettings.getState().settings
+              if (!document.hasFocus() && notifyPrefs.notifyOnClaudeDone && notifyPrefs.notifyConsentAsked) {
+                const me = loadIdentity()?.name ?? 'you'
+                const now = Date.now()
+                for (const h of handoffsFor(prev, next, me)) {
+                  if (now - (notifyCooldownRef.current[h.nodeId] ?? 0) < 5000) continue
+                  notifyCooldownRef.current[h.nodeId] = now
+                  noteHandoff(h.nodeId, now)
+                  void window.nodeTerminal.notify({
+                    title: `${ctlProject?.name ?? 'Board'} — handed to you: ${cardTitle(h.nodeId) || 'a card'}`,
+                    body: `Moved to ${h.columnTitle}.`,
+                    nodeId: h.nodeId
+                  })
+                }
+              }
+            } catch (err) {
+              console.warn('[kanban] handoff ping failed', err)
             }
             const where = columnId
               ? next.columns.find((c) => c.id === columnId)?.title ?? columnId
@@ -13350,7 +16440,7 @@ export function Canvas() {
       if (!nodeId || !title) return
       const projectId = nodesRef.current.some((n) => n.id === nodeId)
         ? activeProjectId
-        : useProjects.getState().projects.find((p) => p.nodes.some((n) => n.id === nodeId))?.id
+        : nodeOwner(useProjects.getState().projects, nodeId)?.id
       if (!projectId) return
       renameSession(projectId, nodeId, title)
     })
@@ -13381,8 +16471,8 @@ export function Canvas() {
   // Global Kanban delegates active-project mutations to the live canvas (React Flow is
   // source of truth — direct store writes for the active project would be clobbered by the
   // next commitActiveToStore). Non-active projects write to the store and then to disk.
-  // Delete uses ConfirmDialog and SSH-aware teardown (local transport.destroy vs remote
-  // sshProject.killSessions with everySocket), not native confirm.
+  // Delete uses ConfirmDialog (not native confirm); an off-canvas delete tears down through
+  // `deleteStoredNodes`, the one cross-project teardown funnel.
   useEffect(() => {
     const onGlobalRename = (e: CustomEvent<{ projectId: string; nodeId: string; title: string }>) => {
       renameSession(e.detail.projectId, e.detail.nodeId, e.detail.title)
@@ -13429,32 +16519,18 @@ export function Canvas() {
         deleteNodeFromKanban(nodeId)
         return
       }
+      // Off-canvas teardown: the SAME funnel the sessions sidebar and canvas control's store
+      // surface `close` use (`deleteStoredNodes`: parked-xterm dispose, remote-aware destroy, issue
+      // run-ended, agent/fan-out/attach-consent/launch-consent/webview cleanup, frame children
+      // freed). A hand-rolled copy here drifted — it skipped the parked dispose and swallowed a
+      // failed SSH kill.
       const proj = useProjects.getState().getProject(projectId)
       const label = proj?.nodes.find((n) => n.id === nodeId)?.title || 'this session'
       setConfirm({
         message: `Delete ${label}? Its terminal session will end.`,
-        onConfirm: async () => {
-          useProjects.setState((s) => ({
-            projects: s.projects.map((p) =>
-              p.id === projectId ? { ...p, nodes: p.nodes.filter((n) => n.id !== nodeId) } : p
-            )
-          }))
-          const owner = useProjects.getState().projects.find((p) => p.id === projectId)
-          const isSsh = !!owner?.ssh
-          try {
-            if (isSsh) {
-              await (window as unknown as { nodeTerminal: { sshProject: { killSessions: (a: string, b: string[], c: unknown) => Promise<void> } } }).nodeTerminal.sshProject.killSessions(projectId, [nodeId], { everySocket: true } as never)
-            } else {
-              transport.destroy(nodeId)
-            }
-          } catch {}
-          useAgentStatus.getState().remove(nodeId)
-          useAgentNodes.getState().clearForParent(nodeId)
-          useAgentNodes.getState().clearLoop(nodeId)
-          useWebviewKeepAlive.getState().drop(nodeId)
-          clearAttachConsent(nodeId)
+        onConfirm: () => {
+          deleteStoredNodes(projectId, [nodeId])
           setConfirm(null)
-          void writeDisk()
         }
       })
     }
@@ -13484,7 +16560,7 @@ export function Canvas() {
       window.removeEventListener('nodeterm:global-delete' as never, onGlobalDelete as never)
       window.removeEventListener('nodeterm:global-set-icon' as never, onGlobalSetIcon as never)
     }
-  }, [renameSession, setNodes, markDirty, writeDisk, deleteNodeFromKanban])
+  }, [renameSession, setNodes, markDirty, writeDisk, deleteNodeFromKanban, deleteStoredNodes])
 
   // Sidebar "Name with AI": generate a title from the session's captured terminal output
   // (same BYO-agent path as the terminal node's ✦), then apply it via renameSession.
@@ -13494,7 +16570,15 @@ export function Canvas() {
       // unmounting mid-request; this Canvas-level call completes and applies the name anyway.
       useSessionNaming.getState().set(id, true)
       try {
-        const r = await api.pty.generateName(id, cwd ?? '')
+        // The node's managed Claude account, so the naming request runs under the same login the
+        // node does (live node first, then the serialized one for a non-active project).
+        const accountId =
+          (nodesRef.current.find((n) => n.id === id)?.data.accountId as string | undefined) ??
+          useProjects
+            .getState()
+            .projects.find((p) => p.id === projectId)
+            ?.nodes.find((n) => n.id === id)?.accountId
+        const r = await api.pty.generateName(id, cwd ?? '', accountId)
         if (r.ok) renameSession(projectId, id, r.message)
       } finally {
         useSessionNaming.getState().set(id, false)
@@ -13670,6 +16754,8 @@ export function Canvas() {
                   void writeDisk()
                 }
               },
+              // Works for any project: a live link needs no node on screen (R49).
+              ...liveLinkMenuItems(id, projectId),
               { type: 'separator' },
               { label: 'End session', icon: <IconTrash />, danger: true, onClick: () => closeSession(projectId, id) }
             ]
@@ -13681,7 +16767,8 @@ export function Canvas() {
       renameSession,
       closeSession,
       writeDisk,
-      selectionItems
+      selectionItems,
+      liveLinkMenuItems
     ]
   )
 
@@ -13721,6 +16808,9 @@ export function Canvas() {
   }, [])
 
   const notifyCooldownRef = useRef<Record<string, number>>({})
+  // A handoff ping folds the "finished" alert that follows it (lib/handoffPings) only while the user
+  // is still away: a window focus in between drops the fold, so the next turn end chimes as always.
+  useEffect(() => installHandoffFocusReset(window), [])
   // Sound effects have their OWN cooldown: they fire whether or not the window is focused, so they
   // can't share the notification one (which only ticks in the background).
   const sfxCooldownRef = useRef<Record<string, number>>({})
@@ -13797,6 +16887,9 @@ export function Canvas() {
         // Everything from here down is an INTERRUPT, and this is where a quiet alert stops. The
         // unread dot and its ack above are deliberately on the other side of this line.
         if (opts?.quiet) return
+        // An agent that just filed its card into a handoff column was already announced to the
+        // assignee (the `assign` verb's handoff ping); its turn end seconds later is the same moment.
+        if (sound === 'done' && suppressDoneAfterHandoff(e.nodeId, Date.now())) return
         // Sound first: it is the one alert that also fires while you're in the app but looking at
         // another node — the case OS notifications deliberately skip.
         const snd = useSettings.getState().settings
@@ -13804,7 +16897,7 @@ export function Canvas() {
           const t = Date.now()
           if (t - (sfxCooldownRef.current[e.nodeId] ?? 0) >= 5000) {
             sfxCooldownRef.current[e.nodeId] = t
-            playSfx(sound, snd.soundVolume)
+            playSfx(sound, snd.soundVolume, snd.customAlertSounds)
           }
         }
         // OS notification only when the whole window is in the background.
@@ -13909,8 +17002,15 @@ export function Canvas() {
               e.pendingId,
               e.verified,
               e.errored,
-              e.held
+              e.held,
+              recordsTurnInterrupt(e)
             )
+          // Claude's Stop names the BACKGROUND tasks still running (async subagents, nested ones,
+          // background shells). A background subagent that ends its turn while its own work runs
+          // fires SubagentStop — its card goes done — and is resumed later, so the card alone would
+          // let Eco or the bulk restart type /exit over live work. The existing background-task
+          // stamp is the guard both already read; a turn start clears it, the next Stop re-decides.
+          if (e.state === 'done' && !stuckRescueSkip && e.backgroundTaskIds?.length) cs.markBackgroundTask(e.nodeId)
           // A genuine new turn drops the previous fan-out — but only the cards that FINISHED
           // (issue #547). Claude launches subagents async, so "waiting for N background agents to
           // finish" is exactly the state in which the next prompt gets typed, and clearing a
@@ -13958,12 +17058,18 @@ export function Canvas() {
         }
         case 'subagent-start':
           if (e.toolUseId) {
-            an.start(e.toolUseId, {
-              parentNodeId: e.nodeId,
-              type: e.subagentType,
-              label: e.taskLabel,
-              startedAt: e.subagentStartedAt
-            })
+            an.start(
+              e.toolUseId,
+              {
+                parentNodeId: e.nodeId,
+                type: e.subagentType,
+                label: e.taskLabel,
+                startedAt: e.subagentStartedAt,
+                lastActivityAt: e.subagentLastActivityAt
+              },
+              // A Claude native card replacing the card its tool call drew (claude-subagent-lifecycle).
+              e.supersedes
+            )
           }
           break
         case 'subagent-end':
@@ -14229,6 +17335,27 @@ export function Canvas() {
     return () => clearInterval(t)
   }, [autoCloseSpawnedNodes, confirmBusy, deleteNodes, spawnLineage, setConfirm, stationHoldsWorkNow])
 
+  // The crisp gate's zoom threshold depends on the display (issue #986): report the device-pixel
+  // ratio now and whenever it changes. Same two triggers as the shared glyph layer: the re-arming
+  // media-query watcher, plus `resize` for ratios an exact `dppx` query can miss (fractional
+  // browser-zoom steps in the Server Edition).
+  useEffect(() => {
+    const report = (): void => setWebglDevicePixelRatio(window.devicePixelRatio)
+    report()
+    const watch = createPixelRatioWatcher(
+      {
+        dpr: () => window.devicePixelRatio || 1,
+        match: (query) => (typeof window.matchMedia === 'function' ? window.matchMedia(query) : null)
+      },
+      report
+    )
+    window.addEventListener('resize', report)
+    return () => {
+      watch.stop()
+      window.removeEventListener('resize', report)
+    }
+  }, [])
+
   // Safety net for a lost Stop POST / crashed CLI: decay working entries that saw no hook
   // event at all for STALE_WORKING_MS (the sweep itself is cheap; see agentStatus.ts).
   //
@@ -14435,7 +17562,8 @@ export function Canvas() {
         if (attached) return connectHostAttachment(scopeId, attached, sshConnect, sshDisconnect)
         const projectId = scopeId
         const project = useProjects.getState().getProject(projectId)
-        if (!project?.ssh) return false
+        // Never a relay tab's endpoint — see session/relay-ssh.ts.
+        if (!project?.ssh || !projectMayDialSsh(project)) return false
         const ssh = project.ssh
         // Same post-connect sequence as the active-project effect: arm remote git routing first
         // (only if this project is still the active tab), then record the connection info.
@@ -14510,6 +17638,8 @@ export function Canvas() {
       // The remote claude probe runs AFTER connect (its login shell is slow) and pushes its answer
       // on a later `connected` event — record it so this project's next Claude launch can use
       // `--permission-mode auto`. Absent = nothing new to record (keep omitting the flag).
+      // The host's `codex --help` answer: may a remote Codex TUI carry `--no-daemon`?
+      if (e.remoteCodexNoDaemon) useSshConn.getState().setRemoteCodexNoDaemon(e.remoteCodexNoDaemon)
       if (e.claudeAutoPermissionMode !== undefined) {
         useSshConn
           .getState()
@@ -14552,18 +17682,25 @@ export function Canvas() {
   // project for that server folder (its master is opened by the active-project effect on switch),
   // persist. openSshProject dedupes by endpoint+remoteCwd — re-adding a folder must reuse its
   // existing project, never mint a fresh empty one that would clobber the server's project.json.
+  // That reuse is a reopen, so a folder whose project was handed to a hosted team asks first
+  // (sameSshEndpoint is the store's own matcher, so this asks about the project it will reopen).
   const createSshProject = useCallback(
     (input: { server: SshServer; remoteCwd: string; label: string }) => {
-      commitActiveToStore()
-      useProjects
-        .getState()
-        .openSshProject(input.label, { server: input.server, remoteCwd: input.remoteCwd })
-      // Same contract as onRepoCloned: the welcome screen waits behind the SSH dialog and
-      // dismisses only once the project is created (cancel returns to the welcome screen).
-      setWelcomeOpen(false)
-      void writeDisk()
+      const ssh = { server: input.server, remoteCwd: input.remoteCwd }
+      void (async () => {
+        const existing = useProjects
+          .getState()
+          .projects.find((p) => !!p.ssh && sameSshEndpoint(p.ssh, ssh))
+        if (existing?.handedOffTo && !(await confirmHandedOffReopen(existing.id))) return
+        commitActiveToStore()
+        useProjects.getState().openSshProject(input.label, ssh)
+        // Same contract as onRepoCloned: the welcome screen waits behind the SSH dialog and
+        // dismisses only once the project is created (cancel returns to the welcome screen).
+        setWelcomeOpen(false)
+        void writeDisk()
+      })()
     },
-    [commitActiveToStore, writeDisk]
+    [commitActiveToStore, writeDisk, confirmHandedOffReopen]
   )
 
   const addProject = useCallback(() => {
@@ -14582,8 +17719,13 @@ export function Canvas() {
     async (folder: string): Promise<void> => {
       commitActiveToStore()
       // A folder maps to one project: reuse the already-registered one first…
-      const existing = useProjects.getState().projects.find((p) => p.cwd === folder)
+      // A relay tab carries the HOST's cwd: the same path on two machines must not route a local
+      // folder to another machine's tab (openFolderProject applies the same rule).
+      const existing = useProjects.getState().projects.find((p) => p.cwd === folder && !p.remote)
       if (existing) {
+        // That reuse reopens the project, so one handed to a hosted team (an SSH project can carry
+        // a local folder too, via "Set folder…") asks first, like every other reopen.
+        if (existing.handedOffTo && !(await confirmHandedOffReopen(existing.id))) return
         useProjects.getState().openFolderProject(folder)
         // An `unavailable` placeholder never recovers on its own: a save emits a header-only ref
         // for it (never a file), so a deleted project.json stays deleted and every later load
@@ -14608,7 +17750,7 @@ export function Canvas() {
       }
       void writeDisk()
     },
-    [commitActiveToStore, writeDisk]
+    [commitActiveToStore, writeDisk, confirmHandedOffReopen]
   )
 
   /** Returns true when a folder was picked (false on cancel), so callers like the welcome
@@ -14672,18 +17814,6 @@ export function Canvas() {
     [persist]
   )
 
-  // Reopen a previously closed project and make it active — the active-project effect reloads its
-  // serialized nodes, whose TerminalNodes reattach to the surviving tmux sessions (or cold-restore).
-  const reopenProject = useCallback(
-    (id: string) => {
-      commitActiveToStore()
-      useProjects.getState().reopenProject(id)
-      setWelcomeOpen(false)
-      void writeDisk()
-    },
-    [commitActiveToStore, writeDisk]
-  )
-
   const setProjectFolder = useCallback(
     async (id: string) => {
       const folder = await window.nodeTerminal.dialog.selectFolder()
@@ -14701,7 +17831,7 @@ export function Canvas() {
         return
       }
       if (plan.kind === 'switch') {
-        if (plan.reopen) reopenProject(plan.projectId)
+        if (plan.reopen) void reopenProject(plan.projectId)
         else switchProject(plan.projectId)
         return
       }
@@ -14782,7 +17912,11 @@ export function Canvas() {
         forgetArmed(n.id)
         abandonLaunch(n.id)
       }
-      useReopenHistory.getState().push({ kind: 'project', projectId: id, closedAt: Date.now() })
+      // A relay tab is never reopened from the history (`planReopen` skips it too): its nodes are
+      // the host's sessions.
+      if (!store.getProject(id)?.remote) {
+        useReopenHistory.getState().push({ kind: 'project', projectId: id, closedAt: Date.now() })
+      }
       disposeRelayTabForProject(id)
       store.closeProject(id)
       void writeDisk()
@@ -14811,6 +17945,98 @@ export function Canvas() {
     [commitActiveToStore, performCloseProject, setCloseTarget]
   )
 
+  // ---- Share with team: an SSH project handed to a hosted team on its own host ----
+  // Every step runs over the project's ControlMaster, so the share waits for the same connection
+  // status the connection banner shows.
+  const shareBlockedReason = useCallback(
+    (id: string): string | null =>
+      sshStatus[id] === 'connected' ? null : 'Connect this project first (its SSH connection is down).',
+    [sshStatus]
+  )
+
+  // A share whose join found the team already live here follows the shared project's tab (see
+  // `followSharedProject`). One follower at a time, stopped on unmount.
+  const shareFollowStopRef = useRef<(() => void) | null>(null)
+  useEffect(() => () => shareFollowStopRef.current?.(), [])
+  const followSharedTab = useCallback(
+    (projectId: string) => {
+      shareFollowStopRef.current?.()
+      shareFollowStopRef.current = followSharedProject({
+        targetId: projectId,
+        read: () => ({ activeId: useProjects.getState().activeProjectId, targetOpen: isOpenTab(projectId) }),
+        subscribe: (listener) => useProjects.subscribe(listener),
+        switchTo: (id) => switchProject(id),
+        setTimer: (fn, ms) => setTimeout(fn, ms),
+        clearTimer: (t) => clearTimeout(t as ReturnType<typeof setTimeout>)
+      })
+    },
+    [switchProject]
+  )
+
+  // The dialog's `start`: runs the share for one project. The orchestrator owns the order and every
+  // undo, so nothing here catches a failure or puts the project back.
+  const startShare = useCallback(
+    (projectId: string) =>
+      async (ui: { phase(p: SharePhase): void; confirm(s: ShareConfirmSummary): Promise<boolean> }): Promise<ShareOutcome> => {
+        commitActiveToStore()
+        const project = useProjects.getState().getProject(projectId)
+        if (!project?.ssh || project.remote) return { kind: 'refused', reason: 'This is not an SSH project.' }
+        const steps = shareProjectDeps({
+          commit: commitActiveToStore,
+          save: writeDisk,
+          setHandedOffTo: (value) => useProjects.getState().setHandedOffTo(projectId, value),
+          isClosed: () => useProjects.getState().getProject(projectId)?.closed === true,
+          // Never `closeProject`: it may ask whether to end the sessions, and the handover ends them
+          // itself, once the server holds the project.
+          close: () => performCloseProject(projectId),
+          reopen: () => reopenProjectUnchecked(projectId),
+          join: joinApprovedTeam,
+          followTab: followSharedTab,
+          now: () => Date.now()
+        })
+        return runShare(
+          {
+            api: window.nodeTerminal.shareTeam,
+            // Read fresh each time (start, right before the mark, the flush check), committing the
+            // live canvas first so a node added since the last read is in it.
+            canvas: () => {
+              commitActiveToStore()
+              const p = useProjects.getState().getProject(projectId)
+              return shareCanvas(p?.nodes ?? [], useAgentStatus.getState().byId, { id: projectId, server: p?.ssh?.server })
+            },
+            confirm: ui.confirm,
+            phase: ui.phase,
+            ...steps,
+            wait: (ms) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+          },
+          {
+            projectId,
+            projectName: project.name,
+            host: project.ssh.server.host,
+            user: project.ssh.server.user,
+            permissionMode: resolvePermissionMode(project, useSettings.getState().settings)
+          }
+        )
+      },
+    [commitActiveToStore, writeDisk, performCloseProject, reopenProjectUnchecked, joinApprovedTeam, followSharedTab]
+  )
+
+  // Every entry (tab menu, sidebar menu, ⌘K) opens the dialog through here, so a blocked share is
+  // refused the same way everywhere.
+  const openShareWithTeam = useCallback(
+    (projectId: string) => {
+      const blocked = shareBlockedReason(projectId)
+      if (blocked) {
+        setNotice({ kind: 'error', text: blocked })
+        return
+      }
+      // One share at a time: a second one would unmount the running dialog and leave its run
+      // going with nothing on screen.
+      setShareProjectId((current) => current ?? projectId)
+    },
+    [shareBlockedReason]
+  )
+
   // Right-click on a sidebar project header: mostly the same project actions as the tab caret
   // menu (plus a color swatch the tab caret menu doesn't have), in the shared ContextMenu shell.
   const onProjectContextMenu = useCallback(
@@ -14833,8 +18059,15 @@ export function Canvas() {
             label: 'Rename',
             icon: <IconEditor />,
             onClick: () => {
-              void promptDialog({ message: 'Rename project', initialValue: project.name }).then((t) => {
-                if (t && t.trim()) renameProject(projectId, t.trim())
+              void promptDialog({
+                message: 'Rename project',
+                // Shown cut to what a rename would store (issue #940).
+                initialValue: clampProjectName(project.name),
+                maxLength: PROJECT_NAME_MAX
+              }).then((t) => {
+                // Confirming the cut name shown for an over-long one stores that cut (issue #940).
+                const next = t?.trim()
+                if (next && next !== project.name) renameProject(projectId, next)
               })
             }
           },
@@ -14844,6 +18077,20 @@ export function Canvas() {
             icon: <IconGear />,
             onClick: () => openProjectSettings(projectId)
           },
+          ...(project.ssh && !project.remote
+            ? ((): MenuItem[] => {
+                const blocked = shareBlockedReason(projectId)
+                return [
+                  {
+                    label: 'Share with team…',
+                    icon: <IconRemote />,
+                    disabled: !!blocked,
+                    ...(blocked ? { hint: blocked } : {}),
+                    onClick: () => openShareWithTeam(projectId)
+                  }
+                ]
+              })()
+            : []),
           { type: 'separator' },
           { type: 'colors', onPick: (color) => setProjectColor(projectId, color) },
           { type: 'separator' },
@@ -14863,7 +18110,9 @@ export function Canvas() {
       setProjectFolder,
       setProjectColor,
       closeProject,
-      openProjectSettings
+      openProjectSettings,
+      shareBlockedReason,
+      openShareWithTeam
     ]
   )
 
@@ -14876,7 +18125,7 @@ export function Canvas() {
     (projectId: string) => {
       const { projects, activeProjectId: active } = useProjects.getState()
       const travel = projectTravel(projects, active, projectId)
-      if (travel.kind === 'reopen') reopenProject(travel.projectId)
+      if (travel.kind === 'reopen') void reopenProject(travel.projectId)
       else if (travel.kind === 'switch') switchProject(travel.projectId)
     },
     [reopenProject, switchProject]
@@ -14891,13 +18140,391 @@ export function Canvas() {
       if (travel.kind === 'blocked') return
       if (travel.kind === 'reopen') {
         pendingFocusRef.current = nodeId
-        reopenProject(travel.projectId)
+        // Declined (a project handed to a hosted team stays closed): drop the staged focus so a
+        // later reopen of that project does not jump to a node nobody asked for this time.
+        void reopenProject(travel.projectId).then((ok) => {
+          if (!ok && pendingFocusRef.current === nodeId) pendingFocusRef.current = null
+        })
         return
       }
       focusNodeById(nodeId)
     },
     [focusNodeById, reopenProject]
   )
+
+  // Published BELOW the callback it mirrors, not above it: an effect placed earlier would read a
+  // const that is only initialized later in the body. That works today and breaks on a reorder.
+  useEffect(() => {
+    travelToNodeRef.current = travelToNode
+  })
+
+  /** The Live chat drawer sits above a kanban card modal (z 57 over 55) — opened from the card's LIVE
+   *  chip — but never above Settings, which stays on top. `kanbanOpen` too: the per-project board
+   *  reports a closed modal on change, not on unmount, so a board closed with its card open would
+   *  leave the flag behind. */
+  const liveChatRaised = cardModalOpen && kanbanOpen && !settingsOpen
+
+  /** The Live chat drawer's "Go to terminal": a modal drawer gives way to the canvas first (its scrim
+   *  would cover the node); a docked one stays. The project switch, a closed project's reopen and the
+   *  board's "open the card" are `travelToNode`'s. */
+  const goToLiveChatNode = useCallback(
+    (nodeId: string) => {
+      if (!liveChatRef.current.pinned) setLiveChat((s) => nextLiveChat(s, { kind: 'close' }))
+      travelToNode(nodeId)
+    },
+    [travelToNode]
+  )
+
+  // Prepare-for-update (Windows session host, issue #829). Opened from the update card or ⌘K via
+  // `nodeterm:prepare-update`. `prepareUpdateAvailable` gates the ⌘K entry: the main process answers
+  // `unsupported` off Windows, when the session host is not the backend, and in the Server Edition.
+  const [prepareUpdateOpen, setPrepareUpdateOpen] = useState(false)
+  const [prepareUpdateAvailable, setPrepareUpdateAvailable] = useState(false)
+  useEffect(() => {
+    let live = true
+    void window.nodeTerminal.updates
+      .prepareInspect()
+      .then((r) => {
+        if (live) setPrepareUpdateAvailable(r.kind !== 'unsupported')
+      })
+      .catch(() => {})
+    const open = (): void => setPrepareUpdateOpen(true)
+    window.addEventListener('nodeterm:prepare-update', open)
+    return () => {
+      live = false
+      window.removeEventListener('nodeterm:prepare-update', open)
+    }
+  }, [])
+  const collectUpdatePrepNodes = useCallback((): PrepNode[] => {
+    // The active project's live nodes first reach the store, so a node created a moment ago is
+    // matched to its host session like every other.
+    commitActiveToStore()
+    const out: PrepNode[] = []
+    for (const p of useProjects.getState().projects) {
+      for (const n of p.nodes) {
+        if (n.kind !== 'terminal') continue
+        out.push({
+          nodeId: n.id,
+          projectId: p.id,
+          projectName: p.name,
+          projectClosed: !!p.closed,
+          title: n.title,
+          agentId: n.agentId
+        })
+      }
+    }
+    return out
+  }, [commitActiveToStore])
+
+  // ── "Open recent": resume a past agent conversation from its CLI's own history ──────────────
+  // The list is THIS machine's (window.nodeTerminal: the desktop's core, or the Server Edition's
+  // host), read on demand — one read per welcome-screen appearance and per palette open, never a
+  // timer. `ok:false` shows nothing rather than "no conversations". The plan is the pure
+  // `planResume` (lib/recentConversations.ts); this only executes it.
+  const [recentConvs, setRecentConvs] = useState<RecentConversation[] | null>(null)
+  const refreshRecentConvs = useCallback(() => {
+    const codexAccountIds = localCodexAccountIds(useSettings.getState().settings.codexAccounts ?? [])
+    return window.nodeTerminal.recentConversations
+      .list({ codexAccountIds })
+      .then((r) => setRecentConvs(r.ok ? r.items : null))
+      .catch(() => setRecentConvs(null))
+  }, [])
+
+  const resumeContext = useCallback((): ResumeContext => {
+    const { projects, activeProjectId: active } = useProjects.getState()
+    const byId = useAgentStatus.getState().byId
+    const settings = useSettings.getState().settings
+    const live = canCreateOnCanvas(nodesProjectIdRef.current, active) ? nodesRef.current : []
+    return {
+      projects,
+      activeProjectId: active,
+      held: heldSessions(projects, active, live as never, (id) => byId[id]?.sessionId),
+      worktreeGroups: worktreeGroups(projects, active, live as never),
+      claudeAccounts: settings.claudeAccounts ?? [],
+      codexAccounts: settings.codexAccounts ?? []
+    }
+  }, [])
+
+
+  /** Create the resume node in the ACTIVE project. Re-plans first: between the click and now a node
+   *  may have taken the session, or its account may have been removed. */
+  const createRecentResumeNode = useCallback(
+    (conv: RecentConversation): void => {
+      const active = useProjects.getState().activeProjectId
+      if (!canCreateOnCanvas(nodesProjectIdRef.current, active)) {
+        setNotice({ kind: 'error', text: CANVAS_NOT_ACTIVE_NOTICE })
+        return
+      }
+      const plan = planResume(conv, resumeContext())
+      if (plan.kind === 'focus') {
+        travelToNode(plan.nodeId)
+        return
+      }
+      if (plan.kind === 'refuse') {
+        setNotice({ kind: 'error', text: plan.reason })
+        return
+      }
+      if (plan.kind !== 'resume' || plan.projectId !== active) return
+      let node: CanvasNode
+      try {
+        node = createAgentNode(
+          conv.agentId,
+          nodesRef.current.length,
+          conv.cwd ?? undefined,
+          emptyNodePos(),
+          undefined,
+          undefined,
+          // The account whose config dir HOLDS this history — never the project default, or the CLI
+          // would look for the conversation under another login and answer "No conversation found".
+          conv.accountId,
+          activePermissionMode(conv.agentId),
+          active,
+          undefined,
+          undefined,
+          conv.sessionId
+        )
+      } catch {
+        setNotice({ kind: 'error', text: RESUME_REFUSALS.unsafeId })
+        return
+      }
+      if (conv.titleSource === 'name' && conv.title) node.data = { ...node.data, title: conv.title }
+      node.selected = true
+      // Inside the worktree-bound frame that owns the folder, when there is one (its branch's work).
+      const placed =
+        plan.groupId && nodesRef.current.some((n) => n.id === plan.groupId)
+          ? parentInto(node, plan.groupId)
+          : node
+      setNodes((ns) => [...ns.map((n) => ({ ...n, selected: false })), placed])
+      markDirty()
+      goToNode(placed)
+      setWelcomeOpen(false)
+    },
+    [resumeContext, travelToNode, emptyNodePos, parentInto, setNodes, markDirty, goToNode]
+  )
+  useEffect(() => {
+    resumeCreateRef.current = createRecentResumeNode
+  })
+
+  /** Land on `projectId`, then resume there (now if the canvas already holds it). */
+  const resumeWhenLanded = useCallback(
+    (projectId: string, conv: RecentConversation) => {
+      if (
+        projectId === useProjects.getState().activeProjectId &&
+        canCreateOnCanvas(nodesProjectIdRef.current, projectId)
+      ) {
+        createRecentResumeNode(conv)
+        return
+      }
+      pendingResumeRef.current = { projectId, conv }
+    },
+    [createRecentResumeNode]
+  )
+
+  const resumeRecentConversation = useCallback(
+    (conv: RecentConversation) => {
+      const plan = planResume(conv, resumeContext())
+      switch (plan.kind) {
+        case 'focus':
+          setWelcomeOpen(false)
+          travelToNode(plan.nodeId)
+          return
+        case 'refuse':
+          setNotice({ kind: 'error', text: plan.reason })
+          return
+        case 'resume':
+          resumeWhenLanded(plan.projectId, conv)
+          if (plan.reopen) {
+            // Declined (a project handed to a hosted team stays closed): drop the staged resume, or
+            // a later "Open here anyway" from anywhere would start this conversation unasked.
+            void reopenProject(plan.projectId).then((ok) => {
+              if (!ok && pendingResumeRef.current?.conv === conv) pendingResumeRef.current = null
+            })
+          } else switchProject(plan.projectId)
+          return
+        case 'open-folder':
+          void openOrAdoptFolder(plan.folder)
+            .then(() => {
+              setWelcomeOpen(false)
+              const landed = useProjects
+                .getState()
+                .projects.find((p) => !p.ssh && !p.remote && p.cwd === plan.folder)
+              if (landed) resumeWhenLanded(landed.id, conv)
+            })
+            .catch((err: unknown) =>
+              setNotice({
+                kind: 'error',
+                text: `Could not open ${plan.folder}: ${stripIpcPrefix(err instanceof Error ? err.message : String(err))}`
+              })
+            )
+          return
+      }
+    },
+    [resumeContext, travelToNode, resumeWhenLanded, reopenProject, switchProject, openOrAdoptFolder]
+  )
+
+  const recentActionFor = useCallback(
+    (conv: RecentConversation): { label: string; disabled?: string } => {
+      const plan = planResume(conv, resumeContext())
+      const label = resumeActionLabel(
+        plan,
+        (id) => useProjects.getState().getProject(id)?.name ?? 'project'
+      )
+      return plan.kind === 'refuse' ? { label, disabled: plan.reason } : { label }
+    },
+    [resumeContext]
+  )
+
+  // #925: start held launches headless in a project that is not on screen (`open-* --run-now`),
+  // and `run --node` (the CLI twin of a QUEUED node's Run now). Wiring only: the flow and every
+  // refusal live in lib/headlessRun. Published every render for the same reason as above.
+  useEffect(() => {
+    startNodesHeadlessRef.current = async (project, nodes) => {
+      const env = {
+        activeProjectId: () => useProjects.getState().activeProjectId,
+        patchLive: (nodeId: string, pending: PendingLaunch | undefined) => {
+          if (!nodesRef.current.some((n) => n.id === nodeId)) return false
+          setNodes((ns) =>
+            ns.map((n) => (n.id === nodeId ? { ...n, data: { ...n.data, pendingLaunch: pending } } : n))
+          )
+          return true
+        },
+        patchStored: (projectId: string, nodeId: string, pending: PendingLaunch | undefined) => {
+          const st = useProjects.getState()
+          const stored = st.getProject(projectId)?.nodes.find((n) => n.id === nodeId)
+          if (!stored) return false
+          return st.applyOwnNodeMutation(projectId, { op: 'upsert', node: { ...stored, pendingLaunch: pending } })
+        },
+        writeDisk,
+        markDirty
+      }
+      const deps = {
+        launch: (req: { ptyOptions: PtyCreateOptions; command: string }) => api.pty.launchHeadless(req),
+        savePending: (nodeId: string, pending: PendingLaunch | undefined) =>
+          savePendingAnywhere(env, project.id, nodeId, pending),
+        markStarting: (id: string) => useLaunchDelivery.getState().markStarting(id),
+        markFailed: (id: string) => useLaunchDelivery.getState().markFailed(id, 1),
+        clearDelivery: (id: string) => useLaunchDelivery.getState().clear(id),
+        inFlight: headlessInFlightRef.current
+      }
+      // A closed project gets its tab back, never the focus (#925 spec §2.5): unhide BEFORE the
+      // claim's disk write, so the same write persists it. When it does NOT (the welcome screen,
+      // an SSH project) is `unhidesForHeadlessStart`'s to say; the answer rides back in the batch,
+      // because the reply's "reopen it from the welcome screen" hint stays true unless it acted.
+      const projectsNow = useProjects.getState()
+      const storedProject = projectsNow.getProject(project.id)
+      const unhidden =
+        !!storedProject && unhidesForHeadlessStart(storedProject, projectsNow.activeProjectId)
+      if (unhidden) projectsNow.unhideProject(project.id)
+      const outcomes = await Promise.all(nodes.map((node) => startHeadless(deps, { project, node })))
+      const started = outcomes.filter((o) => o.started).map((o) => o.id)
+      // Typed by core: the consent is consumed, like any landed delivery (lib/pendingLaunch).
+      for (const id of started) forgetArmed(id)
+      if (started.length) {
+        setNotice({
+          kind: 'info',
+          sticky: true,
+          text: headlessStartNoticeText(project.name, started.length),
+          action: { label: 'Go there', run: () => travelToNodeRef.current(started[0]) }
+        })
+      }
+      return { outcomes, unhidden }
+    }
+
+    runQueuedNodeRef.current = async (project, nodeId) => {
+      const st = useProjects.getState()
+      const active = st.activeProjectId === project.id
+      const live = active ? nodesRef.current.find((n) => n.id === nodeId) : undefined
+      const stored = active ? undefined : st.getProject(project.id)?.nodes.find((n) => n.id === nodeId)
+      if (!live && !stored) return { ok: false, error: `run: no node with id ${nodeId}` }
+      const pending = (live ? live.data.pendingLaunch : stored?.pendingLaunch) as PendingLaunch | undefined
+      // The fork's CONSENT GATE holds for `run` too: only a launch armed by THIS process may be
+      // typed into a shell on an agent's say-so. A pendingLaunch loaded from the git-shared
+      // .nodeterm/project.json (or received from a canvas-sync peer) keeps its QUEUED badge, and
+      // the human's ▶ Run now click is the only consent for it (see wasArmedThisSession).
+      if (pending && !wasArmedThisSession(nodeId, pending)) {
+        return {
+          ok: false,
+          error: `run-not-consented: ${nodeId}'s queued launch was not armed by this app run (it was loaded from the project file or a peer) — the user must press Run now on the node`
+        }
+      }
+      const one = (started: boolean, reason?: string): ControlReply => ({
+        ok: true,
+        message: started
+          ? `started ${nodeId}; agent startup is not confirmed`
+          : `${nodeId} stays queued (${reason})`,
+        result: {
+          ids: [nodeId],
+          id: nodeId,
+          started,
+          startedIds: started ? [nodeId] : [],
+          queued: !started,
+          queuedIds: started ? [] : [nodeId],
+          ...(reason ? { reason } : {})
+        }
+      })
+      switch (
+        planRunVerb({
+          pending,
+          inFlight: headlessInFlightRef.current.has(nodeId),
+          projectActive: active,
+          hasWriter: hasLaunchWriter(nodeId, api)
+        })
+      ) {
+        case 'nothing-queued':
+          return { ok: false, error: `run-nothing-queued: ${nodeId} has no queued launch` }
+        case 'already-starting':
+          return { ok: false, error: `run-already-starting: ${nodeId} is already starting` }
+        case 'wait-for-mount':
+          return one(false, 'starts-when-mounted')
+        case 'refuse-not-mounted':
+          // The mount will not fire a manualOnly or `--after` launch, so "starts when mounted"
+          // would be a promise nobody keeps. Starting it NOW takes ▶ on the mounted node.
+          return {
+            ok: false,
+            error: `run-not-mounted: ${nodeId} is on screen but its terminal is not mounted — bring it into view and use Run now`
+          }
+        case 'mounted': {
+          // The ▶ path verbatim (TerminalNode's QUEUED button): claim the node in the in-flight
+          // registry SHARED with ▶ and the canvas fire effect (one delivery per node across all
+          // three), and disarm only on a landed delivery that is still the node's launch.
+          const sentKey = beginLaunch(nodeId, pending!)
+          if (sentKey === null)
+            return { ok: false, error: `run-already-starting: ${nodeId} is already starting` }
+          const currentLaunch = (): PendingLaunch | undefined =>
+            nodesRef.current.find((n) => n.id === nodeId)?.data.pendingLaunch as PendingLaunch | undefined
+          const outcome = await launchCommand(nodeId, pending!.command, true, api).catch(
+            () => 'cancelled' as const
+          )
+          const verdict = settleLaunch(nodeId, sentKey, outcome === 'submitted', currentLaunch())
+          if (outcome === 'submitted') {
+            if (verdict !== 'stale') {
+              useLaunchDelivery.getState().clear(nodeId)
+              setNodes((ns) =>
+                ns.map((n) =>
+                  n.id === nodeId
+                    ? { ...n, data: { ...n.data, initialCommand: undefined, pendingLaunch: undefined } }
+                    : n
+                )
+              )
+              markDirty()
+            }
+            return one(true)
+          }
+          if (verdict !== 'stale') useLaunchDelivery.getState().markFailed(nodeId, 1)
+          return one(false, outcome)
+        }
+        case 'headless': {
+          // No await between the plan above and this call: the claim lands in the same tick, while
+          // the project is still off screen, which is what makes savePendingAnywhere's store+disk
+          // branch (not its non-durable live one) the one that records it.
+          const {
+            outcomes: [o]
+          } = await startNodesHeadlessRef.current(project, [stored!])
+          return o.started ? one(true) : one(false, o.reason)
+        }
+      }
+    }
+  })
 
   // OS-notification click → focus the originating node (see the note beside focusNodeById:
   // travelToNode, not focusNodeById, so a closed project's tab is reopened first).
@@ -14927,12 +18554,19 @@ export function Canvas() {
       // End the tmux sessions of every terminal in the deleted project, and drop their
       // persisted agent status and subagent fan-out (node unmount removes neither — issue #402).
       const project = store.getProject(id)
+      // A handed-off SSH project shares its node ids with the team tab now serving them: that tab
+      // still needs their agent status.
+      const heldElsewhere = nodeIdsHeldElsewhere(store.projects, id)
       project?.nodes.forEach((n) => {
         if ((n.kind ?? 'terminal') === 'terminal') {
           disposeTerminalOnUnmount(sessionForProject(id).id, n.id) // may be parked from a recent switch away
           transport.destroy(n.id)
         }
-        useAgentStatus.getState().remove(n.id)
+        // A session started on a GitHub issue ends here too. Best effort: the project's board log
+        // outlives the project entry (it is a file in the project's folder), so the run does not
+        // stay open in the issue's history forever.
+        if (n.issueRef) logIssueRunEnded(id, n)
+        if (!heldElsewhere.has(n.id)) useAgentStatus.getState().remove(n.id)
         useAgentNodes.getState().clearForParent(n.id)
       })
       // SSH project: the per-node `transport.destroy` above only ends the REMOTE session for
@@ -14970,7 +18604,7 @@ export function Canvas() {
       store.deleteProject(id)
       void writeDisk()
     },
-    [commitActiveToStore, writeDisk, disposeRelayTabForProject]
+    [commitActiveToStore, writeDisk, disposeRelayTabForProject, logIssueRunEnded]
   )
 
   // The "Recently closed" × goes through a confirm now (issue #442): it is the one permanently
@@ -15018,6 +18652,11 @@ export function Canvas() {
     }
   }, [welcomeVisible, closedProjects])
 
+  // "Open recent": one read per welcome-screen appearance and per palette open.
+  useEffect(() => {
+    if (welcomeVisible || paletteOpen) void refreshRecentConvs()
+  }, [welcomeVisible, paletteOpen, refreshRecentConvs])
+
   const now = useMemo(() => Date.now(), [transcriptHits])
   const transcriptCommands = useMemo<Command[]>(
     () =>
@@ -15031,6 +18670,68 @@ export function Canvas() {
       })),
     [transcriptHits, openTranscriptHit, now]
   )
+
+  // Hosted team palette entries: the owner's invite code, and one "forget" row per joined team. The
+  // bookmarks are read each time the palette opens — a join, a forget or a revocation may have
+  // changed them since. The Server Edition answers none (a browser tab never joins a relay host).
+  const [hostedBookmarks, setHostedBookmarks] = useState<Array<{ hostId: string; label: string }>>([])
+  useEffect(() => {
+    if (!paletteOpen) return
+    let live = true
+    Promise.resolve(window.nodeTerminal.relayHosted?.bookmarks())
+      .then((list) => {
+        if (live) setHostedBookmarks(Array.isArray(list) ? list : [])
+      })
+      .catch(() => {})
+    return () => {
+      live = false
+    }
+  }, [paletteOpen])
+
+  const copyHostedInviteCode = useCallback((hosted: HostedSessionApi) => {
+    hosted.inviteCode().then(
+      (code) => {
+        if (!code) {
+          setNotice({ kind: 'error', text: 'This team has no invite code to hand out right now.' })
+          return
+        }
+        window.nodeTerminal.clipboard.writeText(code)
+        setNotice({
+          kind: 'info',
+          text: 'Team invite code copied. Anyone with it can ask to join; an owner still approves each device.'
+        })
+      },
+      (err: unknown) =>
+        setNotice({
+          kind: 'error',
+          text: `Could not read the invite code: ${stripIpcPrefix(err instanceof Error ? err.message : String(err))}`
+        })
+    )
+  }, [])
+
+  // Forgetting a team drops this device's bookmark (its saved join details) and stops its boot
+  // reconnect. It changes nothing on the team's host. Refused while that team is connecting: main
+  // would refuse it too (its join's own save would bring the bookmark back).
+  const forgetHostedTeam = useCallback((b: { hostId: string; label: string }) => {
+    const joiner = hostedJoinerRef.current
+    if (!joiner) return
+    const team = b.label || 'this team'
+    if (joiner.connecting(b.hostId)) {
+      setNotice({ kind: 'info', text: `Still connecting to ${team}; forget it once that finishes.` })
+      return
+    }
+    setConfirm({
+      message:
+        `Forget ${team}? This device stops reconnecting to it and forgets its saved join details. ` +
+        `Nothing changes on the team's host; to rejoin, paste its invite code again.`,
+      confirmLabel: 'Forget',
+      danger: true,
+      onConfirm: () => {
+        setConfirm(null)
+        void joiner.forget(b.hostId, b.label)
+      }
+    })
+  }, [setConfirm])
 
   const buildCommands = useCallback((): Command[] => {
     const disabled = useSettings.getState().settings.disabledAgents
@@ -15140,6 +18841,48 @@ export function Canvas() {
         icon: <IconRemote />,
         run: () => void connectRemote()
       },
+      // Hosted team rows. Both are absent unless they apply, so every other palette is unchanged.
+      ...((): Command[] => {
+        const session = sessionForProject(useProjects.getState().activeProjectId ?? '')
+        const hosted = session.api.hosted
+        return hosted && hostedInfoFor(session.id)?.role === 'owner'
+          ? [
+              {
+                id: 'hosted-invite-code',
+                label: 'Copy team invite code',
+                hint: 'hosted team invite join share',
+                icon: <IconRemote />,
+                run: () => copyHostedInviteCode(hosted)
+              }
+            ]
+          : []
+      })(),
+      // Share the active SSH project with a team. The palette has no disabled row, so a blocked
+      // share keeps its reason in `note` and running it says so (`openShareWithTeam`).
+      ...(activeProject?.ssh && !activeProject.remote
+        ? ((): Command[] => {
+            const blocked = shareBlockedReason(activeProject.id)
+            return [
+              {
+                id: 'share-with-team',
+                label: `Share ${activeProject.name} with team`,
+                hint: 'hosted team invite ssh server share',
+                icon: <IconRemote />,
+                ...(blocked ? { note: blocked } : {}),
+                run: () => openShareWithTeam(activeProject.id)
+              }
+            ]
+          })()
+        : []),
+      ...hostedBookmarks.map(
+        (b): Command => ({
+          id: `hosted-forget-${b.hostId}`,
+          label: `Forget hosted team: ${b.label || 'unnamed team'}`,
+          hint: 'hosted team bookmark leave remove',
+          icon: <IconRemote />,
+          run: () => forgetHostedTeam(b)
+        })
+      ),
       {
         id: 'focus-node',
         label: 'Focus node',
@@ -15162,6 +18905,16 @@ export function Canvas() {
           ]
         : []),
       { id: 'zoom-100', label: 'Zoom to 100%', icon: <IconFit />, run: zoomTo100 },
+      ...(prepareUpdateAvailable
+        ? [
+            {
+              id: 'prepare-update',
+              label: 'Prepare for update…',
+              hint: 'install update installer stop session host windows quit',
+              run: () => setPrepareUpdateOpen(true)
+            } as Command
+          ]
+        : []),
       // Layouts mirror the Dock's menu, and both are withheld on a relay tab for the same reason:
       // it is a live connection to another machine, never a workspace on this disk. The Dock says
       // so on a disabled button; the palette has no disabled row, so the entries are omitted.
@@ -15187,6 +18940,21 @@ export function Canvas() {
             )
           ]),
       { id: 'save', label: 'Save', icon: <IconSave />, run: () => void persist() },
+      // Live links: Manage (the Settings section), and Stop all — which CONFIRMS (R48).
+      ...liveLinkCommands({
+        activeLinks: useWatchLinks.getState().links.length,
+        entitled: useEntitlement.getState().isPremium,
+        serverEdition: isBrowserRuntime(),
+        icon: <IconBroadcast />,
+        chatIcon: <IconChat />,
+        manage: () => {
+          setSettingsSection('live-links')
+          setSettingsNonce((n) => n + 1)
+          setSettingsOpen(true)
+        },
+        openChat: () => setLiveChat((s) => nextLiveChat(s, { kind: 'open' })),
+        confirmStopAll: confirmStopAllLiveLinks
+      }),
       // Hidden when the canvas has no restartable agent node — the row would have nothing to act
       // on. `hint` is searchable, so "new model" / "update" find it too.
       ...(hasRestartableAgents()
@@ -15213,7 +18981,9 @@ export function Canvas() {
           label: `Switch to ${p.name}`,
           hint: 'project',
           icon: <IconSwitch />,
-          run: () => switchProject(p.id)
+          // A closed project is REOPENED (tab restored), never activated behind a hidden tab — and
+          // the reopen is the guarded one, which asks first for a project handed to a hosted team.
+          run: () => (p.closed ? void reopenProject(p.id) : switchProject(p.id))
         })
       )
     const cs = useAgentStatus.getState()
@@ -15283,6 +19053,7 @@ export function Canvas() {
     addProject,
     persist,
     switchProject,
+    reopenProject,
     goToNode,
     bufferCache,
     connectRemote,
@@ -15294,17 +19065,46 @@ export function Canvas() {
     hasArrangeableNodes,
     saveCanvasLayout,
     restoreCanvasLayout,
-    toggleFocusMode
+    toggleFocusMode,
+    hostedBookmarks,
+    copyHostedInviteCode,
+    forgetHostedTeam,
+    confirmStopAllLiveLinks,
+    shareBlockedReason,
+    openShareWithTeam,
+    prepareUpdateAvailable
   ])
 
   // Build the palette's command list only when its inputs change — the inline `buildCommands()`
   // at the call site rebuilt the whole list (JSX icons for every node + project) on every Canvas
   // render while the palette was open. `nodes` is a dep because the list reads nodesRef.current;
   // capture-cache refreshes arrive via buildCommands' own identity (bufferCache is its dep).
+  // "Open recent" rows in the palette: searchable by title, agent and folder. Capped — the list is
+  // one read of up to 60, and a palette with nothing typed should not be all history.
+  const recentCommands = useMemo<Command[]>(() => {
+    if (!paletteOpen || !recentConvs) return []
+    const at = Date.now()
+    // A refused row is OMITTED here (the palette has no disabled state — a dead search result is
+    // worse than none); the welcome screen shows it disabled with its reason instead.
+    return recentConvs.slice(0, 30).flatMap((conv): Command[] => {
+      const action = recentActionFor(conv)
+      if (action.disabled) return []
+      return [{
+        id: `recent:${conv.agentId}:${conv.sessionId}`,
+        // The row says what it will DO — "Open folder & resume" opens a new project first.
+        label: `${action.label}: ${recentTitle(conv)}`,
+        hint: [folderLabel(conv.cwd), relativeTime(conv.lastActiveAt, at)].join(' · '),
+        section: 'Recent conversations',
+        icon: <AgentIcon agentId={conv.agentId} />,
+        run: () => resumeRecentConversation(conv)
+      }]
+    })
+  }, [paletteOpen, recentConvs, recentActionFor, resumeRecentConversation])
+
   const paletteCommands = useMemo(
-    () => (paletteOpen ? buildCommands() : []),
+    () => (paletteOpen ? [...buildCommands(), ...recentCommands] : []),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- nodes stands in for nodesRef.current
-    [paletteOpen, buildCommands, nodes]
+    [paletteOpen, buildCommands, recentCommands, nodes]
   )
 
   // The palette's chord appears as a bare chip in two places (the cluster's search button and the
@@ -15326,6 +19126,8 @@ export function Canvas() {
         onSetDefaultAccount={setProjectDefaultAccount}
         onSetDefaultPermissionMode={setProjectDefaultPermissionMode}
         onOpenProjectSettings={openProjectSettings}
+        onShareWithTeam={openShareWithTeam}
+        shareBlockedReason={shareBlockedReason}
       />
 
       <div className="top-banners">
@@ -15345,6 +19147,14 @@ export function Canvas() {
             setSettingsOpen(true)
           }}
         />
+        {activeHosted && hostedReadOnly && (
+          <div className="announce-banner announce-banner--info" role="status">
+            <span className="announce-banner__dot" />
+            <div className="announce-banner__content">
+              <span className="announce-banner__body">{viewerBannerText(activeHosted.role, activeHosted.teamLabel)}</span>
+            </div>
+          </div>
+        )}
         {migrationNote && (
           <div className="announce-banner announce-banner--info">
             <span className="announce-banner__dot" />
@@ -15528,7 +19338,11 @@ export function Canvas() {
           })()}
       </div>
       {globalKanbanOpen ? (
-        <GlobalKanbanView />
+        <GlobalKanbanView
+          live={globalKanbanLive}
+          onModalNodeChange={setKanbanModalNode}
+          liveLinkMenuItems={liveLinkMenuItems}
+        />
       ) : perProjectKanbanOpen && (
         <KanbanView
           board={projectKanban ?? seedBoard}
@@ -15543,6 +19357,12 @@ export function Canvas() {
           onBrowserNav={browserNavFromKanban}
           onSetIcon={setNodeIcon}
           accountMenuItems={accountSwitchRows}
+          liveLinkMenuItems={liveLinkMenuItems}
+          onAutoMoveFromPulls={autoMoveCardFromPulls}
+          issueAgentMenu={issueAgentMenu}
+          issueWorktreeMenu={issueWorktreeMenu}
+          teams={teamStations}
+          onIssueMoved={dispatchOnUserMove}
         />
       )}
       <UpdateCard />
@@ -15657,6 +19477,7 @@ export function Canvas() {
           onEdgesChange={handleEdgesChange}
           onConnect={onConnect}
           onEdgeDoubleClick={onEdgeDoubleClick}
+          onEdgeContextMenu={onEdgeContextMenu}
           onMove={onMove}
           onMoveStart={onCanvasMoveStart}
           onMoveEnd={onCanvasMoveEnd}
@@ -15716,8 +19537,17 @@ export function Canvas() {
           // node's is "frame this node", so d3's zoom-in would fight both.
           zoomOnDoubleClick={false}
           zoomActivationKeyCode={null}
+          // Off: space-to-pan is the canvas's OWN gesture (lib/spacePan.ts, issue #86), which drives
+          // `panOnDrag` above through the `spacePan` state. React Flow's built-in duplicate (default
+          // 'Space') was a second window listener with a narrower idea of a text surface: it cannot
+          // see Monaco's EditContext input, so it preventDefault-ed every space typed in an editor
+          // node (#930). It also forced panOnDrag/panOnScroll on while held, straight past the lock.
+          panActivationKeyCode={null}
           snapToGrid={settings.snapToGrid}
           snapGrid={[settings.gridSize, settings.gridSize]}
+          // A hosted team's Viewer/Commenter cannot move or wire nodes (the host would refuse the
+          // edit anyway). Spread, so every other tab passes nothing new to React Flow.
+          {...(hostedReadOnly ? HOSTED_READ_ONLY_FLOW : {})}
         >
           {showCanvasDots(settings.canvasDots) && (
           <Background
@@ -15776,7 +19606,9 @@ export function Canvas() {
           {/* Peer cursors live INSIDE <ReactFlow>: PresenceLayer uses ViewportPortal +
               useReactFlow, which throw outside the provider — and cursors are flow coordinates. */}
           <PresenceLayer />
-          <StatusAwareMiniMap onNodeDoubleClick={goToNode} />
+          <MinimapDock>
+            <StatusAwareMiniMap onNodeDoubleClick={goToNode} />
+          </MinimapDock>
         </ReactFlow>
         </SessionProvider>
 
@@ -15813,6 +19645,7 @@ export function Canvas() {
             onSetDefaultCodexAccount={setProjectDefaultCodexAccount}
             countCodexAccountSessions={countCodexAccountSessions}
             onMoveCodexSessions={(from, to, label) => void moveCodexAccountSessions(from, to, label)}
+            accountMove={accountMove}
           />
         </CanvasPills>
 
@@ -15862,6 +19695,9 @@ export function Canvas() {
             sessionCounts={closedSessionBadges ?? undefined}
             onReopen={reopenProject}
             onDeleteClosed={requestDeleteClosed}
+            recentConversations={recentConvs ?? undefined}
+            recentActionFor={recentActionFor}
+            onResumeRecent={resumeRecentConversation}
             onClose={hasProjects ? () => setWelcomeOpen(false) : undefined}
             overBoard={kanbanOpen}
           />
@@ -15887,6 +19723,15 @@ export function Canvas() {
       )}
 
       {remoteDialogOpen && <RemoteAccessDialog onClose={() => setRemoteDialogOpen(false)} />}
+
+      {shareProjectId && (
+        <ShareTeamDialog
+          projectId={shareProjectId}
+          projectName={useProjects.getState().getProject(shareProjectId)?.name ?? 'project'}
+          start={startShare(shareProjectId)}
+          onClose={() => setShareProjectId(null)}
+        />
+      )}
 
       {sshDialogOpen && (
         <SshProjectDialog
@@ -16028,6 +19873,19 @@ export function Canvas() {
         />
       )}
 
+      {liveChatShown(liveChat, liveLinkCount) && (
+        <LiveChatDrawer
+          linkId={liveChat.linkId}
+          pinned={liveChat.pinned}
+          raised={liveChatRaised}
+          beside={liveChat.pinned && explorerOpen && explorer.pinned && !liveChatRaised}
+          onPickLink={pickLiveChatLink}
+          onClose={closeLiveChat}
+          onTogglePin={toggleLiveChatPin}
+          onGoToNode={goToLiveChatNode}
+        />
+      )}
+
       <SessionsSidebar
         open={sessionsOpen}
         pinned={sessionsPinned}
@@ -16080,6 +19938,14 @@ export function Canvas() {
           and it must be answerable wherever the user is, not only while a settings pane happens to
           be open — see components/SetupConsentDialog.tsx. */}
       <SetupConsentDialog />
+
+      {prepareUpdateOpen && (
+        <PrepareUpdateDialog
+          collectNodes={collectUpdatePrepNodes}
+          onTravel={travelToNode}
+          onClose={() => setPrepareUpdateOpen(false)}
+        />
+      )}
 
       {confirm && (
         <ConfirmDialog
@@ -16149,6 +20015,20 @@ export function Canvas() {
                 }
               : undefined
           }
+        />
+      )}
+
+      {hostedHead && (
+        // A remote device asked to join a hosted team this device owns. Enter never approves it
+        // and Deny holds the focus (components/HostedApprovalDialog). Keyed by request, so the next
+        // one in the queue opens fresh (role back to Viewer, the arm delay again).
+        <HostedApprovalDialog
+          key={hostedHead.pending.pendingId}
+          pending={hostedHead.pending}
+          teamLabel={hostedHead.teamLabel}
+          more={hostedMore}
+          onApprove={(_id, role) => answerHosted(hostedHead, { kind: 'approve', role })}
+          onDeny={() => answerHosted(hostedHead, { kind: 'deny' })}
         />
       )}
 
@@ -16222,6 +20102,38 @@ export function Canvas() {
           )
         })()}
 
+      {lastSessionOffer && (
+        (() => {
+          const copy = lastSessionCloseCopy(lastSessionOffer.name)
+          return (
+            <ConfirmDialog
+              message={copy.message}
+              confirmLabel={copy.confirmLabel}
+              cancelLabel={copy.cancelLabel}
+              // Non-destructive (the canvas is kept, reopenable from Recently closed), so no danger
+              // styling. It appears right after a click the user aimed at a node, so it is answered
+              // by an explicit click: no Enter-confirm, no autofocused button a stray keystroke
+              // could activate (see components/confirm-key).
+              danger={false}
+              enterConfirms={false}
+              autoFocusButtons={false}
+              onConfirm={() => {
+                // The existing close path (issue #848: reuse, don't reimplement). With no session
+                // node left it closes silently; if an agent spawned one since, it gets the
+                // usual #442 confirm instead — so the offer leaves the guard FIRST, or that
+                // confirm would stack over it. Keyed by the id captured at raise time: after a
+                // tab switch this still closes the project the offer named, and closeProject
+                // commits the live canvas only when that project is the active one.
+                const offer = lastSessionOffer
+                setLastSessionOffer(null)
+                closeProject(offer.id)
+              }}
+              onCancel={() => setLastSessionOffer(null)}
+            />
+          )
+        })()
+      )}
+
       {deleteTarget && (
         <ConfirmDialog
           message={deleteTarget.message}
@@ -16236,6 +20148,29 @@ export function Canvas() {
       )}
 
       <UpgradeDialog />
+      {liveLinkDialog && (
+        <LiveLinkDialog
+          key={`${liveLinkDialog.projectId}:${liveLinkDialog.nodeId}`}
+          nodeId={liveLinkDialog.nodeId}
+          title={liveLinkDialog.title}
+          surface={
+            isBrowserRuntime()
+              ? 'server'
+              : sessionForProject(liveLinkDialog.projectId).source === 'relay'
+                ? 'relay'
+                : 'desktop'
+          }
+          // R63: a node in a HOST's tmux gets a viewer client of its own (the "only while open" note
+          // is about this machine's local terminals); the Control warning names where a
+          // controller's commands run. Both from where the NODE runs, not only its project.
+          {...liveLinkRemoteFor(liveLinkDialog)}
+          readPersistence={readLocalPersistence}
+          prepare={liveLinkPrepareFor(liveLinkDialog)}
+          // No license layer in the Server Edition (R43): never an Upgrade button there.
+          onUpgrade={isBrowserRuntime() ? undefined : () => void useEntitlement.getState().upgrade('pro')}
+          onClose={closeLiveLinkDialog}
+        />
+      )}
 
       {remotePicker && (
         <RemotePicker
@@ -16247,6 +20182,30 @@ export function Canvas() {
             setSettingsOpen(true)
           }}
           onClose={() => setRemotePicker(null)}
+        />
+      )}
+
+      {issueWorktreeAsk && (
+        // "Start with agent in a new worktree" found the issue's worktree (or its branch) already
+        // there. Asked, never decided for the person: reuse is the likely answer, but a second,
+        // independent checkout is a legitimate one too. Nothing on disk is overwritten either way.
+        <ConfirmDialog
+          message={issueWorktreeAsk.message}
+          choice={{
+            label: 'Start the agent in',
+            options: issueWorktreeAsk.options,
+            value: issueWorktreeAsk.value,
+            onChange: (value) =>
+              setIssueWorktreeAskState((ask) => (ask ? { ...ask, value: value as IssueWorktreeChoice } : ask))
+          }}
+          confirmLabel="Start agent"
+          danger={false}
+          onConfirm={() => {
+            const ask = issueWorktreeAsk
+            setIssueWorktreeAsk(null)
+            ask.run(ask.value)
+          }}
+          onCancel={() => setIssueWorktreeAsk(null)}
         />
       )}
 

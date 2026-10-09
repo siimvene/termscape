@@ -26,6 +26,14 @@ describe('answerPermission handler parity', () => {
     })
   }
   it('the desktop reads the held request over SSH for a remote node', () => {
-    expect(handler('src/main/index.ts')).toContain('readPendingRequest(sshProjectId, pendingId)')
+    // The I/O choice lives in `heldPermissionIoFor`, shared by this handler and the phone's
+    // `agent.answer` (main/remote/host-chat.ts), so both answer paths reach the same host.
+    expect(handler('src/main/index.ts')).toContain('heldPermissionIoFor(nodeId, pendingId)')
+    const src = readFileSync(resolve(root, 'src/main/index.ts'), 'utf8')
+    const at = src.indexOf('const heldPermissionIoFor =')
+    expect(at).toBeGreaterThan(-1)
+    expect(src.slice(at, at + 800)).toContain('readPendingRequest(sshProjectId, pendingId)')
+    // …and the phone path uses the same function, not a second copy.
+    expect(src).toContain('answerIo: heldPermissionIoFor')
   })
 })

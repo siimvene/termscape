@@ -89,6 +89,7 @@ import { codexThreadIdentityRoot } from '../../codex-identity-proxy'
 import { HOOK_CURL_HEADERS_SH } from '../hook-curl-config-sh'
 import { NODE_TOKEN_READ_SH } from '../node-token-sh'
 import { HOOK_ENDPOINT_FALLBACK_SH } from '../hook-endpoint-failover-sh'
+import { ANTIGRAVITY_EVENT_ENV, antigravityDecisionCaseSh } from './antigravity-decision'
 import {
   PERMISSION_DECISION_MAX_BYTES,
   PERMISSION_DECISION_PREFIX,
@@ -232,12 +233,52 @@ function safeIdentityRoot(): string | null {
   }
 }
 
+/**
+ * ANTIGRAVITY ONLY, emitted at BUILD time (every other agent's script is byte-identical without
+ * it). `agy` reads a hook's stdout as a DECISION and our hook sits in front of every tool call of
+ * every `agy` on the machine, so the answer is the FIRST thing the script does — before the codex
+ * prelude, before the NODETERM_NODE_ID gate (a user's own terminal gets the same answer), before
+ * stdin is read, before the endpoint file is sourced. The table is `antigravity-decision.ts`.
+ *
+ * Then stdout AND stderr go to /dev/null for the rest of the run. That is a stronger guarantee than
+ * auditing every line below: a stray byte (a curl message, a sourced file's echo, a shell warning)
+ * would become "non-JSON → DENY", and on `PreInvocation` it could be injected into the user's
+ * conversation (`injectSteps`). A redirection failure on a SPECIAL builtin (`exec`, `:`) exits a
+ * POSIX shell non-zero, and a non-zero exit is DENY — so the redirect is first PROBED on `true`, a
+ * regular builtin whose redirection failure is an ordinary false, and `exec` runs only when the
+ * probe proved /dev/null opens. A probe failure keeps stdout as it was, the same outcome the old
+ * `command exec … || :` had.
+ *
+ * Why not `command exec … || :` (the original spelling): macOS `/bin/sh` is bash 3.2, which runs
+ * `command exec` with SAVED copies of the old stdout/stderr (fds 10 and 11) and never closes them
+ * once exec makes the redirect permanent. Every forked compound command after it — the
+ * backgrounded `{ nt_send_request; … } &` POST — inherits those copies, so the CALLER's pipes stay
+ * open until the POST ends and agy sees the hook "finish" only after curl's whole timeout plus the
+ * fallback walk (measured 6.2 s against a 6 s stalled endpoint; 0 s with a plain `exec`). dash
+ * does not save the fds, which is why Linux never showed it.
+ */
+function antigravityAnswerFirst(): string[] {
+  return [
+    '# ANSWER FIRST (antigravity): agy reads this stdout as a decision — see antigravity-decision.ts.',
+    antigravityDecisionCaseSh(),
+    '# Nothing after the answer may reach stdout or stderr (a stray byte is a DENY, or a message',
+    '# injected into the conversation).',
+    'if true >/dev/null 2>&1; then exec >/dev/null 2>&1; fi'
+  ]
+}
+
 export function buildManagedScript(
   agentId: string,
   identityRoot: string | null = safeIdentityRoot()
 ): string {
+  const antigravity = agentId === 'antigravity'
+  // The event name rides the POST for antigravity only — its payload never carries one.
+  const eventField = antigravity
+    ? [`      --data-urlencode "nodeterm_hook_event=\${${ANTIGRAVITY_EVENT_ENV}}" \\`]
+    : []
   return [
     '#!/bin/sh',
+    ...(antigravity ? antigravityAnswerFirst() : []),
     ...(identityRoot ? [codexThreadIdentityResolverSh(identityRoot)] : []),
     '# GATE FIRST, and drain stdin before bailing (issues #186/#187). Order is load-bearing twice:',
     '#  - The codex thread-identity prelude above may DERIVE the node id (and endpoint) from its',
@@ -302,7 +343,14 @@ export function buildManagedScript(
       : ['nt_context_window=""']),
     'payload=$(cat)',
     'if [ -z "$payload" ]; then',
-    '  exit 0',
+    ...(antigravity
+      ? [
+          // agy can fire a hook with NO stdin. The answer is already out; still report the event —
+          // a Stop with no body is still the end of the turn (the normalizer reads a missing
+          // fullyIdle as finished), and dropping it would leave the badge on RUNNING.
+          "  payload='{}'"
+        ]
+      : ['  exit 0']),
     'fi',
     '# Keep the payload OFF curl\'s argv. `--data-urlencode "payload=$payload"` puts the full hook',
     '# body (Edit/Write tool_input, the submitted prompt, the last assistant message) into',
@@ -397,6 +445,7 @@ export function buildManagedScript(
     '      --data-urlencode "version=${NODETERM_HOOK_VERSION}" \\',
     '      --data-urlencode "nodeterm_context_window=${nt_context_window}" \\',
     '      --data-urlencode "nodeterm_pending_id=${nt_pending}" \\',
+    ...eventField,
     '      --data-urlencode "payload@${nt_payload_arg}" 2>/dev/null) || return 1',
     '  elif [ -n "$NODETERM_HOOK_PORT" ]; then',
     '    nt_code=$(nt_hook_headers |',
@@ -407,6 +456,7 @@ export function buildManagedScript(
     '      --data-urlencode "version=${NODETERM_HOOK_VERSION}" \\',
     '      --data-urlencode "nodeterm_context_window=${nt_context_window}" \\',
     '      --data-urlencode "nodeterm_pending_id=${nt_pending}" \\',
+    ...eventField,
     '      --data-urlencode "payload@${nt_payload_arg}" 2>/dev/null) || return 1',
     '  else',
     '    return 1',

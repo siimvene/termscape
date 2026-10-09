@@ -11,6 +11,34 @@ export function formatTimeAgo(ts: number): string {
   return `${hours}h ago`
 }
 
+/**
+ * The line for a Claude read that failed with no numbers to show. A 429 is named: the usage
+ * endpoint's budget is shared with every Claude CLI using the same login, and a generic
+ * "could not read" sent people debugging an SSH link and credentials that were both fine.
+ * `where` qualifies only the generic wording — a 429 says nothing about the host's link.
+ */
+export function usageFailureText(u: { rateLimited?: boolean } | null | undefined, where = ''): string {
+  if (u?.rateLimited) return 'Rate limited by the usage endpoint (HTTP 429) — try again in a few minutes.'
+  return where ? `Could not read usage ${where}.` : 'Could not read usage.'
+}
+
+/**
+ * The note under bars the service KEPT because the latest read failed (`holdLastGood`: status
+ * 'error' with limits). Null for anything else. Says how old the numbers are, since the pill
+ * above shows them without a stamp.
+ */
+export function heldUsageText(u: {
+  status: string
+  limits: readonly unknown[]
+  updatedAt: number
+  rateLimited?: boolean
+}): string | null {
+  if (u.status !== 'error' || u.limits.length === 0) return null
+  const why = u.rateLimited ? 'was rate limited (HTTP 429)' : 'failed'
+  const ago = formatTimeAgo(u.updatedAt)
+  return `Latest read ${why} — showing numbers from ${ago === 'just now' ? 'a moment ago' : ago}.`
+}
+
 /** "Resets now" / "Resets in 1h 2m" / "Resets in 2d 4h". */
 export function formatResetCountdown(resetsAt: number | null): string {
   if (resetsAt == null) return ''

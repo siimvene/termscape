@@ -1,10 +1,21 @@
-import { TEXT_NOT_SUBMITTED } from '@shared/text-delivery'
+import { TEXT_NOT_SUBMITTED, isChatPromptBlocked } from '@shared/text-delivery'
+import { claudeScreenBlocksInput, readClaudeScreen } from '@shared/agents/claude-screen'
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { renderMarkdown } from '../lib/markdown'
 import { useAgentStatus } from '../state/agentStatus'
 import { useSession } from '../session/session'
 import { chipFor } from '../lib/keybindingOverrides'
-import { chatComposerPlaceholder, chatSendRefusal } from '../lib/chatSendGate'
+import {
+  canQueue,
+  chatComposerPlaceholder,
+  chatSendMode,
+  chatSendRefusal,
+  composerStandsDown,
+  screenBlockedSentence,
+  type ScreenBlock
+} from '../lib/chatSendGate'
+import type { ChatMessage } from '@shared/types'
+import { chatPaneRefusal, chatPaneRefusalToast } from '../lib/chatPaneGate'
 import { chatAgentLabel, isNearBottom, shouldFollowOnLoad, toolCardTitle } from '../lib/chatPanel'
 import { useSettings } from '../state/settings'
 import {
@@ -13,25 +24,42 @@ import {
   anchoredScrollTop,
   applyOlder,
   applyTail,
+  tailConfirmsSends,
   emptyThread,
   shouldFetchOlder,
   type ChatThread
 } from '../lib/chatPaging'
 import { E_UNSUPPORTED } from '@shared/rpc'
+import { GROK_AMBIGUOUS_SESSION_MESSAGE, isGrokAmbiguousSessionError } from '@shared/chat-page'
 import { Spinner } from '../components/Spinner'
-import { CHAT_OPTIMISTIC_WORKING_MS, chatActivity, planLiveReload } from '../lib/chatLive'
+import {
+  CHAT_LIVE_RELOAD_MIN_MS,
+  CHAT_OPTIMISTIC_WORKING_MS,
+  CHAT_SCREEN_POLL_MS,
+  TURN_END_RELOAD_DELAYS_MS,
+  chatActivity,
+  planLiveReload,
+  shouldPollScreen,
+  turnEndReloadCarries
+} from '../lib/chatLive'
+import { sentCommand } from '@shared/chat-command'
+import { isInteractiveBuiltin } from '@shared/chat-catalog'
+import { capabilityAgentId, chatReadsLocalOnly, readsScreenDialogs } from '@shared/agents/config'
 import { ChatLoadingStatus } from './ChatPanelFallback'
-import { activeAnswerCard } from '../lib/chatAnswer'
-import { PlanAnswerControls, QuestionAnswerControls } from './ChatAnswerControls'
+import { answerCardState, answerRebindPending, rebindRetryDelay, type BoundAnswerCard } from '../lib/chatAnswer'
+import { AnswerControlsUpdating, PlanAnswerControls, QuestionAnswerControls } from './ChatAnswerControls'
 import type { PermissionAnswer } from '@shared/agents/permission-answer'
 import { ChatComposer } from './ChatComposer'
 import { ChatTurnActions } from './ChatTurnActions'
 import { assistantTurnEnds } from '../lib/chatThread'
+import { FALLBACK_SESSION_NOTE, transcriptReadCwd } from '../lib/transcriptSession'
 
 // Memoized bubble: marked+DOMPurify re-ran for EVERY message on each ChatPanel render (each
 // turn-finish reload, each keystroke re-render). Text is stable per message, so cache per text.
+// `breaks`: a single newline is a line break, as Claude Code's own TUI renders it — without it a
+// multi-line prompt, or a reply quoting one line by line (`> a` / `> b`), collapsed onto one line.
 export const MarkdownText = memo(function MarkdownText({ text }: { text: string }) {
-  const html = useMemo(() => renderMarkdown(text), [text])
+  const html = useMemo(() => renderMarkdown(text, { breaks: true }), [text])
   return <div className="term-chat__text" dangerouslySetInnerHTML={{ __html: html }} />
 })
 
@@ -74,6 +102,19 @@ interface ChatPanelProps {
    * see is worse than none).
    */
   onShowTerminal?: () => void
+  /**
+   * An SSH node's project scope (the same one `pathsForFiles` uploads through): the composer's `@`
+   * list is the HOST's files, read over that project's master. Absent = the session's own file
+   * index (this machine, or a relay peer's core).
+   */
+  sshProjectId?: string
+  /**
+   * `sessionId` is the node's PERSISTED launch id, not one a hook confirmed (lib/transcriptSession.ts).
+   * It can be stale after a `/clear` or `/resume` inside the CLI, so the panel says so in one quiet
+   * line, reads strictly by id (no cwd — claude's cwd-newest fallback would show another session),
+   * and never offers plan/question answer controls. Absent = a hook-confirmed id, as before.
+   */
+  sessionFallback?: boolean
 }
 
 /**
@@ -82,27 +123,66 @@ interface ChatPanelProps {
  * initial `[]` because nothing caught the rejection, and a failed resolution was indistinguishable
  * from a session nobody has spoken to. They need different words — and two of them are retryable.
  */
-type LoadState = 'loading' | 'ok' | 'missing' | 'unsupported' | 'error'
+type LoadState = 'loading' | 'ok' | 'missing' | 'unsupported' | 'remoteUnsupported' | 'ambiguous' | 'exportError' | 'error'
+
+/**
+ * An `unreadable` read of a LOCAL-ONLY reader's node (`CHAT_LOCAL_ONLY` — agents with no remote
+ * leg) can only be the remote case: core's leg for those agents answers a remote node (`remoteOnly`)
+ * with `unreadable` before touching anything, while their local readers never set the flag. So the
+ * agent alone names it — no renderer-side remoteness guess, and no new field on the wire (the phone
+ * contract keeps `unreadable`). Retry cannot heal it, so it must not read as a transient failure.
+ * Grok is NOT in that list: its remote node is read on the host (`core/remote-grok-chat.ts`), so a
+ * grok `unreadable` is a real, retryable failure.
+ */
+const remoteReaderUnsupported = (agentId: string | undefined): boolean => !!agentId && chatReadsLocalOnly(agentId)
+
+/**
+ * An `unreadable` read of an OPENCODE node has two causes and nothing on the wire tells them apart:
+ * a local `opencode export` that failed (Retry heals it) and a remote node core refuses before
+ * running anything (it never heals). So its copy names both instead of guessing — and never blames
+ * an unreachable host for a local failure. Through the base harness, mirroring core's routing
+ * (`readChatTranscript` routes `capabilityAgentId(...) === 'opencode'` to `opencode-chat.ts`).
+ * That ambiguity is why opencode is NOT in `CHAT_LOCAL_ONLY` even though it has no remote leg.
+ */
+const opencodeUnreadable = (agentId: string | undefined): boolean =>
+  !!agentId && capabilityAgentId(agentId) === 'opencode'
 
 const isUnsupported = (e: unknown): boolean =>
   !!e && typeof e === 'object' && (e as { code?: string }).code === E_UNSUPPORTED
 
 /** One line each, in the user's terms: what is on screen and whether waiting will fix it.
- *  `missing` names the two causes that actually produce it — a transcript Claude has cleaned up
- *  (30 days by default), and a remote session whose host hasn't been reached yet — because the
- *  second one heals by itself the moment the session speaks, and the first one never will. */
+ *  `missing` is a CLEAN miss — the (local or remote) host looked and there is no file: a transcript
+ *  Claude has cleaned up (30 days by default), or a session that has not written one yet (the
+ *  second heals the moment it speaks). A host that could not be ASKED is `error`, which Retry can
+ *  fix — a remote grok node included, whose host is read by `core/remote-grok-chat.ts`;
+ *  `remoteUnsupported` is a remote node whose agent has no remote reader, which it never can. */
 const EMPTY_TEXT: Record<LoadState, { title: string; detail?: string }> = {
   loading: { title: 'Loading conversation…' },
   ok: { title: 'No conversation yet.' },
   missing: {
     title: 'No transcript found for this session.',
-    detail: "It may have been cleaned up, or the agent's host isn't reachable yet."
+    detail: "It may have been cleaned up, or the session hasn't written one yet."
   },
   unsupported: {
     title: "Transcripts can't be read on this surface.",
     detail: 'Open this session on the desktop app to read its conversation.'
   },
-  error: { title: "Couldn't read the transcript." }
+  // `{agent}` is the node's own agent label (`agentLabel` below) — the case spans several agents.
+  remoteUnsupported: { title: "Reading a remote {agent} session's transcript isn't supported yet." },
+  // A remote grok id that names two sessions on the host: a fixed fact, like `unsupported` — so,
+  // like it, no Retry (waiting cannot change which file is this node's).
+  ambiguous: {
+    title: GROK_AMBIGUOUS_SESSION_MESSAGE,
+    detail: 'nodeterm will not guess which one belongs to this node.'
+  },
+  exportError: {
+    title: "Couldn't read this opencode session.",
+    detail: "opencode export failed on this machine — Retry once it works. A session on a remote host can't be read here yet."
+  },
+  error: {
+    title: "Couldn't read the transcript.",
+    detail: "The agent's host may not be reachable — Retry once it is."
+  }
 }
 
 /**
@@ -122,14 +202,18 @@ export function ChatPanel({
   title,
   hint,
   pathsForFiles,
-  onShowTerminal
+  onShowTerminal,
+  sshProjectId,
+  sessionFallback
 }: ChatPanelProps) {
   // This node's core api (stable for the session — the chat transcript and the tmux session
   // both live on the core this panel's project belongs to).
-  const { api } = useSession()
+  const { api, source } = useSession()
   // Which transcript this panel reads. Keys are byte offsets into ONE file, so a thread is only
   // ever merged with a read of the same identity (see lib/chatPaging.ts).
-  const identity = JSON.stringify([nodeId, sessionId ?? null, cwd ?? null, accountId ?? null, agentId])
+  // The cwd a transcript read carries: none while reading the fallback id (the composer keeps `cwd`).
+  const readCwd = transcriptReadCwd(cwd, sessionFallback === true)
+  const identity = JSON.stringify([nodeId, sessionId ?? null, readCwd ?? null, accountId ?? null, agentId])
   const [thread, setThread] = useState<ChatThread>(() => emptyThread(identity))
   const messages = thread.messages
   // Read by the async handlers, which must decide against the thread as it is NOW, not as it was
@@ -167,6 +251,23 @@ export function ChatPanel({
   // Not just `working`: a TUI dialog (`waiting`/`blocked`) would be ANSWERED by sendText's Enter,
   // and a pane whose CLI is gone (hibernated/paused/dropped/exited) is a SHELL that would execute it.
   const refusal = chatSendRefusal(agentId, { state, hibernated, paused, dropped, sessionEnded })
+  // What Enter does now — `queue` lifts the `working` refusal for a CLI that queues mid-turn input.
+  const sendMode = chatSendMode(agentId, { state, hibernated, paused, dropped, sessionEnded })
+  // The agent's OWN dialog on the pane's screen (folder trust, /model, setup questions): no hook
+  // reports those, so the state gate above cannot see them. Found by the poll (local panes, `live`
+  // — the poll also clears it) or by a send core refused before writing (`live: false` — it then
+  // stays until a send gets through or the view closes). `text`: the dialog's own lines.
+  const [screenBlock, setScreenBlock] = useState<{ kind: ScreenBlock; text: string | null; live: boolean } | null>(
+    null
+  )
+  const pollScreen = shouldPollScreen({
+    readable: readsScreenDialogs(agentId),
+    readOnly: readOnly === true,
+    // An SSH node's tmux is on its host (`sshProjectId` is set exactly for those); a relay tab's
+    // is on the peer. Either way each read is a network round trip.
+    remote: sshProjectId !== undefined || source !== 'local',
+    refusal
+  })
   const agentLabel = chatAgentLabel(agentId, customAgents)
   // What the row closing the thread says (lib/chatLive.ts). `optimistic` covers the gap between a
   // send and the first hook event: set by `send`, retired by the next state change (the real state
@@ -176,10 +277,45 @@ export function ChatPanel({
   // holds a TUI dialog (`dialog` — the CLI is in the pane and waiting) and only on the card the held
   // ticket belongs to. A host whose hook script predates structured answers never sends `held`, so
   // its cards stay read-only — the terminal path is then the only one, exactly as before.
-  const answerCard = useMemo(
-    () => (!readOnly && refusal === 'dialog' ? activeAnswerCard(messages, held) : null),
-    [readOnly, refusal, messages, held]
+  //
+  // …and only when the thread on screen was READ for that ticket (`threadHeldFor`, lib/chatAnswer.ts
+  // `answerCardState`): while the hook moves held A → held B the thread can still show plan A's card
+  // with no result, and matching by tool name alone would approve B from A's card. Until a tail read
+  // that started under B lands, the latest card says "Updating…" instead. Keyed by the transcript
+  // identity, so a session change never carries the previous thread's binding over.
+  const [heldRead, setHeldRead] = useState<{ identity: string; pendingId: string | null } | null>(null)
+  const threadHeldFor = heldRead && heldRead.identity === identity ? heldRead.pendingId : undefined
+  const threadHeldForRef = useRef(threadHeldFor)
+  threadHeldForRef.current = threadHeldFor
+  // The card the last request was bound to (per transcript identity): a NEW request must surface on
+  // a card the thread shows as new, never on that one — see `answerCardState`'s `previous`.
+  const [boundCard, setBoundCard] = useState<(BoundAnswerCard & { identity: string }) | null>(null)
+  const previousBound = boundCard && boundCard.identity === identity ? boundCard : null
+  const cardState = useMemo(
+    // Never on a fallback id: an answer is a WRITE bound to the live `held` ticket, and a thread read
+    // from the node's launch id may not be the conversation that ticket belongs to.
+    () =>
+      !readOnly && !sessionFallback && refusal === 'dialog'
+        ? answerCardState(messages, held, threadHeldFor, previousBound)
+        : null,
+    [readOnly, sessionFallback, refusal, messages, held, threadHeldFor, previousBound]
   )
+  const answerCard = cardState?.kind === 'active' ? cardState : null
+  const updatingCard = cardState?.kind === 'updating' ? cardState.card : null
+  // The request a rebind reload is owed for (null = none): drives the forced reload and its retry.
+  const rebindFor = cardState?.kind === 'updating' ? (held?.pendingId ?? null) : null
+  const rebindForRef = useRef(rebindFor)
+  rebindForRef.current = rebindFor
+  const activePendingId = cardState?.kind === 'active' ? cardState.pendingId : null
+  const activeCardKey = cardState?.kind === 'active' ? cardState.cardKey : null
+  useEffect(() => {
+    if (activePendingId === null || activeCardKey === null) return
+    setBoundCard((b) =>
+      b && b.identity === identity && b.pendingId === activePendingId && b.cardKey === activeCardKey
+        ? b
+        : { identity, pendingId: activePendingId, cardKey: activeCardKey }
+    )
+  }, [identity, activePendingId, activeCardKey])
   const msgsRef = useRef<HTMLDivElement>(null)
   const prevState = useRef(state)
   // Request token: only the NEWEST readTranscript may land. An older read resolving late (the
@@ -218,17 +354,47 @@ export function ChatPanel({
   const livePendingRef = useRef(false)
   const liveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const attemptLiveRef = useRef<() => void>(() => {})
+  // A held-request reload asked for while a tail read was in flight: run when that read settles
+  // (single-flight, like the live reads) — never dropped, since the read in flight started under the
+  // PREVIOUS request and cannot bind the new one. Any read that STARTS later satisfies it.
+  const heldReloadQueuedRef = useRef(false)
+  // The ONE tail read a sent local command schedules (see `send`): `/model` or `!ls` fires no hook,
+  // so neither a state change nor a live read would ever confirm it.
+  const commandReadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const loadRef = useRef<(live?: boolean, rebind?: boolean, carry?: boolean) => void>(() => {})
+  // The turn-end settle reloads (TURN_END_RELOAD_DELAYS_MS) still to fire; cleared on unmount.
+  const settleTimersRef = useRef<ReturnType<typeof setTimeout>[]>([])
+  const requestHeldReloadRef = useRef<() => void>(() => {})
 
   // `live` = a read driven by a hook event while the agent works (see `attemptLive`), as opposed to
   // the first open, the turn-end reload and ↻. A live read is background refresh: it keeps
   // unconfirmed sends on screen (`carryUnconfirmed`), leaves a failed older page's retry row alone
   // (clearing it would re-arm a failing fetch every interval) and never flips the empty state to
   // "Loading…" (which would strobe on every hook event).
-  const load = useCallback((live = false) => {
+  //
+  // `rebind` = the held-request reload (see `requestHeldReload`): QUIET like a live read (no
+  // "Loading…", the older-page row left alone, unconfirmed sends kept), and it never cancels an
+  // older-page fetch — it is only ever started with none in flight.
+  //
+  // `carry` = keep unconfirmed sends (`carryUnconfirmed`). Every live and rebind read does; so do the
+  // turn-end settle reloads but the last (`turnEndReloadCarries`).
+  const load = useCallback((live = false, rebind = false, carry = live || rebind) => {
     const token = ++reqRef.current
-    olderReqRef.current++
-    olderInFlightRef.current = false
-    if (!live) {
+    if (!rebind) olderReqRef.current++
+    // The held request this read starts under: once it is applied, the thread is known to show the
+    // transcript as of (at least) that request. Read from the store, not the render: a hold that
+    // landed since the last render is exactly what this must see.
+    const heldAtStart = useAgentStatus.getState().byId[nodeId]?.held?.pendingId ?? null
+    heldReloadQueuedRef.current = false
+    // After this read settles: a queued held-request reload runs if the thread is still not read
+    // for the request held NOW (`bound` = what the thread is read for after this read).
+    const settleHeldReload = (bound: string | null | undefined) => {
+      if (!heldReloadQueuedRef.current) return
+      heldReloadQueuedRef.current = false
+      if (answerRebindPending(useAgentStatus.getState().byId[nodeId]?.held, bound)) loadRef.current(false, true)
+    }
+    if (!rebind) olderInFlightRef.current = false
+    if (!live && !rebind) {
       // Cancelling an older fetch (or clearing its error) removes a row ABOVE the viewport: anchor
       // it like any other change up there, or the view jumps by the row's height.
       if (olderStateRef.current !== 'idle') captureAnchor()
@@ -237,13 +403,16 @@ export function ChatPanel({
     setTailLoading(true)
     tailInFlightRef.current = true
     lastTailStartRef.current = Date.now()
-    if (!live) setLoadState((s) => (s === 'ok' ? s : 'loading')) // a reload never blanks a rendered thread
+    if (!live && !rebind) setLoadState((s) => (s === 'ok' ? s : 'loading')) // a reload never blanks a rendered thread
     // `nodeId` is what lets an SSH-project node resolve on its host; the rejection branch is what
     // keeps a surface that cannot read transcripts (Server Edition, relay tab) from silently
     // presenting itself as an empty conversation. Only the newest TAIL window is read — older
     // history pages in on scroll-up, and a reload merges by key instead of discarding it.
-    void api.chat.readTranscript(sessionId, cwd, accountId, nodeId, agentId, {
-      maxBytes: CHAT_TAIL_PAGE_BYTES
+    void api.chat.readTranscript(sessionId, readCwd, accountId, nodeId, agentId, {
+      maxBytes: CHAT_TAIL_PAGE_BYTES,
+      // A hook-driven refresh the user did not ask for: an expensive reader (opencode's export) may
+      // space these out. An open, ↻, Retry or a held-request rebind is never marked.
+      ...(live && !rebind ? { background: true } : {})
     }).then(
       (res) => {
         if (token !== reqRef.current) return
@@ -259,14 +428,34 @@ export function ChatPanel({
             // The thread on screen is still this transcript's: back to `ok`, or the `loading` this
             // reload set would stick and silently disable older paging (it waits for `ok`).
             setLoadState('ok')
+            // Nothing was applied: the thread is still read for what it was read for before.
+            settleHeldReload(threadHeldForRef.current)
             return
           }
           setThread(emptyThread(identity))
-          setLoadState('missing')
+          // A read that FAILED (the host did not answer, a remote node with no reachable master)
+          // is not "no transcript": it gets the error copy, and ↻ is the way out.
+          setLoadState(
+            !res.unreadable
+              ? 'missing'
+              : remoteReaderUnsupported(agentId)
+                ? 'remoteUnsupported'
+                : opencodeUnreadable(agentId)
+                  ? 'exportError'
+                  : 'error'
+          )
+          setHeldRead({ identity, pendingId: heldAtStart })
+          settleHeldReload(heldAtStart)
           return
         }
-        setThread((t) => applyTail(t, identity, res, { carryUnconfirmed: live }))
+        // A read that confirms every optimistic send retires the working row: for a local
+        // command it is the ONLY signal (no hook fires). A command that starts a real turn is
+        // still covered — its `working` state keeps the row (and the send refusal) on its own.
+        if (tailConfirmsSends(threadRef.current, identity, res)) setOptimistic(false)
+        setThread((t) => applyTail(t, identity, res, { carryUnconfirmed: carry }))
         setLoadState('ok')
+        setHeldRead({ identity, pendingId: heldAtStart })
+        settleHeldReload(heldAtStart)
       },
       (e: unknown) => {
         if (token !== reqRef.current) return
@@ -277,15 +466,18 @@ export function ChatPanel({
         const t = threadRef.current
         if (t.identity === identity && t.messages.length > 0) {
           setLoadState('ok')
+          settleHeldReload(threadHeldForRef.current)
           return
         }
         // …and, as there, a thread of ANOTHER transcript (the session changed under the panel) is
         // cleared: the error message must not sit under the previous session's conversation.
         if (t.identity !== identity) setThread(emptyThread(identity))
-        setLoadState(isUnsupported(e) ? 'unsupported' : 'error')
+        setLoadState(isUnsupported(e) ? 'unsupported' : isGrokAmbiguousSessionError(e) ? 'ambiguous' : 'error')
+        settleHeldReload(threadHeldForRef.current)
       }
     )
-  }, [api, sessionId, cwd, accountId, nodeId, agentId, identity])
+  }, [api, sessionId, readCwd, accountId, nodeId, agentId, identity])
+  loadRef.current = load
 
   // Fetch the next OLDER page and prepend it. One in flight at a time; a result that arrives
   // after a newer tail load (or unmount) is dropped by its token. A `found:false` here is a failed
@@ -301,8 +493,18 @@ export function ChatPanel({
       olderInFlightRef.current = false
       // A hook event held behind this page gets its (trailing) tail read now.
       queueMicrotask(() => attemptLiveRef.current())
+      // …and so does a held-request reload queued behind it (`requestHeldReload`), once the page
+      // has landed (microtask: after its setThread below).
+      if (heldReloadQueuedRef.current) {
+        heldReloadQueuedRef.current = false
+        // Through the one entry point: a tail read that started meanwhile (and so already captured
+        // the new request) is queued behind, never superseded.
+        queueMicrotask(() => {
+          if (rebindForRef.current !== null) requestHeldReloadRef.current()
+        })
+      }
     }
-    void api.chat.readTranscript(sessionId, cwd, accountId, nodeId, agentId, {
+    void api.chat.readTranscript(sessionId, readCwd, accountId, nodeId, agentId, {
       before,
       maxBytes: CHAT_OLDER_PAGE_BYTES
     }).then(
@@ -324,12 +526,45 @@ export function ChatPanel({
         setOlderState('error')
       }
     )
-  }, [api, sessionId, cwd, accountId, nodeId, agentId, identity, thread.olderCursor, thread.identity])
+  }, [api, sessionId, readCwd, accountId, nodeId, agentId, identity, thread.olderCursor, thread.identity])
 
   // Initial load.
   useEffect(() => {
     load()
   }, [load])
+
+  // A newly held plan / question the thread was not read for: re-read the tail now (declared after
+  // the initial load, so on mount this QUEUES behind that read rather than superseding it) — or, with a
+  // read in flight (it started under the previous request), queue it for that read's settle. Not
+  // for a surface that cannot read transcripts at all (every read would be refused).
+  // An older-page fetch in flight is waited for too, never cancelled: the user's scroll-up paging
+  // must not restart because a plan was revised.
+  const requestHeldReload = useCallback(() => {
+    if (loadStateRef.current === 'unsupported') return
+    if (tailInFlightRef.current || olderInFlightRef.current) heldReloadQueuedRef.current = true
+    else loadRef.current(false, true)
+  }, [])
+  requestHeldReloadRef.current = requestHeldReload
+  // Retries back off (`rebindRetryDelay`), counted per held request: a new one starts over.
+  const rebindAttemptRef = useRef(0)
+  useEffect(() => {
+    rebindAttemptRef.current = 0
+    // working → blocked with a new held id in the same render: the turn-end reload below (a full
+    // read that starts NOW, under the new request) owns it — one read, not two.
+    if (rebindFor !== null && !(prevState.current === 'working' && state !== 'working')) requestHeldReload()
+  }, [rebindFor, requestHeldReload]) // eslint-disable-line react-hooks/exhaustive-deps -- `state` is read, not a trigger
+  // …and while a card stays on "Updating…" with no read in flight (the reload failed, or the
+  // transcript has not caught up), try again: nothing else reads the tail while the agent is
+  // blocked. Also with no card on screen (A answered, B's card not read yet): the reload is quiet,
+  // backs off, and stops by itself once a read under the new request lands.
+  useEffect(() => {
+    if (rebindFor === null || tailLoading) return
+    const t = setTimeout(() => {
+      rebindAttemptRef.current++
+      requestHeldReload()
+    }, rebindRetryDelay(rebindAttemptRef.current))
+    return () => clearTimeout(t)
+  }, [rebindFor, tailLoading, requestHeldReload])
 
   // Invalidate any in-flight read when the panel goes away.
   useEffect(
@@ -340,6 +575,8 @@ export function ChatPanel({
       attemptLiveRef.current = () => {}
       if (liveTimerRef.current !== null) clearTimeout(liveTimerRef.current)
       liveTimerRef.current = null
+      for (const t of settleTimersRef.current) clearTimeout(t)
+      settleTimersRef.current = []
     },
     []
   )
@@ -350,7 +587,7 @@ export function ChatPanel({
   attemptLiveRef.current = () => {
     if (!livePendingRef.current) return
     // This surface cannot read transcripts at all (relay tab): every live read would be refused.
-    if (loadStateRef.current === 'unsupported') {
+    if (loadStateRef.current === 'unsupported' || loadStateRef.current === 'remoteUnsupported') {
       livePendingRef.current = false
       return
     }
@@ -404,12 +641,26 @@ export function ChatPanel({
     return () => document.removeEventListener('visibilitychange', onVisibility)
   }, [])
 
-  // Reload when a turn completes (working -> not working). Sessions whose hooks never report
-  // `working` never take this path — the bar's ↻ is their reload.
+  // Reload when a turn completes (working -> not working), then again on the settle schedule
+  // (TURN_END_RELOAD_DELAYS_MS): the Stop hook lands before the final reply is written, so the read
+  // at the edge usually misses it. A new turn does NOT cancel the schedule: a prompt sent the moment
+  // the turn ended starts one at once, and cancelling there would hide the finished turn's reply
+  // until the next one ended. Sessions whose hooks never report `working` never take this path —
+  // the bar's ↻ is their reload.
   useEffect(() => {
-    if (prevState.current === 'working' && state !== 'working') load()
+    if (prevState.current === 'working' && state !== 'working') {
+      load(false, false, true)
+      for (const t of settleTimersRef.current) clearTimeout(t)
+      const last = TURN_END_RELOAD_DELAYS_MS.length - 1
+      settleTimersRef.current = TURN_END_RELOAD_DELAYS_MS.map((ms, i) =>
+        setTimeout(() => {
+          const working = useAgentStatus.getState().byId[nodeId]?.state === 'working'
+          loadRef.current(false, false, turnEndReloadCarries({ final: i === last, working }))
+        }, ms)
+      )
+    }
     prevState.current = state
-  }, [state, load])
+  }, [state, load, nodeId])
 
   // Any state change retires the optimistic working row: from here the real state speaks.
   useEffect(() => {
@@ -420,6 +671,38 @@ export function ChatPanel({
     const t = setTimeout(() => setOptimistic(false), CHAT_OPTIMISTIC_WORKING_MS)
     return () => clearTimeout(t)
   }, [optimistic])
+
+  // Re-read the pane's screen while the view is visible (see `screenBlock`). A read that fails or
+  // finds a blank screen changes nothing: unknown is not evidence either way.
+  useEffect(() => {
+    if (!pollScreen) {
+      setScreenBlock((b) => (b?.live === true ? null : b))
+      return
+    }
+    let cancelled = false
+    const tick = async (): Promise<void> => {
+      const el = msgsRef.current
+      if (el === null || el.clientHeight === 0 || document.hidden) return
+      let screen: string
+      try {
+        screen = await api.pty.capture(nodeId)
+      } catch {
+        return
+      }
+      if (cancelled) return
+      const read = readClaudeScreen(screen)
+      if (read.kind === 'unknown') return
+      if (!claudeScreenBlocksInput(read)) setScreenBlock(null)
+      else if (read.kind === 'dialog') setScreenBlock({ kind: 'dialog', text: read.text, live: true })
+      else setScreenBlock({ kind: 'no-prompt', text: null, live: true })
+    }
+    void tick()
+    const t = setInterval(() => void tick(), CHAT_SCREEN_POLL_MS)
+    return () => {
+      cancelled = true
+      clearInterval(t)
+    }
+  }, [pollScreen, api, nodeId])
 
   // Follow the newest message only when the user was already at the bottom or just sent; a user
   // scrolled up reading an earlier answer keeps their place. Layout effect: the jump lands before
@@ -442,8 +725,8 @@ export function ChatPanel({
       nearBottomRef.current = true
     }
     justSentRef.current = false
-    // `activity`: the status row appearing at the end grows the thread like a message does.
-  }, [messages, olderState, activity])
+    // `activity` / `screenBlock`: a row appearing at the end grows the thread like a message does.
+  }, [messages, olderState, activity, screenBlock])
 
   const maybeLoadOlder = useCallback(() => {
     const el = msgsRef.current
@@ -497,12 +780,41 @@ export function ChatPanel({
     maybeLoadOlder()
   }
 
+  // The optimistic bubbles sent into the CLI's queue mid-turn, drawn as "Queued" until the transcript
+  // has them. Object identity is enough: `applyTail` carries an unconfirmed send as the same object.
+  const queuedRef = useRef(new WeakSet<ChatMessage>())
+
   const send = useCallback(async () => {
     const text = input.trim()
+    if (!text) return
     // Read the store at SEND time, not the render-time values: a PermissionRequest (or an Eco
     // hibernation) that landed between the last render and this keypress must still block.
-    if (!text || chatSendRefusal(agentId, useAgentStatus.getState().byId[nodeId] ?? {}) !== null) return
-    const ok = await api.pty.sendText(nodeId, text)
+    const mode = chatSendMode(agentId, useAgentStatus.getState().byId[nodeId] ?? {})
+    if (mode === null) return
+    if (mode === 'queue' && !canQueue(text)) {
+      const message = `${chatAgentLabel(agentId, useSettings.getState().settings.customAgents)} is working — send commands once the reply finishes.`
+      window.dispatchEvent(new CustomEvent('nodeterm:toast', { detail: { kind: 'error', message } }))
+      return
+    }
+    // The kernel's say (chatPaneGate.ts): an agent that announces no quit (codex) may have left a
+    // SHELL in the pane while the store still reads `done` — typed there, the message would run.
+    const pane = await chatPaneRefusal(agentId, nodeId, {
+      paneOwner: (n) => api.pty.paneOwner(n),
+      customAgents: useSettings.getState().settings.customAgents
+    })
+    if (pane) {
+      const message = chatPaneRefusalToast(pane, chatAgentLabel(agentId, useSettings.getState().settings.customAgents))
+      window.dispatchEvent(new CustomEvent('nodeterm:toast', { detail: { kind: 'error', message } }))
+      return
+    }
+    // Through core's chat-prompt path: where it can read the agent's screen, it refuses before
+    // writing anything when the agent's own dialog owns the keyboard (such dialogs fire no hook).
+    const ok = await api.pty.sendChatPrompt(nodeId, text, agentId)
+    if (isChatPromptBlocked(ok)) {
+      // Nothing reached the pane: the draft stays for a resend once the dialog is answered.
+      setScreenBlock({ kind: ok.dialog === null ? 'no-prompt' : 'dialog', text: ok.dialog, live: pollScreen })
+      return
+    }
     if (ok === 'pasted-not-submitted') {
       window.dispatchEvent(new CustomEvent('nodeterm:toast', { detail: { kind: 'error', message: TEXT_NOT_SUBMITTED } }))
       setInput('')
@@ -514,22 +826,59 @@ export function ChatPanel({
     }
     // Optimistic: show the prompt immediately. A live read keeps it until the transcript carries it
     // (`carryUnconfirmed`); the turn-end reload / ↻ reconcile from the transcript outright.
+    setScreenBlock(null)
     justSentRef.current = true
-    setThread((t) => ({ ...t, messages: [...t.messages, { role: 'user', parts: [{ kind: 'text', text }] }] }))
+    const sent: ChatMessage = { role: 'user', parts: [{ kind: 'text', text }] }
+    if (mode === 'queue') queuedRef.current.add(sent)
+    setThread((t) => ({ ...t, messages: [...t.messages, sent] }))
     setOptimistic(true)
     setInput('')
-  }, [api, input, nodeId, agentId])
+    // A built-in that opens a dialog in the TUI (`/rewind`, `/resume`, `/model`, …) is now on screen
+    // THERE, invisible from here, and the state still reads `done`: the next message's Enter would
+    // answer it. Go to the terminal — the same hand-off the toolbar's model/effort labels make.
+    // Only after the send was confirmed (`ok === true` above): nothing opened otherwise.
+    if (onShowTerminal && isInteractiveBuiltin(agentId, text)) {
+      onShowTerminal()
+      return
+    }
+    // A local command (`/model`, `!ls`) fires no hook: schedule ONE live tail read, one throttle
+    // interval out (claude writes the command record once the command ran), so its confirmation
+    // retires the working row instead of the 15 s timeout. A read already in flight defers it.
+    if (sentCommand(text)) {
+      if (commandReadTimerRef.current !== null) clearTimeout(commandReadTimerRef.current)
+      const fire = () => {
+        if (tailInFlightRef.current || olderInFlightRef.current) {
+          commandReadTimerRef.current = setTimeout(fire, CHAT_LIVE_RELOAD_MIN_MS)
+          return
+        }
+        commandReadTimerRef.current = null
+        loadRef.current(true)
+      }
+      commandReadTimerRef.current = setTimeout(fire, CHAT_LIVE_RELOAD_MIN_MS)
+    }
+  }, [api, input, nodeId, agentId, onShowTerminal, pollScreen])
+
+  // The scheduled command read belongs to THIS transcript and this mount.
+  useEffect(
+    () => () => {
+      if (commandReadTimerRef.current !== null) clearTimeout(commandReadTimerRef.current)
+      commandReadTimerRef.current = null
+    },
+    [identity]
+  )
 
   const onWriteRefused = useCallback(() => setReadonly(true), [])
 
   // Answer the held request through core, which validates the answer against the pending request
-  // file and builds what the hook prints. The ticket is re-checked against the store at SEND time:
+  // file and builds what the hook prints. `pendingId` is the request the CARD was bound to
+  // (`answerCardState`), re-checked at SEND time against both the store and the thread's binding:
   // a hold that ended (answered in the TUI, timed out, replaced) while the user was choosing must
   // not receive an answer meant for it — that reads as a refusal, and the card says to use the
   // terminal. `false` from core is the same (see ChatAnswerControls).
   const answerHeld = useCallback(
     async (pendingId: string, answer: PermissionAnswer): Promise<boolean> => {
       if (useAgentStatus.getState().byId[nodeId]?.held?.pendingId !== pendingId) return false
+      if (threadHeldForRef.current !== pendingId) return false
       return api.answerPermission({ nodeId, pendingId, answer })
     },
     [api, nodeId]
@@ -583,6 +932,11 @@ export function ChatPanel({
           <span className="term-chat__hint">{hint ?? (mdChip ? `${mdChip} to exit` : 'Exit')}</span>
         </span>
       </div>
+      {sessionFallback && (
+        <div className="term-chat__fallback-note" role="note">
+          {FALLBACK_SESSION_NOTE}
+        </div>
+      )}
       <div className="term-chat__msgs" ref={msgsRef} onScroll={onScroll}>
         {initialLoading && (
           <ChatLoadingStatus text={EMPTY_TEXT.loading.title} />
@@ -608,11 +962,11 @@ export function ChatPanel({
         )}
         {showEmpty && (
           <div className="term-chat__empty">
-            <div>{EMPTY_TEXT[loadState].title}</div>
+            <div>{EMPTY_TEXT[loadState].title.replace('{agent}', agentLabel)}</div>
             {EMPTY_TEXT[loadState].detail && (
               <div className="term-chat__empty-detail">{EMPTY_TEXT[loadState].detail}</div>
             )}
-            {loadState !== 'unsupported' && loadState !== 'ok' && (
+            {loadState !== 'unsupported' && loadState !== 'remoteUnsupported' && loadState !== 'ambiguous' && loadState !== 'ok' && (
               <button className="term-chat__retry" onClick={() => load()}>
                 Retry
               </button>
@@ -625,7 +979,9 @@ export function ChatPanel({
           // bubble) fall back to their position.
           <div
             key={m.key !== undefined ? `k${m.key}` : `i${i}`}
-            className={`term-chat__msg term-chat__msg--${m.role}${m.role === 'user' ? ' term-chat__bubble' : ''}`}
+            className={`term-chat__msg term-chat__msg--${m.role}${m.role === 'user' ? ' term-chat__bubble' : ''}${
+              queuedRef.current.has(m) ? ' term-chat__msg--queued' : ''
+            }`}
           >
             {m.parts.map((p, j) =>
               p.kind === 'text' ? (
@@ -643,24 +999,28 @@ export function ChatPanel({
                   <div className="term-chat__tool-card-title">{toolCardTitle(p.name)}</div>
                   <MarkdownText text={p.body} />
                   {p.result && <pre className="term-chat__tool-result">{p.result}</pre>}
-                  {answerCard && held && answerCard.message === i && answerCard.part === j && (
-                    // Keyed by the ticket: a new hold on the same card starts from a clean state.
+                  {answerCard && answerCard.card.message === i && answerCard.card.part === j && (
+                    // Keyed by the BOUND ticket: a new hold on the same card starts from a clean
+                    // state, and every answer names the request this card was drawn for.
                     p.name === 'AskUserQuestion' && p.questions ? (
                       <QuestionAnswerControls
-                        key={held.pendingId}
+                        key={answerCard.pendingId}
                         questions={p.questions}
                         agentLabel={agentLabel}
                         chip={mdChip}
-                        onSubmit={(a) => answerHeld(held.pendingId, a)}
+                        onSubmit={(a) => answerHeld(answerCard.pendingId, a)}
                       />
                     ) : (
                       <PlanAnswerControls
-                        key={held.pendingId}
+                        key={answerCard.pendingId}
                         agentLabel={agentLabel}
                         chip={mdChip}
-                        onSubmit={(a) => answerHeld(held.pendingId, a)}
+                        onSubmit={(a) => answerHeld(answerCard.pendingId, a)}
                       />
                     )
+                  )}
+                  {updatingCard && updatingCard.message === i && updatingCard.part === j && (
+                    <AnswerControlsUpdating chip={mdChip} />
                   )}
                 </div>
               ) : (
@@ -673,6 +1033,7 @@ export function ChatPanel({
                 </details>
               )
             )}
+            {queuedRef.current.has(m) && <div className="term-chat__queued-label">Queued</div>}
             {turnEnds.has(i) && (
               <ChatTurnActions
                 copyText={turnEnds.get(i)!.copyText}
@@ -683,6 +1044,14 @@ export function ChatPanel({
             )}
           </div>
         ))}
+        {screenBlock && (
+          <div className="term-chat__screen-block" role="status" aria-live="polite">
+            <div className="term-chat__screen-block-title">
+              {screenBlockedSentence(screenBlock.kind, agentLabel, mdChip)}
+            </div>
+            {screenBlock.text !== null && <pre className="term-chat__screen-block-text">{screenBlock.text}</pre>}
+          </div>
+        )}
         {activity && (
           // One live region for both sentences, so working → waiting changes its text instead of
           // remounting it (a remounted role=status is announced again). The words are the
@@ -713,13 +1082,21 @@ export function ChatPanel({
             refusal,
             agentLabel,
             chip: mdChip,
-            answerOnCard: answerCard !== null
+            answerOnCard: answerCard !== null,
+            sendMode,
+            screen: screenBlock?.live === true ? screenBlock.kind : null
           })}
-          disabled={readonly || refusal !== null}
+          // A dialog the POLL found is also cleared by it; one a refused send found is not (a remote
+          // pane is never polled), so that one leaves the draft editable for the resend.
+          disabled={readonly || composerStandsDown(refusal) || screenBlock?.live === true}
+          agentBusy={refusal === 'working'}
           onWriteRefused={onWriteRefused}
           sendUnconfirmed={optimistic}
           pathsForFiles={pathsForFiles}
           onShowTerminal={onShowTerminal}
+          cwd={cwd}
+          accountId={accountId}
+          sshProjectId={sshProjectId}
         />
       )}
     </div>

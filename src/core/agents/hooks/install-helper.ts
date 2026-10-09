@@ -36,6 +36,8 @@ export function writeManagedHookFileAtomic(
   const tmp = tempNameFor(target)
   try {
     writeFileSync(tmp, data, { encoding: 'utf8', flag: 'wx', ...(mode === undefined ? {} : { mode }) })
+    // Exact, not umask-filtered: the rename carries the temp's mode, so set it before publishing.
+    if (mode !== undefined) chmodSync(tmp, mode)
     publish(tmp, target)
   } catch (e) {
     rmSync(tmp, { force: true })
@@ -102,10 +104,42 @@ export function installManagedHookScript(agentId: string, scriptFileName: string
  * Codex builds its own equivalent (`buildManagedCommand` in codex.ts) — its exact bytes are
  * hashed into config.toml's trust entries, so the two must stay separate.
  */
-export function buildManagedHookCommand(scriptPath: string): string {
+export interface ManagedHookCommandOptions {
+  /**
+   * Variables exported to the script. Emitted as `NAME='value'; export NAME; ` BEFORE the `if`
+   * (an assignment prefix cannot precede a compound command). Antigravity is the one user: its
+   * payload carries no event name, so the command carries it.
+   */
+  env?: Readonly<Record<string, string>>
+  /**
+   * Printed by the missing-script branch BEFORE it drains stdin. For an agent that reads hook
+   * stdout as a decision (antigravity), "the script is gone" must still answer — silence there is
+   * the wrong answer for some events. Omitted ⇒ the branch prints nothing, as it always has.
+   */
+  fallbackStdout?: string
+}
+
+const shQuote = (s: string): string => `'${s.replaceAll("'", "'\\''")}'`
+
+export function buildManagedHookCommand(scriptPath: string, opts: ManagedHookCommandOptions = {}): string {
   // POSIX single-quote escape so $, `, " and \ in the path are taken literally.
-  const q = `'${scriptPath.replaceAll("'", "'\\''")}'`
-  return `if [ -r ${q} ]; then sh ${q}; else cat >/dev/null 2>&1 || :; fi`
+  const q = shQuote(scriptPath)
+  const prefix = Object.entries(opts.env ?? {})
+    .map(([name, value]) => {
+      // A name is interpolated bare, so it must be a name — refuse rather than emit a command
+      // that runs something else.
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) throw new Error(`invalid env var name: ${name}`)
+      return `${name}=${shQuote(value)}; export ${name}; `
+    })
+    .join('')
+  const answer = opts.fallbackStdout !== undefined ? `printf '%s\\n' ${shQuote(opts.fallbackStdout)}; ` : ''
+  // An agent that reads our stdout as a DECISION (fallbackStdout set) also reads the exit status:
+  // for antigravity a non-zero exit is a measured DENY even when the right answer was already
+  // printed (the script answers FIRST, then sources the endpoint file, whose syntax error would
+  // otherwise leak out as `sh`'s status). So that branch forces 0, as the Windows wrapper does.
+  // Every other agent's command stays byte-identical.
+  const exitZero = opts.fallbackStdout !== undefined ? ' || :' : ''
+  return `${prefix}if [ -r ${q} ]; then sh ${q}${exitZero}; else ${answer}cat >/dev/null 2>&1 || :; fi`
 }
 
 /**
