@@ -24,10 +24,15 @@ const EMPTY: CheckResult = { messages: [], update: { minSupported: null, mandato
 // call always runs (content delivery + the anonymous install count), so an install still counts
 // even if the user never opts into the detailed telemetry ping. The env kill-switches above are
 // the hard off.
+//
+// TERMSCAPE FORK: never. The feed belongs to upstream's backend and judges UPSTREAM's version line,
+// so for this fork it can only misfire: on 2026-10-09 it answered `{minSupported:'0.4.2',
+// mandatory:true}` to v0.3.16-selfhost.3 and pinned a non-dismissible "Update required" card that
+// the fork's own updater could never clear. Its banners are upstream's announcements, and the call
+// also counts the install in upstream's `devices` table. Kept as a dead switch (not deleted) so an
+// upstream merge touches one function body; `no-upstream-feed.guard.test.ts` pins it.
 function allowed(): boolean {
-  if (process.env.DO_NOT_TRACK || process.env.NODETERM_TELEMETRY_DISABLED) return false
-  if (!platform().isPackaged && !process.env.NODETERM_API_BASE) return false
-  return true
+  return false
 }
 
 function sanitize(data: unknown): CheckResult {

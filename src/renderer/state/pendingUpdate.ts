@@ -23,7 +23,8 @@ export const usePendingUpdate = create<PendingUpdateState>((set) => ({
   setPending: (pending) => set({ pending })
 }))
 
-export const RELEASES_URL = 'https://nodeterm.dev/releases'
+// Termscape fork: our releases, not upstream's download page (whose DMG is a different app).
+export const RELEASES_URL = 'https://github.com/siimvene/termscape/releases'
 
 /** What clicking the title-bar button does for each pending kind. */
 export function runPendingUpdate(p: PendingUpdate): void {
