@@ -283,6 +283,27 @@ describe('joinOnly: a viewer may watch a terminal but never start one', () => {
     expect(argv).not.toContain('-D')
   })
 
+  async function staleTmuxManager() {
+    const m = await tmuxManager('present')
+    vi.spyOn(m as unknown as { paneCwdStale: (k: string) => Promise<boolean> }, 'paneCwdStale').mockResolvedValue(true)
+    return vi
+      .spyOn(m as unknown as { repairPaneCwd: (k: string, cwd?: string) => Promise<boolean> }, 'repairPaneCwd')
+      .mockResolvedValue(true)
+  }
+
+  it('never types the stale-cwd repair into the host shell for a viewer (it cannot type)', async () => {
+    const repair = await staleTmuxManager()
+    const res = await create(VIEWER, { joinOnly: true })
+    expect(res.sessionId).not.toBe('')
+    expect(repair).not.toHaveBeenCalled()
+  })
+
+  it('control: the owner opening the same stale pane does repair it', async () => {
+    const repair = await staleTmuxManager()
+    await create(OWNER, {})
+    expect(repair).toHaveBeenCalledTimes(1)
+  })
+
   it('control: the owner\'s warm reattach still takes the session over (-D)', async () => {
     await tmuxManager('present')
     await create(OWNER, {})

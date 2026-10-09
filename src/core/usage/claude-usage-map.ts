@@ -10,7 +10,7 @@
 // contract: when the next model ships, its limit arrives as another array entry and this file
 // does not change. Binding a `fableWeekly` slot (or a `seven_day_fable` field) would recreate
 // the exact rigidity Anthropic just moved away from.
-import type { ClaudeUsage, ClaudeUsageWindow, UsageLimit } from '../../shared/types'
+import type { ClaudeUsage, ClaudeUsageOrganization, ClaudeUsageWindow, UsageLimit } from '../../shared/types'
 import { findLimit } from '../../shared/usage-limits'
 
 /** `percent`/`utilization` are portions USED, 0–100. Clamp — the server is not our validator. */
@@ -178,6 +178,10 @@ export const HOLD_LAST_GOOD_MAX_MS = 60 * 60 * 1000
  * account answered, the last good read is older than `HOLD_LAST_GOOD_MAX_MS`, or one of its
  * windows has reset since.
  */
+function sameOrganization(a: ClaudeUsageOrganization, b: ClaudeUsageOrganization): boolean {
+  return a.uuid && b.uuid ? a.uuid === b.uuid : a.name === b.name
+}
+
 export function holdLastGood(
   prev: ClaudeUsage | undefined,
   next: ClaudeUsage,
@@ -187,6 +191,9 @@ export function holdLastGood(
   if (!prev || prev.limits.length === 0) return next
   if (prev.status !== 'ok' && prev.status !== 'error') return next
   if (next.email && prev.email && next.email !== prev.email) return next
+  // Fork: one email can switch between organizations (the per-account org row), and the quota
+  // belongs to the org — a failed read for org B must not wear org A's numbers.
+  if (next.organization && prev.organization && !sameOrganization(prev.organization, next.organization)) return next
   if (now - prev.updatedAt > HOLD_LAST_GOOD_MAX_MS) return next
   if (prev.limits.some((l) => l.resetsAt !== null && l.resetsAt <= now)) return next
   const { rateLimited: _previousFailure, ...numbers } = prev

@@ -18394,7 +18394,11 @@ export function Canvas() {
           if (!stored) return false
           return st.applyOwnNodeMutation(projectId, { op: 'upsert', node: { ...stored, pendingLaunch: pending } })
         },
-        writeDisk,
+        // `persist`, not a bare `writeDisk`: the claim is for an OFF-screen project, but the save
+        // serializes the whole store, and a bare write would carry the on-screen project's stale
+        // store copy and clear its dirty flag, dropping its unsaved edits (consort 2026-10-09;
+        // upstream v0.4.2 has the bare form).
+        writeDisk: persist,
         markDirty
       }
       const deps = {

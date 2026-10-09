@@ -217,6 +217,18 @@ describe('holdLastGood', () => {
     expect(holdLastGood(good, next, NOW)).toBe(next)
   })
 
+  it('never lends one organization’s numbers to another under the same email (fork org rows)', () => {
+    const inA = { ...good, organization: { name: 'Org A', uuid: 'a' } }
+    const toB = failed({ organization: { name: 'Org B', uuid: 'b' } })
+    expect(holdLastGood(inA, toB, NOW)).toBe(toB)
+    // Same org (uuid wins over a renamed display name) still holds.
+    const sameA = failed({ organization: { name: 'Org A renamed', uuid: 'a' } })
+    expect(holdLastGood(inA, sameA, NOW).limits).toEqual(good.limits)
+    // Without uuids, the name decides.
+    const byName = failed({ organization: { name: 'Org B' } })
+    expect(holdLastGood({ ...good, organization: { name: 'Org A' } }, byName, NOW)).toBe(byName)
+  })
+
   it('drops the snapshot once one of its windows has reset — those numbers are provably wrong', () => {
     const next = failed()
     expect(holdLastGood(good, next, NOW + 3_600_000)).toBe(next)

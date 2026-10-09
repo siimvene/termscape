@@ -53,6 +53,10 @@ export const HOST_ONLY_CHANNEL_PREFIXES: readonly string[] = [
   'license:',
   'claude-accounts:',
   'codex-accounts:',
+  // Fork: the managed Pi accounts are the same plane (add opens a login node that writes into the
+  // account dir, remove deletes one). Missed in the v0.4.2 merge, where upstream's list arrived
+  // without the fork's third provider (blind security pass, 2026-10-09).
+  'pi-accounts:',
   'usage:',
   // The trust plane itself: who is paired, who may connect, and the invites that mint seats. A
   // peer that could reach these could pin its own key or revoke the host's other devices. Note the

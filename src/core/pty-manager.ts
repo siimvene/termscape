@@ -2860,8 +2860,14 @@ export class PtyManager {
     // terminal race documented above). Non-destructive — nothing is killed, so "recycle + respawn"
     // stays the manual escape hatch. On a clean send the stale banner is suppressed; on a failed
     // send it is left up as the backstop.
+    // Never for a join-only create (a live-link / hosted-team VIEWER, `joinAsWatcher`): the repair
+    // TYPES into the host's shell (`send-keys cd … Enter`, which also submits whatever half-typed
+    // line sits at the prompt), and a viewer's contract is that it cannot type. The owner's next
+    // open still heals the pane (blind adversarial pass on the v0.4.2 merge, 2026-10-09).
     const staleCwdHealed =
-      staleCwdProbe && (await this.repairPaneCwd(options.persistKey as string, options.cwd))
+      staleCwdProbe &&
+      !options.joinOnly &&
+      (await this.repairPaneCwd(options.persistKey as string, options.cwd))
     // Re-ask the tombstone question HERE, after every await above (has-session, PATH, project
     // overrides, the cwd probe) and immediately before the spawn. `create()` checked it before
     // calling us, but a delete can land during those round trips, and `spawnSession` CLEARS the
