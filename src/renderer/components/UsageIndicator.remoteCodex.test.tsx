@@ -74,3 +74,22 @@ it('discards an old forced refresh after switching projects and retains both Cla
   await act(async () => finish?.([row('u@a', 88)]))
   expect(host.querySelector('.usage-pill')?.textContent).toContain('17% Codex')
 })
+
+it('names a rate-limited host read and explains kept host numbers', async () => {
+  useSettings.setState({ settings: { ...useSettings.getState().settings, hiddenUsageProviders: [] } })
+  const limits = usage(42).limits
+  const claudeRow = (u: Partial<Extract<RemoteAccountUsage, { provider?: 'claude' }>['usage']>): RemoteAccountUsage => ({
+    hostKey: 'u@a', accountId: null, label: 'u@a',
+    usage: { limits: [], session: null, weekly: null, email: 'me@example.com', updatedAt: Date.now(), status: 'error', ...u }
+  })
+  await render(async () => [claudeRow({ rateLimited: true })])
+  await act(async () => (host.querySelector('.usage-pill') as HTMLButtonElement).click())
+  expect(host.textContent).toContain('Rate limited by the usage endpoint (HTTP 429) — try again in a few minutes.')
+  expect(host.textContent).not.toContain('Could not read usage on this host.')
+
+  act(() => root.unmount()); root = createRoot(host)
+  await render(async () => [claudeRow({ limits, updatedAt: Date.now() - 3 * 60_000 })])
+  await act(async () => (host.querySelector('.usage-pill') as HTMLButtonElement).click())
+  expect(host.querySelector('.usage-popover__held')?.textContent)
+    .toBe('Latest read failed — showing numbers from 3m ago.')
+})

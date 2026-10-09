@@ -241,6 +241,63 @@ export function isMeasured(
   return !!(numeric(node?.measured?.width) && numeric(node?.measured?.height))
 }
 
+/** Gap kept between a nudged node and the pinned panel it was moved clear of, room permitting. */
+const PINNED_CLEAR_GAP_PX = 12
+
+/**
+ * Keep a pane-centred node out from under a PINNED side panel (issue #854).
+ *
+ * Why this is not the rejected "nudge clear of the chrome" from 5e8abfe7: that one cleared the
+ * sessions sidebar as an OVERLAY — open, by definition, whenever "go to node" is clicked from it —
+ * so every jump moved right. This one only knows PINNED panels (`measurePinnedInsets`), which the
+ * user placed there to stay ("this one stays", see pinnedInsets.ts). With nothing pinned, or a
+ * node that already clears the panel, the viewport is returned untouched: centred in the pane.
+ *
+ * Otherwise, in order:
+ *  - the node fits the free area at this zoom → shift it just clear of the panel (plus a small gap
+ *    when there is room), not re-centred in the free area: the least movement that uncovers it;
+ *  - it does not fit, and the zoom was the caller's (`focusZoomToNode` off) → leave it centred: a
+ *    shift would only swap which edge is covered (the rule 5e8abfe7 already stated);
+ *  - it does not fit, and the zoom is ours to choose → fit it into the free area, the way a
+ *    maximized node is framed (#743).
+ * Vertical placement is never touched.
+ *
+ * FORK NOTE: `viewportForNodeFocus` below does NOT call this. The fork centres every node in the
+ * band the pinned panels leave free (fork invariant, `.claude/rules/canvas.md`), which already lands
+ * a node that fits that band clear of the panel, the case this nudge exists for. Kept from upstream
+ * (#854) so its unit tests keep pinning it and the next upstream merge of this file applies cleanly.
+ */
+export function clearOfPinnedPanels(
+  viewport: Viewport,
+  rect: Rect,
+  containerWidth: number,
+  containerHeight: number,
+  insets: ScreenInsets,
+  keepZoom?: number
+): Viewport {
+  if (!insets.left && !insets.right) return viewport
+  const freeLeft = insets.left
+  const freeRight = containerWidth - insets.right
+  const freeWidth = freeRight - freeLeft
+  if (!(freeWidth > 0)) return viewport
+  const left = viewport.x + rect.x * viewport.zoom
+  const width = rect.width * viewport.zoom
+  const right = left + width
+  if (left >= freeLeft && right <= freeRight) return viewport
+  if (width <= freeWidth) {
+    const gap = Math.min(PINNED_CLEAR_GAP_PX, (freeWidth - width) / 2)
+    const shift = left < freeLeft ? freeLeft + gap - left : freeRight - gap - right
+    return { ...viewport, x: viewport.x + shift }
+  }
+  if (keepZoom !== undefined) return viewport
+  return (
+    viewportForRect(rect, containerWidth, containerHeight, undefined, {
+      left: insets.left,
+      right: insets.right
+    }) ?? viewport
+  )
+}
+
 /** Shared Canvas focus policy. A maximized node uses its placement's chrome reservations
  * (`measureMaximizeInsets`: pinned side panels plus the persistent top controls and bottom dock),
  * so it lands exactly where maximize put it (#743). Every OTHER node is centred in the band the

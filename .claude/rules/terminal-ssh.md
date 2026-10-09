@@ -93,3 +93,72 @@ the 107-session burst 38% — a race). Three changes, order matters:
   durable. A `recycle` (worktree move, model switch, pause & end) keeps the node and records NOTHING
   when it cannot land, or the deferred kill would hit the session that node respawned under the same
   name.
+
+<!-- moved-verbatim-from: CLAUDE.md (upstream v0.4.2) -->
+## SSH projects on Windows: the in-process transport
+
+Windows' own OpenSSH cannot multiplex, and that is measured, not assumed (windows-latest,
+`OpenSSH_for_Windows_9.5p2`): `ssh -M` fails with `getsockname failed: Not a socket`, and a child
+carrying `ControlPath` FAILS rather than falling back — so every remote command, terminal and
+tunnel of an SSH project failed on a stock Windows machine. Git for Windows' ssh (10.5p1) starts a
+master but every session over it is reset and falls back to a full login per command. So on
+Windows the app does not run the ssh binary for SSH projects at all: `src/core/remote-ssh/native/`
+holds ONE `ssh2` connection per ControlPath and carries every exec, pty, SFTP session and reverse
+unix-socket forward over it. POSIX keeps OpenSSH untouched.
+
+- **One switch:** `useNativeSsh()` — always on win32; `NODETERM_NATIVE_SSH=1` turns it on anywhere
+  (how it is tested live from macOS against a real host), `=0` forces it off. Decided once per app
+  run for the SshProjectManager runners.
+- **Call sites do not change.** They keep building OpenSSH argv (`control-master.ts`);
+  `ssh-argv.ts` is a STRICT parser that reads it back and refuses (by name) any option it does not
+  know. A builder that grows a flag must teach the parser, or the native path fails loudly —
+  `ssh-argv.test.ts` parses every builder's output.
+- **Seams wired:** SshProjectManager's runners (`initSshProject`), pty-manager's
+  `runAsync`/`runWithStdin` and the remote terminal itself (`NativeSshPty`, a pty channel shaped
+  like `IPty`), remote-git, the setup runner (`spawnSshArgvStream`), the workspace poll's
+  master check. A new ssh call site owes the same routing.
+- **Semantics are OpenSSH's:** ControlMaster auto/no, `-O check|exit|forward|cancel`,
+  `StrictHostKeyChecking=accept-new` over the user's own known_hosts (hashed entries included —
+  that is why HMAC-SHA1 appears; CodeQL's alert on it is dismissed with the reason), publickey
+  only (agent, then key files, passphrase through the existing dialog, never in BatchMode), the
+  user's `~/.ssh/config` via `ssh -G` (never a second parser of it), a dropped connection ends
+  every channel with 255 (what `SshReconnector` reads).
+- **Channels past the server's MaxSessions spill onto more connections** (10 on a stock sshd; a
+  live 89-terminal project left 25 terminals blank before this). A refusal marks that connection
+  full until one of its channels closes; overflow connections are bounded
+  (`MAX_OVERFLOW_CONNECTIONS`) and live and die with the primary. A key unlocked with a passphrase
+  is held in memory while any connection is alive so overflow connections do not prompt again —
+  the Windows tradeoff for having no app-private ssh-agent.
+- **Channel races — keep these, each was a real bug:** open-confirmation, exit-status and close can
+  arrive in ONE read, so the exit status is recorded inside ssh2's callback (`recordExit`) and exec
+  consumers attach there too (`openOn`'s `onOpen`); late consumers check `channelExit(ch).closed`.
+  A killed streaming child must never write to its ended pipes (an uncaught
+  `ERR_STREAM_WRITE_AFTER_END` in main). A stream nobody reads never emits `close` — tests must
+  `resume()` the channels they hold.
+- **Tests run on every OS** against ssh2's own in-process `Server` (loopback, no sshd); the
+  directory is in the `windows-latest` CI job. Live numbers (macOS, `NODETERM_NATIVE_SSH=1`,
+  89-terminal project): 89/89 attached, 0 ssh processes, ~1 login per connect, main CPU 3–5% idle.
+- **ProxyJump** (#1078) follows OpenSSH: each hop is resolved by ITS OWN `ssh -G` and gets its own
+  host-key check and publickey auth; the chain is ssh2 `forwardOut` streams used as the next hop's
+  socket. `ssh -J a,b t` means `ssh -J a -W t b`, so only the FIRST hop's own ProxyJump is followed
+  (recursively); loops and chains deeper than 8 are refused by name. Jump connections belong to
+  the target connection and die with it (a dropped jump → 255 on the target's channels). MaxSessions
+  overflow connections REUSE the primary's chain (one bastion login; direct-tcpip does not count
+  against the bastion's MaxSessions); one-off connections build their own. Known hosts are checked
+  under `HostName` (or `HostKeyAlias`), as OpenSSH does — not under the alias as typed.
+  **ProxyCommand stays refused by name**, on the target and on a hop.
+- **The Windows ssh-agent only on the user's say-so** (#1080). MEASURED on windows-latest
+  (OpenSSH_for_Windows_9.5p2): the agent service REFUSES any lifetime or confirm constraint
+  (`ssh-add -t` / `-c` and our `ADD_ID_CONSTRAINED` alike), and an unconstrained key is stored in
+  `HKCU\Software\OpenSSH\Agent\Keys` (DPAPI) and survives service restarts — "until removed" is
+  the only add Windows offers. So a passphrase-unlocked key is added (`agent-add.ts`, our own
+  agent-protocol writer; ssh2 only lists and signs) ONLY when the host's own config says
+  `AddKeysToAgent yes` (what Windows' ssh.exe would do) or the user turned on Settings → Remote
+  (SSH) → "Keep unlocked keys in the Windows ssh-agent" (`settings.windowsSshAgentAddKeys`, default
+  OFF, copy says Windows keeps it until `ssh-add -d`). A config lifetime is sent as a constraint and
+  Windows' refusal stands: a refused constrained add is NEVER retried unconstrained. Fail-open: an
+  agent error never affects the connection. Reboot persistence is inferred from the registry hive,
+  not measured.
+- **Not done yet:** sleep/wake verification on the native transport, a like-for-like timing against
+  OpenSSH on the same project, and any run on a real Windows desktop (all evidence so far is CI plus
+  the macOS run of the same code path).

@@ -46,9 +46,11 @@ paths:
   (which sets `NODETERM_CANVAS_CONTROL`) is the whole wiring. That premise rests on grok's shipped
   docs and is **unverified** (`grok inspect --json` never run); if it does not hold, grok takes the
   marker-block route instead — see docs/grok-agent.md.
-  **SSH projects** (docs/ssh-agent-skills.md): the SAME shim + skill + blocks are installed on
-  the remote host at connect (`RemoteHooks.installCanvasControl` + per-account
-  `installCanvasSkillIntoAccountDir`), gated on the VERIFIED reverse hook tunnel — the shim
+  **SSH projects** (docs/ssh-agent-skills.md): the SAME shim + skill + blocks are put on the
+  remote host and KEPT current by the agent-tools check (`RemoteHooks.refreshAgentTools`: on every
+  connect and tunnel repair, rewriting only what differs from this build, managed-account skill
+  dirs included — see "An SSH host's agent tools are CHECKED" under Agent support in `.claude/rules/agents.md`; an account's
+  skill is also written when the account is added), gated on the VERIFIED reverse hook tunnel — the shim
   carries no machine-specific paths and POSTs through the tunnel's unix socket, so remote agents
   control the desktop's canvas. The shim is generated source no compiler checks:
   `canvas-control-shim.test.ts` runs it for real (/bin/sh against a real hook server, port AND
@@ -74,9 +76,79 @@ paths:
   (`--cmd=--version`), which was previously unexpressible in either direction. Two parsers are in
   play and both are tested — the sh loop (`control-shim-parse.test.ts`, real `sh` + a fake `curl`
   that records argv) and `parseControlBody` reading what it built (`canvas-control-shim.test.ts`).
-  **A new verb must not DEPEND on the fix**: the shim is rewritten locally every app boot but onto
-  an SSH host only inside `RemoteHooks.setup()` (on connect), so an already-connected project keeps
-  the old loop with no signal on the wire. Give every flag a value and both loops agree.
+  **A new verb must still not DEPEND on the fix.** The shim is rewritten locally at every app boot,
+  and an SSH host's copy is checked on every connect and brought to this build's bytes, so an app
+  update reaches the host on the first connect after the relaunch. A host can still run an older
+  loop for a while: while its tunnel is down (nothing is installed through a dead tunnel), when the
+  file is unreadable (never written over), or while a second desktop on an older build shares the
+  host account (it rewrites its own copy on its connects; ours returns within the hour). Nothing
+  on the wire says which loop is running. Give every flag a value and both loops agree.
+  **A retried call must not open a second node (`--request-id`, `core/control-request-ledger.ts`).**
+  The reply to an open can be lost while the open went through — the agent's own tool call is
+  killed (~2 min for a Bash tool call while a slow host holds the POST), the ssh tunnel drops
+  mid-reply, or the shim's endpoint walk re-posts after a transport that failed AFTER the request
+  was read — and the agent's natural retry used to open a second agent, team or worktree. The
+  verbs that create something (`REQUEST_ID_VERBS`) take `--request-id <id>`, and the shim also
+  sends its own `requestId` form field, generated once per RUN (`od` of `/dev/urandom`, else
+  pid+time), on every POST of that run, so its own re-post is covered for an agent that never read
+  the docs. Rules a refactor must not undo: (1) **the ledger lives in the hook server's `/control/`
+  route** (core), the one place desktop main's forwarder and the Server Edition's
+  `createServerEditionControlHandler` both sit behind — putting it in either shell's handler
+  leaves the other without it; (2) rows are keyed **(verified caller node, id)** only — an
+  unverified caller gets no dedupe rather than a shared bucket, and an explicit id from one is
+  answered with `REQUEST_ID_UNVERIFIED_NOTE`; (3) the row is **claimed before the handler runs**,
+  synchronously after the lookup, so two concurrent POSTs cannot both run; (4) a fingerprint (verb
+  + args minus the id, key order ignored) makes the same id with a different call a
+  `request-id-conflict`; (5) a settled row stores the WHOLE reply and a replay returns it (text:
+  a `replayed:` first line; JSON: `replayed: true`) — a refusal included, so an id never runs
+  twice; (6) a handler that cannot say whether its effect happened answers `indeterminate: true`
+  (desktop main's 120 s wait, now `src/main/control-forward.ts`: the renderer is not cancelled, and
+  an `open-worktree` whose `git worktree add` outlives the wait still completes) or throws, and the
+  row becomes UNKNOWN — refused, never re-run; the forwarder hands a late renderer answer back via
+  the handler's `onLateAnswer`, and settlement only moves up (unknown → answer, never the reverse).
+  **A late answer is finished exactly like an on-time one**: everything main does with a renderer
+  answer (the `open-browser` ownership claim, `browser-open-claim.ts`; the `open-project` grant) is
+  ONE `finishAnswer` step the forwarder runs on whichever answer arrives — replaying a late
+  "opened browser b1" without the claim told the agent it had a browser it could never drive. And
+  **an indeterminate reply names its id**: the route adds a `request id: <id>` line saying to pass
+  it back as `--request-id <id>`, and the in-flight/unknown refusals spell the flag with its value —
+  the shim's per-run id is otherwise never seen, so "retry with the same --request-id" sent agents
+  to re-run the bare command, get a fresh id and open a second one. That reply is not enough on
+  its own: an agent's tool call is typically killed at 120 s — the SAME instant the app gives up —
+  so the shim also prints the per-run id to stderr BEFORE posting an open it carries no caller id
+  for (`requestIdAnnounceLine`, skipped for a caller's own `--request-id` and for `--dry-run`), and
+  both agent bodies say to pass an OWN unique id up front for slow opens (open-worktree,
+  spawn-team, verify) with a tool timeout above 120 s. A `finishAnswer` step that throws never
+  escapes into the IPC listener: on time it resolves indeterminate, late it hands nothing back (the
+  row stays unknown);
+  (7) an explicit id on a verb outside the set is REFUSED (`request-id-unsupported`), like
+  `--dry-run` — an agent believing its `write` is protected when it is not is the failure the flag
+  exists to end — while a malformed or out-of-set per-run id is silently ignored; (8) a dry run
+  neither claims nor replays. The ledger is **durable** (24 h, 256 per caller, 4096 in total,
+  in-flight rows never evicted), mirrored to `<userData>/orchestration-state/control-requests.json`
+  and loaded by `hookServer.start()` in both shells: a retry after an app restart replays the reply,
+  a row IN FLIGHT when the process ended comes back UNKNOWN (refused, never re-run), and unknown
+  stays unknown — see **Durable orchestration state** (`.claude/rules/orchestration-state.md`). (It used to be process memory, on the theory
+  that a restart between the effect and the retry was too rare to pay for; measured, the cost is
+  small — below.) The timeout sentence is verb- and claim-aware (`controlTimeoutError`): only a
+  confirm-gated verb, whose dialog dismisses itself at the same deadline, is still called "safe to
+  retry"; a call with no ledger row (no id, or an unverified caller) is told to check the canvas for
+  its effect before retrying, never pointed at a flag it has no value for. Ids suggested to agents
+  must be UNIQUE (a uuid — `$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid)`, since slim
+  Linux lacks `uuidgen` and macOS lacks `/proc` — or a readable name with a random part): rows are per node for 24 h, so a
+  later conversation in the same node reusing a readable id for the same call would be answered
+  with the earlier reply. An SSH
+  host gets the new shim at its first connect after the update (the agent-tools check,
+  `RemoteHooks.refreshAgentTools`); until then — or while its tunnel is down — its runs carry no
+  per-run id (an explicit `--request-id` still works through the old loop). Agent-facing text
+  is rendered from `REQUEST_ID_VERBS` / `REQUEST_ID_RETRYABLE` / `REQUEST_ID_OUTCOME_GLOSS`
+  (`requestIdDocLines`). Tests: the ledger alone, the route (both dialects, in flight, conflict,
+  late answer, throw), the Server Edition handler behind it, and the real shim under `/bin/sh`
+  through a proxy that forwards the request and drops the reply — the re-post case, red before.
+  Deliberately NOT in the set: reads (a replay would serve a stale snapshot, and `browser
+  --cookies` would sit in memory for a day), the idempotent-by-nature verbs, and the
+  human-confirmed / rate-limited ones (`write`, `send`, `settings`, `report-issue`) — widening it
+  to those is a separate decision.
   **Grouping verbs** (`group` / `ungroup` / `move` / `arrange` / `align`): `group` wraps **sibling**
   objects — nodes or frames — into a new frame in their shared container (a mixed-container set, or
   an ancestor plus its descendant, is refused with that reason); `ungroup --group <id>` dissolves a
@@ -106,10 +178,131 @@ paths:
   unsupported cross-project boundary, without probing other projects or exposing their metadata.
   Callers that create and link nodes **in the same tick** must pass their own `lookup` — `setNodes`
   is async, so resolving fresh nodes off `nodesRef` would skip every one as "no such node".
+  **Issue-bound opens (`--issue`, 2026-09-28):** `open-agent`/`open-claude --issue <owner/repo#N |
+  #N>` binds the new session to a GitHub issue exactly like the board's **Start with agent**. The
+  SHAPE is refused by ONE gate, `issueFlagRefusal` (`canvas-control-core.ts`), which desktop MAIN
+  runs in its control handler (desktop main does not run `parseControlRequest` at all — do not move
+  the gate there alone) and the Server Edition runs inside `parseControlRequest`; any other verb
+  carrying `--issue` is refused, not ignored. `#N` is resolved by each shell against the project the
+  node OPENS IN (the `--project` target, the cold-open owner, or `ctlProject`) — the repository its
+  kanban board syncs with, i.e. the GitHub host controller's answer (configured, else detected) —
+  and a project with no GitHub board refuses `#N` and names the full form (`lib/issueFlag.ts`,
+  `HeadlessNodeFactoryDeps.issueRepository`). **On the desktop it is resolved ONCE, at the top of
+  the control handler (`issuePre`), before any open path snapshots the projects store**: the lookup
+  is a host round trip (`git remote`, `gh auth`), and an await inside a path let a tab switch in that
+  window write the node into the wrong project. A full `owner/repo#N` asks nobody. The same
+  placement puts resolution before every path's dry-run branch. **But not before the gates**:
+  `resolveIssueFlagForCall` first runs the renderer's authorization belt — the same
+  `resolveProjectTarget` call and source-capability rule the paths apply — and answers a caller
+  they would refuse with the path's own refusal, asking nobody (the lookup otherwise ran for a
+  refused caller, and its refusal said whether that project had a GitHub board). Main's
+  `gateProjectTarget` runs before the renderer as ever; the Server Edition already resolved after
+  its identity, source and target gates, now pinned by a test.
+  **The open PROMPT is decided in the same place, once, for every open path** (`openPrompt`, via
+  `launchPromptFor` in `lib/promptSpill.ts`): the issue reference line composed through
+  `issueLaunchPrompt`, then spilled to a file when it is over the typed-line budget (#706), judged
+  "local" by the project the node opens in (an SSH project's pane cannot read a file written here),
+  which comes from the SAME authorization belt (`issueFlagScope`, exported for this): a caller the
+  paths refuse gets no project and no spill. The live open was the only path that spilled; the `--project` and cold opens typed the prompt
+  inline, so the docs' "a long `--prompt` is safe on a local project" was false exactly where the
+  ~490-byte issue line made it likeliest to bite, and the `--project` path silently DROPPED
+  `--prompt-file` (the session started with no brief) and `--model`. A new open path types
+  `openPrompt`, never its own prompt — `control-prompt-spill.source.test.ts` pins each path.
+  **A spilled prompt is read at LAUNCH, which for a cold open can be weeks away**, so it is not a
+  paste: `saveUpload` puts a `LAUNCH_PROMPT_FILE_PREFIX` name under `<userData>/launch-prompts`
+  (`@shared/launch-prompt`), owner-only, swept after `LAUNCH_PROMPT_TTL_MS` (30 days) by the next
+  spill — under `uploads` the 7-day sweep of the next paste deleted it and `"$(cat '<path>')"`
+  started the agent with nothing. And because a cold open can wait longer than ANY TTL, the held
+  launch records the file (`pendingLaunch.promptFile`, via `withLaunchBrief` on every arming path)
+  and the delivery loop checks it right before typing (`launchBriefPresent`: local projects only,
+  a failed check answers "present"); a definite "gone" persists `manualOnly`, raises the
+  `brief-missing` delivery state (tooltip names the path, `list` says HELD) and waits for ▶ / `run`,
+  which still run it on purpose. The one residue: a refused open may leave a spill file behind
+  (the spill is decided before the paths, to keep awaits out of them), swept with the rest.
+  `--prompt` replaces the default task after the reference line; `--prompt-file` stays the whole brief. Both
+  generated agent bodies render the contract from `issueBindingDocLines` (the example first prompt
+  is rendered from `issueLaunchPrompt` itself): move your OWN card with `assign` (In Progress on
+  start, In Review on delivery), never close the issue, never Done, `Closes #N` in a PR, and **post
+  to GitHub only when the user asked in that session — otherwise end with a proposed comment**.
+  nodeterm has no automatic post-to-issue path and must not grow one. `list` marks a bound row
+  `issue owner/repo#N`. Server Edition: `open-agent --issue` works under its verified-only,
+  creator-owned rules and writes the run history; `assign` is unsupported there (the skill says so).
+  **The board's GitHub lane for agents (`issues`, `prs`, 2026-09-30, read-only).** An orchestrator could
+  start work on an issue (`--issue`) and wait on a PR (`--after-pr`) but not SEE the lane: `board` lists
+  session cards only (measured: 21 session cards, zero issue/PR cards), so agents fell back to
+  `gh issue list` / `gh pr checks`, which spend the account's budget outside the coordinator and cannot
+  say which column an issue sits in, which session is bound to it, whether dispatch queued it, or what CI
+  snapshot the board already holds. `issues [--state open|closed|all] [--label L] [--column <id|title|
+  ungrouped>] [--limit N]` and `prs [--state open|merged|closed|all] [--limit N]` (default open, 30 rows,
+  max 100, newest-updated first; both take `--project`) answer that. ONE module, `core/github/control-
+  read.ts`, called by desktop main (after the `--project` grant gate, before any forward) and by the
+  Server Edition's control handler (own project only — it keeps no grant ledger). Rules a refactor must
+  not undo:
+  - **Zero GitHub requests.** The read is `GitHubIssueService.controlSnapshot`: the issue cache plus the
+    pull tracker's memory, through `projectContextForCache` — no credential resolve, no heartbeat, no
+    poll (`service.pulls.test.ts` counts the client's calls and the credential chain, before and after a
+    fetch). No snapshot yet, an unapproved repository and a board with no GitHub connection are each a
+    NAMED refusal (`issues-no-snapshot`, `-not-approved`, `-no-github-board`), never "0 issues". An
+    agent's read deliberately does NOT start a fetch: a repository's first fetch is a full paged harvest,
+    and spending that is the person's call (opening the board), not a background agent's.
+  - **An unapproved column mapping is not a fact.** The label → column mapping arrives through the
+    git-shared project file; while this machine has not approved its digest (`mappingApproved` false)
+    the board is read-only with "approve the column labels", and `issues` likewise shows NO `column:`,
+    says so in its header, and refuses `--column` (`issues-mapping-not-approved`).
+  - **One workspace load per call.** The host's cache context carries the `Project` it resolved
+    (`GitHubIssueProjectContext.project`, in-process only) and `controlSnapshot` returns it; a second
+    `githubProject` load per call re-fired the store's persist hooks for an agent polling `prs`.
+  - **A harvested merge/close wins over an open status read**, which may be stale; the status read
+    stays authoritative about draft vs open.
+  - **The board's semantics, imported.** CI is `GitHubPullStatus.ci` (`pullStatusFrom`: a null rollup
+    is "no checks", never passed; only the CURRENT head counts), merge `ready` only from CLEAN, a failed
+    status read says STALE (`pullStatusFreshness`), merged/closed PRs carry no CI. PR ↔ session card is
+    `pullsForCard` — MOVED to `@shared/pull-card-links` (the renderer's `lib/pullLinks.ts` re-exports it)
+    with the nearest-bound-branch walk (`nearestBoundBranch`, which `worktreeBranchOf` now calls), so
+    the card and the verb cannot link differently: worktree branch (never a fork, never on an SSH
+    project) or the issue the session was started on, tombstones honoured. Bound sessions are terminal
+    nodes whose `issueRef` names this repository, with the mirror's live state (`queued` for a held
+    launch, `unknown` otherwise).
+  - **Untrusted text.** Titles, labels, logins, branch names — and node ids and column ids, which come from
+    the git-shared project file whose load checks only that they are strings — pass `untrustedLine` (one line, `\p{Cf}`
+    bidi/zero-width stripped, capped); the reply's first line is `UNTRUSTED_TEXT_NOTE`; issue bodies and
+    comments are never included (the agent reads them with `gh`, as the `--issue` prompt says).
+  - **Dispatch state is the renderer's**, so the renderer REPORTS it: `boardDispatch.report` (display
+    only, replaced whole on change, `@shared/board-dispatch-report`) into `core/board-dispatch-report.ts`,
+    kept per sender and read only for senders still in `clientIds()` (a closed tab leaves no stale
+    "queued"), owner clients only, the channel host-only (a relay tab's stub is inert). Desktop and
+    Server Edition both register it.
+  - Verified-only (`requiresVerified`, refusal `GitHub lane read refused.`, and desktop main checks
+    `verified` again as a second guard, like open-project) — the project is resolved
+    from the caller's node, so a forgeable caller could read any project's lane; `STORE_ANSWERED_VERBS`
+    (a read needs no canvas, and polling `prs` must never travel the user's view); not a request-id
+    verb. Both agent bodies render `githubReadDocLines` from the module's constants, including the loop
+    (`issues` → `open-agent --issue #N` → `prs` / `--after-pr`) and "GitHub writes stay with the person".
+    Relay peers cannot call these (their control belongs to the host). **Mobile: N/A** — the phone issues no
+    control verbs.
+
   **Dependency edges (`--after`, 2026-07):** `open-terminal`/`open-claude`/`open-agent` accept
   `--after <id,id>`, which opens the node **armed** — `data.pendingLaunch` ({after, command},
   `PendingLaunch` in shared/types) holds the launch the factory built, and Canvas fires it once
-  every dep reports `done`. This is what makes the canvas a DAG instead of a fan-out. Load-bearing
+  every dep reports `done`. This is what makes the canvas a DAG instead of a fan-out.
+  **`pendingLaunch` is a MACHINE-LOCAL exec field, like `shell`** (@shared/node-exec): its `command`
+  is typed into a shell once the wait is over, and `after: []` or a vanished dep counts as over, so
+  a value that arrives from outside would run a command nobody here armed. It is persisted in
+  workspace.json's `IndexEntryV3.localExec` (every ref kind: folder, SSH, local-data), NEVER in
+  `.nodeterm/project.json` or an SSH mirror (`stripSharedNodeExec`), and a file that carries one is
+  ignored on read — the one-time legacy hoist deliberately does not adopt it either (provenance
+  cannot be told apart, so an armed node written by an older build loses its held launch on
+  upgrade). On `canvas:mut` a peer's value is stripped and OUR value carried across its upserts
+  (`carryLocalNodeExec`); the reflector forwards one only between OWNER clients
+  (`CorePlatform.isOwnerClient`: the app window, a cookie-authenticated Server Edition tab — never a
+  relay peer), stamped `origin: 'core'`, which a client cannot supply and a relay tab ignores. That
+  owner→owner leg is load-bearing: it is how two Server Edition tabs agree a launch was claimed, and
+  how a headless delivery's clear reaches the browser, so nothing types it twice. Our OWN writes
+  into a background project go through `applyOwnNodeMutation` (unstripped — a cold open keeps its
+  launch, a patch to `undefined` clears it); `applyNodeMutation` is the peer path (the one reducer,
+  `applyCanvasOp`). On a Server Edition that governs a shared project, the canvas authority hears
+  every op WITHOUT its launch and a save's exec carry is what writes it (see **Shared canvas
+  authority**). Load-bearing
   details: (1) **an unknown agent state is NOT "satisfied"** — right after a fan-out no upstream has
   emitted a hook event yet, and reading "no news" as "finished" would fire every dependent
   instantly; a **deleted** dep IS satisfied (it can never report); and a dep that is `done` with a
@@ -142,6 +335,11 @@ paths:
   graphs through project switches/park expiry. Attempted/legacy-unknown intent stays manual: its
   clearing autosave may have been lost after Enter. Explicit Run now rechecks the foreground shell and
   clears any incomplete line; a refused/throwing/cancelled launch stays held, `manualOnly`.
+  The Server Edition's immediate open and its `run`, and the desktop's headless start (`--run-now` /
+  `run`, below), deliver through the SAME echo-verified writer (`@shared/command-delivery`, moved
+  out of the renderer for this), via the headless launcher `core/headless-launch.ts` (#925): a tmux
+  paste is not immune to zsh's rc-time tty flush (#556) or the canonical-line cap (#706). The
+  Server Edition's deferred `--after` release (`refreshArmed`) still pastes with `sendText`.
   (5) UI `initialCommand` stays until submission; serialization converts unsubmitted UI intent
   into a never-attempted `pendingLaunch`, including a project switch during shell settle. A live
   initialCommand alias on remount cannot reset an attempted marker. Server saves
@@ -158,7 +356,10 @@ paths:
   (6) Canvas subscribes to `armedDepSig`, NOT `useAgentStatus(s => s.byId)` —
   the same discipline as `loopSig`; the full map re-renders the canvas on every hook event.
   Pure logic + refusal matrix in `renderer/lib/pendingLaunch.ts` (unit-tested). The dep→node edge is
-  a **persisted rope** (`ctrl-<dep>-<node>` in `project.ropes`, like the opener's) whose LOOK is
+  a **persisted rope** (`ctrl-after-<dep>-<node>` — `waitRopeId`, marked so it can never be mistaken
+  for the opener's `ctrl-<source>-<node>` once the canvas prunes that one; ropes saved before the mark
+  are re-marked by append order at load, `markLegacyWaitRopes` — in `project.ropes`, like the
+  opener's) whose LOOK is
   derived — dashed + ⏳ while `pendingLaunch.after` still lists the dep, solid once it launched
   (`edgeModel.ts` `ropeVisual` over the ONE `ropeInfoOf` lookup the render and BOTH delete paths ask;
   two builders would be two answers and the label the user reads would stop describing what the
@@ -166,7 +367,7 @@ paths:
   ONE edge per pair holds. Deleting a WAITING rope drops that dep from `after` (`dropAfterDep`) and
   takes nothing else — the covered bridge survives, because "stop waiting for it" is not "stop being
   able to read its work"; an emptied list fires. Only `open-*`/`verify` write the rope, so
-  `missingDepRopes` heals an armed node that has none at PROJECT LOAD (`pendingLaunch` is persisted,
+  `missingDepRopes` heals an armed node that has none at PROJECT LOAD (`pendingLaunch` is persisted (machine-locally),
   the rope is not, so a node armed by an older build would otherwise hold a launch with no arrow). All
   edges route through the single `floating` edge type (`canvas/FloatingEdge.tsx`, a bezier between
   the two nodes' facing-side midpoints; a node whose eye is closed hides every edge touching it).
@@ -198,8 +399,8 @@ paths:
   `queued:false` is NOT proof of a running CLI: Server's `deliveredIds` acknowledges terminal
   delivery only. Its initial commands are persisted before attach/send and retained on failure;
   only acknowledged sends clear them. Boot ownership remains fail-closed. Desktop `list` (live
-  and stored projects) names QUEUED / LAUNCH FAILED / DROPPED / AGENT STATUS UNCONFIRMED rather
-  than treating absence of a hook as success. Server v1 still explicitly refuses `list`.
+  and stored projects) names QUEUED / STARTING / LAUNCH FAILED / DROPPED / AGENT STATUS UNCONFIRMED, and every other agent row its state (WORKING / IDLE / NEEDS YOU: an unlabelled idle row and a row waiting on a person used to read the same)
+  rather than treating absence of a hook as success. Server v1 still explicitly refuses `list`.
   **(8) An armed node must not cold-start its own agent** (found while fixing (7)). The mount-time
   cold-restore relaunch (`fresh && agentId && canResume(...)`) carries a second, independent
   refusal beside the `paused` one (`shouldColdResume`): `!data.pendingLaunch`. A first open is
@@ -235,6 +436,301 @@ paths:
   so reporting it as "the error" would be a confident wrong fact. Reading the text, and the
   *failed-to-start* watchdog (a station that never emits ANY hook event — the opposite failure,
   which hangs dependents honestly rather than firing them wrongly), stay open.
+  **(10) A `done` from BEFORE new work was handed over does not release anything**
+  (`core/station-handover.ts`, `@shared/station-handover`, 2026-09-30). A station is reused: an
+  orchestrator hands it task B (`send` → `queued` because it is busy, or delivered to an idle pane
+  it has not started on yet, or a `write` / `run`) and then opens D `--after <station>`. Until the
+  station STARTS B its state is still task A's `done`, so D fired at once — on A's output, and a
+  launched dependent cannot un-launch. #1042 closed the same hole for `--after-success` (reports);
+  this is the plain-turn half. Rules a refactor must not undo:
+  - **The fact is core's, per station, fed by the SAME hand-over moments #1042 uses**: the
+    messaging layer's `onHandover` (`queued` = held from that instant; `landed` at the time the
+    delivery attempt STARTED; a queued entry that `settled` without landing holds too, from the
+    settle — the orchestrator armed D believing the task was handed; the turn running at the expiry
+    does not end it, only a turn started after it does, and nothing starts one unless the station is
+    given work again, so ▶ / `run` are the usual way out), and each shell's control answer
+    (`noteControlAnswer`, on success only, never the caller naming itself) for `write` — stamped with
+    the renderer's `typedAt`, when it STARTED TYPING after the human's confirm, never the request
+    time: a turn that began while the dialog was open (a background child's task-notification) must
+    not answer text not yet typed — and for `run` (starts the named node's held launch; no confirm,
+    stamped at request arrival). A `write` into a station that was BLOCKED or WAITING at request time
+    (read from the tracker's short state history) is NOT a hand-over: it answers the prompt and the
+    same turn continues, so no new turn would ever start to end it. Board comments, station notices
+    and a person typing are not hand-overs (the #1042 set).
+  - **It ends with a turn that STARTED at or after the newest hand-over and has ENDED, with nothing
+    still queued.** The tracker stamps turn starts itself (first working/waiting/blocked after an
+    idle state, or any genuine `newTurn` — after an Esc interrupt core may never see the idle the
+    renderer infers — on its own clock) for EVERY station, because a delivered prompt can start — and
+    even finish — its turn before the delivery's `landed` event is emitted; a hand-over that finds
+    its answering turn already over clears at once. Timestamps never cross a process: the renderer
+    only reads a membership list, so the Server Edition browser's clock never enters it. A turn
+    already running when the work landed does not end it (the typed text is answered by a LATER
+    turn); if a CLI folds typed input into the running turn instead, the hold lasts until its next
+    turn — the holding direction, with ▶ / `run` as the way out. The idle-prompt rescue (`idle: true`)
+    counts only for a station still `working` (the reduceEntry rule): it also fires under an open
+    permission prompt, and taking it as idle there let the approval's `working` stamp a fake turn
+    start inside the same turn (review of #1052, reproduced).
+  - **The tracker is fed every agent event BEFORE the messaging queue** (desktop `emitAgentStatus`,
+    the Server Edition's `onAgentEvent`): the queue flushes new work on the very `done` the tracker
+    must stamp, and the server's `refreshArmed` reads the tracker on that same event. Pinned at
+    source level by `main/station-handover-wiring.test.ts`.
+  - **The renderer reads it through a derived primitive signature** (`armedHandoverSig`, only the
+    armed nodes' deps — the `armedDepSig` rule), and `launchesToFire` / `depSatisfied` take it as a
+    trailing argument: a handed-over station is never a satisfied dep, a DELETED one still is.
+    `successDepFacts.turnDone` applies it too, so a success wait never releases where plain
+    `--after` would hold. The Server Edition's factory asks `handedOver` in `refreshArmed` AND in the
+    creation shortcut (`mustWait`): "already satisfied at creation" must mean satisfied under this
+    rule, or the node is launched immediately by the shortcut.
+  - **Background SUBAGENTS hold the same way; background SHELLS do not** (same module, same list;
+    `background: true` on the record). MEASURED live 2026-09-30: an agent's turn ended while its
+    work went on in the background, and the node armed `--after` it fired before anything was
+    pushed. Claude's `Stop` carries `background_tasks` (see **Claude's native subagent hooks** in `.claude/rules/agents.md`, fact
+    6); `liveBackgroundSubagentIds` keeps only `type: 'subagent'` entries
+    (`NormalizedAgentEvent.backgroundSubagentIds`). A `done` listing a live subagent holds the
+    station; only a later `done` whose inventory is PRESENT with no subagent left releases it, or
+    `SessionEnd`. Why only subagents: a child ENDS, and its task-notification wakes the parent into
+    another turn, so that later `Stop` reliably comes; a background shell (a dev server, a watcher,
+    `tail -f`) may never end and does not reliably wake the station — holding on shells held a
+    dependent FOREVER ("S starts the dev server, T `--after` S runs e2e" never fired; review of
+    #1052). Unknown `type`s are treated like shells. An ABSENT inventory is unknown and changes
+    NOTHING (a CLI too old to send it keeps today's behaviour exactly; the idle rescue and
+    `StopFailure` carry none). The agent bodies tell a station to wait for a background shell's
+    result itself before ending its turn when a dependent needs it.
+  - **Eviction prefers stations with nothing held** (the bound is 2000 tracked stations; the oldest
+    with nothing held goes first) — dropping a held one would release its dependents. Only when
+    every tracked station holds is the oldest held one dropped.
+  - **The Server Edition re-runs `refreshArmed` on every tracker change**, not only on
+    working/done events: a hold can end on an event the factory is not otherwise run for (a
+    `SessionEnd` clearing a subagent hold).
+  - Surfaces: `list` says `waiting for <station> to finish the work handed to it` (or `…the tasks
+    still running in its background`); the QUEUED tooltip
+    names it; both agent bodies render `afterHandoverDocLines` ("hand it the next task FIRST, then
+    open the dependent"). DURABLE across a restart (`HANDOVER_FACT`, see **Durable orchestration
+    state**, `.claude/rules/orchestration-state.md`): the holding stations are stored, `queued` is rebuilt from the durable queue.
+    Relay tabs take the inert stub; the list channel is HOST_ONLY
+    (unscoped: every project's stations). Mobile: N/A (the phone never sees `pendingLaunch`).
+    Tests: `core/station-handover.test.ts`, `test/acceptance/after-handover.test.ts` (the REAL
+    queue → tracker → the renderer's real `launchesToFire`, red on the old code) and the server
+    factory's own cases.
+  **Pull request waits (`--after-pr`, 2026-09-29).** `open-terminal --cmd …` / `open-claude` /
+  `open-agent` take `--after-pr <N:checks|N:merged>[,…]` (N may be `#N` or `owner/repo#N`) and
+  `--pr-deadline <90m|12h|3d>`: the held launch ALSO waits for pull requests of the project's
+  board repository, ANDed with `after` and the setup gate. The grammar, the persisted shape
+  (`pendingLaunch.afterPr = {repository, waits, deadlineAt}`) and main's shape gate are ONE module,
+  `@shared/pr-wait`; when a wait is met is `renderer/lib/prWait.ts`. Rules a refactor must not undo:
+  - **No new poller, no new request path.** The status is #1008's `GitHubPullBoard` from the host's
+    memory. Canvas holds the board's own refcounted host subscription (`watchPulls`) while any live
+    node holds a PR wait, so #1008's conditional heartbeat (free while nothing changes) keeps it
+    fresh; a `checks` wait also asks the host's bounded chase (`usePullChase`, visible window only)
+    because a finished check run does not move the heartbeat. Past the chase cap (12 reads, about
+    48 minutes) a still-running CI is noticed on the next repository change — the deadline and ▶
+    are the answer, never a timer of our own.
+  - **#1008's semantics, not new ones.** `checks` = `ci === 'passed'`, which `pullStatusFrom`
+    reports only for a SUCCESS rollup at the CURRENT head; a null rollup ("no checks") never passes;
+    a STALE board never passes `checks` (a push since the last read carries other checks) but may
+    pass `merged` (irreversible). A board whose repository differs from the hold's is `blocked`,
+    which holds rather than fires — that is also what makes a mid-switch board harmless.
+  - **`checks` needs a read that STARTED after arming.** The host remembers "passed at head A"
+    across a closed board, so pushing B and arming at once would otherwise fire on A. The hold
+    stores `armedAt` on the HOST clock (`pullStatus().now`), the tracker publishes `readStartedAt`,
+    and `checks` is `unknown` until `readStartedAt >= armedAt`. Two host changes carry it: a
+    FOREGROUND read now notifies even when nothing changed (else an already-green PR's fresh read
+    would never reach the renderer), and Canvas asks for one (`startFreshReadAsks`: at once, then at
+    most 3 more, 35 s apart — the 30 s refresh floor or a read already in flight can swallow one).
+  - **"No such PR" needs a snapshot refreshed after the question** (`lookupPullRequests`). A board's
+    snapshot can be a minute old and `subscribe` starts no refresh when a board already holds it,
+    so `gh pr create` then `open-* --after-pr` used to be told "does not exist — do not retry". A
+    miss now asks for one refresh and looks again; absence is proven only when the snapshot's
+    `lastSuccessfulRefreshAt` is at or after the host time read before that refresh. Columns come
+    from the first page's `counts`, so a PR filed under a deleted column is still found, and a
+    truncated harvest says so instead of "retry in a minute" forever. The spilled-prompt TTL
+    (30 days) outlives the longest `--pr-deadline` (14 days), pinned by a test.
+  - **Unknown is never satisfied, in both directions.** `launchesToFire` treats a caller that passes
+    no PR context as CLOSED for a PR hold (the opposite of the setup gate, whose absent probe is
+    open for a restart reason that does not apply here), and a malformed persisted hold becomes
+    `INVALID_PR_WAIT_HOLD` — present, expired, never satisfied — never `undefined`, because dropping
+    it would start the node on its `--after` deps alone. `normalizePendingLaunch`
+    (`@shared/pending-launch-shape`) now runs at BOTH serializer seams for the whole held launch: an
+    `after` that is not a list used to throw inside the canvas's dep-signature selector; an
+    unreadable gate turns the hold `manualOnly` instead of opening it.
+  - **Deadline, and the escape.** Default 24h, 1m–14d, refused (not clamped) outside it. Past it the
+    node never starts on its own: the badge reads ⚠ EXPIRED (TerminalNode sets its own timer — no
+    store changes at a deadline), `list` says EXPIRED, and ▶ / `run` start it anyway (`planRunVerb`
+    treats a PR hold like `--after`: the mount does not fire it). Exactly-once is unchanged:
+    `launchInFlight` plus clearing `pendingLaunch` on submit.
+  - **Refused at arm time, each with its reason** (`resolvePrWaitFor`, resolved ONCE next to
+    `issuePre`, against the project the node OPENS in — and only for a caller `issueFlagScope`
+    authorizes, since the lookup tells its caller whether a project's board exists): a relay tab; a board not connected to GitHub
+    (a cwd-less project says why); no repository or sync not approved on this machine; a full
+    `owner/repo#N` in another repository; a number the harvested PR list lacks — only from a WHOLE,
+    refreshed snapshot (`lookupPullRequests`), anything less is the retryable
+    `after-pr-unconfirmed`; a closed-unmerged PR; `:checks` on a merged PR. A `:merged` wait on an
+    already-merged PR is met now and not stored. An SSH project is NOT refused on its own account:
+    its board's status is read by this machine's GitHub client like any other.
+  - Main (`afterPrFlagRefusal` in its handler) and the Server Edition (`parseControlRequest`) share
+    the shape gate: `--run-now` with `--after-pr`, `--pr-deadline` alone, and `open-terminal` without
+    `--cmd` (nothing to hold) are refused. The Server Edition then refuses the well-formed flag by
+    name (its open allowlist) — it keeps no PR watch, and a silent drop would start the node at once.
+  - A node in a project that is not on screen is judged when that project is next viewed (the watch
+    follows the live canvas), the same contract as a cold-opened `--after` node. **Downgrade:** a
+    build older than this one keeps `afterPr` in the file but ignores it, releasing the node on
+    `after` alone. **Kanban / mobile:** the card does not show QUEUED for any held launch (a
+    pre-existing gap, not new here); the phone never sees `pendingLaunch`.
+  **Success waits (`--after-success`) and `report-outcome`** (2026-09-29). `--after` releases a
+  node when every station's TURN ends; a turn ending is not the task succeeding (a station can give
+  up, answer its own question or produce something broken, and end its turn cleanly), and #521 only
+  catches a turn that ERRORED. So a station says how its task went —
+  `report-outcome --outcome succeeded|failed [--note <line>]` — and `open-terminal --cmd` /
+  `open-claude` / `open-agent --after-success <id,id> [--success-deadline <90m|12h|3d>]` waits for
+  a reported success. Grammar, the persisted shape and the pure evaluation are ONE module,
+  `@shared/station-outcome`, used by desktop main's shape gate, the Server Edition's parser AND
+  headless factory, and the renderer's launch loop, so the two shells cannot disagree about when a
+  dependent starts. Rules a refactor must not undo:
+  - **A success wait is `--after` plus the report.** Every `--after-success` id is FOLDED INTO
+    `pendingLaunch.after` (renderer: once, right after `prWaitPre`; server: before `resolveAfter`),
+    so the existing rules apply unchanged — the station must exist and report status, the wait rope
+    is drawn and deleting it is the escape (`dropAfterDep` now drops the success half too), the
+    `--run-now` / `--project` refusals, #521's errored-turn hold. The hold
+    (`pendingLaunch.afterSuccess = {deps, deadlineAt}`) adds only "and it reported success". It is
+    also the downgrade story: a build that ignores the field still waits for the turn.
+  - **One grammar; the ambiguous form is refused by name.** `--after a1:ok` (any `:` in `--after` —
+    node ids never contain one) is refused pointing at `--after-success`, not answered "no such
+    node"; an id in both flags is refused ("name each station once").
+  - **The matrix** (`evaluateSuccessDep`): `failed` BLOCKS (never fires; `list` BLOCKED BY FAILURE,
+    badge ⚠ BLOCKED, tooltip names the station and its note); `succeeded` is met once the station's
+    turn is over without an error; no report = waiting (no news is never success); a DELETED station
+    counts only if it reported success before it went — the one place this differs from `--after`,
+    where a deletion is satisfied, because closing a station is how an orchestrator abandons a failed
+    attempt. Only a canvas-control agent can run `report-outcome`, so waiting on anything else is
+    refused (`successDepRefusal`, checked where `--after` is checked). Deadline: the `--pr-deadline`
+    grammar and bounds (`parseWaitDeadlineArg`, one parser for both), EXPIRED badge, `list` EXPIRED,
+    ▶ / `run` start it (`planRunVerb` treats the hold like `--after`).
+  - **The report is core's, and never read from a git-shared file.** `core/station-outcome-store.ts`
+    holds it in MAIN (desktop) / the server process: a renderer reload does not lose it, and since
+    the durable-state change an app restart does not either — it is mirrored to the machine-local
+    `<userData>/orchestration-state/station-outcomes.json`, BOUND to the session that made it (see
+    **Durable orchestration state**, `.claude/rules/orchestration-state.md`). The board-log line (`station-reported`, on the station's own
+    card, NEVER_COLLAPSE) is display only — `project.json` and the board log are git-shared, and a
+    success anyone can commit would release every dependent. `report-outcome` is verified-only
+    (`requiresVerified`) and a node reports only about ITSELF: `--node` naming another node is
+    refused (`report-outcome-not-self`), not ignored. The note is display text (`sanitizeOutcomeNote`:
+    `oneLine` + format chars stripped, 200 code points) and is never typed into a pane.
+  - **When a report ends — the "new task" rule, decided by when work REACHES THE PANE, never by
+    when a control answer comes back.** A later report supersedes. Otherwise, "hand a station its next
+    task, then open a dependent `--after-success` on it" releases the dependent on the PREVIOUS task's
+    success. The first version withdrew the report on the `send`'s ANSWER, which for a busy station is
+    `queued` (ok: true) long before the message lands — so the station's report for the task it was
+    still on counted, its turn ended, D fired, and the queue flushed the new task on the same idle edge
+    (review of #1034). Now:
+    - `send` / `reply`: the messaging layer emits `AgentMessagingDeps.onHandover` — `queued` (the
+      queue's own `onQueued`, synchronous at the push), `landed` (bytes reached the pane: `delivered`,
+      `stalled`, `deliveredToReplacedTarget`, on a first attempt or a flush, `at` = when that attempt
+      STARTED), `settled` (one per `queued`: flushed, refused on flush, or expired). The store
+      (`StationOutcomeStore.onHandover`) marks a queued station WORK PENDING — its reports publish with
+      `workPending` and do not count — withdraws reports older than a landing's start (so a report
+      about the new work survives a stalled or late answer), and on a settle that never landed
+      withdraws the report too (holding, not the old success; the orchestrator was told it expired).
+      Only `send` / `reply` count: a board comment is a person steering and a station notice is the app.
+    - `write` / `run`: their answer IS the landing (typed after the confirm; a held launch delivered),
+      so `clearOutcomesAfterControl` withdraws reports older than the answer, from each shell's
+      control handler (desktop `finishAnswer`, which runs on a late answer too).
+    - A new TURN clears nothing (a turn is not a task: a station may report mid-turn, and a person
+      typing "thanks" starts a turn), nor does typing in the pane. Closing a station keeps its report
+      (the deleted-station rule reads it). Every rule errs toward holding, which the deadline and ▶ end.
+    `main/station-outcome-handover.test.ts` replays the review's scenario through the REAL queue and
+    fails on the answer-time rule.
+  - **Both shells**: desktop main answers the verb before the forward; the Server Edition answers it
+    through the same `handleReportOutcome` (`onRecorded` re-runs `refreshArmed`) and honours
+    `--after-success` in the headless factory (`successFacts`: the mirror's `done`, the fresh-spawn
+    `awaitingFirstWorking` rule, and #521's errored turn from its own event stream, `lastTurnErrored`
+    — so a succeeded-then-errored station holds on both editions; the server's PLAIN `--after` still
+    does not apply #521, a pre-existing gap). Both wire `onHandover` into their messaging deps and run
+    `clearOutcomesAfterControl` on answers.
+  - **The badge's deadline tick is a memo input** (`lib/useSuccessWait.ts`): nothing in any store
+    changes when a deadline passes, and a timer whose tick the memo ignores re-rendered the node with
+    the cached "waiting" — the badge kept QUEUED while `list` said EXPIRED. `useSuccessWait.test.tsx`.
+  - Reports survive an app restart, so a station that reported success and was then CLOSED still
+    counts for its dependents afterwards; one CLOSED without a success report reads BLOCKED ("closed
+    without reporting success") and only ▶ / `run` start that dependent. A station that starts a
+    DIFFERENT session loses its report (below). Both agent bodies say so.
+    `station-outcome:list` is in `HOST_ONLY_CHANNELS` (unscoped: every project's notes); relay tabs
+    take the inert stub. Pinned at source level by `main/station-outcome-wiring.test.ts`. **Not
+    done:** a reported `failed` does not raise a station-failure notice to the opener (the opener
+    reads BLOCKED BY FAILURE in `list`) — a candidate trigger for `@shared/station-notice`; the kanban
+    card and the phone show no outcome (the phone never sees `pendingLaunch`).
+  **Headless start (`--run-now`, `run`, #925):** `open-*` with `--run-now` into a project that is
+  not on screen starts the new node's held launch at once instead of "when next viewed". A node
+  with nothing held (an `open-terminal` without `--cmd`) has nothing to start, and gets the plain
+  cold-open reply. `run --node <id> [--project <id>]` builds nothing: it claims and starts the held
+  launch of a node that already exists, the CLI twin of the QUEUED badge's Run now (like ▶, a `run`
+  that starts the node overrides its `--after` wait). Into a project that IS on screen `--run-now`
+  changes nothing: the mount path already starts the node.
+  - **Flow.** For `--run-now` the renderer first builds the node as a cold open; `run` starts from
+    the node as stored. Either way it then writes an
+    `executor:'core', attempted:true, manualOnly:true` claim to disk BEFORE any spawn (never
+    spawn on an unsaved claim: a failed save restores the original launch and starts nothing,
+    `claim-not-saved`). Desktop main's `pty.launchHeadless` runs core `launchHeadless` on
+    `desktopHeadlessRequest(req)`: `createHeadless` (client 0), then settle a fresh shell (200 ms
+    quiet / 1.5 s silence cap, under an absolute `SETTLE_MAX_MS` = 5 s ceiling that output never
+    extends — nothing cancels this wait, and a pane that keeps painting never goes quiet), then the
+    mounted writer's trust rule (`trustsFreshShell`, `@shared/launch-trust`: a fresh session-host
+    session is trusted without a probe; every other pane must pass `isLaunchShell`, and an unknown
+    answer is `no-shell`, nothing typed), then the echo-verified writer (`@shared/command-delivery`),
+    then `releaseHeadless`.
+  - **The IPC is desktop-only and host-only.** It is registered in `src/main`, not in core
+    `registerIpc`, so a Server Edition browser cannot reach it (ws-bridge declares it
+    `unsupported`), and `IPC.ptyLaunchHeadless` is in `HOST_ONLY_CHANNELS`, so a relay peer that
+    sends the raw request is refused host-side.
+  - **Remote nodes are fenced twice.** The primary fence is the renderer's: `startHeadless`
+    answers `remote-unsupported` before any claim for every node of an SSH project (`project.ssh`)
+    and for a node carrying `ssh` / `sshRemoteTmux`, and leaves its launch exactly as it was. The
+    project is asked, not only the node's flags: a node of an SSH project may carry neither.
+    Behind it is core's belt: `headlessPtyOptions` sets `requireRemote` for an SSH-project
+    (`sshRemoteTmux`) node, and `desktopHeadlessRequest` keeps it while stripping `sshRemote`.
+    So if such a node ever got past the fence, core's `spawnNew` would refuse it (`spawn-failed`)
+    instead of starting a LOCAL `nt-<id>` wearing its identity. `desktopHeadlessRequest` also
+    strips `viewerId` (a create under a viewer id subscribes `(0, viewer)`, while
+    `releaseHeadless` detaches `(0, PRIMARY)`, so client 0 would stay attached forever) and
+    `clearEnv` (a one-shot recycle flag, never a launch option).
+  - **Why release the client.** An invisible client would fight the viewer's window size and
+    keep the session "attached" for the reaper forever.
+  - **No persistent backend** (tmux or session-host): releasing a plain shell would kill it, so the
+    start fails `not-persistent`. In the normal case that happens before any spawn
+    (`persistentSpawnAvailable`). In the race where the backend goes away between that probe and
+    the spawn (tmux switched off in between), the spawn yields a plain shell; the launcher refuses
+    it the same way, before typing anything, and its release kills that shell. Either way the node
+    is handed back exactly as it was, so a cold open degrades to an ordinary queued node.
+  - **Outcome patch.** It lands wherever the node lives at that moment (`savePendingAnywhere`):
+    the live canvas if the user switched there mid-start, otherwise the store copy plus a disk
+    write. `delivered` clears the launch; `not-persistent` restores the original (above); every
+    other launch failure keeps the claim and marks the node failed (amber ⚠ QUEUED, recovered by
+    Run now).
+  - **While starting.** `launchDelivery` holds `starting`: the badge reads STARTING, ▶ is disabled
+    (a click would splice a second copy into the pane), `launchesToFire` skips the node, and
+    `list` names it. Canvas's delivery sweep spares it (`deliveriesToRetire`): the node lives in
+    ANOTHER project by design, so "not armed on this canvas" does not mean "delivered".
+  - **Notice.** A batch that started at least one session raises ONE sticky "Go there" notice
+    (`headlessStartNoticeText`). A launch failure after the claim (`spawn-failed`, `no-shell`,
+    `line-too-long`, `cancelled`) shows on the badge (amber ⚠ QUEUED) and in the reply.
+    `not-persistent`, `claim-not-saved` and `remote-unsupported` show only in the reply: the node
+    reads as it did before the attempt.
+  - **`--run-now` with `--after` is refused on both editions**, before any node is built, with the
+    shared `RUN_NOW_AFTER_REFUSAL` (`@shared/control-verbs`): "start now" and "start when X is
+    done" contradict each other.
+  - **`run` gates.** `run` is verified-only (`requiresVerified`), reaches another project only
+    through `--project` + the existing grant gate (`PROJECT_TARGETABLE_VERBS`), and is
+    `stored-node` off screen. The renderer's `--project` belt is ONE pure resolver,
+    `resolveProjectTarget` (`lib/projectOpen.ts`), shared with the open verbs. A project ON screen
+    never starts headless (`planRunVerb`): `run` there uses the mounted writer (the ▶ path) when
+    the node has one. Without one, a plain queued launch replies `queued` / `starts-when-mounted`,
+    because the mount delivers it; a `manualOnly` or `--after`-armed launch is refused with
+    `run-not-mounted`, because the mount fires neither, and "starts when mounted" would be a
+    promise nobody keeps.
+  - **Server Edition.** It accepts `--run-now` as a no-op (its opens are already immediate) and
+    implements `run` under creator ownership, resolving the node through the ownership record,
+    never by first id match. It neither unhides a closed project nor raises a notice, the same as
+    its other immediate opens. Its immediate open delivers through the same launcher with
+    `release:false`: the attached client is what keeps even a plain shell reachable there.
   **Review panel (`verify`, 2026-07):** `verify --node <id> [--lenses …] [--focus …] [--agent …]
   [--synthesis off]` opens one reviewer per LENS, each armed behind the target (`--after`) and
   bridged to it, wrapped in a `Verify: <title>` group, plus a judge armed behind the whole panel.
@@ -250,6 +746,91 @@ paths:
   caller's. The judge is armed on ids that exist only in that tick, which is why `armAfter` takes
   `extraLive` — without it the reviewers would look *deleted*, deletion counts as satisfied, and
   the judge would fire before a single review existed.
+  **Station-failure notices (2026-09, `src/core/agents/station-notice.ts` + the pure
+  `@shared/station-notice`):** when a station an agent OPENED stops, that agent is told ONCE,
+  with its options (retry or wait / reassign / skip / stop), instead of having to poll `list`.
+  Load-bearing rules:
+  - **The trigger is a closed table (`STATION_TRIGGERS`), first match wins:** `dropped` (the
+    renderer's DROPPED verdict, about a station core does not know to be mid-turn or asking),
+    `turn-errored` (a verified `done` carrying `errored`; a verified new turn OR a clean `done`
+    retires it — it describes the LAST turn), `question-unanswered` (the status mirror still holds
+    the station's correlated `pendingQuestion` 15 min after the verified event that asked it,
+    `STATION_QUESTION_NOTICE_MS`, AND the recipient's own verified state is `done`). An unknown
+    never triggers, and only VERIFIED events move a station: a notice leads an orchestrator to
+    retry, reassign or END a workflow, so a forgeable event is not evidence. 15 min because the
+    human already got NEEDS YOU + a notification; an orchestrator reassigning seconds before the
+    user answers doubles the work.
+  - **A permission prompt is NEVER a trigger, and that is a measurement, not caution.** On the main
+    thread Claude paints its dialog CONCURRENTLY with our held hook (docs/hook-reply-approvals.md),
+    and an approval given in the pane fires nothing until the approved tool FINISHES — so neither
+    `blocked` nor a `pendingId` can tell "unanswered" from "approved, twenty-minute build running",
+    and a notice there invites the orchestrator to close a working station. A question can be told
+    apart: its answer is a tool result, and the mirror's `pendingQuestion` is held across unrelated
+    traffic until it arrives. The monitor reads it through `pendingQuestionOf` (required dep)
+    rather than re-deriving it.
+  - **Once per episode, re-armed ONLY by a successful turn** — a turn that started after the notice
+    and ended `done` with no error, no interruption and not the idle-prompt rescue — and the re-arm
+    clears every fact the episode was about (error, DROPPED, question), or the next sweep re-fires
+    it. The condition merely clearing does not re-arm: a usage-limited station fails again on
+    every retry, and re-notifying each time would be a loop that burns the orchestrator's turns
+    all night. The notice says so in its own text.
+  - **Core withdraws DROPPED itself, on ANY verified hook event from the node** (the CLI speaking
+    from inside the pane — the renderer's own self-heal in `agentStatus.setState`). It must not
+    wait for the renderer's `reportDropped(false)`: the renderer's record of what it reported and
+    its transient flag both die with a reload (⌘R, a Server Edition tab closing), and a verdict
+    nobody withdraws re-fired on the healthy station after its next successful turn — typed into
+    the orchestrator with "reassign: close it" as an option (the independent review's blocker).
+  - **The recipient is the OPENER, and a rope alone cannot name it.** An `--after` station is roped
+    to every station it waited on as well as to its opener, with the same `ctrl-<src>-<dst>` id, so
+    "the other end of the rope" can be a sibling that opened nothing. The open verbs therefore
+    STAMP `data.openedBy` where they draw the opener's rope (`connect` for the live paths —
+    addAndConnect, verify, spawn-team — plus the off-canvas and cold-open writes; pure helper
+    `lib/stationOpener.ts`), and `stationRecipient` requires BOTH: `openedBy` names a canvas-capable
+    agent node in the same (single) project, AND that node's OPENER rope to the station still
+    exists — never a `ctrl-after-` wait rope (deleting the rope detaches the station). Never a bridge-linked node. `openedBy` is git-shared,
+    so `safeOpenedBy` (`isSafeNodeId`) runs at both serializer seams, and a duplicate drops it. A
+    node opened before this build has no `openedBy` and is never attributed (no guessing).
+  - **Server Edition: the creator LEDGER is the recipient rule** (`stationRecipientFromOwner` over
+    `factory.openerOf`) — only stations opened during the current server run, the same creator rule
+    as every other verb there; a restart clears it.
+  - **Two legs.** The canvas leg needs no switch: a `station-failed` board-log line on the
+    RECIPIENT's card (`from` = station id, `to` = reason code, `title` = the capped one-line
+    title; in `NEVER_COLLAPSE`) and a STATION FAILED chip (`components/StationFailedChip.tsx`, one
+    component on the node header and the card modal; the tooltip says whether the pane leg landed,
+    so "stayed on the canvas because messaging is off" is visible). The pane leg is
+    `deliverStationNotice` = the messaging service's WHOLE gate chain (scope, the per-project
+    `agentMessaging` switch — off by default ⇒ canvas only — runtime pane ownership, flow limits,
+    idle gate + deliver-on-idle queue, receipt, trace) under an internal verb
+    `STATION_NOTICE_VERB` that is deliberately NOT in `AGENT_MESSAGE_VERBS`, so neither the IPC
+    guard nor the shim can ask for a notice with a body of its choosing. The pane leg is followed to
+    its END so the chip never says "queued" about a message that landed or lapsed: a queued
+    notice's flush or expiry comes back through `AgentMessagingDeps.onQueuedResult` (called from
+    `createDeliveryQueue`, read at call time). Two outcomes get exactly ONE more attempt, each
+    because it would otherwise lose the pane leg for a reason unrelated to the notice:
+    `rateLimited` (the station `send`s its result, then errors seconds later — the pair budget is
+    spent) retries after the limiter's wait, capped at 60 s; an expiry (the orchestrator stayed busy
+    past the queue's 5-min TTL) is offered again on the orchestrator's next verified `done`. Two differences from
+    `send`, both because the APP is the author: the body is `stationNoticeBody` (fixed text from
+    the table; the only station-influenced string is the title, `oneLine`d, capped at 80, quoted,
+    and labelled data — NO station output is ever quoted), and the Server Edition's creator check
+    runs reversed (`callerOwnsTarget(recipient, station)`). The pane leg honouring the switch is
+    deliberate: the app typing into an agent's session is the capability that switch grants.
+  - **DROPPED is the renderer's fact** (it needs `hibernated`/`paused`), forwarded as EDGES by
+    `lib/stationNoticeWiring.ts` over `stationNotice.reportDropped`; the monitor never measures a
+    pane. Both request channels are in `HOST_ONLY_CHANNELS`: a relay guest never measured the
+    host's panes (its tab takes the inert stub), so a raw DROPPED report from one is a spoofed
+    verdict, and `station-notice:list` is unscoped — every project's failed-station ids and titles
+    — which a guest bound to one project must not read. It is therefore only as available as the liveness check, which asks for WATCHED nodes:
+    a station that dies off screen is noticed when it next comes into view, and a Server Edition
+    with no browser tab attached reports no DROPPED at all. Widening the check to unwatched
+    stations costs one pane read per finished station per 30 s (an ssh exec on SSH projects) and
+    is a deliberate follow-up, not an oversight.
+  - **Both shells wire it and nothing type-checks that:** desktop main feeds
+    `stationNotices.onAgentEvent(enriched)` from `emitAgentStatus`; the server's canvas-control
+    `onAgentEvent` feeds its own monitor; both call `registerStationNoticeIpc`. Pinned at source
+    level by `main/station-notice-wiring.test.ts`, along with every stamping site. Relay tabs take
+    the inert stub (a relay tab's stations are the host's). Mobile: N/A — the notice reaches the
+    orchestrator's pane, which the phone's chat view already shows.
   **Panel placement (2026-09-02):** the finished panel frame is dropped ADJACENT to the target's
   container — immediately RIGHT of the target's OUTERMOST (top-level) group frame when the target
   sits in one, else right of the target node — with a fixed `VERIFY_PANEL_GUTTER` (48px), then
@@ -425,6 +1006,30 @@ paths:
   `~/.gemini/GEMINI.md`. On connect an idle-gated one-line note is injected into each endpoint
   (claude → skill pointer; codex/gemini → inline CLI command via `contextLink.info()`).
   (Replaced the earlier MCP-based bridge.)
+  **One-way links (issue #852):** a context bridge may carry `reader` (`BridgeLink.reader`, the ONE
+  endpoint allowed to read the other); absent = both read, which is every pre-#852 link, so old
+  `project.json` files load unchanged. The rule is `linkReadPairs` (`shared/canvas-link.ts`), and
+  `buildLinkMap` is where it BITES: the non-reading side gets no map entry, so main serves it no
+  document and the resolver refuses it — enforcement is at the read, not in the discovery note. A
+  `reader` naming neither endpoint, or any present non-string value, authorizes nobody (fail closed)
+and is carried VERBATIM through every conversion — dropping it as "absent" would widen it to two-way
+on the next save. Set it from the context-link
+  edge's right-click menu (both / A reads B / B reads A; arrowheads point at the reader — a rope
+drawn over a hidden link resolves it by endpoint pair via `contextLinkForEdge`) or with
+  `link --one-way` (`--from` reads). On the canvas it rides `edge.data.reader`; every bridge↔edge
+  conversion goes through `bridgeToEdge`/`edgeToBridge` (renderer/lib/noteLink.ts; CLI-planned
+bridges enter live state only via `appendBridgeEdges`) and the server
+  merge keeps it (`serverChange.edgeRef`) — a field-by-field `{id, source, target}` copy silently
+  turns a one-way link two-way again. A flip that GRANTS read access sends the same one-shot
+  discovery note a new link sends; losing access sends nothing, like removing a link. Note: the
+  premise "every submit triggers a full read" does not hold — nothing reads on submit; the linked
+  agent reads only when it decides to run the skill/shim. What one-way removes is the other side's
+  PERMISSION and its discovery note. **Team sync carries it too**: an `edge-upsert` of kind
+  `bridge` keeps `reader` through the diff, the shape gate, the reflector's sanitize and the peer's
+  apply (`edgeFields`/`sameEdge` in `shared/canvas-mutations.ts`), and a flip alone is a change. A
+  three-id copy there never cast a flip and landed a cast one-way link on the peer as both-read,
+  which the peer then saved and published back. A malformed reader on the wire REFUSES the op
+  (never dropped — dropping widens), and a rope never carries one.
   **Note links:** a sticky note can be connected to ANY terminal node (one-way, sticky →
   terminal). On connect, agent sessions get a one-shot idle-gated push of the note text
   (`buildNotePushMessage`, single-line, truncated at 2000 chars); plain terminals get no
@@ -581,13 +1186,32 @@ paths:
   `writeDisk` returns, so it replies `offCanvas:true` NOT `queued:true`; the half the cold-open fix
   left open, and an HTML-report skill reaches for `show-web` every finish, each of which used to yank
   the user's tab); `STORED_NODE_VERBS` (`write`/`close`/`rename`/`color`/`link`/`board`/`assign` —
-  each reaches a pane, a store writer or the board file); and `OFF_SCREEN_REFUSALS` (the eleven that
-  genuinely need live React Flow, each with its reason in the refusal). Load-bearing: `ctlNodes()` is
+  each reaches a pane, a store writer or the board file — plus the five layout verbs
+  `group`/`ungroup`/`move`/`arrange`/`align`); and `OFF_SCREEN_REFUSALS` (the six that
+  genuinely need live React Flow, each with its reason in the refusal).
+  **The layout verbs off screen lay out from PERSISTED sizes** (nothing there was measured; a node is
+  born at a persisted default size and a user resize is persisted too, so the gap is at most the
+  overlap a live canvas can already show) and write back through `commitCtlNodes` →
+  `geometryMutations` (`renderer/lib/storedGeometry.ts`): only the geometry that changed
+  (`position`/`size`/`parentId`/`group`) is patched onto the STORED node, a created frame is added
+  whole, only a frame is ever removed, and the batch lands in one `applyOwnNodeMutations` re-sorted
+  parents-first. Never write the hydrated array back whole: that round-trips every node through the
+  serializers. They were refusals until 2026-09-30; an orchestrator that could open a team off screen
+  but never frame it was the report that moved them.
+  Load-bearing: `ctlNodes()` is
   the one name for "the node array this call acts on" (on screen `nodesRef.current`, off canvas the
   owning project's serialized nodes via `nodeStatesToFlow`); `board`/`assign` read `ctlProject`, not
   `activeProjectId` (a bug that hid behind the old travel); `closeStoredNodes` is the ONE cross-project
   teardown, shared with the sidebar's `closeSession`; route **`reopen` (a CLOSED project) cold-writes
-  and does NOT reopen the tab** (closing is the user's "park this, keep it running"). The human learns
+  and does NOT reopen the tab** (closing is the user's "park this, keep it running").
+  **Exception (#925):** `--run-now` (and `run`) restores a closed project's tab WITHOUT activating it
+  (`unhideProject`) and starts the node headless. A session that is running must be findable somewhere
+  more durable than a notice, and not activating it keeps the half of this rule that matters. Two
+  cases keep the tab closed: an SSH project, because its nodes are refused before any claim
+  (`remote-unsupported`), so nothing starts; and the welcome screen (no project active), because
+  un-closing one there would render a canvas with no active project. On the welcome screen the session
+  still starts; the project just stays in Recently closed.
+  The human learns
   of off-screen work through ONE sticky info strip (`offCanvasNoticeText`, button `travelToNode`).
   Guard: `test/acceptance/control-verb-disposition.test.ts` walks MAIN's `VERBS_FOR_TEST` against the
   RENDERER's disposition — the only way "every verb" is checked rather than a hand-kept list.
@@ -640,9 +1264,12 @@ paths:
     duplicate one because the control POST carries **no `--max-time`** (a POST waiting on a human
     eventually gets an HTTP answer, and failover fires only on a dead transport). A future `--max-time`
     on that curl would break this.
+    (The walk's liveness probe IS bounded, and does not break this: it runs only against a FALLBACK
+    candidate, only after the primary failed — a dead transport, or a 421 wrong-owner answer, which
+    the server gives before dispatch, so no dialog exists — and before any POST to that candidate.)
 - **`settings` verb** (`@shared/settings-verb`, 2026-09) — `settings [--project <id>]` lists,
   `--get <key>` reads, `--set <key> --value <v>` ASKS to change (flags only: the shim drops a
-  positional sub-action for an unlisted verb). One pure rule set shared by the desktop dispatch, the
+  positional sub-action for an unlisted verb and an SSH host can still be running an older shim). One pure rule set shared by the desktop dispatch, the
   Server Edition and main's `parseControlRequest`: an **allowlist** (`agentMessaging` per project;
   `snapToGrid`/`gridSize`/`defaultNodeWidth`/`defaultNodeHeight` machine-wide) with a required `why`,
   and a **forbidden set + name pattern that outranks it** (permission modes incl. `bypassPermissions`,
@@ -678,6 +1305,74 @@ checks unique project membership, runtime ownership, consent, verified status an
 An unrelated active canvas is not saved for a background message. Server control already writes
 its nodes through the authoritative store; the renderer barrier is a desktop concern. Mobile is
 not an agent-message sender.
+
+**A `send` to a node that has not STARTED yet is queued, not refused** (`targetNotStarted`,
+`agent-messaging.ts`). A node opened into a project that is not on screen without `--run-now`
+exists only as a held launch until the project is viewed, so no spawn has recorded its pane owner.
+When the owner is unproven AND no session exists AND this machine holds a launch for it
+(`WorkspaceStore.heldLaunch`, the machine-local `localExec` overlay), the outcome is
+`targetNotStarted` and the deliver-on-idle queue holds it; the flush re-runs every gate against the
+pane the spawn will have proven. A LIVE pane with no proven owner stays `unproven-target-owner` —
+that refusal is the security property. Such a message waits up to 24 hours
+(`NOT_STARTED_TTL_MS` = `QUEUE_PERSIST_TTL_MAX`): the start waits for a person to open the project,
+and the ordinary 5-minute TTL lost the message in the field (queued 19:12, expired 19:17, project
+opened 19:27). It is not carried across an app restart (no session was recorded to bind it to), and
+a node deleted before it starts keeps it until the TTL. A `targetStatusStale` target — a station
+started a moment ago (`--run-now`, `run`) that has not posted its first hook — is queued too, with the
+ordinary TTL: a retry cannot help before that hook, and its first verified `done` flushes the queue.
+Both shells wire `heldLaunch`.
+
+**A board comment that @mentions a session is a message from a PERSON** (`@shared/board-comment`,
+`deliverBoardCommentFromUi` in `core/agents/agent-messaging.ts`). The comment composer's @ picker
+inserts an id-based token `@[label](node:<id>)` (the id is the authority, the label only a fallback
+name); on send, each mentioned session gets its own delivery through the SAME `runDelivery` an
+agent `send` takes — scope, runtime pane ownership, the per-project `agentMessaging` switch, flow
+control, the pane probes, the nonce envelope, the receipt, the deliver-on-idle queue with its TTL.
+What differs is only who it is from: the scope is "the target is on the comment's board"
+(`resolveBoardCommentScope`); the PAIR window belongs to the board (`board:<projectId>` — one comment
+per session per 10 s, whichever comment) while the FAN-OUT budget belongs to the comment itself
+(`reserveFlow`'s `fanOutKey`, `board:<projectId>:<commentId>`), because a person's turn is one comment
+and an earlier comment's in-flight holds or queued flush must never spend a newer one's (review
+finding; both scenarios are tests); a comment mentions at most `BOARD_COMMENT_MENTION_MAX` =
+`FANOUT_PER_TURN` sessions and is refused whole above it; a pair-limited board comment is QUEUED
+rather than refused (`BOARD_QUEUE_ON` — an agent retries, a person could only post again; the
+flush re-runs the limiter) AND re-offered on a timer when the window ends
+(`DeliveryQueue.retryAfter`, armed at enqueue and at every `rateLimited` re-queue, one pending nudge
+per target): the queue otherwise flushes only on the target's `done`, and a window ending emits
+nothing — a session already idle, or whose `done` landed inside the window, left the comment to
+expire at the TTL; and the envelope reads `from: board comment by <author>` with no node id
+and `reply-to: none (…)` (`BOARD_COMMENT_REPLY_TO`; both agent-facing bodies render it from the
+constants). An agent node TITLED like that is labelled `node titled "…"` in its own `from:` line, so
+it cannot pass as a person. The body is the comment with each token turned into the `@<name>` its author saw
+(`mentionNameForAgent`: the token's label reduced to letters, digits, spaces and `. _ - #`, capped at
+40, else the node id — a node title is whatever the project file says, and it lands in another
+agent's prompt), then `sanitizeChatText` (every C0/C1 control but `\n`/`\t` — the one shared rule)
+and a cap. A comment's parallel mention deliveries share ONE `syncMessageScope` save (`coalesce`).
+**Only the local user, typing in THIS app, can trigger it.** The log is a shared file — a git pull,
+another instance, a relay peer or a team-presence guest can put a token in it — so NOTHING that
+reads the log reaches a delivery: the one call site is `BoardLogPanel`'s send
+(`board-comment-trigger.guard.test.ts`), the IPC (`agent:board-comment-deliver`) is a raw,
+main-window-only `ipcMain` handler that no peer can dispatch into and is also `HOST_ONLY`, and the
+renderer refuses a relay-bound project and a browser tab (`canDeliverBoardComments`). Around the IPC
+Canvas takes the same two steps as `send`: the target's `guardConcurrentRestart` lock and
+`syncMessageScope`. **No silent success**: every outcome is on the comment row — `sending…`, then
+the reply's typed outcome (with the `notPermitted` reason) from this app run, else the latest
+`agent-message` trace line in the log whose `from` is `board-comment:<commentId>` (the trace now
+carries `reason` too, and the queue hands its trace leg the queued request, so a board comment's
+`queued`/`expired` lines land on ITS board whoever owns the pane by then). Log lines are trusted
+ONLY for comments this machine sent (`nodeterm.boardCommentsSent`, localStorage, bounded): the log
+is shared, so a teammate's comment arrives with THEIR machine's trace lines and a forged line is one
+append away — such a comment shows no status, and its lines stay ordinary feed rows. For our own:
+a line dated in the future is ignored, a `queued` older than `BOARD_COMMENT_QUEUE_STALE_MS` (the
+queue TTL + 1 min — a crash still never writes its end; a clean restart does, since the durable
+queue expires a restored board comment at boot, see **Durable orchestration state**, `.claude/rules/orchestration-state.md`) says no outcome
+was recorded, and a mention with no record at all says so too. A trace line is hidden as a row only
+on the card whose comment row shows it; the mentioned session's own card keeps "routed a board
+comment here: …". Text tables are read with `Object.hasOwn` (values come from the shared file).
+The card modal's capture-phase Escape defers to the composer while its @ picker is open. Desktop: full. Server Edition and relay
+tabs: display-only by design (the bridge answers `notPermitted: unsupported-edition`; the picker is
+not offered) — a browser or a relay guest typing into this machine's panes is exactly the
+cross-user injection this refuses. Mobile: N/A (the phone posts no board comments).
 
 **Direct Windows agent messaging:** `core/native-windows-pane.ts` owns a headless screen for
 non-persistent native PTYs. Lookup uses the runtime node index, and the console identity probe

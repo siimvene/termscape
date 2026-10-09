@@ -4,6 +4,7 @@ import {
   anchoredScrollTop,
   applyOlder,
   applyTail,
+  tailConfirmsSends,
   attachCarried,
   emptyThread,
   shouldFetchOlder,
@@ -127,6 +128,21 @@ describe('applyTail — unconfirmed optimistic sends (live reads)', () => {
     expect(out.messages.every((m) => m.key !== undefined)).toBe(true)
   })
 
+  it('a send the CLI recorded as a <pasted_content> paste (rendered fenced) confirms it', () => {
+    const sent = 'please look at `this` log\nline two of it'
+    const t = base([say(0, 'q'), say(undefined, sent, 'user')], 0)
+    // What the reader renders for `<pasted_content id="ab12">\n<sent>\n</pasted_content id="ab12">`.
+    const recorded = '\n```\n' + sent + '\n```\n'
+    const out = applyTail(t, ID, page([say(0, 'q'), say(300, recorded, 'user'), say(400, 'ok')], 0), { carryUnconfirmed: true })
+    expect(texts(out)).toEqual(['q', recorded, 'ok'])
+    expect(out.messages.every((m) => m.key !== undefined)).toBe(true)
+    // A send with a backtick run is fenced one longer, and still matches.
+    const ticks = 'a ```b``` c and more text'
+    const t2 = base([say(0, 'q'), say(undefined, ticks, 'user')], 0)
+    const rec2 = '\n````\n' + ticks + '\n````\n'
+    expect(texts(applyTail(t2, ID, page([say(0, 'q'), say(300, rec2, 'user')], 0), { carryUnconfirmed: true }))).toEqual(['q', rec2])
+  })
+
   it('matches one-for-one, and never against a user line the thread already had', () => {
     // An OLD "yes" (key 100, already rendered) must not confirm the NEW unconfirmed "yes".
     const t = base([say(100, 'yes', 'user'), say(undefined, 'yes', 'user'), say(undefined, 'yes', 'user')], 100)
@@ -145,6 +161,70 @@ describe('applyTail — unconfirmed optimistic sends (live reads)', () => {
     const t = base([say(undefined, 'go', 'user')])
     const out = applyTail(t, 'other', page([say(0, 'x')], null), { carryUnconfirmed: true })
     expect(texts(out)).toEqual(['x'])
+  })
+
+  // A slash command / `!` line is written by claude as a command record, which the transcript
+  // reader renders as an assistant tool part (`name:"/model"` / `name:"!"`) — never as the typed text.
+  const cmd = (key: number, name: string, arg = ''): ChatMessage => ({
+    role: 'assistant',
+    key,
+    parts: [{ kind: 'tool', name, arg }]
+  })
+  const live = (sent: string, got: ChatMessage[]): ChatThread =>
+    applyTail(base([say(0, 'q'), say(undefined, sent, 'user')], 0), ID, page([say(0, 'q'), ...got], 0), {
+      carryUnconfirmed: true
+    })
+  const sentTexts = (t: ChatThread): string[] => t.messages.filter((m) => m.key === undefined).map((m) => (m.parts[0] as { text: string }).text)
+
+  it('a sent slash command is confirmed by a later command tool part of the same name', () => {
+    expect(sentTexts(live('/model', [cmd(100, '/model')]))).toEqual([])
+    expect(sentTexts(live('  /model  ', [cmd(100, '/model')]))).toEqual([])
+    expect(sentTexts(live('/compact foo', [cmd(100, '/compact', 'foo')]))).toEqual([])
+    // Args on only one side: the name is enough.
+    expect(sentTexts(live('/compact  foo bar ', [cmd(100, '/compact')]))).toEqual([])
+    expect(sentTexts(live('/compact', [cmd(100, '/compact', 'x')]))).toEqual([])
+  })
+
+  it('a slash command is NOT confirmed by a different name, different args, or an older record', () => {
+    expect(sentTexts(live('/model', [cmd(100, '/effort')]))).toEqual(['/model'])
+    expect(sentTexts(live('/compact foo', [cmd(100, '/compact', 'bar')]))).toEqual(['/compact foo'])
+    expect(sentTexts(live('/model', [say(100, '/model is a command')]))).toEqual(['/model'])
+    // Only a command TOOL part confirms — an assistant text that reads exactly `/model` does not.
+    expect(sentTexts(live('/model', [say(100, '/model')]))).toEqual(['/model'])
+    // A command record the thread already had keyed must not confirm a new send of it.
+    const t = base([cmd(100, '/model'), say(undefined, '/model', 'user')], 100)
+    const out = applyTail(t, ID, page([cmd(100, '/model')], 100), { carryUnconfirmed: true })
+    expect(sentTexts(out)).toEqual(['/model'])
+  })
+
+  it('matches one-for-one: one command record confirms one send', () => {
+    const t = base([say(0, 'q'), say(undefined, '/model', 'user'), say(undefined, '/model', 'user')], 0)
+    const out = applyTail(t, ID, page([say(0, 'q'), cmd(100, '/model')], 0), { carryUnconfirmed: true })
+    expect(sentTexts(out)).toEqual(['/model'])
+  })
+
+  it('a `!` send is confirmed by a "!" tool part with the same command', () => {
+    expect(sentTexts(live('!ls -la', [cmd(100, '!', 'ls -la')]))).toEqual([])
+    expect(sentTexts(live('! ls', [cmd(100, '!', 'ls')]))).toEqual([])
+    expect(sentTexts(live('!ls', [cmd(100, '!', 'pwd')]))).toEqual(['!ls'])
+  })
+
+  it('a long argument is compared after the same 200-character cap the reader applies', () => {
+    const arg = 'x'.repeat(250)
+    expect(sentTexts(live(`/compact ${arg}`, [cmd(100, '/compact', arg.slice(0, 200))]))).toEqual([])
+  })
+
+  it('tailConfirmsSends: true only when the read confirms every trailing optimistic send', () => {
+    const t = base([say(0, 'q'), say(undefined, '/model', 'user')], 0)
+    expect(tailConfirmsSends(t, ID, page([say(0, 'q'), cmd(100, '/model')], 0))).toBe(true)
+    expect(tailConfirmsSends(t, ID, page([say(0, 'q')], 0))).toBe(false)
+    // Nothing was waiting: nothing to confirm.
+    expect(tailConfirmsSends(base([say(0, 'q')], 0), ID, page([say(0, 'q'), cmd(100, '/model')], 0))).toBe(false)
+    // Another transcript never confirms this one's sends.
+    expect(tailConfirmsSends(t, 'other', page([cmd(100, '/model')], 0))).toBe(false)
+    // Two sends, one confirmed: still waiting.
+    const two = base([say(0, 'q'), say(undefined, '/model', 'user'), say(undefined, '/model', 'user')], 0)
+    expect(tailConfirmsSends(two, ID, page([say(0, 'q'), cmd(100, '/model')], 0))).toBe(false)
   })
 
   it('a NON-live reload (turn end, ↻) retires any unconfirmed carry', () => {

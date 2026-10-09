@@ -354,7 +354,10 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
           </div>
         ) : (
           <>
-            <div className="editor-node__monaco nodrag nowheel" ref={bodyRef} />
+            {/* `nokey`: React Flow's own key handling (the selected node's arrow-key move, its
+                key-press hooks) stands down only for inputs, a contenteditable attribute or
+                `.nokey` — and Monaco types through an EditContext div, none of those (#930). */}
+            <div className="editor-node__monaco nodrag nowheel nokey" ref={bodyRef} />
             {preview && (
               <div className="term-md nodrag nowheel">
                 <div className="term-md__bar">

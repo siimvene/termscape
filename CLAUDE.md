@@ -36,28 +36,35 @@ file has been opened yet. A rule you did not load is an invariant you will viola
 |---|---|
 | `.claude/rules/persistence.md` | State & persistence (workspace files, project.json, SSH mirror, triggers) |
 | `.claude/rules/projects.md` | Projects (tabs): switch, close/park, reopen, delete, open-folder recovery |
-| `.claude/rules/terminal.md` | Terminal sessions: tmux continuity, PTY lifecycle, cold restore, xterm seeding, TerminalNode |
+| `.claude/rules/terminal.md` | Terminal sessions: tmux continuity, PTY lifecycle, cold restore, Zellij backend, xterm seeding, TerminalNode |
 | `.claude/rules/nodes.md` | Node kinds (incl. trigger), node icons, group frames, editor/diff/video/web/browser nodes, resize hit-area, webview keep-alive |
 | `.claude/rules/agents.md` | Agent support: registry + capabilities, hooks, permission mode, transcripts, subagent/workflow viz, adding a new agent |
 | `.claude/rules/agents-canvas-control.md` | Canvas control (nodeterm.sh shim, verbs, fan-in, --after, verify panel), Context Link, agent messaging (scope publication, Windows delivery) |
 | `.claude/rules/agents-accounts-usage.md` | Managed Claude/Codex accounts, account switch, usage indicator scope, remote usage |
-| `.claude/rules/agents-grok.md` | Grok agent per-CLI deep reference: capabilities, hook-directory dialect, subagent-card keying |
+| `.claude/rules/agents-grok.md` | Grok agent per-CLI deep reference: capabilities, hook-directory dialect, subagent-card keying, NEEDS YOU event-log check, chat view |
+| `.claude/rules/agents-antigravity.md` | Antigravity (`agy`) agent per-CLI deep reference: capabilities, resume, launch, Windows hook dispatch |
 | `.claude/rules/agents-codex.md` | Codex shared-thread node identity: tool-shell recovery, the exported HMAC record |
 | `.claude/rules/agents-pi.md` | Pi agent: extension-based status, stated context meter, managed Pi accounts |
+| `.claude/rules/open-recent.md` | Open recent: resume a past agent conversation from its CLI history |
+| `.claude/rules/orchestration-state.md` | Durable orchestration state: delivery queue, station reports, hand-over holds, control request ledger |
 | `.claude/rules/session-memory.md` | Session memory: the RAM pill, the per-session panel, socket fan-out kills |
 | `.claude/rules/keybindings.md` | Keybindings (registry, overrides, dispatch) and window chrome / menu stand-down |
 | `.claude/rules/canvas.md` | Canvas interaction & panels: menus, undo, zoom, goToNode, breadcrumbs, palette, sidebar, explorer, settings, theme |
 | `.claude/rules/source-control-worktrees.md` | Source Control panel, AI commit messages, git worktrees bound to group frames |
 | `.claude/rules/kanban.md` | Kanban view: dual-source board, card modal, board log, labels, metadata |
-| `.claude/rules/terminal-ssh.md` | SSH remote terminals: ControlMaster early-publish + boot pre-warm, per-host freshness read, late cold-start self-heal, remote pty spawn pacing, remote node teardown / owed kills |
+| `.claude/rules/terminal-ssh.md` | SSH remote terminals: ControlMaster early-publish + boot pre-warm, per-host freshness read, late cold-start self-heal, remote pty spawn pacing, remote node teardown / owed kills, SSH projects on Windows (in-process ssh2 transport) |
 | `.claude/rules/canvas-layouts.md` | Canvas layouts: named node-geometry snapshots per project (save/restore/update/delete) |
-| `.claude/rules/canvas-idle-energy.md` | Idle-energy animation frame-loop gate (styles.css `--nt-anim-state`, window/board attributes) |
+| `.claude/rules/canvas-idle-energy.md` | Idle-energy animation frame-loop gate (styles.css `--nt-anim-state`, window/board attributes); performance: how to measure, and the rules measurement produced |
 | `.claude/rules/window-behavior.md` | Main-process window behavior: geometry restore + window-raise policy |
 | `.claude/rules/node-colors.md` | Node colors: one palette (system + agent sections), swatches, `color --color` boundary |
 | `.claude/rules/semantic-colours.md` | Semantic colour tokens: the `--sys-*` palette, state/git ROLE tokens, `palette.ts`, the git status table, minimap strokes |
 | `.claude/rules/appearance-wallpaper-glass.md` | Desktop wallpaper + Liquid Glass appearance (Settings → Appearance): painting, glass chrome, contrast, traps |
 | `.claude/rules/files-node.md` | The `files` node (file-manager node) |
 | `.claude/rules/relay.md` | Remote access (phone relay): free, not Pro |
+| `.claude/rules/push-webhook.md` | Push webhook: a script or CI job rings the paired phone |
+| `.claude/rules/hosted-team-relay.md` | Hosted team relay: the Server Edition as a relay host (share-team, hosted join, team admin) |
+| `.claude/rules/live-links.md` | Live links: Pro browser link to one terminal (watch, chat, or type) |
+| `.claude/rules/dev-server-ports.md` | Dev-server ports: the Ports chip + same-port SSH forwarding |
 | `.claude/rules/speech.md` | Speech / dictation (desktop + server) |
 | `.claude/rules/packaging.md` | Packaging, Windows beta, auto-update, check feed, telemetry |
 
@@ -124,7 +131,8 @@ means — and what you may assume when writing a feature — is three tiers, not
   no tmux (Windows), a standalone session-host process — the mechanism differs, the guarantee does
   not.
 - **POSIX-bound edges degrade explicitly, never silently.** Some subsystems are structurally tied
-  to POSIX (SSH ControlMaster, the unix-socket askpass transport, some tmux-only paths). On a
+  to POSIX (SSH ControlMaster, the unix-socket askpass transport, some tmux-only paths — SSH
+  projects on Windows use the in-process transport instead, see **SSH projects on Windows** in `.claude/rules/terminal-ssh.md`). On a
   platform where they cannot work they must either use a platform-appropriate mechanism or be
   clearly gated off — a feature that throws `EACCES`/`EPERM` on Windows because nobody checked is a
   bug, not an accepted limitation.
@@ -343,14 +351,51 @@ SSH/scp staging follows the same ownership rule outside direct `fs` calls. Atomi
 writes use `src/main/remote-atomic-write.ts`: a bounded `.nodeterm-<uuid>.tmp` leaf is placed beside
 the target BEFORE both complete paths are quoted, then the shell preserves the write/move status
 while cleaning that exact temp. The temp leaf must stay independent of the target leaf — appending
-`.uuid.tmp` to a valid `NAME_MAX` target makes the write impossible. It currently protects
-filesystem API writes, tmux.conf, the private hook endpoint, node
-tokens, agent status and pending answers; some generated hook scripts/config merges still use direct writes; only the guarded shared
-Claude/Gemini settings transactions stage and rename here. Do not generalize that claim to every installer. Upload directories use UUIDs across app
+`.uuid.tmp` to a valid `NAME_MAX` target makes the write impossible.
+
+**A remote write is only complete if the host checked the byte count, and a rename alone does not
+check it.** `cat` cannot tell "the body ended" from "the ssh channel ended": when the channel dies
+before the body arrives (the ControlMaster killed or rebuilt on a reconnect, the runner's 15 s
+timeout SIGTERMing the child, a dropped link) it reads EOF and EXITS 0. Measured against OpenSSH 9.6
+with the master SIGKILLed and with the child SIGTERMed, both before the body: a bare
+`cat > f && chmod 755 f` left `f` at 0 bytes and flipped 644 → 755, and the temp + `mv` shape
+published the empty temp over a good file just the same. That is how, on 2026-09-28, a host's
+`~/.nodeterm/nodeterm.sh` and `context.sh` were 0 bytes after a reconnect and every agent's canvas
+call exited 0 with no output. So `remoteAtomicWrite(path, body, options)` takes the BODY, checks
+`[ "$(wc -c < temp)" -eq <utf-8 bytes> ]` before the rename (a short temp exits
+`REMOTE_WRITE_SHORT_BODY` = 65 with the target untouched), returns the `stdin` it was built for,
+and refuses an empty body unless `allowEmpty` (only the generic `ssh-fs` write passes it — an editor
+may save an empty file; nothing we GENERATE is ever empty). `runRemoteAtomicWrite` also THROWS on a
+non-zero exit: the runners resolve on failure, and awaiting them and moving on is what made the
+failure silent. Every remote write goes through it — filesystem API writes, tmux.conf, the hook
+endpoint, node tokens, agent status, pending answers, session env files, the Codex relay and
+launcher, every agent hook script, the canvas/context shims and skills, and our own grok/copilot
+hook configs. The USER's files — Claude/Gemini `settings.json`, codex `hooks.json` and
+`config.toml`, and the AGENTS.md / GEMINI.md / copilot-instructions.md instruction blocks — go
+through `updateRemoteTextFile` / `updateRemoteSettingsFile` (`core/agents/hooks/remote-settings-file.ts`)
+instead: the same byte check plus our lock, symlink resolution (a dotfile link stays a link),
+mode preservation, and a compare-before-publish; a read that fails is never treated as an empty
+file (the old `cat f || true` then `cat > f` replaced an unreadable AGENTS.md with our block alone).
+The local installers for the same files use `writeManagedHookFileAtomic` / `mergeInstructionFile`.
+`src/main/remote-ssh/remote-write.guard.test.ts` fails on any new bare `cat > <file>` in
+src/{core,main,server}, and `remote-write-truncation.test.ts` runs every installer under a real
+`/bin/sh` with the body cut off.
+**Never `chmod <mode> -- <file>` in a remote command.** BSD/macOS chmod does not permute: its
+getopt stops at the MODE operand, so the `--` after it is a FILE named `--` ("No such file or
+directory", exit 1) and the `&&` chain never publishes. `mkdir -p --`, `mv -f --` and `rm -f --` are
+fine (their `--` comes before any operand). That spelling shipped from v0.3.3 (fbc65ad8) for the
+hook endpoint and node tokens, so `setup()` returned null on every macOS SSH host — no status
+hooks, canvas control or context link there. The real-shell tests put a non-permuting chmod
+(`POSIXLY_CORRECT=1` GNU chmod) first on PATH for every mode-bearing caller.
+**Canvas control and context link install as ONE chain** (`RemoteHooks.installAgentTools`): they
+merge different blocks into the same AGENTS.md / GEMINI.md, and the transaction lets only one of two
+racing writers publish a snapshot — fired side by side they lost 16–19 of 48 blocks over 8 fresh
+hosts. Upload directories use UUIDs across app
 processes. Downloads and media-cache copies use hidden UUID `.part` names; user-visible downloads
 also hold an exclusive candidate lock until the rename and cleanup finish. Never simplify any of
 those back to `<target>.tmp` / `<target>.part` or a read-only "does the destination exist?" check —
 the overlap tests exercise the resulting race.
+
 
 ## The test suite never touches a live tmux server
 
@@ -396,6 +441,52 @@ points at tmux's `server_accept()` calling `fatal()` under the suite's process/f
 memory-starved machine, and two identical runs finished clean. Sharing a server with the user's live
 sessions is a hazard whatever kills it; this removes the hazard, not a proven cause.
 
+**`fakePlatform()`'s directories live exactly as long as the run** (`test/setup/fake-platform-root.ts`,
+the same per-RUN `globalSetup` shape as the tmux sandbox). Each call used to `mkdtemp` in the system
+temp dir at construction and nothing removed it: a development server running the suite repeatedly
+collected ~395,000 `nodeterm-fake-*` directories, `/tmp` ran out of inodes while still showing GBs
+free, and full runs failed in 1,201 of 1,207 files with ENOSPC. Measured on 40 suites that use it:
+271 directories left behind before, 0 after. Two halves, both needed: the directory is made on first
+READ of `userDataDir` (a test that passes its own, or never reads it, makes none), and it is made
+under a run root that teardown removes once every test file has finished (vitest tears global setup
+down BEFORE it waits for its workers to exit, so a late timer is not ruled out — a per-file
+`afterAll` would be strictly worse, sweeping while that file's debounced writes are still due). The
+teardown never throws and is listed first so it runs last: vitest's teardown loop has no catch per
+file, and a throw there would silently skip the tmux sandbox's teardown. The leaf under the root is a
+bare `u-`, because every byte added is closer to the macOS unix-socket path budget
+(`hook-sock-path.ts`) for anything a test binds under `userDataDir`. A run killed before teardown
+leaves ONE directory. A test that builds its own `CorePlatform` takes its `userDataDir` from
+`makeFakeUserDataDir()` (same root, removed with it) — never a bare `mkdtemp` in the system temp
+dir and never a fixed `/tmp/...` literal.
+`platform-fake.test.ts` fails if the root is not in effect, so dropping the `globalSetup` entry is loud.
+
+## The test suite leaves nothing in the OS temp dir
+
+Measured 2026-09-29 on a shared dev box: `/tmp` held ~41k top-level entries, and one full run of this
+suite added ~1,560 of them (`nodeterm-fake-*` alone was 1,412 — see the `fakePlatform()` paragraph
+above for that half). The filesystem ran out of INODES and every session's builds and tests broke.
+For every OTHER test dir, two layers, both needed:
+
+- **Every test dir is removed where it is made.** `testTmpDir(prefix)` (`src/core/test-tmp.ts`) is
+  a tracked `mkdtemp` whose removal is an `afterAll` in the setup file `test/setup/tmp-worker-env.ts`
+  — a setup file's hooks sit on the file's root suite and, with vitest's default stacked hook order,
+  run AFTER the file's own `afterAll` hooks, i.e. after the suite stopped whatever was writing there.
+- **The run is sandboxed and FAILS on a leak.** `test/setup/tmp-sandbox.ts` (`globalSetup`, listed
+  AFTER the tmux sandbox so that one keeps its short base path) points `TMPDIR` (and `TEMP`/`TMP` on
+  Windows) at one private directory; teardown lists what is left, removes the sandbox anyway, and
+  sets `process.exitCode = 1` naming each prefix. **Not `throw`**: vitest only LOGS a teardown error
+  (`error during close`) and still exits 0, and a throw skips the other globalSetup teardowns — the
+  tmux sandbox's, measured. Windows warns instead of failing (a just-exited child's file can be
+  EBUSY for a moment after a correct cleanup). `NODETERM_TEST_KEEP_TMP=1` keeps it for inspection.
+  `FOREIGN_TMP_ENTRIES` is the short allowlist of names nothing in this repo creates (Chrome's own
+  scratch files from the headless layout tests), each with its reason.
+- **Two leaks were production memos, not test bugs**: `contextLinkDir()` and
+  `HookServer.endpointFilePath()` cached the FIRST platform's `userDataDir` for the life of the
+  process, so a process that booted a second core (the server e2e suites) wrote `context.sh` and
+  `hook-endpoint.env` into the first core's already-removed directory. `initContextLink` and
+  `hookServer.stop()` now drop the memo. Found with `strace -f -e trace=mkdir,rename` — an EMPTY
+  leftover dir is the signature of a late writer, not of a missing `rm`.
+
 ## Conventions
 
 - **Two docs, two audiences — keep both.** This file holds the deep invariants with their
@@ -435,11 +526,13 @@ sessions is a hazard whatever kills it; this removes the hazard, not a proven ca
   1. **Desktop** (Electron) — the primary app (`src/main` + `src/renderer` via the preload).
   2. **Server Edition** (Linux, browser) — `src/server` + the `src/renderer/bridge` shim (see
      the `src/server/` bullet above and docs/SERVER.md).
-  3. **Mobile companion** — *nodeterm mobile*, a **separate PRIVATE repo** (`nodeterm-ios`)
-     — outside contributors cannot see or PR it, so a mobile implication is raised in the
-     desktop PR and **@eneskirca** is mentioned to carry it over
-     (SwiftUI + SwiftTerm/Citadel, tmux-integrated, talks the `TerminalTransport`/RemoteTransport
-     protocol).
+  3. **Mobile companion** — *nodeterm mobile*, two **separate PRIVATE repos**: `nodeterm-ios`
+     (SwiftUI + SwiftTerm/Citadel) and `eneskirca/nodeterm-android` (Kotlin/Compose, in
+     development) — outside contributors cannot see or PR either, so a mobile implication is
+     raised in the desktop PR and **@eneskirca** is mentioned to carry it over. Both are
+     tmux-integrated, talk the same `TerminalTransport`/RemoteTransport protocol and the same
+     pairing/relay/mirror wire contracts, so a desktop change must not assume the phone is an
+     iPhone (copy, defaults, store links — see **Phone pairing is platform-neutral**).
 
   **The canvas and the kanban board are TWO VIEWS of the same nodes — treat the board as a
   first-class surface, not an afterthought.** Every session/node feature you add to a canvas node

@@ -46,7 +46,8 @@ const EXPECTED_PROCESS = {
   opencode: 'opencode',
   grok: 'grok',
   copilot: 'copilot',
-  pi: 'pi'
+  pi: 'pi',
+  antigravity: 'agy'
 }
 
 const SHELL_NAMES = new Set([

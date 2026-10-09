@@ -10,7 +10,7 @@
 // contract: when the next model ships, its limit arrives as another array entry and this file
 // does not change. Binding a `fableWeekly` slot (or a `seven_day_fable` field) would recreate
 // the exact rigidity Anthropic just moved away from.
-import type { ClaudeUsage, ClaudeUsageWindow, UsageLimit } from '../../shared/types'
+import type { ClaudeUsage, ClaudeUsageOrganization, ClaudeUsageWindow, UsageLimit } from '../../shared/types'
 import { findLimit } from '../../shared/usage-limits'
 
 /** `percent`/`utilization` are portions USED, 0–100. Clamp — the server is not our validator. */
@@ -155,4 +155,47 @@ export function emptyUsage(
     ...(failure?.cause ? { cause: failure.cause } : {}),
     ...(typeof failure?.httpStatus === 'number' ? { httpStatus: failure.httpStatus } : {})
   }
+}
+
+/**
+ * How long a failed read may keep showing the last good numbers. Past this the snapshot has
+ * outlived its usefulness: the pill itself carries no age stamp, and an hour-old percentage in
+ * a 5-hour window is a different number from the one the account is at now.
+ */
+export const HOLD_LAST_GOOD_MAX_MS = 60 * 60 * 1000
+
+/**
+ * Fold a new read into the previous snapshot of the SAME identity. A failed read must not erase
+ * numbers an earlier read produced: the endpoint rate-limits (HTTP 429) on a budget every Claude
+ * CLI using the same login also spends, so on a busy host reads fail intermittently, and replacing good bars with "Could not read usage" made the
+ * row flicker between numbers and an error for no change in the account at all.
+ *
+ * The held snapshot keeps the old limits AND the old `updatedAt` (so "Updated N ago" describes
+ * the numbers, not the failed read) under `status: 'error'` — the UI's existing contract for
+ * "last-known data, latest read failed". `rateLimited` reflects the LATEST failure only.
+ *
+ * Refuses to hold when doing so would show wrong numbers rather than old ones: a different
+ * account answered, the last good read is older than `HOLD_LAST_GOOD_MAX_MS`, or one of its
+ * windows has reset since.
+ */
+function sameOrganization(a: ClaudeUsageOrganization, b: ClaudeUsageOrganization): boolean {
+  return a.uuid && b.uuid ? a.uuid === b.uuid : a.name === b.name
+}
+
+export function holdLastGood(
+  prev: ClaudeUsage | undefined,
+  next: ClaudeUsage,
+  now: number
+): ClaudeUsage {
+  if (next.status !== 'error' || next.limits.length > 0) return next
+  if (!prev || prev.limits.length === 0) return next
+  if (prev.status !== 'ok' && prev.status !== 'error') return next
+  if (next.email && prev.email && next.email !== prev.email) return next
+  // Fork: one email can switch between organizations (the per-account org row), and the quota
+  // belongs to the org — a failed read for org B must not wear org A's numbers.
+  if (next.organization && prev.organization && !sameOrganization(prev.organization, next.organization)) return next
+  if (now - prev.updatedAt > HOLD_LAST_GOOD_MAX_MS) return next
+  if (prev.limits.some((l) => l.resetsAt !== null && l.resetsAt <= now)) return next
+  const { rateLimited: _previousFailure, ...numbers } = prev
+  return { ...numbers, status: 'error', ...(next.rateLimited ? { rateLimited: true } : {}) }
 }

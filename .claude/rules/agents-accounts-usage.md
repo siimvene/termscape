@@ -89,9 +89,19 @@ paths:
     node's rows from the SAME builder the canvas node menu uses (`accountSwitchRows` → KanbanView's
     `accountMenuItems`), and the **usage popover** puts "⇄ Move N sessions" on each account row —
     every Claude session on this canvas running on that account, on the popover's machine
-    (`bulkSwitchCandidates`), is moved to the picked account ONE AT A TIME (N parallel copies +
-    recycles on one host is a load spike), busy ones skipped and counted, one summary line
-    (`summarizeBulkSwitch`). The cross-project board (GlobalKanbanView) does not offer it:
+    (`bulkSwitchCandidates`), is moved to the picked account ALL AT ONCE (`startBulkSwitch`), busy
+    ones skipped and counted, one summary line (`summarizeBulkSwitch`). It was one-at-a-time and
+    that broke twice: N sessions cost N exits in a row, and a switch reads its node off the live
+    canvas when it STARTS, so a project switch mid-run refused every node still waiting its turn.
+    An SSH host's load is paced in core (`SshChildGate`, the pty spawn gate), not by serializing.
+    While it runs, Canvas hands the popover `accountMove`: the moving sessions keep their OLD
+    account until each lands, so the source row reads "Moving N sessions…" instead of re-offering
+    them, and every other row's move is disabled (a second bulk move would be refused).
+    **A recycling restart can outlive its canvas** (`settleRecycledNode`): if the project was
+    switched while the CLI quit, React Flow no longer holds the node and `updateNodeData` is a
+    silent no-op — the rebind then goes into the stored project (`projects.rebindNode`) and the
+    park is DROPPED, because it holds the session this recycle just killed and re-adopting it on
+    return showed a dead pane on the old account. The cross-project board (GlobalKanbanView) does not offer it:
     its cards belong to other projects' canvases, whose nodes have no restart closure mounted.
   - **`boundAccountId(accountId, agentId)` (`shared/agents/account-binding.ts`) is the ONE rule for
     whether a node is account-bound at all**, and it feeds `data.accountId` *and* the account color
@@ -470,6 +480,13 @@ paths:
      `$HOME` + fake `curl`, the same discipline as the canvas-control shim.
   3. **A read that could not run is `error`, never `unavailable`** — a dead master says nothing
      about whether the account has a subscription, and 'unavailable' silently drops the row.
+  4. **A failed read keeps the last good numbers** (`holdLastGood`, local AND remote): the
+     endpoint answers **429** on a budget every Claude CLI using the same login also spends
+     (measured on a host running 54 `claude` processes: 429 for minutes on end), and replacing
+     the bars with "Could not read usage" made rows flicker for no change in the account. The
+     held snapshot is `status: 'error'` + the old limits + the OLD `updatedAt`, so the debounce
+     must key on the READ's time (`lastFetchAt`/`remoteCache.at`), never on `updatedAt` — keying
+     it on the numbers' age re-reads on every call and hammers the endpoint that said 429.
   Shape: `remoteUsageTargets` (pure) elects ONE connected project per host (several projects share
   a host's `$HOME`) and offers its system `~/.claude` plus every managed account pinned to that
   host. The service (`usage:remote`) caches per target under the usual debounce, evicts targets

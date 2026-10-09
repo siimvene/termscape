@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { tailFromOffsetArgs, tailFromOffsetCappedArgs, tailLastBytesArgs, RemoteFile } from './remote-file'
+import { tailFromOffsetArgs, tailFromOffsetCappedArgs, tailLastBytesArgs, RemoteFile, ContextReadError } from './remote-file'
 
 const conn = { host: 'h', user: 'u' }
 const ref = { conn, controlPath: '/s.sock', path: '/home/u/.claude/projects/p/x.jsonl' }
@@ -98,6 +98,24 @@ describe('RemoteFile.readContextWindow', () => {
   })
   it('rejects malformed responses instead of advancing the cursor', async () => {
     await expect(new RemoteFile(async () => ({ code: 0, stdout: 'invalid' })).readContextWindow(ref, 42, 1024)).rejects.toThrow()
+  })
+  // The poller logs `reason`, so it must say what was observed and nothing the host sent back.
+  it.each([
+    [async () => ({ code: 255, stdout: 'SECRET' }), 'exit 255'],
+    [async () => ({ code: 1, stdout: 'SECRET' }), 'exit 1'],
+    [async () => { throw new Error('SECRET') }, 'runner error'],
+    [async () => ({ code: 'ENOENT' as unknown as number, stdout: '' }), 'ENOENT'],
+    [async () => ({ code: 'SECRET token' as unknown as number, stdout: '' }), 'runner error'],
+    [async () => ({ code: 0, stdout: 'SECRET\n' }), 'malformed reply']
+  ])('fails with a payload-free reason (%#)', async (run, reason) => {
+    const err = await new RemoteFile(run).readContextWindow(ref, 42, 1024).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(ContextReadError)
+    expect((err as ContextReadError).reason).toBe(reason)
+    expect(String((err as Error).message)).not.toContain('SECRET')
+  })
+  it('answers a missing transcript as absent instead of failing', async () => {
+    const window = await new RemoteFile(async () => ({ code: 0, stdout: 'NODETERM_ABSENT\n' })).readContextWindow(ref, null, 1024)
+    expect(window).toMatchObject({ absent: true, data: Buffer.alloc(0) })
   })
 })
 

@@ -255,7 +255,9 @@ export async function fetchRemoteUsage(
   if (out.httpCode === null) return emptyUsage(out.email, now, 'error')
   if (out.httpCode < 200 || out.httpCode >= 300) {
     const { status, cause, httpStatus } = classifyUsageResponseStatus(out.httpCode)
-    return emptyUsage(out.email, now, status, { cause, httpStatus })
+    const failed = emptyUsage(out.email, now, status, { cause, httpStatus })
+    // 429 also carries upstream's `rateLimited` flag: holdLastGood and usageFailureText key on it.
+    return out.httpCode === 429 ? { ...failed, rateLimited: true } : failed
   }
   // An ok answer whose body is empty or not JSON: the endpoint answered, so this is 'parse',
   // exactly as the local reader words it — never laundered into a generic error.

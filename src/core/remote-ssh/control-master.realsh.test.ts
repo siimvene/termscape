@@ -13,12 +13,12 @@
 import { describe, expect, it, beforeAll } from 'vitest'
 import { execFileSync } from 'child_process'
 import fs from 'fs'
-import os from 'os'
 import path from 'path'
 import { remoteHookEnvArgs, remoteTmuxPtyArgs } from './control-master'
 import { REMOTE_TMUX_PATH_DIRS, remoteTmuxPathPrologue } from '../../shared/ssh'
 import { accountTmuxEnvArgs, remoteAccountConfigDirAbs } from '../claude-accounts-core'
 import { isSafeNodeId, isSafeRemoteHome } from '../remote-safety'
+import { testTmpDir } from '../test-tmp'
 
 const conn = { host: 'h.example.com', user: 'deploy', port: 2222, identityFile: '/k/id' }
 
@@ -26,7 +26,7 @@ let binDir: string
 let markerDir: string
 
 beforeAll(() => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ntsh-'))
+  const root = testTmpDir('ntsh-')
   binDir = path.join(root, 'bin')
   markerDir = path.join(root, 'markers')
   fs.mkdirSync(binDir)
@@ -214,7 +214,7 @@ describe('REAL sh: remote tmux PATH resolution + graceful degrade (issue #449)',
   // `command -v` and run for real ("open terminal failed: not a terminal" on stderr, nothing on
   // stdout). An empty dir is the only safe PATH; everything the guard needs (command, printf, cd,
   // exec) is an sh builtin.
-  const emptyPath = (): string => fs.mkdtempSync(path.join(os.tmpdir(), 'ntsh-nopath-'))
+  const emptyPath = (): string => testTmpDir('ntsh-nopath-')
 
   // …but an empty PATH is NOT enough, because the line under test APPENDS four fixed install dirs
   // to it (`REMOTE_TMUX_PATH_DIRS`), and on a dev Mac /opt/homebrew/bin really does hold tmux — so
@@ -233,7 +233,7 @@ describe('REAL sh: remote tmux PATH resolution + graceful degrade (issue #449)',
   }
 
   it('finds a tmux that lives only in an appended dir ($HOME/.local/bin)', () => {
-    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ntsh-home-'))
+    const home = testTmpDir('ntsh-home-')
     const local = path.join(home, '.local', 'bin')
     fs.mkdirSync(local, { recursive: true })
     fs.copyFileSync(path.join(binDir, 'tmux'), path.join(local, 'tmux'))
@@ -248,7 +248,7 @@ describe('REAL sh: remote tmux PATH resolution + graceful degrade (issue #449)',
   })
 
   it('a host with NO tmux prints the explanation and execs a plain login shell', () => {
-    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ntsh-home-'))
+    const home = testTmpDir('ntsh-home-')
     const shell = path.join(home, 'shell-stub')
     fs.writeFileSync(shell, `#!/bin/sh\nprintf 'SHELL_STUB %s\\n' "$@"\n`, { mode: 0o755 })
     const empty = emptyPath()

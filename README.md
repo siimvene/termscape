@@ -216,8 +216,8 @@ never leaves the machine.
 
 ### Node kinds
 
-🖥 **Terminal** (xterm + tmux, AI naming) · 🤖 **Agent** (Claude Code / Codex / Gemini /
-GitHub Copilot / opencode / Grok / Pi / custom) · 📝 **Sticky note** (link to an agent as context) · 🗂 **Group**
+🖥 **Terminal** (xterm + tmux, AI naming) · 🤖 **Agent** (Claude Code / Codex / Antigravity /
+Gemini / GitHub Copilot / opencode / Grok / Pi / custom) · 📝 **Sticky note** (link to an agent as context) · 🗂 **Group**
 (bind to a **git worktree** for agent-per-branch) · ✏️ **Editor** (Monaco, ⌘S) ·
 🔀 **Diff** · 🌐 **Web / Video**
 
@@ -444,7 +444,8 @@ fork adds a handful of self-host and multi-account conveniences on top.
 - **License:** BUSL-1.1, © Enes Kirca — unchanged by this fork
 
 If Termscape is useful to you, the project to star, fund and file issues against is **nodeterm**,
-not this fork.
+not this fork — upstream takes sponsors via its
+[Sponsor section](https://github.com/eneskirca/nodeterm#sponsor).
 
 ## 📜 License
 

@@ -37,7 +37,17 @@ const termMock = vi.hoisted(() => ({ mounts: 0, unmounts: 0 }))
 vi.mock('./ModalTerminal', async () => {
   const { useEffect } = await import('react')
   return {
-    ModalTerminal: ({ nodeId, covered }: { nodeId: string; covered?: boolean }) => {
+    ModalTerminal: ({
+      nodeId,
+      covered,
+      projectId,
+      onOpenFile
+    }: {
+      nodeId: string
+      covered?: boolean
+      projectId?: string
+      onOpenFile?: (file: { path: string; projectId: string; ssh: boolean }) => void
+    }) => {
       useEffect(() => {
         termMock.mounts++
         return () => {
@@ -45,13 +55,35 @@ vi.mock('./ModalTerminal', async () => {
         }
       }, [])
       return (
-        <div className="kanban-modal__term" data-node-id={nodeId} data-covered={String(!!covered)} tabIndex={0}>
+        <div
+          className="kanban-modal__term"
+          data-node-id={nodeId}
+          data-project-id={projectId}
+          data-covered={String(!!covered)}
+          tabIndex={0}
+        >
           Terminal Mock
+          <button
+            className="modal-terminal-file-link"
+            onClick={() => onOpenFile?.({ path: '/project/docs/plan.md', projectId: 'p1', ssh: false })}
+          >
+            Open file
+          </button>
         </div>
       )
     }
   }
 })
+
+vi.mock('./LocalFilePreviewModal', () => ({
+  LocalFilePreviewModal: ({ file, onClose }: { file: { path: string }; onClose: () => void }) => (
+    <div className="local-file-preview-mock" data-path={file.path}>
+      <button className="local-file-preview-close" onClick={onClose}>
+        Close preview
+      </button>
+    </div>
+  )
+}))
 
 // The two ⌘M faces, stubbed to record the props they are handed.
 vi.mock('../../nodes/TerminalMarkdownView', () => ({
@@ -120,6 +152,144 @@ describe('CardModal', () => {
     document.body.innerHTML = ''
   })
 
+  it('opens a terminal file link in an overlay without leaving the Kanban card', () => {
+    const session: KanbanSession = {
+      id: 'node-term-preview',
+      title: 'Preview docs',
+      color: '#0a84ff',
+      kind: 'terminal',
+      spawn: { cwd: '/project' }
+    }
+    const onClose = vi.fn()
+    const onOpenCanvas = vi.fn()
+    const root = createRoot(host)
+
+    act(() =>
+      root.render(
+        <CardModal
+          projectId="p1"
+          session={session}
+          columnTitle="To Do"
+          board={board}
+          onChangeBoard={vi.fn()}
+          onClose={onClose}
+          onOpenCanvas={onOpenCanvas}
+          onRename={vi.fn()}
+          onEditSticky={vi.fn()}
+          onSetIcon={vi.fn()}
+          onBrowserNav={vi.fn()}
+        />
+      )
+    )
+
+    // File links resolve against the CARD's project, which the modal hands to its live viewer.
+    expect(document.body.querySelector<HTMLElement>('.kanban-modal__term')?.dataset.projectId).toBe('p1')
+    act(() => {
+      document.body.querySelector<HTMLButtonElement>('.modal-terminal-file-link')!.click()
+    })
+    const preview = document.body.querySelector<HTMLElement>('.local-file-preview-mock')
+    expect(preview?.dataset.path).toBe('/project/docs/plan.md')
+    expect(onClose).not.toHaveBeenCalled()
+    expect(onOpenCanvas).not.toHaveBeenCalled()
+
+    act(() => {
+      document.body.querySelector<HTMLButtonElement>('.local-file-preview-close')!.click()
+    })
+    expect(document.body.querySelector('.local-file-preview-mock')).toBeNull()
+    expect(document.body.querySelector('.kanban-modal')).toBeTruthy()
+
+    act(() => root.unmount())
+  })
+
+  // #291 review: the header slot decided smiley-vs-icon on the RAW stored value, while
+  // NodeIconView normalizes — so an invalid stored icon drew an empty, un-muted slot.
+  it('shows the smiley "Set icon" slot for an icon that fails validation', () => {
+    const icon = (value: unknown): HTMLButtonElement => {
+      const root = createRoot(host)
+      act(() =>
+        root.render(
+          <CardModal
+            projectId="p1"
+            session={{ id: 'n1', title: 'db', color: '#fff', kind: 'sticky', text: '', spawn: {}, icon: value as never }}
+            columnTitle="To Do"
+            board={board}
+            onChangeBoard={vi.fn()}
+            onClose={vi.fn()}
+            onOpenCanvas={vi.fn()}
+            onRename={vi.fn()}
+            onEditSticky={vi.fn()}
+            onSetIcon={vi.fn()}
+            onBrowserNav={vi.fn()}
+          />
+        )
+      )
+      const button = document.body.querySelector<HTMLButtonElement>('.kanban-modal__icon')!
+      const snapshot = button.cloneNode(true) as HTMLButtonElement
+      act(() => root.unmount())
+      return snapshot
+    }
+    for (const bad of [{ type: 'lucide', name: '__proto__' }, { type: 'lucide', name: 'heart' }, { type: 'image', path: '/etc/passwd' }]) {
+      const button = icon(bad)
+      expect(button.title, JSON.stringify(bad)).toBe('Set icon')
+      expect(button.className).toContain('kanban-modal__icon--empty')
+      expect(button.querySelector('svg'), 'the smiley').toBeTruthy()
+      expect(button.querySelector('.node-icon')).toBeNull()
+    }
+    const good = icon({ type: 'lucide', name: 'database' })
+    expect(good.title).toBe('Change icon')
+    expect(good.className).not.toContain('kanban-modal__icon--empty')
+    expect(good.querySelector('.node-icon svg')).toBeTruthy()
+  })
+
+  it.each([
+    { projectName: 'Example project', projectColor: '#32d74b', columnTitle: 'In Progress' },
+    { projectName: 'A very long project name with <literal> characters', projectColor: undefined, columnTitle: null },
+    { projectName: undefined, projectColor: undefined, columnTitle: 'To Do' }
+  ])('shows the owning project in the header: $projectName', ({ projectName, projectColor, columnTitle }) => {
+    const root = createRoot(host)
+    const session: KanbanSession = {
+      id: 'header-note', title: 'Review generated documentation', color: '#ffd60a',
+      kind: 'sticky', text: 'Review generated documentation', spawn: {}
+    }
+    act(() => root.render(
+      <CardModal
+        projectId="p1"
+        session={session}
+        projectName={projectName}
+        projectColor={projectColor}
+        columnTitle={columnTitle}
+        board={board}
+        onChangeBoard={vi.fn()}
+        onClose={vi.fn()}
+        onOpenCanvas={vi.fn()}
+        onRename={vi.fn()}
+        onEditSticky={vi.fn()}
+        onSetIcon={vi.fn()}
+        onBrowserNav={vi.fn()}
+      />
+    ))
+
+    const identity = document.body.querySelector<HTMLElement>('.kanban-modal__identity')!
+    expect(identity.querySelector<HTMLElement>('.kanban-modal__title')!.title).toBe(session.title)
+    const column = identity.querySelector<HTMLElement>('.kanban-modal__column')!
+    expect(column.textContent).toBe(columnTitle ?? 'Ungrouped')
+    expect(column.title).toBe(columnTitle ?? 'Ungrouped')
+    const project = identity.querySelector<HTMLElement>('.kanban-modal__project')
+    if (projectName) {
+      expect(project!.textContent).toBe(projectName)
+      expect(project!.title).toBe(projectName)
+      expect(project!.getAttribute('aria-label')).toBe(`Project: ${projectName}`)
+      expect(project!.previousElementSibling?.textContent).toBe(session.title)
+      expect(project!.nextElementSibling).toBe(column)
+      const dot = project!.querySelector<HTMLElement>('.kanban-modal__project-dot')!
+      expect(dot.style.background).toBe(projectColor ? 'rgb(50, 215, 75)' : 'currentcolor')
+      expect(dot.getAttribute('aria-hidden')).toBe('true')
+    } else {
+      expect(project).toBeNull()
+    }
+    act(() => root.unmount())
+  })
+
   it('writes through raw textarea value on sticky note edit (including whitespace and newlines)', () => {
     const session: KanbanSession = {
       id: 'node-sticky-1',
@@ -136,7 +306,7 @@ describe('CardModal', () => {
 
     act(() =>
       root.render(
-        <CardModal
+        <CardModal projectId="p1"
           session={session}
           columnTitle="To Do"
           board={board}
@@ -217,7 +387,7 @@ describe('CardModal', () => {
     const root = createRoot(host)
     act(() =>
       root.render(
-        <CardModal
+        <CardModal projectId="p1"
           session={session}
           columnTitle="To Do"
           board={board}
@@ -245,6 +415,51 @@ describe('CardModal', () => {
     act(() => root.unmount())
   })
 
+  it('shows the session\'s #N in the header, like the canvas node and the session card, and opens the issue', () => {
+    const session: KanbanSession = {
+      id: 'node-term-issue',
+      title: 'Claude',
+      color: '#0a84ff',
+      kind: 'terminal',
+      issueRef: { owner: 'eneskirca', repo: 'nodeterm', number: 42 },
+      spawn: {}
+    }
+    const root = createRoot(host)
+    const onOpenIssue = vi.fn()
+    const onClose = vi.fn()
+    act(() =>
+      root.render(
+        <CardModal projectId="p1" session={session} columnTitle="To Do" board={board} onChangeBoard={vi.fn()}
+          onClose={onClose} onOpenCanvas={vi.fn()} onRename={vi.fn()} onEditSticky={vi.fn()}
+          onSetIcon={vi.fn()} onBrowserNav={vi.fn()} onOpenIssue={onOpenIssue} />
+      )
+    )
+    const chip = document.body.querySelector<HTMLElement>('.issue-ref-chip')!
+    expect(chip.textContent).toBe('#42')
+    act(() => chip.dispatchEvent(new MouseEvent('click', { bubbles: true })))
+    expect(onOpenIssue).toHaveBeenCalledWith({ owner: 'eneskirca', repo: 'nodeterm', number: 42 })
+    // The chip's click is the chip's — it does not also rename the card or close the modal.
+    expect(document.body.querySelector('input.kanban-modal__rename')).toBeNull()
+    expect(onClose).not.toHaveBeenCalled()
+    act(() => root.unmount())
+  })
+
+  it('draws no #N for a session with no binding, or a hostile one from a hand-edited file', () => {
+    for (const issueRef of [undefined, { owner: 'o', repo: 'r;rm -rf ~', number: 1 }]) {
+      const root = createRoot(host)
+      act(() =>
+        root.render(
+          <CardModal projectId="p1" session={{ id: 'n', title: 'T', color: '#fff', kind: 'terminal', issueRef, spawn: {} } as KanbanSession}
+            columnTitle={null} board={board} onChangeBoard={vi.fn()} onClose={vi.fn()}
+            onOpenCanvas={vi.fn()} onRename={vi.fn()} onEditSticky={vi.fn()} onSetIcon={vi.fn()}
+            onBrowserNav={vi.fn()} onOpenIssue={vi.fn()} />
+        )
+      )
+      expect(document.body.querySelector('.issue-ref-chip')).toBeNull()
+      act(() => root.unmount())
+    }
+  })
+
   it('handles title renaming and Esc cancellation for non-sticky cards', () => {
     const session: KanbanSession = {
       id: 'node-term-1',
@@ -260,7 +475,7 @@ describe('CardModal', () => {
 
     act(() =>
       root.render(
-        <CardModal
+        <CardModal projectId="p1"
           session={session}
           columnTitle="To Do"
           board={board}
@@ -336,7 +551,7 @@ describe('CardModal', () => {
 
     act(() =>
       root.render(
-        <CardModal
+        <CardModal projectId="p1"
           session={session}
           columnTitle="To Do"
           board={board}
@@ -390,7 +605,7 @@ describe('CardModal', () => {
 
     act(() =>
       root.render(
-        <CardModal
+        <CardModal projectId="p1"
           session={session}
           columnTitle="To Do"
           board={board}
@@ -430,7 +645,7 @@ describe('CardModal', () => {
     const onClose = vi.fn()
     act(() =>
       root.render(
-        <CardModal
+        <CardModal projectId="p1"
           session={session}
           columnTitle="To Do"
           board={board}
@@ -481,7 +696,7 @@ describe('CardModal', () => {
 
     act(() =>
       root.render(
-        <CardModal
+        <CardModal projectId="p1"
           session={session}
           columnTitle="To Do"
           board={board}
@@ -535,7 +750,7 @@ describe('CardModal', () => {
 
     act(() =>
       root.render(
-        <CardModal
+        <CardModal projectId="p1"
           session={session}
           columnTitle="To Do"
           board={board}
@@ -584,7 +799,7 @@ describe('CardModal', () => {
     const render = (root: ReturnType<typeof createRoot>, session: KanbanSession) =>
       act(() =>
         root.render(
-          <CardModal
+          <CardModal projectId="p1"
             session={session}
             columnTitle="To Do"
             board={board}

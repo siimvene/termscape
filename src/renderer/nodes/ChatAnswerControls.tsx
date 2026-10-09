@@ -256,6 +256,19 @@ export function QuestionAnswerControls({ questions, onSubmit, agentLabel, chip }
         >
           Submit
         </button>
+        {/* Claude Code's own escape hatch: decline the question and talk it over instead — Claude
+            asks what you want to clarify and waits at the prompt, where the composer takes over. */}
+        <button
+          type="button"
+          className="term-chat__answer-btn"
+          aria-disabled={busy}
+          title={`Decline the question — ${agentLabel} will ask what you'd like to clarify`}
+          onClick={() => {
+            if (!busy) void submit({ kind: 'question-clarify' })
+          }}
+        >
+          Chat about this
+        </button>
       </div>
       {tooLong && (
         // The only incomplete state that is not visible on its own: the ticked labels plus the typed
@@ -266,5 +279,19 @@ export function QuestionAnswerControls({ questions, onSubmit, agentLabel, chip }
       )}
       <StatusLine status={status} agentLabel={agentLabel} chip={chip} />
     </form>
+  )
+}
+
+/**
+ * In place of the controls while the thread is re-read for a request it was not read for
+ * (`answerCardState` → `updating`): a new plan / question is held, and the card on screen may still
+ * be the previous one. Nothing here can answer anything; the terminal path still works, so the line
+ * names it — the same fallback the error line gives.
+ */
+export function AnswerControlsUpdating({ chip }: { chip: string }) {
+  return (
+    <div className="term-chat__answer term-chat__answer-updating" role="status" aria-live="polite">
+      {chip ? `Updating… — or answer in the terminal (${chip})` : 'Updating… — or answer in the terminal'}
+    </div>
   )
 }

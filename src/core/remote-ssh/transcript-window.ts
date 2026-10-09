@@ -3,13 +3,18 @@ import { CHAT_PAGE_MAX_BYTES } from '../../shared/chat-page'
 
 const BLOCK = 65536
 const STATUS = '\nNODETERM_READ_STATUS:0\n'
+const ABSENT = 'NODETERM_ABSENT'
 
 /** One size snapshot and at most cap + two blocks of file bytes. POSIX sh + BSD/GNU dd.
- * The dd status travels INSIDE base64: pipeline success alone hides a failed file read. */
+ * The dd status travels INSIDE base64: pipeline success alone hides a failed file read.
+ * A path that does not exist answers `NODETERM_ABSENT` with status 0: Claude creates its transcript
+ * on the first prompt while SessionStart already hands us the path, so an unused session has no
+ * file for as long as it stays unused (measured on 2.1.283). That is an answer, not a failed read. */
 export function transcriptWindowCommand(path: string, offset: number | null, cap: number): string {
   if ((offset !== null && (!Number.isSafeInteger(offset) || offset < 0)) ||
       !Number.isSafeInteger(cap) || cap < 1 || cap > 1024 * 1024) throw new Error('Invalid transcript read bounds')
-  return `exec 3< ${posixQuote(path)} || exit 1
+  return `if [ ! -e ${posixQuote(path)} ]; then echo ${ABSENT}; exit 0; fi
+exec 3< ${posixQuote(path)} || exit 1
 size=$(wc -c < ${posixQuote(path)}) || exit 1
 size=$((size + 0))
 start=${offset ?? -1}
@@ -33,9 +38,12 @@ export interface TranscriptWindow {
   start: number
   newOffset: number
   initial: boolean
+  /** The file does not exist (yet). `data` is empty and the offsets carry no meaning. */
+  absent?: boolean
 }
 
 export function parseTranscriptWindow(stdout: string, cap: number): TranscriptWindow {
+  if (stdout === `${ABSENT}\n`) return { data: Buffer.alloc(0), start: 0, newOffset: 0, initial: false, absent: true }
   const end = stdout.indexOf('\n')
   const match = /^(\d+) (\d+) (\d+) ([01])$/.exec(stdout.slice(0, end))
   if (!match) throw new Error('Invalid transcript read header')

@@ -111,10 +111,16 @@ describe('registerBoardLogHandlers — change subscription', () => {
     await append(f, 'p1', entry({ id: 'a' }))
     f.listeners[IPC.boardLogSubscribe]('p1')
     await append(f, 'p1', entry({ id: 'b' }))
-    // fs.watch is debounced 250ms in the store; give it margin
-    await new Promise((r) => setTimeout(r, 500))
-    const pushed = f.sent.filter((s) => s.channel === IPC.boardLogChanged('p1'))
-    expect(pushed.length).toBeGreaterThanOrEqual(1)
+    // fs.watch is debounced 250ms in the store, and on macOS the event itself rides FSEvents, whose
+    // latency under a full-suite load overran a fixed 500ms wait (red in 2 of 3 full runs on
+    // 2026-10-09, green 12/12 alone). Poll for the broadcast instead of guessing a margin.
+    await vi.waitFor(
+      () => {
+        const pushed = f.sent.filter((s) => s.channel === IPC.boardLogChanged('p1'))
+        expect(pushed.length).toBeGreaterThanOrEqual(1)
+      },
+      { timeout: 5000, interval: 50 }
+    )
     f.listeners[IPC.boardLogUnsubscribe]('p1')
   })
 

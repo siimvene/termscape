@@ -48,6 +48,18 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
   every hovered node twice, and on the desktop it would duplicate main's forward. (`node.close`
   has no browser owner at all: the browser keeps ⌘W.)
 - **Invariants**
+  - **A bare letter or Space is only ever a `board`-scope binding.** `board` commands resolve only
+    while a board is up and carry neither `allowWhileTyping` nor `allowInTerminal` — that pair of
+    refusals is what makes a bare key a command rather than a character stolen from the user, so a
+    `board` row must never gain either flag, and no other scope may be given bare letters
+    (`normalizeBindingForCommand`).
+  - **A conflict bucket is a DISPATCH CONTEXT, not a scope** (`conflictBuckets`): `canvas` resolves
+    only with the board closed, `board` only with it open, `app` in both — so an app command sits in
+    `canvas-view` AND `board-view`, and a canvas command never conflicts with a board one. One
+    shared keyspace for all three reported a collision dispatch cannot produce, and the load-time
+    sanitizer then STRIPPED the user's legitimate override (a bare-arrow canvas command against the
+    board's arrow keys). A test walks every pair of view commands through the real
+    `resolveCommandForKeyEvent`, so a new scope or a dispatch change that forgets the buckets reds.
   - **Never read `settings.speech.shortcut`.** The dictation chord is `dictationBinding()` (the
     first effective `speech.dictation` binding); the legacy field is a **downgrade mirror only**,
     written by `setKeybindingOverride` so an older build still finds the user's chord.
@@ -59,8 +71,8 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
     warning reads that list and cannot derive it — main is not importable from the renderer. Note
     what the pin cannot cover: a HARDCODED intercept (the `Digit0` branch) has no command id, so it
     swallows its chord app-wide with the recorder reporting no conflict.
-  - **Dictation has its own conflict bucket** (`conflictBucket` — `speech.dictation` is never in
-    `global`), because it never competes at dispatch: the resolver skips it and its own keyed
+  - **Dictation has its own conflict bucket** (`conflictBuckets` — `speech.dictation` is never in
+    a view bucket), because it never competes at dispatch: the resolver skips it and its own keyed
     listener claims the chord FIRST **in plain app focus or the ⌘M composer box** (`isChatComposerTarget`),
     which is precedence, not ambiguity.
     Overlap policy is deliberately asymmetric — the LOAD path PERMITS a shared chord (legacy

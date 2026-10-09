@@ -75,6 +75,15 @@ project's nodes only.** The contract:
   with the NEW project's tag. A commit in that window wrote an SSH project's 7 nodes over a local
   project's 18 in its `.nodeterm/project.json` (2026-09-26). `nodesEpoch.test.tsx` reproduces the
   interleaving with real React (no `act`, which would flush both lanes together and hide it).
+  **The refs are the LATEST pair, not the last rendered one**: the tag ref is written only by
+  `installEpoch`, and a render copies its `nodes` into `nodesRef` only when that state CHANGED and
+  the render belongs to the installed epoch. An unconditional mirror rewound both refs to the
+  outgoing project in that window, and a peer's `canvas:mut` for the incoming (active) project was
+  applied to the outgoing nodes and queued after the load — the canvas ended on A's nodes plus the
+  op, tagged B, and the next commit wrote them into B. So the receive path routes by
+  `liveCanvasHolds` (tag AND active id; otherwise the store) and queues a FUNCTIONAL update
+  (`rebaseOnLatest`). Consequence for readers: code pairing the tag with the RENDERED `nodes`
+  (a render-time publish, an effect keyed on `nodes`) reads `renderedProjectId`, never the ref.
 - Switching away unmounts the old project's `TerminalNode`s → their tmux clients detach but
   the sessions keep running; switching back reattaches. tmux session names are per-node-id
   (globally unique), so projects never collide.

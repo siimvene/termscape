@@ -115,6 +115,33 @@ paths:
   `main/index.ts` intercepts it in `before-input-event` and forwards `app:zoom-actual-size`, which
   re-asks the same refusals. Server Edition needs no intercept (no menu; Chrome/Firefox hand ⌘0 to
   the page) and stubs the subscription.
+- **Per-terminal font size** (`renderer/terminal/terminal-font-zoom.ts`, issue #915). Opt-in
+  `settings.terminalFontZoomKeys` (Settings → Terminal, default OFF). On, with a terminal focused:
+  ⌘+ / ⌘− (Ctrl off-mac — exactly one primary, since Ctrl+− on mac is readline undo) step THAT
+  node's `data.terminalFontSize` by 1 within the global field's 8–28 range; ⌘0 clears it back to the
+  global `fontSize`. + and − match on `e.key` (German `+` key), 0 on `e.code` like the canvas chord.
+  Before #915 ⌘+ / ⌘− did NOTHING (no menu zoom roles, React Flow's key zoom is off; only
+  webview guests zoom on them) and ⌘0 in a terminal was claimed by main and then refused. Off, or
+  with no terminal focused, every key behaves as before. The override is persisted per node
+  (`normalizeTerminalFontSize` on both sides of `nodeStatesToFlow`/`flowToNodeStates`) and layered
+  by `useXtermVisualSettings(projectId, fontSizeOverride)` — the SAME path for the canvas node and
+  the card modal (`ModalSpawn.terminalFontSize`); the settings preview passes none. Font size is
+  cell geometry, so `applyLiveOptions` reports `metricsChanged` and both surfaces re-fit and report
+  the new grid exactly as for a global font change. **One writer:** both xterm key handlers and the
+  forwarded desktop ⌘0 (resolved from focus via `data-font-zoom-node` on the xterm host) dispatch
+  `nodeterm:terminal-font-zoom`; Canvas applies it (`nextTerminalFontSizeOverride`, `markDirty`).
+  The toolbar / dock +/− buttons stay CANVAS zoom (they have no focused terminal to act on).
+  Two review fixes: main forwards ⌘0 WITH `{meta, control}` and the renderer resets only on the
+  platform chord (`forwardedResetMatches` — a mac Ctrl+0 keeps its old meaning); and under
+  `terminalGpuRendering: 'shared'` a node whose size differs from the global one is held OFF the
+  shared glyph canvas (`leavesSharedGlyphAtlas` → `glyphOff`) and paints its own pixels, because the
+  shared atlas is rasterized for the global font and a grid's cell is fixed at `register`.
+  Round 2: every xterm is BUILT from the effective visual (`visualRef`, both surfaces) — a refresh
+  or offscreen revive recreates it in the same mount, where the live-options effect does not re-run;
+  and keypad 0 resets only when it types `0` (Num Lock off it is Insert, and Ctrl+Insert copies).
+  Round 3: Canvas also mirrors the step into the projects store for the ACTIVE project
+  (`patchStoredFontSize`, same epoch guard as `commitActiveToStore`), because the Omni board builds
+  its card modal's spawn from the store and would otherwise lag until the next autosave commit.
 - **"Go to node" (`goToNode` → the single `frameNode`)** — the one camera-travel path (notification
   click, sessions sidebar, ⌘K jump, presence travel, minimap double-click, double-click focus).
   **`frameNode` computes the viewport itself and applies it with `setViewport`; it must NEVER call
@@ -166,6 +193,18 @@ paths:
       `viewportForRect` **only for maximized nodes**; that gate is NOT adopted here (merge of
       v0.3.16): an ordinary node still gets the pinned side insets, per the rule above. With no
       pinned panels or overlapping persistent controls, `insets` is zero.
+  - **Upstream v0.4.2 (#854) answered the same sidebar report with a nudge on top of whole-pane
+    centring; its paragraph, verbatim (which branch each zoom mode takes is decided in
+    `renderer/lib/nodeFocus.ts`, where the fork rule above and `clearOfPinnedPanels` meet):**
+    **A second, narrower exception: a PINNED side panel (issue #854).** An ordinary node is still
+    centred in the pane, but if that lands part of it under a pinned sessions sidebar or explorer
+    (`measurePinnedInsets` — pinned only, never the hover overlay), `clearOfPinnedPanels` moves it
+    the least distance that uncovers it (plus a 12px gap when there is room). A node too wide for
+    the free area stays centred at a caller's zoom (a shift only swaps which edge is covered) and is
+    fitted into the free area when the zoom is ours. This is not the rejected nudge of 5e8abfe7:
+    that cleared the sidebar as an OVERLAY, which is open whenever the click comes from it, so every
+    jump moved; pinning is the user's statement that the panel stays. The reporter measured 36–47px
+    of a large node under a pinned 321px sidebar on every jump.
   - **`settings.focusZoomToNode`** (Behavior, default ON) is the rescale escape hatch: off, the camera
     keeps the zoom `getZoom()` reports and only pans, and that zoom is passed **unclamped** (it is one
     the canvas already shows; re-clamping it to the framing range would rescale the view the option
@@ -252,7 +291,16 @@ self-correcting on the next render; guarding it would mean threading ownership t
   shell, grid + snap, **default node size** (`defaultNodeWidth`/`defaultNodeHeight` — new
   terminal/agent nodes only, clamped in `terminalNodeSize()` in `state/workspace.ts`),
   pan-hover delay, double-click focus, accent, tmux on/scrollback, commit agent,
-  `seenShortcuts`.
+  `seenShortcuts`. **Every section is MOUNTED whenever Settings is open** — an inactive one
+  returns null from `SettingsSection`, but its hooks and the whole render body above that return
+  still run. So a throw in a section the user never navigated to blanks the entire page: #1090
+  (0.4.0) was `GitHubIssuesSection` calling `dispatchBindingFor` during render, a closure over a
+  `const repository` declared ~140 lines lower (below the early returns) — a TDZ ReferenceError on
+  every Settings open once dispatch was switched on for the active project. **tsc does not flag a
+  closure that reads a later `const`**, only a direct read, so declare anything a render-time
+  helper closes over ABOVE the helper. Each section is now wrapped in `SettingsSectionBoundary`,
+  which contains a throw to that section (fallback shown only while it is the viewed one) — keep
+  new sections inside one.
 - **Shortcuts** (`ShortcutsPanel.tsx`, ? / ⌘/): shown once on first launch (`seenShortcuts`).
   **Derived from the registry, never hand-listed** — see the Keybindings invariant below.
 - **Welcome** (`WelcomeScreen.tsx`): shown when no projects exist.

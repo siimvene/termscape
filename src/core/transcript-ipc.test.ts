@@ -8,7 +8,7 @@ import os from 'os'
 import path from 'path'
 import { fakePlatform } from './platform-fake'
 import { initPlatform, resetPlatformForTests } from './platform'
-import { registerTranscriptIpc } from './transcript-ipc'
+import { readChatTranscript, registerTranscriptIpc } from './transcript-ipc'
 import { rememberGrokSessionDir } from './grok-session'
 import { IPC } from '../shared/ipc'
 import type { ChatTranscriptResult, TranscriptLine } from '../shared/types'
@@ -294,6 +294,34 @@ describe('registerTranscriptIpc — paged chat reads', () => {
     return lines(...out)
   }
 
+  it('readChatTranscript is what the IPC handler serves (same result for the same query)', async () => {
+    writeTranscript(
+      lines(
+        userLine('merhaba'),
+        { type: 'assistant', effort: 'xhigh', message: { model: 'claude-opus-5-5', content: [{ type: 'text', text: 'selam' }] } }
+      )
+    )
+    registerTranscriptIpc()
+    const q = { sessionId: SID, cwd: CWD }
+    for (const page of [undefined, { maxBytes: 65536 }]) {
+      const viaIpc = await paged(page)
+      const direct = await readChatTranscript(q, page, {})
+      expect(direct).toStrictEqual(viaIpc)
+    }
+    const pagedRes = await readChatTranscript(q, { maxBytes: 65536 }, {})
+    expect(pagedRes.model).toBe('claude-opus-5-5')
+    expect(pagedRes.effort).toBe('xhigh')
+  })
+
+  it('the legacy (unpaged) result gains no model/effort keys', async () => {
+    writeTranscript(
+      lines({ type: 'assistant', effort: 'high', message: { model: 'claude-opus-5', content: [{ type: 'text', text: 'x' }] } })
+    )
+    registerTranscriptIpc()
+    const res = await chat()
+    expect(Object.keys(res).sort()).toEqual(['found', 'messages'])
+  })
+
   it('legacy (no page) result carries none of the paging fields', async () => {
     writeTranscript(lines(userLine('merhaba')))
     registerTranscriptIpc()
@@ -418,7 +446,8 @@ describe('registerTranscriptIpc — paged chat reads', () => {
         messages: [],
         found: false,
         olderCursor: null,
-        unmatchedResults: []
+        unmatchedResults: [],
+        unreadable: true
       })
     })
 
@@ -455,7 +484,8 @@ describe('registerTranscriptIpc — paged chat reads', () => {
         messages: [],
         found: false,
         olderCursor: null,
-        unmatchedResults: []
+        unmatchedResults: [],
+        unreadable: true
       })
     })
 
@@ -466,5 +496,99 @@ describe('registerTranscriptIpc — paged chat reads', () => {
       expect(res.messages[0].parts[0]).toMatchObject({ text: 'local' })
       expect(res.olderCursor).toBeNull()
     })
+  })
+})
+
+describe('readChatTranscript — remoteOnly (a node the host KNOWS is remote)', () => {
+  it('never takes the local leg when the remote leg cannot resolve it (unmounted SSH node)', async () => {
+    writeTranscript(lines(assistantLine('the LOCAL machine')))
+    const pathFor = vi.fn(() => undefined)
+    for (const readRemotePage of [async () => null, undefined]) {
+      const res = await readChatTranscript(
+        { sessionId: SID, cwd: CWD, nodeId: 'nt-1', agentId: 'claude', remoteOnly: true },
+        {},
+        { pathFor, ...(readRemotePage ? { readRemotePage } : {}) }
+      )
+      expect(res).toEqual({ messages: [], found: false, olderCursor: null, unmatchedResults: [], unreadable: true })
+    }
+    expect(pathFor).not.toHaveBeenCalled()
+  })
+  it('a remote grok node is not read from this machine either', async () => {
+    const res = await readChatTranscript({ sessionId: SID, nodeId: 'nt-1', agentId: 'grok', remoteOnly: true }, {}, {})
+    expect(res).toMatchObject({ found: false, unreadable: true, messages: [] })
+  })
+  it('without remoteOnly a null remote leg still means "local session" (unchanged)', async () => {
+    writeTranscript(lines(assistantLine('local')))
+    const res = await readChatTranscript({ sessionId: SID, cwd: CWD, nodeId: 'nt-1' }, {}, { readRemotePage: async () => null })
+    expect(res.found).toBe(true)
+    expect(res.unreadable).toBeUndefined()
+  })
+})
+
+// ⌘M (the renderer's `chat:read-transcript`) never said which node was remote, so a mounted SSH
+// node whose host locate missed — or whose master was down — fell through to THIS machine's
+// resolver, cwd-newest fallback included: a wrong-machine, wrong-session read. The shell now
+// decides remoteness from its own records (`isRemoteNode`), never from anything the renderer sends.
+describe('registerTranscriptIpc — a node the SHELL knows is remote (isRemoteNode)', () => {
+  const pagedFor = (nodeId: string) =>
+    f.handlers[IPC.chatReadTranscript](SID, CWD, undefined, nodeId, 'claude', {}) as Promise<ChatTranscriptResult>
+  const exists = (nodeId: string) =>
+    f.handlers[IPC.transcriptExists](SID, undefined, nodeId) as Promise<string>
+  const notFound = { messages: [], found: false, olderCursor: null, unmatchedResults: [] }
+
+  it('host looked, no file (clean miss) → found:false, NOT unreadable, and no local read', async () => {
+    writeTranscript(lines(assistantLine('the LOCAL machine')))
+    const pathFor = vi.fn(() => undefined)
+    registerTranscriptIpc({ pathFor, isRemoteNode: () => true, readRemotePage: async () => ({ ok: false, absent: true }) })
+    expect(await pagedFor('nt-ssh')).toEqual(notFound)
+    expect(pathFor).not.toHaveBeenCalled()
+  })
+
+  it('master down (the remote leg cannot resolve a remote node) → unreadable, no local read', async () => {
+    writeTranscript(lines(assistantLine('the LOCAL machine')))
+    const pathFor = vi.fn(() => undefined)
+    registerTranscriptIpc({ pathFor, isRemoteNode: () => true, readRemotePage: async () => null })
+    expect(await pagedFor('nt-ssh')).toEqual({ ...notFound, unreadable: true })
+    expect(pathFor).not.toHaveBeenCalled()
+  })
+
+  it('a local node is unchanged: a null remote leg still reads this machine', async () => {
+    writeTranscript(lines(assistantLine('local')))
+    const isRemoteNode = vi.fn(() => false)
+    registerTranscriptIpc({ isRemoteNode, readRemotePage: async () => null })
+    const res = await pagedFor('nt-local')
+    expect(res.found).toBe(true)
+    expect(res.messages[0].parts[0]).toMatchObject({ text: 'local' })
+    expect(isRemoteNode).toHaveBeenCalledWith('nt-local')
+  })
+
+  it('the legacy unpaged read does not leak either', async () => {
+    writeTranscript(lines(assistantLine('the LOCAL machine')))
+    registerTranscriptIpc({ isRemoteNode: () => true, readRemote: async () => null })
+    expect(await chat('nt-ssh')).toEqual({ messages: [], found: false })
+  })
+
+  it('the find-bar index (claude:read-transcript) does not index this machine for a remote node', async () => {
+    writeTranscript(lines(assistantLine('the LOCAL machine')))
+    registerTranscriptIpc({ isRemoteNode: () => true, readRemote: async () => null })
+    expect(await search('nt-ssh')).toEqual([])
+  })
+
+  it('presence of a remote node the remote leg could not ask is unknown — never a local scan', async () => {
+    writeTranscript(lines(assistantLine('the LOCAL machine')))
+    registerTranscriptIpc({ isRemoteNode: () => true, remoteExists: async () => null })
+    expect(await exists('nt-ssh')).toBe('unknown')
+  })
+})
+
+describe('readChatTranscript — the phone path (remoteOnly) tells a clean miss from a failure', () => {
+  it('a clean miss on the host is found:false without unreadable', async () => {
+    writeTranscript(lines(assistantLine('the LOCAL machine')))
+    const res = await readChatTranscript(
+      { sessionId: SID, cwd: CWD, nodeId: 'nt-1', agentId: 'claude', remoteOnly: true },
+      {},
+      { readRemotePage: async () => ({ ok: false, absent: true }) }
+    )
+    expect(res).toEqual({ messages: [], found: false, olderCursor: null, unmatchedResults: [] })
   })
 })

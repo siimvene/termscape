@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createReadRemotePage, forgetLocatedRef, rememberHookRef, type RemoteTranscriptRefCache } from './remote-transcript-page'
+import { createReadRemotePage, forgetLocatedRef, locateRemoteTranscriptRef, remotePresenceFromLocate, rememberHookRef, remoteTargetForNode, type RemoteTranscriptRefCache } from './remote-transcript-page'
 import type { RemoteFileRef } from './remote-ssh/remote-file'
 
 const ref = (path: string): RemoteFileRef => ({
@@ -74,5 +74,120 @@ describe('createReadRemotePage — the desktop remote leg of a paged chat read',
     expect(await read(q, PAGE)).toEqual({ ok: false })
     expect(c.bySession.has('sid')).toBe(false)
     expect(c.located.has('sid')).toBe(false)
+  })
+})
+
+describe('remoteTargetForNode (which master a remote transcript read goes over)', () => {
+  const live = { conn: { host: 'live' } as RemoteFileRef['conn'], controlPath: '/live' }
+  const proj = { conn: { host: 'proj' } as RemoteFileRef['conn'], controlPath: '/proj' }
+  it('the live pty session wins when there is one', () => {
+    expect(remoteTargetForNode('n', { live: () => live, projectIdFor: () => 'p', refForProject: () => proj })).toBe(live)
+  })
+  it('an UNMOUNTED SSH node resolves through its PROJECT\'s master', () => {
+    const refForProject = vi.fn(() => proj)
+    expect(remoteTargetForNode('n', { live: () => undefined, projectIdFor: () => 'p', refForProject })).toEqual(proj)
+    expect(refForProject).toHaveBeenCalledWith('p')
+  })
+  it('a local node (no project) or a disconnected project resolves nothing', () => {
+    expect(remoteTargetForNode('n', { live: () => undefined, projectIdFor: () => undefined, refForProject: () => proj })).toBeUndefined()
+    expect(remoteTargetForNode('n', { live: () => undefined, projectIdFor: () => 'p', refForProject: () => undefined })).toBeUndefined()
+  })
+})
+
+describe('createReadRemotePage — a clean miss vs a failure', () => {
+  it("the host looked and found nothing ('absent') is a clean miss, not a failed read", async () => {
+    const readPage = vi.fn()
+    const read = createReadRemotePage({ cache: cache(), refFor: async () => 'absent', readPage })
+    expect(await read(q, PAGE)).toEqual({ ok: false, absent: true })
+    expect(readPage).not.toHaveBeenCalled()
+  })
+  it("a remote session that could not be located ('unreadable') is a failed read", async () => {
+    const read = createReadRemotePage({ cache: cache(), refFor: async () => 'unreadable', readPage: vi.fn() })
+    expect(await read(q, PAGE)).toEqual({ ok: false })
+  })
+})
+
+describe('locateRemoteTranscriptRef (the host-side locate, tri-state)', () => {
+  const target = { conn: { host: 'h', user: 'u' } as RemoteFileRef['conn'], controlPath: '/cm' }
+  const base = (over: Partial<Parameters<typeof locateRemoteTranscriptRef>[1]> = {}) => ({
+    cache: cache(),
+    isRemote: () => true,
+    target: () => target,
+    remoteHome: () => '/home/u',
+    command: () => 'locate-cmd',
+    run: vi.fn(async () => ({ code: 0, stdout: '/home/u/.claude/projects/-w/sid.jsonl\n' })),
+    isSafePath: () => true,
+    ...over
+  })
+
+  it('a located, jailed path is a ref — cached and marked as located by us', async () => {
+    const d = base()
+    const r = await locateRemoteTranscriptRef(q, d)
+    expect(r).toEqual({ ...target, path: '/home/u/.claude/projects/-w/sid.jsonl' })
+    expect(d.cache.bySession.get('sid')).toEqual(r)
+    expect(d.cache.located.has('sid')).toBe(true)
+  })
+  it('a cached ref wins without asking the host', async () => {
+    const d = base()
+    d.cache.bySession.set('sid', ref('/cached'))
+    expect(await locateRemoteTranscriptRef(q, d)).toEqual(ref('/cached'))
+    expect(d.run).not.toHaveBeenCalled()
+  })
+  it("the host answered with no file (exit 0, empty) → 'absent'", async () => {
+    expect(await locateRemoteTranscriptRef(q, base({ run: vi.fn(async () => ({ code: 0, stdout: '' })) }))).toBe('absent')
+  })
+  it("a remote node with no session id → 'absent' (nothing to look for), a local one → undefined", async () => {
+    expect(await locateRemoteTranscriptRef({ ...q, sessionId: undefined }, base())).toBe('absent')
+    expect(await locateRemoteTranscriptRef({ ...q, sessionId: undefined }, base({ isRemote: () => false }))).toBeUndefined()
+  })
+  it("an id no locate command accepts → 'absent'", async () => {
+    expect(await locateRemoteTranscriptRef(q, base({ command: () => null }))).toBe('absent')
+  })
+  it("master down: a remote node with no reachable master → 'unreadable'; a local node → undefined", async () => {
+    expect(await locateRemoteTranscriptRef(q, base({ target: () => undefined }))).toBe('unreadable')
+    expect(await locateRemoteTranscriptRef(q, base({ target: () => undefined, isRemote: () => false }))).toBeUndefined()
+  })
+  it("no resolved home, a failed ssh (non-zero / throw), or a path outside the jail → 'unreadable'", async () => {
+    expect(await locateRemoteTranscriptRef(q, base({ remoteHome: () => undefined }))).toBe('unreadable')
+    expect(await locateRemoteTranscriptRef(q, base({ run: vi.fn(async () => ({ code: 255, stdout: '' })) }))).toBe('unreadable')
+    expect(
+      await locateRemoteTranscriptRef(q, base({ run: vi.fn(async () => { throw new Error('ssh') }) }))
+    ).toBe('unreadable')
+    expect(await locateRemoteTranscriptRef(q, base({ isSafePath: () => false }))).toBe('unreadable')
+  })
+})
+
+describe('remotePresenceFromLocate (transcriptExists on a remote node)', () => {
+  const SID = '46b36ce2-dd77-4f5e-a89e-4a0e831e83df'
+  it('ref → present, clean miss → absent, could not ask → unknown, not remote → null', async () => {
+    expect(await remotePresenceFromLocate(SID, async () => ref('/t.jsonl'))).toBe('present')
+    expect(await remotePresenceFromLocate(SID, async () => 'absent')).toBe('absent')
+    expect(await remotePresenceFromLocate(SID, async () => 'unreadable')).toBe('unknown')
+    expect(await remotePresenceFromLocate(SID, async () => undefined)).toBeNull()
+  })
+  it('a malformed id is unknown, never absent (absent drops a --resume)', async () => {
+    expect(await remotePresenceFromLocate('not-an-id', async () => 'absent')).toBe('unknown')
+  })
+  it('works without a live pty: an SSH-project node resolves over its project master', async () => {
+    const run = vi.fn(async () => ({ code: 0, stdout: '' }))
+    const project = { conn: { host: 'proj' } as RemoteFileRef['conn'], controlPath: '/proj' }
+    const target = (id: string) =>
+      remoteTargetForNode(id, { live: () => undefined, projectIdFor: () => 'p', refForProject: () => project })
+    const r = await remotePresenceFromLocate(SID, () =>
+      locateRemoteTranscriptRef(
+        { sessionId: SID, cwd: undefined, accountId: undefined, nodeId: 'nt-idle' },
+        {
+          cache: cache(),
+          isRemote: () => true,
+          target,
+          remoteHome: () => '/home/u',
+          command: () => 'locate',
+          run,
+          isSafePath: () => true
+        }
+      )
+    )
+    expect(r).toBe('absent')
+    expect(run).toHaveBeenCalledWith(project, 'locate')
   })
 })

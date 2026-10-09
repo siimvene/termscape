@@ -1,14 +1,14 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import * as fs from 'fs'
-import * as os from 'os'
 import * as path from 'path'
 import { readPeerMirror, readFreshPeerMirror, readPeerUsage, startPeerStatusBridge } from './peer-status-bridge'
 import { IPC } from '../shared/ipc'
+import { testTmpDir } from '../core/test-tmp'
 import { WORKING_STALE_MS } from '../shared/agents/stale'
 import { _resetForTest, EXPIRE_MS, initAgentStatusMirror, recordAgentEvent } from '../core/agent-status-mirror'
 
 function tmpMirror(nodes: Record<string, unknown>, usage?: unknown): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'peer-mirror-'))
+  const dir = testTmpDir('peer-mirror-')
   const file = path.join(dir, 'agent-status.json')
   fs.writeFileSync(file, JSON.stringify({ v: 1, updatedAt: 1, nodes, ...(usage ? { usage } : {}) }))
   return file
@@ -47,7 +47,7 @@ describe('readPeerMirror', () => {
   })
 
   it('fresh snapshot carries approvals, strips question tickets, and drops stale working evidence', () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'peer-fresh-'))
+    const dir = testTmpDir('peer-fresh-')
     const file = path.join(dir, 'agent-status.json')
     const now = Date.now()
     fs.writeFileSync(file, JSON.stringify({ v: 1, nodes: {

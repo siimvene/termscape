@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { IconClose } from '../icons'
 import type { BoardLogAuthor, KanbanPriority, ProjectKanban } from '@shared/types'
-import { cardMeta, labelsForCard, setCardDue, setCardPriority, toggleAssignee } from '../../lib/kanban'
+import { cardAssignees, cardMeta, labelsForCard, setCardDue, setCardPriority, toggleAssignee } from '../../lib/kanban'
 import { LabelChips } from './LabelChips'
 import { LabelPicker } from './LabelPicker'
 import { useShallow } from 'zustand/react/shallow'
@@ -57,7 +57,7 @@ export function CardMetaBar({ nodeId, board, onChange }: CardMetaBarProps) {
     return [...seen.values()]
   }, [peers, logEntries])
 
-  const assignees = meta?.assignees ?? []
+  const assignees = cardAssignees(meta)
   const due = meta?.dueAt
   const overdue = due !== undefined && due < Date.now()
   const priority = meta?.priority

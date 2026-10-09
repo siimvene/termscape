@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync, appendFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, appendFileSync, rmSync, unlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createRemoteContextTail, idleDelayMs } from './remote-context-tail'
+import { createRemoteContextTail, failureDelayMs, idleDelayMs, logsFailure } from './remote-context-tail'
 import { RemoteFile, type RemoteFileRef } from './remote-ssh/remote-file'
 
 const cap = 1024 * 1024
@@ -36,9 +36,16 @@ describe('remote context polling', () => {
       expect(readContextWindow).toHaveBeenCalledTimes(calls + 1)
     }
     expect(warn.mock.calls.flat().join()).not.toContain('SECRET')
+    // Eight failures, two lines: the first of the streak and the one that settles at the cap.
+    expect(warn.mock.calls.map(c => c[0])).toEqual([
+      '[remote-context-tail] Read for session s failed (unknown); retrying in 2000ms',
+      '[remote-context-tail] Read for session s still failing after 6 attempts (unknown); retrying every 60000ms until it recovers'
+    ])
     readContextWindow.mockResolvedValue({ data: Buffer.from(usage(120)), start: 0, newOffset: 200, initial: true })
     await vi.advanceTimersByTimeAsync(60000)
     expect(h.send.mock.calls.at(-1)?.[1].usedTokens).toBe(120)
+    expect(warn.mock.calls.at(-1)?.[0]).toBe('[remote-context-tail] Read for session s recovered after 8 failed attempts')
+    expect(warn).toHaveBeenCalledTimes(3)
     await vi.advanceTimersByTimeAsync(1000)
     expect(readContextWindow).toHaveBeenLastCalledWith(ref, 200, cap)
     h.tail.untrack('s')
@@ -67,9 +74,9 @@ describe.skipIf(process.platform === 'win32')('real POSIX shell transcript fixtu
   let dir: string
   beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'nt-transcript-')) })
   afterEach(() => rmSync(dir, { recursive: true, force: true }))
-  function fixture(initial: string | Buffer) {
+  function fixture(initial: string | Buffer | null) {
     const path = join(dir, "transcript ' fixture.jsonl")
-    writeFileSync(path, initial)
+    if (initial !== null) writeFileSync(path, initial)
     const transfers: number[] = []
     const reader = new RemoteFile(async args => {
       const stdout = execFileSync('/bin/sh', ['-c', args.at(-1)!], { encoding: 'utf8', maxBuffer: 2 * cap })
@@ -126,6 +133,96 @@ describe.skipIf(process.platform === 'win32')('real POSIX shell transcript fixtu
     await vi.advanceTimersByTimeAsync(1000)
     expect(h.onTaskNotification.mock.calls.map(c => c[1].result)).toEqual(['fresh', 'next'])
     h.tail.untrack('s')
+  })
+
+  // Claude creates its transcript on the first prompt, but SessionStart hands the path over at
+  // launch (measured on 2.1.283), so every unused remote Claude node starts here — and used to
+  // walk the failure backoff to 60 s and log a line a minute for as long as it stayed unused.
+  it('treats a transcript that does not exist yet as idle, then reads it from its first byte', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const h = fixture(null)
+    await flush()
+    await expect(h.read.mock.results[0].value).resolves.toMatchObject({ absent: true })
+    for (let i = 0; i < 120; i++) await vi.advanceTimersByTimeAsync(1000)
+    // Idle cadence (capped at 10 s), not the 60 s failure wait, and nothing logged.
+    expect(h.read.mock.calls.length).toBeGreaterThan(12)
+    expect(h.read.mock.calls.every(c => c[1] === null)).toBe(true)
+    expect(warn).not.toHaveBeenCalled()
+
+    // The first prompt: the file appears and its hook arrives. Everything in it is new.
+    writeFileSync(h.path, notification('first turn') + tool + usage(300))
+    const before = h.read.mock.calls.length
+    h.tail.track('s', { ...ref, path: h.path })
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(h.read.mock.calls.length).toBe(before + 1)
+    expect(h.send.mock.calls.at(-1)?.[1].usedTokens).toBe(300)
+    expect(h.onTaskNotification).toHaveBeenCalledExactlyOnceWith('s', expect.objectContaining({ result: 'first turn' }))
+    expect(h.onToolResult).toHaveBeenCalledExactlyOnceWith('s', 'tu')
+
+    // Removed and written again (not a realistic Claude path, but the same rule): new bytes, live.
+    unlinkSync(h.path)
+    await vi.advanceTimersByTimeAsync(1000)
+    writeFileSync(h.path, notification('rewritten') + usage(400))
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(h.onTaskNotification.mock.calls.map(c => c[1].result)).toEqual(['first turn', 'rewritten'])
+    expect(warn).not.toHaveBeenCalled()
+    h.tail.untrack('s')
+  })
+})
+
+describe('a file that appears after it was missing', () => {
+  it('is history again when it arrives bigger than the bootstrap window', async () => {
+    const readContextWindow = vi.fn()
+      .mockResolvedValue({ data: Buffer.alloc(0), start: 5000, newOffset: 5000, initial: false })
+      .mockResolvedValueOnce({ data: Buffer.alloc(0), start: 0, newOffset: 0, initial: false, absent: true })
+      .mockResolvedValueOnce({ data: Buffer.from(notification('copied in') + usage(50)), start: 4000, newOffset: 5000, initial: true })
+    const h = harness({ readContextWindow })
+    try {
+      h.tail.track('s', ref)
+      await flush()
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(h.send.mock.calls.at(-1)?.[1].usedTokens).toBe(50)
+      // Bytes before `start` were never seen: this is someone else's history, not a new turn.
+      expect(h.onTaskNotification).not.toHaveBeenCalled()
+    } finally { h.tail.untrack('s') }
+  })
+})
+
+describe('failure log and wait', () => {
+  it('logs the first failure and the one that reaches the cap, and nothing in between', () => {
+    expect([1, 2, 3, 4, 5, 6, 7].map(failureDelayMs)).toEqual([2000, 4000, 8000, 16000, 32000, 60000, 60000])
+    expect(Array.from({ length: 30 }, (_, i) => i + 1).filter(logsFailure)).toEqual([1, 6])
+  })
+
+  it('names the observed status, never the reply', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const reader = new RemoteFile(async () => ({ code: 255, stdout: 'SECRET banner' }))
+    const h = harness(reader)
+    try {
+      h.tail.track('0123456789abcdef', ref)
+      await flush()
+      expect(warn.mock.calls[0][0]).toBe('[remote-context-tail] Read for session 01234567 failed (exit 255); retrying in 2000ms')
+    } finally { h.tail.untrack('0123456789abcdef') }
+  })
+
+  it('a hook for the session skips the rest of the failure wait, keeping the streak', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const readContextWindow = vi.fn().mockRejectedValue(new Error('down'))
+    const h = harness({ readContextWindow })
+    try {
+      h.tail.track('s', ref)
+      await flush()
+      for (const delay of [2000, 4000, 8000, 16000, 32000]) await vi.advanceTimersByTimeAsync(delay)
+      expect(readContextWindow).toHaveBeenCalledTimes(6) // now 60 s away
+      h.tail.track('s', { ...ref, conn: { ...ref.conn } })
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(readContextWindow).toHaveBeenCalledTimes(7)
+      // Still failing: straight back to the capped wait, not to 2 s.
+      await vi.advanceTimersByTimeAsync(59_000)
+      expect(readContextWindow).toHaveBeenCalledTimes(7)
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(readContextWindow).toHaveBeenCalledTimes(8)
+    } finally { h.tail.untrack('s') }
   })
 })
 

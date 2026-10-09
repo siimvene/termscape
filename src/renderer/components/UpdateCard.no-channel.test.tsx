@@ -34,7 +34,10 @@ beforeEach(() => {
       onNoChannel: sub('noChannel'),
       getPolicy: () => Promise.resolve({ minSupported: null, mandatory: false }),
       check: () => {},
-      restart: () => {}
+      restart: () => {},
+      prepareInspect: () => Promise.resolve({ kind: 'unsupported' }),
+      prepareShutdownHost: () => Promise.resolve({ kind: 'unsupported' }),
+      prepareQuit: () => {}
     }
   }
   window.open = ((url: string) => {
@@ -77,7 +80,8 @@ describe('the no-channel card', () => {
     )
     expect(btn).toBeTruthy()
     act(() => btn!.click())
-    expect(opened).toEqual(['https://nodeterm.dev/releases'])
+    // Termscape fork: our releases page, never upstream's DMG.
+    expect(opened).toEqual(['https://github.com/siimvene/termscape/releases'])
   })
 
   it('stays put — no auto-dismiss timer, unlike the up-to-date toast', () => {

@@ -70,6 +70,19 @@ paths:
   PTY write has no image receipt. Never synthesize that key or fall back between routes.
   The macOS shortcuts reference explains both keys; its Server Edition copy explicitly
   says Ctrl+V cannot transfer the viewer's clipboard to the host. SSH keeps remote uploads.
+  **The path paste has a receipt for claude, and only for claude** (`terminal/image-paste-confirm.ts`,
+  both surfaces through `pasteWithImageReceipt`). MEASURED on Claude Code 2.1.285 (bracketed paste,
+  captures in `terminal/__fixtures__/claude-image-paste.json`): a path to an existing
+  png/jpg/jpeg/gif/webp (any case) becomes `[Image #N]` in the composer within ~60 ms; bmp, svg,
+  heic, tiff and a missing file stay text; `N` keeps counting for the session and does NOT reset
+  when the composer is cleared. So the receipt reads OUR xterm buffer (the emulator, not tmux) for
+  placeholder numbers ABOVE the highest one on screen before the paste (the counter only rises,
+  so an older placeholder scrolling into view cannot confirm it; with none on screen, two pastes
+  inside ~60 ms can still confirm each other), up to 3 s: "Image attached", else
+  "Pasted the path — not confirmed as an image" (`.term-paste-pill`, top-right so it never covers
+  the copy pill or the agent's bottom-left input line). Only when a claude CLI is in the pane
+  (`agentProcessInPane`); every other agent was not measured and gets the paste with no receipt
+  either way — nothing is claimed on its behalf. A terminal disposed mid-wait reports nothing.
   **Copying now says so**: the OSC 52 handler floats a transient `Copied N lines` pill over the
   terminal's BOTTOM-RIGHT corner (`.term-copy-pill`, the same class on the canvas node and the
   kanban card modal — one session seen twice must not speak in two voices; bottom-right because
@@ -94,14 +107,47 @@ paths:
   all terminals — harmless in a plain shell). **Cmd (mac) / Ctrl+click** opens links in the
   output: URLs → default browser (`@xterm/addon-web-links`), file paths → editor node and
   directories → Explorer reveal (`terminal/file-links.ts`, existence-verified against the project
-  fs via cached parent-dir listings, with `path:line[:col]` compiler-output suffixes). The path
+  fs via cached parent-dir listings, with `path:line[:col]` compiler-output suffixes). **What counts
+  as a path is `terminal/file-link-tokens.ts`**, and it is generous on purpose because existence is
+  the arbiter: segments take any Unicode letter/number/mark (`var/otta-aktarım/çıktı.sql`) and
+  route-folder brackets (`app/(shop)/[id]/page.tsx`; prose parentheses are dropped only when
+  unbalanced); a separator path with SPACES is offered whole, ending at a word with a separator, a
+  word completing `name.ext`, or the line end — AND as its space-free pieces, which is what keeps
+  `/usr/bin/python failed to start app.py` from costing the `/usr/bin/python` link (tokens may
+  overlap; the provider keeps the first that exists in start/longest order, `linkAtCell` carries the
+  rest as `alternatives` for the Cmd+click fallback and the link menu); a BARE filename (`README`,
+  `foo.ts`) only when `looksLikeBareFilename` says so — versions (`v1.2`), abbreviations (`e.g.`)
+  and plain words are never looked up, and a right-click does not claim a bare word; a `file://`
+  URI is percent-decoded to its absolute path (local host only; Windows needs a drive). **The scan
+  must stay linear** — it runs per hovered row on padded TUI rows; no backtracking regex, and the
+  ReDoS guard in `file-link-tokens.test.ts` pins it (the previous regex took 2.2 s on a 30k-char
+  word). Hit-tests and underlines go through `Paragraph.cellStart/cellEnd` (xterm cells, not string
+  indices), so wide CJK glyphs before or inside a path no longer shift its range. A relative
+  path is anchored on the node's LAUNCH cwd first, then on the pane's LIVE cwd (`pty:pane-cwd` —
+  tmux `#{pane_current_path}`, local or over the ControlMaster; `findExistingPath`), because an
+  agent prints paths relative to where IT runs; the launch cwd wins a tie so a link never changes
+  meaning when the pane moves. A Cmd/Ctrl+click on a path that exists under neither raises a
+  `File not found: …` toast naming where it looked — the click is swallowed before the async
+  lookup, so without it the gesture silently did nothing. **"Could not check" is never "not
+  found"**: a lookup has three outcomes (`PathLookup.unverified`, `PathResolution.unverified`), and
+  `makeDirListingLookup` treats a REJECTED listing and an EMPTY one as unverified — `FsApi` is
+  fail-open (`listDir` ends `catch { return [] }`, and a dead ControlMaster lists `[]`), so only a
+  listing WITH entries can prove absence (same rule as `classifyEmptyListing`); `.git` is unverified
+  too (both listing legs strip it). A failure is cached as a failure for ~1 s, never as an empty
+  directory for the 3 s TTL. An unchecked launch-cwd candidate still lets the live cwd be tried (a
+  hit there is proof). The toast then reads `Couldn't check <path>: <reason>` (`fileMissMessage`),
+  and the link menu shows `Couldn't check: <reason>` instead of `Not found`. The path
   dialect follows the FILESYSTEM-OWNING CORE, not the viewer: desktop-local may use its own
   platform, Server Edition and relay tabs use the core's reported `process.platform`, and SSH
   projects are POSIX. A failed host-platform read disables file links for that connection — it
   never guesses from the browser. Standalone `ssh` terminal nodes remain URL-only because they
   have no remote fs API with which to verify a token; relay tabs do have a core-bound, jailed fs
   API and therefore support file links. Windows existence matching is case-insensitive and accepts
-  both separators; UNC tokens are refused whole before they can be reinterpreted as cwd-relative.
+  both separators; UNC tokens are refused whole before they can be reinterpreted as cwd-relative. A path an
+  agent TUI wrapped under a **hanging indent** (Codex: 2 spaces, broken after a `/` or at a space)
+  is neither a soft nor a hard wrap, so it is offered as extra READINGS (`hangingReadings` — the
+  seam as nothing, and as one space), tried BEFORE the plain row's tokens by both the provider and
+  `linkAtCell`; existence decides, and a click on the indent is not a click on the path.
   **Right-click on a link** opens a link menu (pure `terminal/link-menu.ts`; the listener is
   `installLinkContextMenu`, beside the Cmd+click fallback and sharing its `linkAtCell` hit-test):
   Open / Reveal in Explorer / Download / Copy path for a file, Open in browser / canvas browser /
@@ -111,10 +157,39 @@ paths:
   right PRESS, not on `contextmenu`:** tmux 3.x binds `MouseDown3Pane` to its own `display-menu`, so
   the press is what must be swallowed; a right-click OFF a link stays byte-identical (tmux menu,
   agent TUI, node menu). A path-shaped token that turns out not to exist still gets a menu ("Not
-  found" + Copy path) — its press was already swallowed, and a silent swallow reads as broken.
+  found" + Copy path; "Couldn't check: <reason>" when its existence could not be checked) — its
+  press was already swallowed, and a silent swallow reads as broken.
   Downloads report in a `DownloadStrip` floated over the terminal, not in a drawer that may be
-  shut. The kanban card modal gets URL rows only (no file links there) and no "Open in canvas
-  browser" (the node would land under the board).
+  shut. The kanban card modal's right-click menu has URL rows only and no "Open in canvas
+  browser" (the node would land under the board). Its Cmd/Ctrl+click DOES follow file links, with
+  main's token model and lookup, but routed by the CARD's project, not the active one
+  (`lib/cardFileLinks.ts` — the Omni board opens cards from every project; any doubt turns file
+  links off): a file opens in `LocalFilePreviewModal` over the card (HTML copied into the agent-web
+  jail and shown under its strict CSP; source text in a browser tab, which has no webview), whose
+  "Open on canvas" is offered only for a card of the active project. On the canvas a LOCAL `.html`
+  opened by a link or that button renders as a WebNode (`fileViewerKind`'s `renderHtml`, carried as
+  `view: true` on `nodeterm:open-file`); Explorer, ⌘K and the files node still open it in the editor.
+  **Hovering a link says what a click opens** (`terminal/link-hover.ts`): the RESOLVED absolute
+  path — which of the two cwds held it — plus the gestures, `<abs> (⌘-click to open · ⇧⌘-click to
+  open with default app)` (Ctrl/Shift+Ctrl off-mac; a directory reads "reveal" / "open in
+  Finder|file manager"; a URL just `<url> (⌘-click to open)`, OSC 8 included, whose target the label
+  hides). It rides xterm's `ILink.hover`/`leave`, which fire in a tmux pane too — the linkifier
+  listens to `mousemove` on the screen element whatever the mouse-tracking mode; only CLICKS need
+  the capture fallback. One tooltip per xterm instance, INSIDE `term.element` (parks and dies with
+  the terminal, scales with the canvas zoom like the copy pill; positioned by dividing the rect by
+  the rendered/layout width ratio), `pointer-events: none` + `xterm-hover`, hidden by any press or
+  wheel. **Shift+Cmd/Ctrl+click opens with the OS default app** (`linkOpenIntent` — ONE routing rule
+  for the provider `activate` and `installLinkClickFallback`): `shell.openPath` behind
+  `canUseLocalShell`, the same gate as Reveal in Finder, so a directory opens in the OS file
+  manager. Everywhere that gate says no the click TOASTS its reason (`systemOpenRefusal`) and the
+  hint omits the gesture: an SSH project is refused rather than downloaded-then-opened (a click must
+  not silently copy a file or folder to this machine, and edits would land on a stale copy — the
+  link menu's Download is one right-click away), the Server Edition is refused rather than falling
+  back to the plain open (a modified gesture that quietly does something else is harder to learn;
+  the bridge's `shell.openPath` stays its documented inert stub), and a relay tab is refused (the
+  path is on the peer). Shift alone is never a link gesture (xterm's selection modifier); a
+  modified press released on another cell is a drag and is left alone, and a Shift+Cmd click that
+  extended an xterm selection does not open.
   **Home-relative `~/x` tokens** (Claude Code prints its plan file as `~/.claude/plans/<name>.md`)
   stay `~`-rooted all the way to the fs call and are expanded by the core that OWNS the filesystem
   — `expandHomePath` in `core/fs-handlers.ts` for desktop/Server Edition, the remote shell for
@@ -145,7 +220,11 @@ paths:
   a frame among its siblings, carrying its subtree. `nodeStatesToFlow`/`groupsFirst` emit frames
   **depth-first from the root** — a flat "groups first" sort is not enough once two groups compare
   equal — and that persisted order is also the downgrade contract (a pre-nesting build's stable
-  sort leaves it alone, so a nested tree still hydrates parent-first and renders there).
+  sort leaves it alone, so a nested tree still hydrates parent-first and renders there). The order
+  has ONE definition (`groupsFirstBy`, `src/shared/node-order.ts`), and the shared op reducer
+  (`applyCanvasMutation`) re-sorts with it on an append or a `parentId` change — the same two points
+  the live React Flow apply does — because a governed Server Edition project's file is written from
+  the canvas authority's array, not from React Flow's.
   **A frame that gains a child bigger than itself is re-fitted, ancestors included**
   (`fitGroupToChildren` up the chain): a wrapper created at `(minX-28, minY-62)` relative to its
   parent is routinely negative, and `extent:'parent'` would make React Flow clamp it into an
@@ -196,7 +275,7 @@ paths:
   the ephemeral loop/cron cards, which visualize AGENT-initiated recurrence). The card shows the
   schedule + next-run countdown, the target (a derived, never-persisted edge — but the pending-launch
   dep edge is NO longer one: since the 2026-09-02 edge model it is a persisted rope,
-  `ctrl-<dep>-<node>`, whose dashed ⏳ LOOK is what is derived), the payload, an honest
+  `ctrl-after-<dep>-<node>`, whose dashed ⏳ LOOK is what is derived), the payload, an honest
   ARMED/DISARMED/CHANGED/SET-UP chip with the
   "definitions travel with the repo, consent never does" narrative, Run-now, and the last runs
   (fired / delivered-late / queued / missed / failed / expired). Arming passes a ConfirmDialog
@@ -372,10 +451,10 @@ the wire never see any of it):
   both directions. Server Edition: inert (no `<webview>` in a plain browser — ghosts are empty
   husks, nothing to preserve). Mobile: N/A (no canvas).
 
-## Node icons (emoji or picture)
+## Node icons (emoji, glyph or picture)
 
-A node may carry `data.icon` (`NodeIcon` in `@shared/node-icon`): `{type:'emoji', value}` or
-`{type:'image', path}`. Absent = the node draws exactly as it did before the feature, which is the
+A node may carry `data.icon` (`NodeIcon` in `@shared/node-icon`): `{type:'emoji', value}`,
+`{type:'lucide', name}` or `{type:'image', path}`. Absent = the node draws exactly as it did before the feature, which is the
 degrade every failure path falls back to. Set from the node right-click menu ("Set icon…", hideable
 like Colors — id `icon`), from the icon itself in the terminal node header, and from the kanban card
 modal's header slot; drawn by the one `NodeIconView` on all four surfaces that list a node (canvas
@@ -385,6 +464,20 @@ kind, deliberately: offering it on an editor or a group frame would persist a va
 which is the "looks like it worked" failure this file warns about elsewhere. Extending it to sticky
 or browser nodes means adding the draw and the set together, in one change.
 
+- **Glyphs (issue #291) are a closed allowlist, `NODE_GLYPHS`** — shell, git repo, database, server,
+  … with a label each (tooltip / accessible name, never stored). It is typed as a SUBSET of the
+  project icon's `LUCIDE_ICON_IDS`, so a glyph draws from the one `LUCIDE_ICONS` map `ProjectGlyph`
+  owns; a new glyph needs an id already in that map (or added to both). The name is matched exactly —
+  a name outside the list, a newer build's glyph, is no icon, and an OLDER build drops it on its next
+  save of a shared project.json (its `normalizeNodeIcon` does not know the variant). Picked from the
+  same dialog as emoji, drawn in `currentColor`. Agent nodes are terminal nodes, so they are offered
+  a glyph like any icon: it sits beside the agent's own identity, it does not replace it. No
+  auto-suggest (cwd is git → git glyph, pane command `psql` → database): an icon written without the
+  user choosing it would land in the git-shared file.
+- **The icon survives a close/reopen.** Both reopen paths carry it re-validated — `withCosmetics`
+  (⇧⌘T and the sidebar history both end there) and `stateToReopenSnapshot` (the persisted twin is
+  read from hand-editable workspace.json). Before, `icon` was not a cosmetic key and a reopened
+  session came back bare.
 - **`.nodeterm/project.json` is hostile input, so the icon is validated at BOTH serializer seams.**
   `normalizeNodeIcon` runs in `nodeStatesToFlow` (a cloned file becoming live state) *and* in
   `flowToNodeStates` (live state becoming the next reader's file — live node data is reachable by a

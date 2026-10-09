@@ -1,8 +1,9 @@
 import { commitLaunchAttempt } from './launch-attempt'
 import type { PendingLaunch } from '@shared/types'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createLaunchWriter, deliverInitialLaunch, launchCommand, registerLaunchWriter, trustsFreshShell } from './launch-command'
-import { KILL_LINE, WINDOWS_KILL_LINE, VERIFY_TIMEOUT_MS, DELIVERY_ATTEMPTS } from './command-delivery'
+import { createLaunchWriter, deliverInitialLaunch, hasLaunchWriter, launchCommand, registerLaunchWriter } from './launch-command'
+import { trustsFreshShell } from '@shared/launch-trust'
+import { KILL_LINE, WINDOWS_KILL_LINE, VERIFY_TIMEOUT_MS, DELIVERY_ATTEMPTS } from '@shared/command-delivery'
 
 function fixture(attempted = false, killLine = KILL_LINE) {
   const cleanups: Array<() => void> = []
@@ -129,6 +130,15 @@ describe('durable launch delivery', () => {
     expect(await launchCommand('node', 'cmd')).toBe('submitted')
     second()
     expect(await launchCommand('node', 'cmd', true)).toBe('cancelled')
+  })
+  it('hasLaunchWriter reports a registered writer, per scope, and forgets it on unregister', () => {
+    const scope = {}
+    expect(hasLaunchWriter('probe')).toBe(false)
+    const off = registerLaunchWriter('probe', async () => 'submitted')
+    expect(hasLaunchWriter('probe')).toBe(true)
+    expect(hasLaunchWriter('probe', scope)).toBe(false)
+    off()
+    expect(hasLaunchWriter('probe')).toBe(false)
   })
 })
 

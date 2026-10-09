@@ -15,10 +15,12 @@ const MIN_INTERVAL_MS = 6 * 60 * 60 * 1000 // client-side burst cap: never ping 
 // Hardening: never transmit unless it's an official
 // build AND the user hasn't opted out AND no kill switch is set. A dev can target a local
 // server by setting NODETERM_API_BASE explicitly.
-function telemetryAllowed(getSettings: () => Settings): boolean {
-  if (process.env.DO_NOT_TRACK || process.env.NODETERM_TELEMETRY_DISABLED) return false
-  if (!app.isPackaged && !process.env.NODETERM_API_BASE) return false
-  return getSettings().telemetryEnabled
+//
+// TERMSCAPE FORK: never. The ping goes to upstream's backend (api.nodeterm.dev) and nothing a fork
+// build sends there is the fork's business to send. Same dead-switch shape as core/check.ts
+// `allowed()`; pinned by core/no-upstream-feed.guard.test.ts. Settings → Privacy says so.
+function telemetryAllowed(_getSettings: () => Settings): boolean {
+  return false
 }
 
 // A stable anonymous id in its own file (kept out of the renderer-synced settings).
