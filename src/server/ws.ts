@@ -12,6 +12,7 @@
 // the sink. Binary client→server frames are ignored in Phase 2 (pty input rides
 // JSON casts). See task-5-brief.md.
 import type http from 'http'
+import type { ClaudeScienceProxy } from './claude-science-proxy'
 import type { Duplex } from 'stream'
 import { WebSocketServer, type WebSocket } from 'ws'
 import type { Auth } from './auth'
@@ -54,6 +55,7 @@ export const WS_HEARTBEAT_MS = 30_000
 export const WS_MAX_PAYLOAD = 8 * 1024 * 1024
 
 export interface WsServerOpts {
+  scienceProxy?: ClaudeScienceProxy
   platform: ServerPlatform
   auth: Auth
   /**
@@ -77,7 +79,7 @@ export interface WsServerOpts {
  * WS hijacking check applies to both auth paths). A malformed Origin URL is treated as a
  * rejection (never throws).
  */
-function upgradeAllowed(
+export function upgradeAllowed(
   req: http.IncomingMessage,
   auth: Auth,
   trustProxy?: TrustProxyConfig
@@ -146,6 +148,15 @@ export function attachWsServer(server: http.Server, opts: WsServerOpts): WebSock
   server.on('close', () => clearInterval(heartbeat))
 
   server.on('upgrade', (req: http.IncomingMessage, socket: Duplex, head: Buffer) => {
+    if (opts.scienceProxy?.matches(req.url ?? '/')) {
+      socket.on('error', () => socket.destroy())
+      if (!upgradeAllowed(req, auth, trustProxy)) {
+        socket.end('HTTP/1.1 401 Unauthorized\r\n\r\n')
+        return
+      }
+      opts.scienceProxy.upgrade(req, socket, head)
+      return
+    }
     // Only handle our path; a mismatched path is left for any other upgrade
     // listener (and, if none, the socket eventually times out / is destroyed by node).
     const pathname = new URL(req.url || '/', 'http://x').pathname

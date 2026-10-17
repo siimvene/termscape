@@ -138,6 +138,7 @@ export interface NodeData {
   fileMissing?: boolean
   /** web-only: live URL to load in the web (webview) node. */
   url?: string
+  browserApp?: 'claude-science'
   /**
    * browser-only: the Electron session partition for this <webview>. Set ONCE at creation for an
    * AGENT-opened node (`agentBrowserPartition`, `persist:nt-agent-browser-<projectId>`) and never
@@ -1212,6 +1213,16 @@ export function createBrowserNode(
   }
 }
 
+/** A large managed browser panel, with only its application identity persisted. */
+export function createScienceNode(index: number, center?: { x: number; y: number }): CanvasNode {
+  const node = createBrowserNode(index, '', center)
+  return {
+    ...node,
+    ...placeNode('browser', center, index, 1100, 760),
+    data: { ...node.data, browserApp: 'claude-science', title: 'Claude Science', color: resolveAgent('claude').color }
+  }
+}
+
 /**
  * Creates a file-manager node browsing `cwd`.
  *
@@ -2121,6 +2132,7 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
         filePath: n.filePath,
         fileMissing: n.fileMissing,
         url: n.url,
+        browserApp: n.browserApp === 'claude-science' ? n.browserApp : undefined,
         partition: n.partition,
         diffStaged: n.diffStaged,
         commitOid: n.commitOid,
@@ -2213,6 +2225,7 @@ export function flowToNodeStates(nodes: CanvasNode[], retainInitialCommand = tru
         filePath: n.data.filePath,
         fileMissing: n.data.fileMissing,
         url: n.data.url,
+        browserApp: n.data.browserApp === 'claude-science' ? n.data.browserApp : undefined,
         partition: n.data.partition,
         diffStaged: n.data.diffStaged,
         commitOid: n.data.commitOid,

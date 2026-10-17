@@ -196,6 +196,10 @@ const ROWS = {
       'security'
     ]
   },
+  science: {
+    title: 'Claude Science panels',
+    keywords: ['claude', 'science', 'research', 'panels', 'browser', 'sandbox']
+  },
   hibernation: {
     title: 'Hibernate idle agents',
     keywords: [
@@ -715,6 +719,17 @@ export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.El
               ))}
             </Select>
           }
+        />
+      </SearchableRow>
+      <SearchableRow {...ROWS.science}>
+        <FieldRow
+          label="Claude Science panels"
+          description="Allow Termscape to start the separately installed Claude Science app and embed its interface. Turning this off blocks panel access; use Stop Science in a panel to stop running analyses."
+          control={<Switch
+            checked={settings.claudeScienceEnabled}
+            onChange={(v) => update({ claudeScienceEnabled: v })}
+            ariaLabel="Claude Science panels"
+          />}
         />
       </SearchableRow>
       <SearchableRow {...ROWS.browserControl}>

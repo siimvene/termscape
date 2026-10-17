@@ -1,7 +1,17 @@
 import { describe, it, expect } from 'vitest'
-import { createBrowserNode, nodeStatesToFlow, flowToNodeStates } from './workspace'
+import { createBrowserNode, createScienceNode, nodeStatesToFlow, flowToNodeStates } from './workspace'
 
 describe('browser node', () => {
+  it('persists the Science application identity and panel size without a login URL', () => {
+    const node = createScienceNode(0)
+    const state = flowToNodeStates([node])
+    const restored = nodeStatesToFlow(state)[0]
+    expect(restored.data.browserApp).toBe('claude-science')
+    expect(restored.width).toBe(node.style?.width)
+    expect(restored.height).toBe(node.style?.height)
+    expect(restored.width).toBeGreaterThanOrEqual(1000)
+    expect(JSON.stringify(state)).not.toContain('nonce')
+  })
   it('createBrowserNode carries kind browser + url', () => {
     const n = createBrowserNode(0, 'https://example.com')
     expect(n.type).toBe('browser')

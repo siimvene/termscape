@@ -265,6 +265,14 @@ paths:
   does NOT persist zoom in `project.json`: Electron propagates a zoom level by origin, so a per-node
   persisted value would make two nodes for one origin fight. Desktop: full; Server Edition:
   controls hidden (no Electron guest); Mobile: N/A (no canvas).
+  **Claude Science** is a managed browser subtype (`browserApp: 'claude-science'`), using
+  `ClaudeScienceSurface` on both canvas and card modal. It keeps nonce URLs in component state
+  only. The core service owns a single instance per Termscape data directory; closing a node
+  leaves it running, and only the explicit Stop action stops analyses. Launch and server-side
+  framing require machine-local `claudeScienceEnabled` consent (default off, Settings → Agents).
+  Server Edition uses an authenticated same-origin HTTP/WS proxy and an iframe. The preview
+  listener is always a separate origin. Desktop loads Science directly in a webview; relay/mobile
+  refuse the HTTP app. Do not give Science Claude Code hooks, flags, or managed-account semantics.
 - **files** (`FilesNode.tsx`) — a file-manager node: one directory listing (`data.cwd`, persisted)
   pinned beside the terminals working in it. Adds no new IPC (runs on `FsApi`). Deep reference:
   `.claude/rules/files-node.md`.

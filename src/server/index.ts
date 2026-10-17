@@ -9,6 +9,9 @@ import http from 'http'
 import { ServerPlatform } from './platform-server'
 import { Auth } from './auth'
 import { createHttpHandler } from './http'
+import { ClaudeScienceService, registerClaudeScience } from '../core/claude-science'
+import { SCIENCE_BASE_PATH } from '../shared/claude-science'
+import { ClaudeScienceProxy } from './claude-science-proxy'
 import { attachWsServer } from './ws'
 import { describeTrustedNets } from './proxy-trust'
 import type { ServerConfig } from './config'
@@ -232,6 +235,7 @@ export async function startServer(
     ...(config.peerUserDataDir ? { peerUserDataDir: config.peerUserDataDir } : {})
   })
   initPlatform(platform)
+  const science = new ClaudeScienceService(config.dataDir, { basePath: SCIENCE_BASE_PATH })
   if (config.peerUserDataDir) {
     const peerAccounts = path.join(config.peerUserDataDir, 'claude-accounts')
     console.log(
@@ -264,6 +268,9 @@ export async function startServer(
   const workspaceStore = new WorkspaceStore()
 
   settingsStore.init()
+  const scienceEnabled = () => settingsStore.get().claudeScienceEnabled === true
+  registerClaudeScience(platform, science, scienceEnabled)
+  const scienceProxy = new ClaudeScienceProxy(science.port, scienceEnabled)
   // The linked-account resolver's one source of truth on this shell. Registered as
   // soon as settings exist and BEFORE anything that resolves a config dir — the mirror settings
   // provider, `installHooksIntoLocalAccounts`, the transcript jail — because an unregistered
@@ -1246,6 +1253,7 @@ export async function startServer(
     createHttpHandler({
       auth,
       rendererDir: config.rendererDir,
+      scienceProxy,
       trustProxy: config.trustProxy,
       downloadTickets
     })
@@ -1255,6 +1263,7 @@ export async function startServer(
   const wsServer = attachWsServer(server, {
     platform,
     auth,
+    scienceProxy,
     onClientGone: dropUiClient,
     trustProxy: config.trustProxy
   })

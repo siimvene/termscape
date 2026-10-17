@@ -848,6 +848,7 @@ import {
   systemAccountDisplay,
   createAgentNode,
   createBrowserNode,
+  createScienceNode,
   createDinoNode,
   createTriggerNode,
   createFilesNode,
@@ -6443,11 +6444,16 @@ export function Canvas() {
   )
 
   const addBrowser = useCallback(
-    (center?: { x: number; y: number }) => {
+    (center?: { x: number; y: number }, browserApp?: 'claude-science') => {
       // Open a blank browser node — the user types the URL in the node's own address bar (like a
       // browser's new tab). We deliberately don't use window.prompt: Electron doesn't support it
       // (it throws "prompt() is and will not be supported"), and a browser node doesn't need it.
-      setNodes((ns) => [...ns, createBrowserNode(ns.length, '', center ?? emptyNodePos())])
+      setNodes((ns) => {
+        const at = center ?? emptyNodePos()
+        const node = browserApp === 'claude-science'
+          ? createScienceNode(ns.length, at) : createBrowserNode(ns.length, '', at)
+        return [...ns, node]
+      })
       markDirty()
     },
     [setNodes, markDirty, emptyNodePos]
@@ -11664,7 +11670,7 @@ export function Canvas() {
     () => ({
       terminal: (at) => addTerminal(at),
       remote: (screenPos) => openRemotePicker(screenPos),
-      browser: (at) => addBrowser(at),
+      browser: (at, app) => addBrowser(at, app),
       web: (at) => void addWebView(at),
       sticky: (at) => addSticky(at),
       files: (at) => addFiles(at),
@@ -18805,6 +18811,7 @@ export function Canvas() {
         : []),
       { id: 'open-web', label: 'Open web view…', icon: <IconRemote />, run: () => addWebView() },
       { id: 'open-browser', label: 'New browser', icon: <IconRemote />, run: () => addBrowser() },
+      { id: 'open-science', label: 'New Claude Science', icon: <IconRemote />, run: () => addBrowser(undefined, 'claude-science') },
       ...useSshServers.getState().servers.map(
         (srv): Command => ({
           id: `new-remote-${srv.id}`,
@@ -20383,7 +20390,7 @@ export function Canvas() {
         onOpenFile={() => void openFileDialog()}
         onAddRemote={() => openRemotePicker({ x: window.innerWidth / 2, y: window.innerHeight / 2 })}
         onConnectRemote={() => void connectRemote()}
-        onAddBrowser={() => addBrowser()}
+        onAddBrowser={(app) => addBrowser(undefined, app)}
         onAddWeb={() => void addWebView()}
         onNewFile={() => void newProjectFile()}
         onAddWorktree={() => openWorktreeDialog(null)}

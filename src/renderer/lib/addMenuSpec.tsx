@@ -57,6 +57,7 @@ export type AddItem =
   | { kind: 'terminal' }
   | { kind: 'remote' }
   | { kind: 'browser' }
+  | { kind: 'science' }
   | { kind: 'web' }
   | { kind: 'sticky' }
   | { kind: 'files' } // requiresCwd
@@ -78,6 +79,7 @@ export const CONTENT_ADD_ITEMS: readonly AddItem[] = [
   { kind: 'terminal' },
   { kind: 'remote' },
   { kind: 'browser' },
+  { kind: 'science' },
   { kind: 'web' },
   { kind: 'sticky' },
   { kind: 'files' },
@@ -108,7 +110,7 @@ export interface AddCtx {
 export interface AddHandlers {
   terminal: (at?: AddPos) => void
   remote: (screenPos: { x: number; y: number }) => void
-  browser: (at?: AddPos) => void
+  browser: (at?: AddPos, app?: 'claude-science') => void
   web: (at?: AddPos) => void
   sticky: (at?: AddPos) => void
   files: (at?: AddPos) => void
@@ -170,6 +172,12 @@ export function contentAddItemsToMenuItems(
         break
       case 'browser':
         out.push({ label: 'New browser', icon: <IconRemote />, onClick: () => handlers.browser(at) })
+        break
+      case 'science':
+        out.push({ label: 'New Claude Science', icon: <IconWeb />,
+          disabled: ctx.isSshProject,
+          hint: ctx.isSshProject ? 'Claude Science runs on the Termscape host. Open it in a local project.' : undefined,
+          onClick: () => handlers.browser(at, 'claude-science') })
         break
       case 'web':
         out.push({ label: 'New web view…', icon: <IconWeb />, onClick: () => handlers.web(at) })
@@ -272,6 +280,12 @@ export function contentAddItemsToDockRows(
       case 'browser':
         out.push({ kind: 'browser', label: 'Browser', icon: <IconRemote />, onClick: () => handlers.browser() })
         break
+      case 'science':
+        out.push({ kind: 'science', label: 'Claude Science', icon: <IconWeb />,
+          disabled: ctx.isSshProject,
+          hint: ctx.isSshProject ? 'Claude Science runs on the Termscape host. Open it in a local project.' : undefined,
+          onClick: () => handlers.browser(undefined, 'claude-science') })
+        break
       case 'web':
         out.push({ kind: 'web', label: 'Web View', icon: <IconWeb />, onClick: () => handlers.web() })
         break
@@ -361,6 +375,7 @@ export const ADD_ITEM_GROUP: Record<AddItem['kind'], AddGroupId> = {
   terminal: 'top',
   remote: 'top',
   browser: 'view',
+  science: 'view',
   web: 'view',
   sticky: 'view',
   files: 'view',

@@ -237,6 +237,11 @@ export function buildStubApi(): Omit<
       stopAll: noop,
       stopProject: noop
     },
+    // Relay clients cannot reach a host's HTTP app through the terminal-only relay transport.
+    science: {
+      status: U('science.status'), open: U('science.open'),
+      stop: U('science.stop'), logs: U('science.logs')
+    },
     updates: {
       onAvailable: noopUnsub,
       onDownloaded: noopUnsub,

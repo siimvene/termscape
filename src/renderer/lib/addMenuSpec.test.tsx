@@ -41,6 +41,7 @@ const allKinds: AddItem['kind'][] = [
   'terminal',
   'remote',
   'browser',
+  'science',
   'web',
   'sticky',
   'files',
@@ -70,6 +71,7 @@ describe('contentAddItemsToMenuItems', () => {
       'New terminal',
       'New remote…',
       'New browser',
+      'New Claude Science',
       'New web view…',
       'New sticky note',
       'New file manager',
@@ -144,7 +146,7 @@ describe('contentAddItemsToMenuItems', () => {
     const calls: string[] = []
     const h = handlers({
       terminal: () => calls.push('terminal'),
-      browser: () => calls.push('browser'),
+      browser: (_at, app) => calls.push(app ? 'science' : 'browser'),
       web: () => calls.push('web'),
       sticky: () => calls.push('sticky'),
       dino: () => calls.push('dino'),
@@ -158,7 +160,7 @@ describe('contentAddItemsToMenuItems', () => {
     for (const item of items) {
       if ('onClick' in item) item.onClick()
     }
-    expect(calls.sort()).toEqual(['browser', 'dino', 'spawnTeam', 'sticky', 'terminal', 'web', 'worktree'])
+    expect(calls.sort()).toEqual(['browser', 'dino', 'science', 'spawnTeam', 'sticky', 'terminal', 'web', 'worktree'])
   })
 })
 
@@ -172,6 +174,7 @@ describe('contentAddItemsToDockRows', () => {
     // "New Remote Connection" flow. Emitting a terminal row here duplicated the Terminal entry.
     expect(rows.map((r) => r.kind)).toEqual([
       'browser',
+      'science',
       'web',
       'sticky',
       'files',
@@ -304,6 +307,7 @@ describe('buildGroupedAddMenu', () => {
     }
     expect(children(ADD_GROUP_LABEL.view)).toEqual([
       'New browser',
+      'New Claude Science',
       'New web view…',
       'New sticky note',
       'New file manager',
@@ -448,7 +452,7 @@ describe('buildGroupedAddMenu', () => {
     const h = handlers({
       terminal: () => calls.push('terminal'),
       remote: () => calls.push('remote'),
-      browser: () => calls.push('browser'),
+      browser: (_at, app) => calls.push(app ? 'science' : 'browser'),
       web: () => calls.push('web'),
       sticky: () => calls.push('sticky'),
       files: () => calls.push('files'),
@@ -473,6 +477,7 @@ describe('buildGroupedAddMenu', () => {
       'newFile',
       'openFile',
       'remote',
+      'science',
       'scopedCheckout',
       'spawnTeam',
       'sticky',

@@ -4,6 +4,7 @@ import { IconClose } from '../components/icons'
 import { NODE_MIN_SIZES } from '../lib/nodeSizing'
 import type { CanvasNode } from '../state/workspace'
 import { BrowserSurface } from './BrowserSurface'
+import { ClaudeScienceSurface } from './ClaudeScienceSurface'
 import { BrowserDrivingIndicator } from './BrowserDrivingChip'
 import { useWebviewKeepAlive } from '../state/webviewKeepAlive'
 
@@ -59,7 +60,7 @@ export default function BrowserNode({ id, data, selected }: NodeProps<CanvasNode
       </div>
 
       <div className="editor-node__body">
-        <BrowserSurface
+        {data.browserApp === 'claude-science' ? <ClaudeScienceSurface /> : <BrowserSurface
           nodeId={id}
           url={(data.url as string) ?? ''}
           partition={data.partition as string | undefined}
@@ -70,7 +71,7 @@ export default function BrowserNode({ id, data, selected }: NodeProps<CanvasNode
             ghost ? useWebviewKeepAlive.getState().updateGhostData(id, { title: t }) : updateNodeData(id, { title: t })
           }
           onGuestDiscarded={ghost ? () => useWebviewKeepAlive.getState().drop(id) : undefined}
-        />
+        />}
       </div>
     </div>
   )

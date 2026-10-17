@@ -448,6 +448,12 @@ const api: NodeTerminalApi = {
     stopAll: () => ipcRenderer.send(IPC.browserStopAll),
     stopProject: (projectId: string) => ipcRenderer.send(IPC.browserStopProject, projectId)
   },
+  science: {
+    status: () => ipcRenderer.invoke(IPC.scienceStatus),
+    open: () => ipcRenderer.invoke(IPC.scienceOpen),
+    stop: () => ipcRenderer.invoke(IPC.scienceStop),
+    logs: () => ipcRenderer.invoke(IPC.scienceLogs)
+  },
   files: {
     quickOpen: (cwd: string) => ipcRenderer.invoke(IPC.filesQuickOpen, cwd),
     // Desktop has no HTTP surface to redeem a ticket on — the core handler answers null here, and

@@ -1,6 +1,10 @@
 // IPC channel names — single source of truth for both main and preload.
 
 export const IPC = {
+  scienceStatus: 'science:status',
+  scienceOpen: 'science:open',
+  scienceStop: 'science:stop',
+  scienceLogs: 'science:logs',
   ptyCreate: 'pty:create',
   ptyWrite: 'pty:write',
   ptyResize: 'pty:resize',

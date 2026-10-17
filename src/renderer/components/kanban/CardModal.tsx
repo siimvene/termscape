@@ -58,6 +58,7 @@ import { CardMetaBar } from './CardMetaBar'
 import { CardPullRequests } from './CardPullRequests'
 import { ModalTerminal } from './ModalTerminal'
 import { BrowserSurface } from '../../nodes/BrowserSurface'
+import { ClaudeScienceSurface } from '../../nodes/ClaudeScienceSurface'
 import { BrowserDrivingIndicator } from '../../nodes/BrowserDrivingChip'
 import { NoteMarkdown } from '../NoteMarkdown'
 import { inLiveChatDrawer } from '../../lib/liveChatPin'
@@ -713,7 +714,7 @@ export function CardModal({ session, projectId, projectName, projectColor, colum
                 ) : isBrowser ? (
                   // A live browser webview seeded with the node's URL; navigation persists back to
                   // the node (the canvas node picks it up on its next mount).
-                  <BrowserSurface
+                  session.browserApp === 'claude-science' ? <ClaudeScienceSurface /> : <BrowserSurface
                     key={session.id}
                     nodeId={session.id}
                     url={session.url ?? ''}

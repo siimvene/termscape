@@ -18,6 +18,7 @@ export function toKanbanSession(n: CanvasNode): KanbanSession | null {
       kind: 'browser',
       url: n.data.url as string | undefined,
       partition: n.data.partition as string | undefined,
+      browserApp: n.data.browserApp,
       spawn: {}
     }
   }

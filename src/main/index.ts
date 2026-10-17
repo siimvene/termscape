@@ -64,6 +64,7 @@ import { TrackpadGestureLedger } from './trackpad-gesture'
 import { LogBuffer } from '../core/log-buffer'
 import { installLogSink, splitTag } from '../core/log-sink'
 import { registerLogHandlers } from '../core/log-handlers'
+import { ClaudeScienceService, registerClaudeScience } from '../core/claude-science'
 import {
   registerBrowserGuest,
   type BrowserGuest,
@@ -1961,6 +1962,7 @@ app.whenReady().then(async () => {
   }
   const boardLog = registerBoardLogHandlers(corePlatform, boardLogRouter)
   registerLogHandlers(corePlatform, logBuffer, () => settingsStore.get().debugLogPanel)
+  registerClaudeScience(corePlatform, new ClaudeScienceService(corePlatform.userDataDir), () => settingsStore.get().claudeScienceEnabled === true)
 
   // Agent messaging (the `send`/`reply` control verbs). Canvas.tsx forwards the validated verb
   // here; everything that authorizes or performs the delivery reads MAIN's stores. See
