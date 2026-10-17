@@ -2,6 +2,7 @@
 
 export const IPC = {
   scienceStatus: 'science:status',
+  scienceInstall: 'science:install',
   scienceOpen: 'science:open',
   scienceStop: 'science:stop',
   scienceLogs: 'science:logs',

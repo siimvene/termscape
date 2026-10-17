@@ -1444,6 +1444,7 @@ export async function installWsBridge(): Promise<boolean> {
     ...stubApi,
     science: {
       status: () => client.request(IPC.scienceStatus) as ReturnType<NodeTerminalApi['science']['status']>,
+      install: () => client.request(IPC.scienceInstall) as Promise<void>,
       open: () => client.request(IPC.scienceOpen) as Promise<string>,
       stop: () => client.request(IPC.scienceStop) as Promise<void>,
       logs: () => client.request(IPC.scienceLogs) as Promise<string>

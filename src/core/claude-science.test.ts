@@ -1,17 +1,40 @@
 import { describe, it, expect, vi } from 'vitest'
+import fs from 'fs'
+import path from 'path'
 import { ClaudeScienceService, redactScienceSecrets, registerClaudeScience } from './claude-science'
+import { testTmpDir } from './test-tmp'
 
 describe('Claude Science service', () => {
   it('enforces machine-wide consent before a saved node can launch Science', async () => {
     const handlers = new Map<string, (...args: any[]) => unknown>()
     const service = new ClaudeScienceService('/unused', { env: {}, run: async () => '{}' })
     const open = vi.spyOn(service, 'open').mockResolvedValue('fresh')
+    const install = vi.spyOn(service, 'install').mockResolvedValue()
     let enabled = false
     registerClaudeScience({ handle: (name, fn) => { handlers.set(name, fn) } }, service, () => enabled)
     expect(() => handlers.get('science:open')!()).toThrow('Allow Claude Science')
     expect(open).not.toHaveBeenCalled()
+    expect(() => handlers.get('science:install')!()).toThrow('Allow Claude Science')
+    expect(install).not.toHaveBeenCalled()
     enabled = true
+    await handlers.get('science:install')!()
+    expect(install).toHaveBeenCalledTimes(1)
     expect(await handlers.get('science:open')!()).toBe('fresh')
+  })
+
+  it.skipIf(process.platform === 'win32')('finds a newly installed runtime without restarting the service', async () => {
+    const root = testTmpDir('science-discovery-')
+    const service = new ClaudeScienceService(root, { env: {} })
+    fs.mkdirSync(path.join(root, 'science-bin'))
+    fs.writeFileSync(path.join(root, 'science-bin', 'claude-science'), '#!/bin/sh\nprintf \'{"version":"managed-fixture","running":false}\\n\'\n', { mode: 0o700 })
+    expect(await service.status()).toMatchObject({ installed: true, version: 'managed-fixture' })
+  })
+
+  it('honors an administrator binary override instead of downloading an unused executable', async () => {
+    const service = new ClaudeScienceService('/unused', { env: { NODETERM_SCIENCE_BIN: '/custom/science' },
+      run: async () => { throw Object.assign(new Error('missing'), { code: 'ENOENT' }) } })
+    expect(await service.status()).toMatchObject({ installed: false, installable: false })
+    await expect(service.install()).rejects.toThrow('NODETERM_SCIENCE_BIN')
   })
   it('starts only once for simultaneous views, and mints independent login links', async () => {
     let running = false

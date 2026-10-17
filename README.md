@@ -423,7 +423,16 @@ The same panel opens from a browser card on the kanban board. Reconnect mints a 
 link; **Stop Science** stops the shared instance and its running analyses. Closing a panel keeps
 the service and saved work. Revoke panel access in **Settings → Agents → Claude Science panels**.
 
-Install Science separately on the host that runs Termscape, following
+If Science is missing, click **Install Claude Science** in the panel. Termscape downloads the
+official runtime from Anthropic, verifies its SHA-256 checksum against the official release
+manifest, and installs it into `<userData>/science-bin` without sudo. Each Linux user's
+Termscape instance can install its own runtime; an installation under another user's home
+is not shared. Restoring a saved panel never starts a download. The first start may take
+several minutes while Science prepares its analysis environment. Internet access is required.
+The managed installer supports Linux x64, macOS x64/arm64, and Windows x64/arm64; it reports
+unsupported platforms rather than downloading another architecture's binary.
+
+You can also install Science yourself using
 [Anthropic's setup guide](https://claude.com/docs/claude-science/get-started). Linux requires
 glibc x64, bubblewrap 0.8 or later, system-installed socat, and permitted unprivileged user
 namespaces. Termscape preserves Science's sandbox and approval prompts. Science has its own
@@ -455,8 +464,11 @@ viewer's localhost. Desktop webviews reach the local preview port directly.
 
 Optional host environment overrides: `NODETERM_SCIENCE_BIN` (executable path),
 `NODETERM_SCIENCE_PORT` (default `8765`), and `NODETERM_SCIENCE_PREVIEW_PORT` (default `8766`).
-Use distinct unused ports and adjust the preview proxy if you change them. A Science binary
-update is an explicit operation outside Termscape; managed launches disable automatic updates.
+Use distinct unused ports and adjust the preview proxy if you change them. `NODETERM_SCIENCE_BIN`
+takes precedence and disables the in-app installer. Otherwise Termscape prefers its managed runtime,
+then `~/.local/bin/claude-science`, then the executable on `PATH`. Managed launches disable automatic
+updates. To update, stop Science, remove its managed executable, and use **Install Claude Science**
+again. This keeps updates explicit and preserves projects and sign-in.
 
 ## 🤝 Contributing
 

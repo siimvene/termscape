@@ -270,6 +270,10 @@ paths:
   only. The core service owns a single instance per Termscape data directory; closing a node
   leaves it running, and only the explicit Stop action stops analyses. Launch and server-side
   framing require machine-local `claudeScienceEnabled` consent (default off, Settings → Agents).
+  Installation requires both consent and an explicit Install click. The core downloads only the
+  official manifest and a version-pinned binary, verifies SHA-256 before atomic publication into
+  `<userData>/science-bin`, and never runs an installer script or requests root. Resolve the binary
+  on each command so new installations work without restarting. Preserve explicit binary overrides.
   Server Edition uses an authenticated same-origin HTTP/WS proxy and an iframe. The preview
   listener is always a separate origin. Desktop loads Science directly in a webview; relay/mobile
   refuse the HTTP app. Do not give Science Claude Code hooks, flags, or managed-account semantics.

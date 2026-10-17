@@ -9,13 +9,14 @@ import { DEFAULT_SETTINGS } from '@shared/types'
 vi.mock('../bridge/runtime', () => ({ isBrowserRuntime: () => true }))
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 let host: HTMLDivElement, root: Root
-let api: { open: ReturnType<typeof vi.fn>; status: ReturnType<typeof vi.fn>; stop: ReturnType<typeof vi.fn>; logs: ReturnType<typeof vi.fn> }
+let api: { install: ReturnType<typeof vi.fn>; open: ReturnType<typeof vi.fn>; status: ReturnType<typeof vi.fn>; stop: ReturnType<typeof vi.fn>; logs: ReturnType<typeof vi.fn> }
 const original = useSettings.getState()
 let order: string[]
 
 beforeEach(() => {
   order = []
   api = {
+    install: vi.fn(async () => { order.push('install') }),
     open: vi.fn(async () => { order.push('open'); return '/apps/claude-science/?nonce=ephemeral' }),
     status: vi.fn(async () => ({ installed: true, enabled: true, running: true, previewConfigured: true })),
     stop: vi.fn(async () => {}), logs: vi.fn(async () => '')
@@ -54,6 +55,47 @@ describe('Science panel permission and lifecycle', () => {
     useSettings.setState({ settings: { ...DEFAULT_SETTINGS, claudeScienceEnabled: true } })
     await act(async () => root.render(<ClaudeScienceSurface />))
     expect(host.querySelector('[role="alert"]')?.textContent).toContain('unexpected URL')
+    expect(host.querySelector('iframe')).toBeNull()
+  })
+
+  it('offers installation without downloading on mount, then installs and opens only after a click', async () => {
+    let installed = false
+    api.status.mockImplementation(async () => ({ installed, installable: true, enabled: true, running: installed, previewConfigured: true }))
+    api.install.mockImplementation(async () => { order.push('install'); installed = true })
+    useSettings.setState({ settings: { ...DEFAULT_SETTINGS, claudeScienceEnabled: true } })
+    await act(async () => root.render(<ClaudeScienceSurface />))
+    expect(api.install).not.toHaveBeenCalled()
+    expect(api.open).not.toHaveBeenCalled()
+    const button = [...host.querySelectorAll('button')].find((b) => b.textContent === 'Install Claude Science')!
+    await act(async () => button.click())
+    expect(order).toEqual(['save', 'save', 'install', 'save', 'open'])
+    expect(host.querySelector('iframe')?.getAttribute('src')).toBe('/apps/claude-science/?nonce=ephemeral')
+  })
+
+  it('shows a failed install and allows retry without trying to start the missing runtime', async () => {
+    api.status.mockResolvedValue({ installed: false, installable: true })
+    api.install.mockRejectedValue(new Error('checksum verification failed'))
+    useSettings.setState({ settings: { ...DEFAULT_SETTINGS, claudeScienceEnabled: true } })
+    await act(async () => root.render(<ClaudeScienceSurface />))
+    const button = [...host.querySelectorAll('button')].find((b) => b.textContent === 'Install Claude Science')!
+    await act(async () => button.click())
+    expect(host.querySelector('[role="alert"]')?.textContent).toContain('checksum verification failed')
+    expect(button.disabled).toBe(false)
+    expect(api.open).not.toHaveBeenCalled()
+  })
+
+  it('does not launch after access is revoked during a download', async () => {
+    let finish!: () => void
+    api.status.mockResolvedValue({ installed: false, installable: true })
+    api.install.mockImplementation(() => new Promise<void>((resolve) => { finish = resolve }))
+    useSettings.setState({ settings: { ...DEFAULT_SETTINGS, claudeScienceEnabled: true } })
+    await act(async () => root.render(<ClaudeScienceSurface />))
+    const button = [...host.querySelectorAll('button')].find((b) => b.textContent === 'Install Claude Science')!
+    await act(async () => button.click())
+    expect(button.disabled).toBe(true)
+    await act(async () => useSettings.setState((s) => ({ settings: { ...s.settings, claudeScienceEnabled: false } })))
+    await act(async () => finish())
+    expect(api.open).not.toHaveBeenCalled()
     expect(host.querySelector('iframe')).toBeNull()
   })
 })

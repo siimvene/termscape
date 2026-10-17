@@ -7,6 +7,7 @@ import { IPC } from '../shared/ipc'
 import type { ClaudeScienceStatus } from '../shared/claude-science'
 import type { CorePlatform } from './platform'
 import { redactSecrets } from './log-redact'
+import { ClaudeScienceInstaller } from './claude-science-install'
 
 const execute = promisify(execFile)
 type Run = (args: string[]) => Promise<string>
@@ -19,6 +20,8 @@ export function redactScienceSecrets(text: string): string {
 export class ClaudeScienceService {
   private opening?: Promise<void>
   private run: Run
+  private installer: ClaudeScienceInstaller
+  private installUnavailableReason?: string
   readonly port: number
   readonly previewPort: number
   readonly dataDir: string
@@ -28,6 +31,10 @@ export class ClaudeScienceService {
 
   constructor(userDataDir: string, options: { basePath?: string; run?: Run; env?: NodeJS.ProcessEnv } = {}) {
     const env = options.env ?? process.env
+    this.installer = new ClaudeScienceInstaller(userDataDir)
+    this.installUnavailableReason = env.NODETERM_SCIENCE_BIN
+      ? 'This host uses NODETERM_SCIENCE_BIN. Ask its administrator to install Claude Science at that path.'
+      : this.installer.unavailableReason
     // Science creates AF_UNIX sockets beneath this directory. Keep its name short.
     this.dataDir = path.join(userDataDir, 'science')
     this.basePath = options.basePath ?? ''
@@ -54,14 +61,17 @@ export class ClaudeScienceService {
       this.appOrigin = u.origin
     }
     if (this.appOrigin && this.appOrigin === this.previewOrigin) throw new Error('Science and its previews need separate origins')
-    const localBinary = path.join(os.homedir(), '.local', 'bin', 'claude-science')
-    const binary = env.NODETERM_SCIENCE_BIN || (fs.existsSync(localBinary) ? localBinary : 'claude-science')
+    const name = process.platform === 'win32' ? 'claude-science.exe' : 'claude-science'
+    const localBinary = path.join(os.homedir(), '.local', 'bin', name)
     const scratch = path.join(userDataDir, 'claude-science-scratch')
     this.run = options.run ?? (async (args) => {
       fs.mkdirSync(scratch, { recursive: true, mode: 0o700 })
       try {
+        // Resolve on every command so an installation takes effect without restarting Termscape.
+        const binary = env.NODETERM_SCIENCE_BIN || (fs.existsSync(this.installer.binary) ? this.installer.binary
+          : fs.existsSync(localBinary) ? localBinary : name)
         const result = await execute(binary, [...args, '--data-dir', this.dataDir], {
-          timeout: 45_000, maxBuffer: 1024 * 1024, windowsHide: true,
+          timeout: args[0] === 'serve' ? 5 * 60_000 : 45_000, maxBuffer: 1024 * 1024, windowsHide: true,
           env: { ...env, TMPDIR: scratch, ...(this.previewOrigin ? { OPERON_SANDBOX_ORIGIN: this.previewOrigin } : {}) }
         })
         return result.stdout
@@ -73,10 +83,15 @@ export class ClaudeScienceService {
   }
 
   async status(): Promise<ClaudeScienceStatus> {
+    const installation = {
+      installable: !this.installUnavailableReason,
+      installUnavailableReason: this.installUnavailableReason,
+      installing: this.installer.installing
+    }
     try {
       const s = JSON.parse(await this.run(['status']))
       return {
-        installed: true, running: s.running === true,
+        ...installation, installed: true, running: s.running === true,
         version: typeof s.version === 'string' ? s.version : undefined,
         port: s.running === true && Number.isInteger(s.port) ? s.port : undefined,
         sandboxActive: s.daemon?.sandbox_active,
@@ -84,9 +99,14 @@ export class ClaudeScienceService {
       }
     } catch (e) {
       const missing = (e as NodeJS.ErrnoException).code === 'ENOENT'
-      return { installed: !missing, running: false, previewConfigured: (!!this.previewOrigin && !!this.appOrigin) || !this.basePath,
-        error: missing ? 'Install Claude Science on this host, then try again.' : 'Could not read Claude Science status.' }
+      return { ...installation, installed: !missing, running: false, previewConfigured: (!!this.previewOrigin && !!this.appOrigin) || !this.basePath,
+        error: missing ? 'Claude Science is not installed for this Termscape user.' : 'Could not read Claude Science status.' }
     }
+  }
+
+  async install(): Promise<void> {
+    if (this.installUnavailableReason) throw new Error(this.installUnavailableReason)
+    await this.installer.install()
   }
 
   /** Serializes simultaneous opens: there is exactly one daemon for this data directory. */
@@ -140,6 +160,10 @@ export class ClaudeScienceService {
 
 export function registerClaudeScience(platform: Pick<CorePlatform, 'handle'>, service: ClaudeScienceService, enabled: () => boolean): void {
   platform.handle(IPC.scienceStatus, async () => ({ ...await service.status(), enabled: enabled() }))
+  platform.handle(IPC.scienceInstall, () => {
+    if (!enabled()) throw new Error('Allow Claude Science panels in Settings > Agents first.')
+    return service.install()
+  })
   platform.handle(IPC.scienceOpen, () => {
     if (!enabled()) throw new Error('Allow Claude Science panels in Settings > Agents first.')
     return service.open()

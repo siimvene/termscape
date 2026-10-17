@@ -450,6 +450,7 @@ const api: NodeTerminalApi = {
   },
   science: {
     status: () => ipcRenderer.invoke(IPC.scienceStatus),
+    install: () => ipcRenderer.invoke(IPC.scienceInstall),
     open: () => ipcRenderer.invoke(IPC.scienceOpen),
     stop: () => ipcRenderer.invoke(IPC.scienceStop),
     logs: () => ipcRenderer.invoke(IPC.scienceLogs)
