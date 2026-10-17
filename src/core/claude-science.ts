@@ -24,6 +24,7 @@ export class ClaudeScienceService {
   readonly dataDir: string
   readonly basePath: string
   readonly previewOrigin?: string
+  readonly appOrigin?: string
 
   constructor(userDataDir: string, options: { basePath?: string; run?: Run; env?: NodeJS.ProcessEnv } = {}) {
     const env = options.env ?? process.env
@@ -45,6 +46,14 @@ export class ClaudeScienceService {
       }
       this.previewOrigin = u.origin
     }
+    if (env.NODETERM_SCIENCE_APP_ORIGIN) {
+      const u = new URL(env.NODETERM_SCIENCE_APP_ORIGIN)
+      if (u.protocol !== 'https:' || u.username || u.password || u.pathname !== '/' || u.search || u.hash) {
+        throw new Error('NODETERM_SCIENCE_APP_ORIGIN must be an HTTPS origin')
+      }
+      this.appOrigin = u.origin
+    }
+    if (this.appOrigin && this.appOrigin === this.previewOrigin) throw new Error('Science and its previews need separate origins')
     const localBinary = path.join(os.homedir(), '.local', 'bin', 'claude-science')
     const binary = env.NODETERM_SCIENCE_BIN || (fs.existsSync(localBinary) ? localBinary : 'claude-science')
     const scratch = path.join(userDataDir, 'claude-science-scratch')
@@ -71,11 +80,11 @@ export class ClaudeScienceService {
         version: typeof s.version === 'string' ? s.version : undefined,
         port: s.running === true && Number.isInteger(s.port) ? s.port : undefined,
         sandboxActive: s.daemon?.sandbox_active,
-        previewConfigured: !!this.previewOrigin || !this.basePath
+        previewConfigured: (!!this.previewOrigin && !!this.appOrigin) || !this.basePath
       }
     } catch (e) {
       const missing = (e as NodeJS.ErrnoException).code === 'ENOENT'
-      return { installed: !missing, running: false, previewConfigured: !!this.previewOrigin || !this.basePath,
+      return { installed: !missing, running: false, previewConfigured: (!!this.previewOrigin && !!this.appOrigin) || !this.basePath,
         error: missing ? 'Install Claude Science on this host, then try again.' : 'Could not read Claude Science status.' }
     }
   }
@@ -91,6 +100,8 @@ export class ClaudeScienceService {
     try {
       await this.run(['serve', '--detached', '--no-browser', '--no-auto-update',
         '--port', String(this.port), '--sandbox-port', String(this.previewPort),
+        // The preview server's frame-ancestors policy must also admit the public app front.
+        ...(this.appOrigin ? ['--allow-origin', this.appOrigin] : []),
         ...(this.basePath ? ['--base-path', this.basePath] : [])])
     } catch (e) {
       // execFile errors include stdout (and therefore a login nonce). Only return redacted text.

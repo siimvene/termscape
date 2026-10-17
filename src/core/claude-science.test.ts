@@ -23,14 +23,20 @@ describe('Claude Science service', () => {
       if (args[0] === 'stop') { running = false; return '' }
       return ''
     })
-    const service = new ClaudeScienceService('/unused', { run, basePath: '/apps/claude-science', env: {} })
+    const service = new ClaudeScienceService('/unused', { run, basePath: '/apps/claude-science', env: {
+      NODETERM_SCIENCE_APP_ORIGIN: 'https://termscape.test',
+      NODETERM_SCIENCE_PREVIEW_ORIGIN: 'https://termscape.test:8444'
+    } })
     const links = await Promise.all([service.open(), service.open()])
     expect(links).toEqual(['/apps/claude-science/?nonce=1', '/apps/claude-science/?nonce=2'])
     const launches = run.mock.calls.filter(([a]) => a[0] === 'serve')
     expect(launches).toHaveLength(1)
     expect(launches[0][0]).toContain('--base-path')
+    expect(launches[0][0]).toContain('--allow-origin')
+    expect(launches[0][0]).toContain('https://termscape.test')
     expect(launches[0][0].join(' ')).not.toMatch(/dangerously/)
     expect((await service.status()).sandboxActive).toBe(true)
+    expect((await service.status()).previewConfigured).toBe(true)
     await service.stop()
     expect((await service.status()).running).toBe(false)
   })
@@ -60,5 +66,6 @@ describe('Claude Science service', () => {
   it('requires a separate valid HTTPS preview origin and distinct ports', () => {
     expect(() => new ClaudeScienceService('/unused', { env: { NODETERM_SCIENCE_PREVIEW_ORIGIN: 'http://host' } })).toThrow('HTTPS origin')
     expect(() => new ClaudeScienceService('/unused', { env: { NODETERM_SCIENCE_PREVIEW_PORT: '8765' } })).toThrow('separate ports')
+    expect(() => new ClaudeScienceService('/unused', { env: { NODETERM_SCIENCE_APP_ORIGIN: 'https://host', NODETERM_SCIENCE_PREVIEW_ORIGIN: 'https://host' } })).toThrow('separate origins')
   })
 })

@@ -445,8 +445,9 @@ deployment, publish the loopback preview port separately:
 sudo tailscale serve --bg --https=8444 http://127.0.0.1:8766
 ```
 
-Set `NODETERM_SCIENCE_PREVIEW_ORIGIN=https://your-host.your-tailnet.ts.net:8444` in the Termscape
-server's environment, then restart Termscape and, if it was already running, stop and reopen
+Set `NODETERM_SCIENCE_APP_ORIGIN=https://your-host.your-tailnet.ts.net` and
+`NODETERM_SCIENCE_PREVIEW_ORIGIN=https://your-host.your-tailnet.ts.net:8444` in the Termscape
+server's environment. The app origin is also allowed to frame Science's previews. Restart Termscape and, if it was already running, stop and reopen
 Science. The preview listener serves Science's token-protected preview URLs, not Termscape's
 application or cookies. Keep it private to the tailnet. Without a configured preview endpoint,
 the panel displays a setup notice; remote interactive HTML previews cannot work through the
