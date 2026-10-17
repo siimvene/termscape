@@ -282,11 +282,12 @@ describe('buildGroupedAddMenu', () => {
     agent('custom:1', 'New My Agent')
   ]
 
-  it('shows terminal + remote, the account-capable agents, then four submenus — in that order', () => {
+  it('shows terminal + remote + Science, the account-capable agents, then four submenus — in that order', () => {
     const items = buildGroupedAddMenu(CONTENT_ADD_ITEMS, handlers(), ctx, agents)
     expect(topLabels(items)).toEqual([
       'New terminal',
       'New remote…',
+      'New Claude Science',
       'New claude',
       'New Codex',
       'New Pi',
@@ -307,7 +308,6 @@ describe('buildGroupedAddMenu', () => {
     }
     expect(children(ADD_GROUP_LABEL.view)).toEqual([
       'New browser',
-      'New Claude Science',
       'New web view…',
       'New sticky note',
       'New file manager',
@@ -398,9 +398,10 @@ describe('buildGroupedAddMenu', () => {
       agent('codex', 'New Codex'),
       agent('gemini', 'New Gemini')
     ])
-    expect(topLabels(flatCodex).slice(0, 4)).toEqual([
+    expect(topLabels(flatCodex).slice(0, 5)).toEqual([
       'New terminal',
       'New remote…',
+      'New Claude Science',
       'New Claude Code',
       'New Codex'
     ])

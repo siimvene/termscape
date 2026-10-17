@@ -369,13 +369,14 @@ export type AddGroupId = 'top' | 'view' | 'files' | 'orchestrate'
  *
  * `terminal` and `remote` stay at the top because they are the two fastest paths to a session, and
  * because `remote` is not an agent — the one entry point to an SSH session must not be buried
- * under a menu named "New agent", where nobody would look for it.
+ * under a menu named "New agent", where nobody would look for it. Science also stays in this
+ * first-level session/agent list beside Claude Code, while still opening its managed browser panel.
  */
 export const ADD_ITEM_GROUP: Record<AddItem['kind'], AddGroupId> = {
   terminal: 'top',
   remote: 'top',
   browser: 'view',
-  science: 'view',
+  science: 'top',
   web: 'view',
   sticky: 'view',
   files: 'view',

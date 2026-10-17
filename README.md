@@ -417,8 +417,9 @@ under [`docs/`](./docs) for deeper notes.
 
 ## Claude Science
 
-Add **Claude Science** from the dock's **+** menu, the canvas **New view** menu, or the command
-palette. Allow Science panels when prompted, then sign in with your Claude account inside Science.
+Add **Claude Science** from the main add-menu list beside **Claude Code** in the dock, canvas
+right-click, or sidebar **+** menu, or use the command palette. Allow Science panels when prompted,
+then sign in with your Claude account inside Science.
 The same panel opens from a browser card on the kanban board. Reconnect mints a fresh local login
 link; **Stop Science** stops the shared instance and its running analyses. Closing a panel keeps
 the service and saved work. Revoke panel access in **Settings → Agents → Claude Science panels**.

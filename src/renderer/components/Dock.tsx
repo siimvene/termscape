@@ -201,6 +201,7 @@ export function Dock({
     hasCwd,
     isSshProject
   })
+  const scienceRow = contentRows.find((row) => row.kind === 'science')
 
   return (
     <>
@@ -226,6 +227,12 @@ export function Dock({
               <TerminalIcon />
               <span>Remote…</span>
             </button>
+            {scienceRow && (
+              <button disabled={scienceRow.disabled} title={scienceRow.hint} onClick={pick(scienceRow.onClick)}>
+                {scienceRow.icon}
+                <span>{scienceRow.label}</span>
+              </button>
+            )}
             {BUILTIN_AGENT_IDS.filter((aid) => !disabledAgents.includes(aid)).flatMap((aid) => {
               const inheriting = inheritingByBase.get(aid) ?? []
               // No inheriting customs → the builtin stays a flat button (with Claude's account
@@ -324,7 +331,7 @@ export function Dock({
                 <span>{c.label}</span>
               </button>
             ))}
-            {contentRows.map((row) => (
+            {contentRows.filter((row) => row.kind !== 'science').map((row) => (
               <button
                 key={row.kind}
                 disabled={row.disabled}
