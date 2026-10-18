@@ -29,6 +29,18 @@ export function piAccountDirFor(userDataPath: string, accountId: string): string
   return path.join(userDataPath, PI_ACCOUNTS_DIRNAME, accountId)
 }
 
+/**
+ * Fork (Termscape): is `dir` a managed pi account dir of `userDataPath` (`<userData>/pi-accounts/<id>`,
+ * exactly one level below the root)? Writes into such a dir are ANCHORED (`mkdirBelow`) so a deleted
+ * account is never recreated. Decided by LOCATION, not by the account list, because the same dir can
+ * also arrive as the "system" pi dir: an app launched from a managed pi terminal inherits that
+ * session's PI_CODING_AGENT_DIR, and `piAgentDir()` then names the account.
+ */
+export function isManagedPiAccountDir(dir: string, userDataPath: string): boolean {
+  const rel = path.relative(path.join(userDataPath, PI_ACCOUNTS_DIRNAME), path.resolve(dir))
+  return rel !== '' && !path.isAbsolute(rel) && !rel.startsWith('..') && !rel.includes(path.sep)
+}
+
 /** `piAccountDirFor` against this instance's own userData (the platform seam). */
 export function piAccountDir(accountId: string): string {
   return piAccountDirFor(platform().userDataDir, accountId)

@@ -42,7 +42,7 @@ import { buildCanvasSkillBody } from './canvas-control-core'
 import { buildContextLinkSkillBody } from './context-link-core'
 import { claudeConfigDirFor } from './claude-config-dir'
 import { codexHomeForAccount, systemCodexHome } from './codex-accounts-core'
-import { piAccountDirFor } from './pi-config-dir'
+import { isManagedPiAccountDir, piAccountDirFor } from './pi-config-dir'
 import { applySkillShare } from './claude-skill-share'
 import {
   ReceiptStore,
@@ -429,10 +429,13 @@ export function createIntegrationLifecycle(deps: IntegrationLifecycleDeps): Inte
       const skills = skillsFor(agent, shims)
       for (const root of skillRootsFor(agent, settings, deps.userDataDir(), home)) {
         // A managed pi account's skills root (`<account>/skills`) is anchored on the account dir,
-        // for the same reason as its extension above. Every pi root except the system one is an
-        // account root (skillRootsFor lists them afresh, so this must not depend on the snapshot).
+        // for the same reason as its extension above. Decided by location (`isManagedPiAccountDir`),
+        // not by the snapshot: skillRootsFor lists the accounts afresh, and the "system" root is an
+        // account too when the app inherited a managed session's PI_CODING_AGENT_DIR.
         const anchor =
-          agent === 'pi' && root !== path.join(piAgentDir(), 'skills') ? path.dirname(root) : undefined
+          agent === 'pi' && isManagedPiAccountDir(path.dirname(root), deps.userDataDir())
+            ? path.dirname(root)
+            : undefined
         for (const name of [CANVAS_SKILL, CONTEXT_SKILL]) {
           const file = path.join(root, name, 'SKILL.md')
           const body = skills.get(name)
@@ -514,6 +517,7 @@ export function createIntegrationLifecycle(deps: IntegrationLifecycleDeps): Inte
           writeOwnedFile(receipts, path.join(agentDir, 'skills', name, 'SKILL.md'), body, agentDir)
         }
       } catch (e) {
+        if (isAnchorGone(e) && !existsSync(agentDir)) return // the add rolled back: nothing to install into
         console.warn('[integrations] pi account install failed', agentDir, e)
       }
     },

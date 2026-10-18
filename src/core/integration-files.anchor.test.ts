@@ -6,6 +6,7 @@ import os from 'os'
 import path from 'path'
 import { ReceiptStore, isAnchorGone, mkdirBelow, writeOwnedFile } from './integration-files'
 import { installPiExtensionInto, piExtensionPath, PI_EXTENSION_MARKER } from './agents/hooks/pi'
+import { isManagedPiAccountDir } from './pi-config-dir'
 
 let tmp: string
 beforeEach(() => {
@@ -92,5 +93,16 @@ describe('installPiExtensionInto anchored', () => {
     mkdirSync(dir, { recursive: true })
     installPiExtensionInto(dir, { anchored: true })
     expect(readFileSync(piExtensionPath(dir), 'utf8').startsWith(PI_EXTENSION_MARKER)).toBe(true)
+  })
+})
+
+describe('isManagedPiAccountDir', () => {
+  it('is exactly one level below <userData>/pi-accounts', () => {
+    const ud = path.join(tmp, 'ud')
+    expect(isManagedPiAccountDir(path.join(ud, 'pi-accounts', 'a1'), ud)).toBe(true)
+    expect(isManagedPiAccountDir(path.join(ud, 'pi-accounts'), ud)).toBe(false)
+    expect(isManagedPiAccountDir(path.join(ud, 'pi-accounts', 'a1', 'skills'), ud)).toBe(false)
+    expect(isManagedPiAccountDir(path.join(ud, 'pi-accounts', '..', 'x'), ud)).toBe(false)
+    expect(isManagedPiAccountDir(path.join(os.homedir(), '.pi', 'agent'), ud)).toBe(false)
   })
 })

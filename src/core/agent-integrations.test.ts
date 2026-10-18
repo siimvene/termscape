@@ -363,11 +363,35 @@ describe('decline: remove exactly what we wrote', () => {
     }
   })
 
-  it('pi accounts: an add whose dir vanished before the install writes nothing (installIntoPiAccount)', () => {
+  it('pi accounts: an add whose dir vanished before the install writes nothing, quietly (installIntoPiAccount)', () => {
     const dir = piAccountDirFor(userData, 'pi-rolled-back')
     const { lc } = lifecycle(() => withAgents({ pi: 'enabled' }))
-    lc.installIntoPiAccount(dir)
-    expect(existsSync(dir)).toBe(false)
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      lc.installIntoPiAccount(dir)
+      expect(existsSync(dir)).toBe(false)
+      expect(warn).not.toHaveBeenCalled()
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  // An app launched from a managed pi terminal inherits that session's PI_CODING_AGENT_DIR, so the
+  // "system" pi dir IS an account dir. Deleting that account must not see it recreated by the system
+  // extension install or the system skills root.
+  it('pi accounts: a system pi dir that aliases a deleted managed account is not recreated', () => {
+    const aliased = piAccountDirFor(userData, 'pi-inherited')
+    const prev = process.env.PI_CODING_AGENT_DIR
+    process.env.PI_CODING_AGENT_DIR = aliased
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      lifecycle(() => withAgents({ pi: 'enabled' }), { realHooks: true }).lc.reconcile()
+      expect(existsSync(aliased)).toBe(false)
+    } finally {
+      warn.mockRestore()
+      if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR
+      else process.env.PI_CODING_AGENT_DIR = prev
+    }
   })
 
   it('pi accounts: an undecided pi, or the veto, writes nothing into an account dir', () => {

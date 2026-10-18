@@ -15,6 +15,8 @@
 // shared plugin client in plugin-hook-client.ts; `normalizePi` reads the payload.
 import fs from 'fs'
 import { mkdirBelow } from '../../integration-files'
+import { isManagedPiAccountDir } from '../../pi-config-dir'
+import { platform } from '../../platform'
 import os from 'os'
 import path from 'path'
 import { parseEndpointEnv } from '../hook-endpoint-parse'
@@ -175,9 +177,18 @@ export function removePiExtensionFrom(agentDir: string): void {
   }
 }
 
-/** The system pi home. Managed pi account dirs are installed by their own lifecycle. */
+/** The system pi home. Managed pi account dirs are installed by their own lifecycle.
+ *  Fork (Termscape): anchored when the "system" dir IS a managed account (an app launched from a
+ *  managed pi terminal inherits its PI_CODING_AGENT_DIR), so a deleted account is not recreated. */
 export function installPiHooks(): void {
-  installPiExtensionInto(piAgentDir())
+  const dir = piAgentDir()
+  let anchored = false
+  try {
+    anchored = isManagedPiAccountDir(dir, platform().userDataDir)
+  } catch {
+    /* no platform (a bare test) — the system dir is pi's own */
+  }
+  installPiExtensionInto(dir, { anchored })
 }
 
 export function removePiHooks(): void {
