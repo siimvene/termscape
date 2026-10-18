@@ -372,52 +372,7 @@ jobs:
       # whose autobump follows /releases/latest — which excludes prereleases, so it only ever
       # picks up a release this publish job has promoted. (nodeterm/homebrew-tap is retired.)
 
-  # The update FEED is what installed apps actually read, and it is not the GitHub Release: the
-  # apps poll https://nodeterm.dev/updates (package.json build.publish), a mirror hosted OUTSIDE
-  # this repo. Nothing used to check it, which is how latest.yml 404'd there while every job here
-  # was green — and a check-only Windows build reports a failed automatic check only in its log, so
-  # the passive update notice was dead with no signal anywhere (U2). This job turns that hidden
-  # dependency into a visible result, AFTER the release is already promoted: it never holds a
-  # release back, a red run is the alarm.
-  #
-  # STRICT files fail the job when the mirror does not serve this tag's version within the retry
-  # window (mirror sync / CDN delay); ADVISORY files only warn. latest.yml is advisory until the
-  # mirror is confirmed to serve it — move it to STRICT then. It is checked only when release-win
-  # itself succeeded (that job is best-effort and may finish later or need a rerun).
-  verify-feed:
-    runs-on: ubuntu-latest
-    needs: [publish, release-win]
-    if: ${{ always() && needs.publish.result == 'success' }}
-    steps:
-      - name: Verify the update feed serves this release
-        env:
-          FEED: https://nodeterm.dev/updates
-          STRICT: latest-mac.yml latest-linux.yml
-          ADVISORY: latest.yml
-          WIN_RESULT: ${{ needs.release-win.result }}
-        run: |
-          want="${GITHUB_REF_NAME#v}"
-          fail=0
-          check() {
-            f="$1"; level="$2"; n=1; got=""
-            while [ "$n" -le 10 ]; do
-              got=$(curl -fsSL --max-time 20 "$FEED/$f" 2>/dev/null \
-                | sed -n 's/^version:[[:space:]]*//p' | head -n 1 | tr -d "\"' \r")
-              if [ "$got" = "$want" ]; then
-                echo "$FEED/$f serves $got"
-                return 0
-              fi
-              echo "attempt $n: $FEED/$f serves '${got:-<missing>}', want $want; retrying in 30s…"
-              n=$((n + 1))
-              sleep 30
-            done
-            echo "::$level::$FEED/$f serves version '${got:-<missing>}', expected $want"
-            if [ "$level" = error ]; then fail=1; fi
-          }
-          for f in $STRICT; do check "$f" error; done
-          if [ "$WIN_RESULT" = success ]; then
-            for f in $ADVISORY; do check "$f" warning; done
-          else
-            echo "::warning::release-win result is '$WIN_RESULT'; latest.yml was not checked"
-          fi
-          exit "$fail"
+  # TERMSCAPE FORK: upstream's `verify-feed` job (curls https://nodeterm.dev/updates after publish to
+  # check its update mirror) is removed. This fork has no update feed (header comment, package.json
+  # `publish: null`, every package stamped nodeTermUpdates=disabled) and never talks to upstream's
+  # backend, so the job could only ever report upstream's mirror state against a Termscape tag.

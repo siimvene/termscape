@@ -274,7 +274,7 @@ export async function startServer(
   settingsStore.init()
   // The linked-account resolver's one source of truth on this shell. Registered as
   // soon as settings exist and BEFORE anything that resolves a config dir — the mirror settings
-  // provider, `installHooksIntoLocalAccounts`, the transcript jail — because an unregistered
+  // provider, the agent-integration lifecycle's account reconcile, the transcript jail — because an unregistered
   // source means "no linked accounts", i.e. a linked row would resolve to a managed dir that does
   // not exist. The desktop registers the identical getter next to `initTranscriptIndex`.
   registerClaudeAccountsSource(() => settingsStore.get().claudeAccounts ?? [])

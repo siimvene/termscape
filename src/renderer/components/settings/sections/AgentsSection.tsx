@@ -457,8 +457,8 @@ export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.El
       id="agents"
       title="Agents"
       description={agentChip
-        ? `Choose which agents the Add menus show and the default (${agentChip}), and whether nodeterm installs its hooks and skills into each agent.`
-        : 'Choose which agents the Add menus show and the default, and whether nodeterm installs its hooks and skills into each agent.'}
+        ? `Choose which agents the Add menus show and the default (${agentChip}), and whether Termscape installs its hooks and skills into each agent.`
+        : 'Choose which agents the Add menus show and the default, and whether Termscape installs its hooks and skills into each agent.'}
       isActive={isActive}
       searchEntries={ENTRIES}
     >
@@ -503,8 +503,8 @@ export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.El
         <FieldRow
           label="Hooks & skills (integrations)"
           description={
-            'Files nodeterm installs into each agent CLI’s own config: a status hook (RUNNING / NEEDS YOU badges, notifications) ' +
-            'and two skills (canvas control, reading linked nodes). Remove deletes exactly what nodeterm added. ' +
+            'Files Termscape installs into each agent CLI’s own config: a status hook (RUNNING / NEEDS YOU badges, notifications) ' +
+            'and two skills (canvas control, reading linked nodes). Remove deletes exactly what Termscape added. ' +
             'Without it the agent still runs in a terminal, just without those features. This is separate from the menu list above.'
           }
           control={null}
@@ -651,7 +651,7 @@ export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.El
                   always
                     ? undefined
                     : sessionWaived
-                      ? 'Waived until nodeterm quits, in every project (you chose that in an agent\u2019s dialog). Revoke restores the dialog now.'
+                      ? 'Waived until Termscape quits, in every project (you chose that in an agent\u2019s dialog). Revoke restores the dialog now.'
                       : inProjects.length
                         ? `Waived permanently in ${inProjects.map((r) => `"${r.name}"`).join(', ')} \u2014 revoke below.`
                         : undefined
