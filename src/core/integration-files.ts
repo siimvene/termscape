@@ -110,10 +110,43 @@ function readIfRegular(p: string): string | null | 'not-regular' {
   }
 }
 
-export type OwnedWrite = 'written' | 'unchanged' | 'retained' | 'failed'
+/**
+ * Fork (Termscape): `mkdir -p dir`, except that nothing at or above `anchor` is ever created. Every
+ * directory below `anchor` is made one level at a time (non-recursive), so when `anchor` itself is
+ * gone the first mkdir fails with ENOENT instead of resurrecting it. `anchor` is a managed account
+ * dir (`<userData>/pi-accounts/<id>`): an existence check before the write cannot close the window
+ * in which another process sharing userData, or a `remove` landing mid-reconcile, deletes it — the
+ * write itself has to refuse to recreate the root. Throws when `dir` is not `anchor` or below it.
+ */
+export function mkdirBelow(anchor: string, dir: string): void {
+  const rel = path.relative(anchor, dir)
+  if (rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
+    throw new Error(`mkdirBelow: ${dir} is not under ${anchor}`)
+  }
+  if (!lstatSync(anchor).isDirectory()) throw Object.assign(new Error(`ENOTDIR: ${anchor}`), { code: 'ENOTDIR' })
+  let cur = anchor
+  for (const seg of rel.split(path.sep).filter(Boolean)) {
+    cur = path.join(cur, seg)
+    try {
+      mkdirSync(cur)
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e
+    }
+  }
+}
 
-/** Write `body` at `p` unless the file there is the user's (edited since our last write). */
-export function writeOwnedFile(receipts: ReceiptStore, p: string, body: string): OwnedWrite {
+/** True for the errors `mkdirBelow` (or a write after it) raises when the anchor has vanished. */
+export function isAnchorGone(e: unknown): boolean {
+  const code = (e as NodeJS.ErrnoException | null)?.code
+  return code === 'ENOENT' || code === 'ENOTDIR'
+}
+
+export type OwnedWrite = 'written' | 'unchanged' | 'retained' | 'failed' | 'gone'
+
+/** Write `body` at `p` unless the file there is the user's (edited since our last write).
+ *  Fork (Termscape): with `anchor`, parent dirs are created only below it (`mkdirBelow`), and a
+ *  vanished anchor answers `'gone'` — quietly, and without recreating it. */
+export function writeOwnedFile(receipts: ReceiptStore, p: string, body: string, anchor?: string): OwnedWrite {
   const current = readIfRegular(p)
   if (current === 'not-regular') return 'retained'
   const want = sha256(body)
@@ -127,11 +160,13 @@ export function writeOwnedFile(receipts: ReceiptStore, p: string, body: string):
     if (receipt !== undefined && receipt !== have) return 'retained'
   }
   try {
-    mkdirSync(path.dirname(p), { recursive: true })
+    if (anchor !== undefined) mkdirBelow(anchor, path.dirname(p))
+    else mkdirSync(path.dirname(p), { recursive: true })
     writeManagedHookFileAtomic(p, body)
     receipts.set(p, want)
     return 'written'
   } catch (e) {
+    if (anchor !== undefined && isAnchorGone(e) && !existsSync(anchor)) return 'gone'
     console.warn('[integrations] write failed', p, e)
     return 'failed'
   }

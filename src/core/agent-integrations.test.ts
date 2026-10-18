@@ -3,7 +3,7 @@
 // Each case is a promise to the user about their OWN files: nothing is written for an agent they
 // did not enable, a decline removes exactly what nodeterm wrote (a file they edited is kept and
 // reported), and every agent that has canvas control / context link still discovers them.
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'fs'
 import os from 'os'
 import path from 'path'
@@ -84,7 +84,10 @@ function filesUnder(root: string): string[] {
   return out.sort()
 }
 
-function lifecycle(settings: () => Settings, opts: { veto?: boolean; realHooks?: boolean } = {}) {
+function lifecycle(
+  settings: () => Settings,
+  opts: { veto?: boolean; realHooks?: boolean; onInstallHooks?: () => void } = {}
+) {
   const hookCalls: { install: string[][]; remove: string[][] } = { install: [], remove: [] }
   const lc = createIntegrationLifecycle({
     settings,
@@ -94,7 +97,10 @@ function lifecycle(settings: () => Settings, opts: { veto?: boolean; realHooks?:
     ...(opts.realHooks
       ? {}
       : {
-          installHooks: (a) => void hookCalls.install.push([...a].sort()),
+          installHooks: (a) => {
+            hookCalls.install.push([...a].sort())
+            opts.onInstallHooks?.()
+          },
           removeHooks: (a) => void hookCalls.remove.push([...a].sort())
         })
   })
@@ -329,6 +335,39 @@ describe('decline: remove exactly what we wrote', () => {
     expect(read(path.join(live, 'auth.json'))).toBe('{"anthropic":{}}')
     expect(read(path.join(live, 'skills', 'my-skill', 'SKILL.md'))).toBe('mine\n')
     expect(existsSync(gone)).toBe(false)
+  })
+
+  // Fork (Termscape): the existence snapshot in `localPiAccountDirs` cannot close the window in which
+  // the account is deleted (its `remove`, or the other shell sharing userData). `installHooks` runs
+  // AFTER the snapshot and BEFORE the pi writes, so deleting the dir inside it is exactly that race.
+  // An un-anchored `mkdir -p` recreated it as an empty logged-out account.
+  it('pi accounts: an account deleted mid-reconcile is not resurrected by the writes', () => {
+    const doomed = piAccountDirFor(userData, 'pi-doomed')
+    const kept = piAccountDirFor(userData, 'pi-kept')
+    mkdirSync(doomed, { recursive: true })
+    mkdirSync(kept, { recursive: true })
+    const piAccounts = ['pi-doomed', 'pi-kept'].map((id) => ({ id, label: 'x', createdAt: 0 }))
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const { lc } = lifecycle(() => withAgents({ pi: 'enabled' }, { piAccounts } as Partial<Settings>), {
+        onInstallHooks: () => rmSync(doomed, { recursive: true, force: true })
+      })
+      lc.reconcile()
+      expect(existsSync(doomed)).toBe(false)
+      // The surviving account is still fully installed, and the vanished one is skipped quietly.
+      expect(read(piExtensionPath(kept)).startsWith(PI_EXTENSION_MARKER)).toBe(true)
+      expect(read(path.join(kept, 'skills', CANVAS_SKILL, 'SKILL.md'))).toBe(buildCanvasSkillBody(SHIMS().canvas))
+      expect(warn.mock.calls.filter((c) => String(c[0]).includes('pi-doomed') || String(c[1] ?? '').includes('pi-doomed'))).toEqual([])
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('pi accounts: an add whose dir vanished before the install writes nothing (installIntoPiAccount)', () => {
+    const dir = piAccountDirFor(userData, 'pi-rolled-back')
+    const { lc } = lifecycle(() => withAgents({ pi: 'enabled' }))
+    lc.installIntoPiAccount(dir)
+    expect(existsSync(dir)).toBe(false)
   })
 
   it('pi accounts: an undecided pi, or the veto, writes nothing into an account dir', () => {
