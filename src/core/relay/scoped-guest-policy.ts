@@ -48,6 +48,11 @@ export interface ScopedGuestDeps {
   nodeOfSession(sessionId: string): string | undefined
   /** The shared project's LOCAL folder, or undefined (a cwd-less or SSH project). */
   projectCwd(projectId: string): string | undefined
+  /** Is the shared project an SSH project (per the index — identity, not liveness)? Its terminals
+   *  run on the remote host, so a guest's create is forced `requireRemote`: joins a live session
+   *  this process holds, never spawns a LOCAL `nt-<id>` wearing a remote node's id. Optional:
+   *  absent = not an SSH project (the Server Edition has none). */
+  projectIsRemote?(projectId: string): boolean
   /** This app's own data directory (keys, license, every project's scrollback): never reachable
    *  through a scoped guest's fs/git calls, even when the shared root contains it. */
   hostDataDir: string
@@ -238,7 +243,9 @@ const worktreeAddOrRemove: Check = (a, s) => {
  * of the shared project, in a working directory inside the project root. Rewritten, not just judged:
  *  - `sshRemote` is dropped. Its `conn.extraArgs` reach `ssh` on the host during the existence probe,
  *    and a guest never names an ssh route; a node that requires one (`requireRemote`) is then
- *    refused by the core instead of spawning locally.
+ *    refused by the core instead of spawning locally. For an SSH project `requireRemote` is SET here
+ *    rather than trusted from the guest, so a guest that omits it still cannot start a local shell
+ *    under a remote node's id (it can still join a live session this process holds).
  *  - a missing `cwd` becomes the project root (the core's default would be the host user's `$HOME`).
  *  - `ownerProjectId` may only name the shared project (it is recorded as the pane's owner, which
  *    agent messaging trusts).
@@ -250,6 +257,10 @@ const ptyCreate: Check = (a, s) => {
   if (!nodeInScope(opts.persistKey, s)) return no(NODE_OUTSIDE)
   if (opts.ownerProjectId !== undefined && opts.ownerProjectId !== s.projectId) return no(OUTSIDE)
   delete opts.sshRemote
+  // The local-login exemption from the SSH-project refusal is this machine's own UI's mark, never
+  // a guest's (issue #1186).
+  delete opts.localOnSshCanvas
+  if (s.deps.projectIsRemote?.(s.projectId)) opts.requireRemote = true
   const root = rootOf(s)
   if (opts.cwd === undefined || opts.cwd === null || opts.cwd === '') {
     if (root) opts.cwd = root
@@ -311,6 +322,7 @@ export const SCOPED: Readonly<Record<string, Check>> = Object.freeze({
   [IPC.ptyReadScrollback]: nodeArg0,
   [IPC.ptySendText]: nodeArg0,
   [IPC.ptySendChatPrompt]: nodeArg0,
+  [IPC.ptySendToEmptyPrompt]: nodeArg0,
   [IPC.ptyTmuxStatus]: pass,
   [IPC.ptyPaneCommand]: nodeArg0,
   [IPC.ptyPaneCwd]: nodeArg0,
@@ -426,6 +438,14 @@ export const SCOPED: Readonly<Record<string, Check>> = Object.freeze({
 export const SCOPED_REFUSED: ReadonlySet<string> = new Set<string>([
   // A whole-workspace write from a peer would replace the host's other projects.
   IPC.workspaceSave,
+  // Host-only (shared/host-control.ts): a peer's launch claim would make the host's own viewers
+  // stand down from a launch (#1173). A relay tab never sends it.
+  IPC.workspaceClaimLaunch,
+  // Host-only for every peer (shared/host-control.ts): it would type a launch on the host and read
+  // a host-local prompt file into it. A relay tab never sends it.
+  IPC.ptyExecuteLaunch,
+  // Types into a pane by node id; HOST_ONLY, and relay-api.ts stubs it.
+  IPC.ptySendPaneKeys,
   // Project settings / setup / trust: relay-api.ts keeps these LOCAL; the setup ones are host-only.
   IPC.projectSettingsRead,
   IPC.projectSettingsWriteShared,
@@ -441,6 +461,8 @@ export const SCOPED_REFUSED: ReadonlySet<string> = new Set<string>([
   // Host settings and credentials (also host-only for every peer, shared/host-control.ts).
   IPC.settingsLoad,
   IPC.settingsSave,
+  // Agent-integration consent status: paths in the host's home (host-only, #744).
+  IPC.integrationsStatus,
   IPC.agentDiscoverModels,
   IPC.agentGatewayCredentialStatus,
   IPC.agentGatewayCredentialSave,

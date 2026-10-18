@@ -106,7 +106,11 @@ describe('registry invariants', () => {
         darwin: [], other: [] },
       { id: 'canvas.tidy', title: 'Tidy canvas', group: 'Canvas', scope: 'canvas',
         darwin: ['Cmd+Shift+A'], other: ['Cmd+Shift+A'] },
+      { id: 'canvas.tidyLineage', title: 'Arrange by lineage', group: 'Canvas', scope: 'canvas',
+        darwin: [], other: [] },
       { id: 'canvas.groupSelection', title: 'Group selection', group: 'Canvas', scope: 'canvas',
+        darwin: [], other: [] },
+      { id: 'canvas.toggleLock', title: 'Toggle canvas lock', group: 'Canvas', scope: 'canvas',
         darwin: [], other: [] },
       { id: 'node.newTerminal', title: 'New terminal node', group: 'Nodes', scope: 'canvas',
         darwin: ['Cmd+T'], other: ['Cmd+T'] },
@@ -129,6 +133,8 @@ describe('registry invariants', () => {
         darwin: [], other: [] },
       { id: 'node.newAgent.antigravity', title: 'New Antigravity node', group: 'Nodes',
         scope: 'canvas', darwin: [], other: [] },
+      { id: 'node.newAgent.cursor', title: 'New Cursor node', group: 'Nodes', scope: 'canvas',
+        darwin: [], other: [] },
       { id: 'node.newSticky', title: 'New sticky note', group: 'Nodes', scope: 'canvas',
         darwin: [], other: [] },
       { id: 'node.newBrowser', title: 'New browser node', group: 'Nodes', scope: 'canvas',
@@ -157,6 +163,20 @@ describe('registry invariants', () => {
         darwin: ['Ctrl+Alt+ArrowUp'], other: [], allowInTerminal: true },
       { id: 'node.zoneDown', title: 'Snap node to bottom half', group: 'Nodes', scope: 'canvas',
         darwin: ['Ctrl+Alt+ArrowDown'], other: [], allowInTerminal: true },
+      { id: 'node.zoneLeftThird', title: 'Snap node to left third', group: 'Nodes',
+        scope: 'canvas', darwin: [], other: [], allowInTerminal: true },
+      { id: 'node.zoneCenterThird', title: 'Snap node to center third', group: 'Nodes',
+        scope: 'canvas', darwin: [], other: [], allowInTerminal: true },
+      { id: 'node.zoneRightThird', title: 'Snap node to right third', group: 'Nodes',
+        scope: 'canvas', darwin: [], other: [], allowInTerminal: true },
+      { id: 'node.zoneTopLeft', title: 'Snap node to top left quarter', group: 'Nodes',
+        scope: 'canvas', darwin: [], other: [], allowInTerminal: true },
+      { id: 'node.zoneTopRight', title: 'Snap node to top right quarter', group: 'Nodes',
+        scope: 'canvas', darwin: [], other: [], allowInTerminal: true },
+      { id: 'node.zoneBottomLeft', title: 'Snap node to bottom left quarter', group: 'Nodes',
+        scope: 'canvas', darwin: [], other: [], allowInTerminal: true },
+      { id: 'node.zoneBottomRight', title: 'Snap node to bottom right quarter', group: 'Nodes',
+        scope: 'canvas', darwin: [], other: [], allowInTerminal: true },
       { id: 'node.close', title: 'Close node / window', group: 'Nodes', scope: 'app',
         darwin: ['Cmd+W'], other: ['Cmd+W'], allowInTerminal: true, allowWhileTyping: true },
       { id: 'node.toggleMarkdown', title: 'Toggle markdown view', group: 'Nodes', scope: 'app',
@@ -219,7 +239,7 @@ describe('registry invariants', () => {
       'node.newDino',
       'node.newFile'
     ]
-    expect(added).toHaveLength(13)
+    expect(added).toHaveLength(14) // fork pi + upstream cursor each added one
     for (const id of added) {
       const d = COMMANDS_BY_ID.get(id as CommandId)
       expect(d, id).toBeDefined()

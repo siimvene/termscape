@@ -5,19 +5,16 @@
 // paired relay GUEST mint and delete managed pi accounts on the HOST — the same reason
 // `main/claude-accounts.ts` binds the Claude table here.
 import { ipcMain } from 'electron'
-import { piAccountsHandlers, type PiAccountsDeps } from '../core/pi-accounts-service'
+import { piAccountsHandlers } from '../core/pi-accounts-service'
 import type { AccountRowStore } from '../core/settings-store'
 
 /**
  * @param settings The settings store; account ROW membership is written through its `mutate`.
- * @param installSkill Optional per-account addition (a pi canvas-control skill), when the shell has one.
+ * A new account's extension + skills come from the consent lifecycle (`installIntoPiAccount`).
  */
-export function initPiAccounts(
-  settings: AccountRowStore,
-  installSkill?: PiAccountsDeps['installSkill']
-): void {
+export function initPiAccounts(settings: AccountRowStore): void {
   // The event is stripped exactly as the core seam would strip it: none of the four reads a sender.
-  for (const [channel, fn] of Object.entries(piAccountsHandlers({ settings, installSkill }))) {
+  for (const [channel, fn] of Object.entries(piAccountsHandlers({ settings }))) {
     ipcMain.handle(channel, (_event, ...args: any[]) => fn(...args))
   }
 }

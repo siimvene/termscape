@@ -60,6 +60,14 @@ about which machine they describe. Reading + parsing is `core/session-memory.ts`
   fence back out — and do not replace the classifier with a blunt "any error ⇒ ok:false" either: on
   a host with no tmux server at all EVERY socket fails, and there "there are no sessions" is the
   honest answer.
+- **On Windows the session host's own cost is a separate, measured line** (`SessionMemoryReport.host`,
+  `hostOverhead`): the host process plus its non-shell children (ConPTY's conhost/OpenConsole is the
+  host's child, the shell's sibling, so no row reaches it). Never folded into a session row, never a
+  fake `0` — an unknown host pid or an undescribed session (whose shell would be misbooked) means no
+  line. Windows pane probes run through ONE long-lived PowerShell per process
+  (`session-host/windows-probe-worker.ts`, one-shot fallback), and the table read is coalesced in
+  flight but **never time-cached**: the exit poll's two-consecutive-readings rule must see two real
+  observations. Details + device checklist: docs/windows-session-host.md.
 - **`readMemInfo` has exactly one home** (`core/session-memory.ts`); `session-budget.ts` imports and
   re-exports it. The reaper's watermark and the pill must never disagree about how much RAM is free,
   and a second copy is exactly the drift these rule files warn about elsewhere. `null` = could not read,
@@ -157,6 +165,17 @@ about which machine they describe. Reading + parsing is `core/session-memory.ts`
   any value inside it. **Mobile**: **N/A for v1** — *nodeterm
   mobile* attaches to tmux sessions over the transport protocol and has no per-session host-memory
   concept; adding one means extending that protocol (follow-up in the iOS repo).
+- **Windows (no tmux) — the session host is a third leg, not a special case.** Its sessions reach
+  the reaper (`SessionReaperOpts.sessionHost`, consulted only when `tmuxBin()` is null), this panel
+  (`collectSessionHostMemory`, CIM process table) and dev-server ports (`collectWin32DevPorts`, one
+  PowerShell call) through ONE additive hello feature, `sessionDetails` (pid, subscribers, output
+  clock, generation per session — docs/windows-session-host.md "Observability"). The rules above
+  carry over unchanged: a failed host read is `ok:false` / no candidates / `unreachable`, never "no
+  sessions"; no host running IS "no sessions"; a session an older host names but cannot describe is
+  `unmeasured` (`unmeasuredBackend: 'session-host'`, its own sentence), never dropped; a reap kills
+  exactly the observed generation. Both legs merge (`mergeLocalLegs`): a leg that answered is never
+  overridden by one that failed. The tmux path is untouched wherever the session host is not the
+  backend (`PtyManager.sessionHostListing()` answers `undefined`).
 
 - **The panel's second row action is PAUSE, and it's usually the right one, not `×`.** Measured
   (2026-09-04, 149 `nt-` sessions, 46 GB tree RSS): the median session with a live `claude` holds
@@ -166,7 +185,8 @@ about which machine they describe. Reading + parsing is `core/session-memory.ts`
   **Quote these numbers when someone proposes a memory lever that destroys sessions** — it is why
   issue #616's "end the tmux session too" was not built. PAUSE is not a third depth: it calls
   `pauseAgentNode(id, false)`, the same `performExitPhase` / PAUSED chip / Resume the node menu
-  offers, so there is no second exit path to keep in step with Eco's. Eligibility is the pure
+  offers, so there is no second exit path to keep in step with Eco's. To pause many rows at once,
+  use **Bulk pause** (`.claude/rules/terminal.md`), not a loop over this control. Eligibility is the pure
   `renderer/lib/sessionPause.ts`, two-directional on purpose: a row that could NEVER pause (orphan,
   plain terminal, an agent we cannot quit-and-resume) renders **nothing**; one merely refused right
   now (busy, no session id, or its terminal is not mounted on this canvas — the common case in a

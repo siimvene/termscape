@@ -89,14 +89,18 @@ export interface AgentNodeStatus {
    * It is a record of the PAST, restored as nothing else:
    *  - NOT as `state`: after a relaunch nothing has reported, a turn may have started or ended while
    *    the app was down (the hook server was down with it), so the state stays unknown until the
-   *    next hook event. `lastSeen.state` is shown as "what it was last seen doing", never acted on.
+   *    next hook event. `lastSeen.state` is shown as "what it was last seen doing", and acted on in
+   *    exactly ONE place: a user-confirmed bulk pause (`idleForPause`, lib/bulkPause.ts) treats an
+   *    unknown-state session as pausable only when it was last seen `done`. That is weak evidence
+   *    on purpose: the user asked for the pause, the runner still proves the agent owns its pane,
+   *    and without it every session after a restart would be unpausable. Nothing AUTOMATIC reads it.
    *  - NOT as `lastEventAt`: that field is the Eco idle clock AND the `idleKnown` signal for the
    *    offscreen release deferral, and a restored stamp read as "idle since before the restart"
    *    would make a session with an unknown state look hours idle. Eco stays inert for a session
    *    with no hook event in this run, deliberately — see `hibernation-policy.ts` ("A restored clock
    *    is not an idle proof").
    * Its readers are the sessions sidebar's order and age label (`sessionList.ts`), which use it only
-   * while `lastEventAt` is unset. `lastSeen.restored` (set on load, never written) is what says the
+   * while `lastEventAt` is unset, and the bulk-pause gate above. `lastSeen.restored` (set on load, never written) is what says the
    * clock is from BEFORE the restart; any hook event in this run replaces the object without it.
    *
    * Written on EVERY hook event, same-state ones included (in place, no re-render — the fast path's
@@ -133,10 +137,10 @@ export interface AgentNodeStatus {
    * moment of hibernation, persisted beside the flag, and dropped with it.
    *
    * The wake refuses to type a launch line into a pane it does not recognize as a shell, and its
-   * allowlist (`isShellCommand`) knows zsh/bash/fish/… but not `nu`, `xonsh` or `pwsh`. The EXIT
+   * allowlist (`isShellCommand`) knows zsh/bash/fish/pwsh/cmd/nu/… but not `xonsh` or `elvish`. The EXIT
    * half has a second, allowlist-free signal for exactly those users (the foreground command
    * stopped being the CLI, twice in a row) — so without this the wake is STRICTER than the exit,
-   * and a `nu` user could be hibernated and then never woken: the chip would refuse forever.
+   * and an `xonsh` user could be hibernated and then never woken: the chip would refuse forever.
    * Remembering what we exited TO closes that gap, and it is narrow by construction: it permits
    * one specific string, on one specific node, recorded by us.
    *

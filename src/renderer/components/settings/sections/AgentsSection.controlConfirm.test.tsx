@@ -48,6 +48,7 @@ function bypassSwitch(): HTMLElement {
 
 const CLOSE_LABEL = 'Ask before an agent closes nodes'
 const WRITE_LABEL = 'Ask before an agent types into a node'
+const OPEN_PROJECT_LABEL = 'Ask before an agent opens or adds a project'
 
 async function render(): Promise<void> {
   host = document.createElement('div')
@@ -79,9 +80,13 @@ describe('destructive canvas-control confirmations in Settings', () => {
   it('shows one row per waivable verb, derived from the shared table', () => {
     // Derived, not hand-listed: a verb that becomes waivable in code but invisible here would be a
     // loosening the user cannot see or revoke.
-    expect(CONFIRM_WAIVABLE_VERBS.size).toBe(2)
+    expect(CONFIRM_WAIVABLE_VERBS.size).toBe(3)
     selectFor(WRITE_LABEL)
     selectFor(CLOSE_LABEL)
+    // `open-project` joined the table (2026-10) — and must arrive with its own sentence, not the
+    // honest-but-ugly fallback that only names the verb.
+    selectFor(OPEN_PROJECT_LABEL)
+    expect(host.textContent).not.toContain('Ask before an agent runs `open-project`')
   })
 
   it('defaults to Always ask with no setting stored', () => {
@@ -110,7 +115,7 @@ describe('destructive canvas-control confirmations in Settings', () => {
       useSettings.setState((s) => ({
         settings: {
           ...s.settings,
-          controlConfirmWaivers: { always: ['open-project', 'close', 'close'] } as never
+          controlConfirmWaivers: { always: ['settings', 'close', 'close'] } as never
         }
       }))
     })
@@ -124,16 +129,16 @@ describe('destructive canvas-control confirmations in Settings', () => {
   })
 
   it('surfaces an app-run waiver granted from a dialog, and offers Revoke', () => {
-    expect(host.textContent).not.toContain('Waived until nodeterm quits')
+    expect(host.textContent).not.toContain('Waived until Termscape quits')
     act(() => useControlConfirm.getState().waiveForSession('close'))
     const text = host.textContent ?? ''
     // The dialog that granted it is gone, so this row is the only place it can be seen or ended.
-    expect(text).toContain('Waived until nodeterm quits')
+    expect(text).toContain('Waived until Termscape quits')
     const revoke = [...host.querySelectorAll('button')].find((b) => b.textContent === 'Revoke')
     expect(revoke, 'an app-run waiver must be revocable here').toBeTruthy()
     act(() => revoke!.dispatchEvent(new MouseEvent('click', { bubbles: true })))
     expect(useControlConfirm.getState().sessionWaived).toEqual([])
-    expect(host.textContent).not.toContain('Waived until nodeterm quits')
+    expect(host.textContent).not.toContain('Waived until Termscape quits')
     // Revoking an app-run waiver must not write anything to disk.
     expect(useSettings.getState().settings.controlConfirmWaivers).toBeUndefined()
   })
@@ -141,7 +146,7 @@ describe('destructive canvas-control confirmations in Settings', () => {
   it('does not offer Revoke for a PERMANENT waiver — the dropdown is that control', () => {
     choose(CLOSE_LABEL, 'never')
     act(() => useControlConfirm.getState().waiveForSession('close'))
-    expect(host.textContent).not.toContain('Waived until nodeterm quits')
+    expect(host.textContent).not.toContain('Waived until Termscape quits')
     // A Revoke beside a permanent waiver would clear the app-run one and change nothing the user
     // can see, since the permanent waiver still applies — a button that appears to do nothing.
     expect([...host.querySelectorAll('button')].some((b) => b.textContent === 'Revoke')).toBe(false)

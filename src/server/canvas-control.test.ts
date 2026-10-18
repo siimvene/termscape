@@ -27,9 +27,10 @@ import { IPC } from '../shared/ipc'
 import { DEFAULT_SETTINGS, type Project, type Settings, type Workspace } from '../shared/types'
 import {
   initServerCanvasControl,
-  installServerPiCanvasSkillInto,
+  serverCanvasShimPath,
   type ServerCanvasControl
 } from './canvas-control'
+import { CANVAS_SKILL, createIntegrationLifecycle, skillsFor } from '../core/agent-integrations'
 
 /** The minimal workspace/pty deps `initServerCanvasControl` needs to boot (no node is opened). */
 function bootDeps(): { workspaceStore: WorkspaceStore; ptyManager: PtyManager } {
@@ -56,13 +57,16 @@ describe('initServerCanvasControl — managed pi account dirs', () => {
   let home = ''
   let runtime: ServerCanvasControl | null = null
   const prevHome = process.env.HOME
+  const prevPiDir = process.env.PI_CODING_AGENT_DIR
 
   beforeEach(() => {
     dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nodeterm-server-control-pi-'))
     home = fs.mkdtempSync(path.join(os.tmpdir(), 'nodeterm-server-home-'))
-    // `installAgentIntegrations: true` writes the system agents' skill/instruction files under
-    // `os.homedir()`, which honors $HOME on POSIX — so they land in a temp home, never the real one.
+    // Anything that wrongly reached for a system agent dir would resolve it under `os.homedir()`
+    // (which honors $HOME on POSIX) or $PI_CODING_AGENT_DIR — pin both into a temp home, never the
+    // real one, so the "writes nothing" assertion below inspects a dir we own.
     process.env.HOME = home
+    delete process.env.PI_CODING_AGENT_DIR
     resetPlatformForTests()
     initPlatform(fakePlatform({ userDataDir: dataDir }))
   })
@@ -73,22 +77,23 @@ describe('initServerCanvasControl — managed pi account dirs', () => {
     resetPlatformForTests()
     if (prevHome === undefined) delete process.env.HOME
     else process.env.HOME = prevHome
+    if (prevPiDir === undefined) delete process.env.PI_CODING_AGENT_DIR
+    else process.env.PI_CODING_AGENT_DIR = prevPiDir
     fs.rmSync(dataDir, { recursive: true, force: true })
     fs.rmSync(home, { recursive: true, force: true })
   })
 
   it.skipIf(process.platform === 'win32')(
-    'installs the pi canvas skill into every existing managed pi account dir (desktop parity)',
+    'boot writes no skill anywhere; the lifecycle writes this edition’s pi body into an account dir',
     async () => {
+      // Upstream #744: discovery skills are the consent lifecycle's (core/agent-integrations.ts),
+      // managed pi account dirs included (gated on pi's consent), so booting the canvas runtime must
+      // not write into a pi account dir or the system ~/.pi.
       const acctDir = path.join(dataDir, 'pi-accounts', 'p1')
       fs.mkdirSync(acctDir, { recursive: true })
       const settings = (): Settings => ({
         ...DEFAULT_SETTINGS,
-        piAccounts: [
-          { id: 'p1', label: 'work pi', pending: false, createdAt: 0 },
-          // A row whose dir is gone is skipped, never resurrected as an empty logged-out dir.
-          { id: 'p2', label: 'gone', pending: false, createdAt: 0 }
-        ]
+        piAccounts: [{ id: 'p1', label: 'work pi', pending: false, createdAt: 0 }]
       })
       runtime = await initServerCanvasControl({
         ...bootDeps(),
@@ -100,20 +105,25 @@ describe('initServerCanvasControl — managed pi account dirs', () => {
           fullscreenTui: false,
           sessionIdFlag: false
         }),
-        codexSharedIdentity: async () => true,
-        installAgentIntegrations: true
+        codexSharedIdentity: async () => true
       })
       const shim = path.join(dataDir, 'canvas-control', 'nodeterm.sh')
-      const skill = path.join(acctDir, 'skills', 'manage-nodeterm-canvas', 'SKILL.md')
-      expect(fs.readFileSync(skill, 'utf8')).toContain(shim)
-      expect(fs.existsSync(path.join(dataDir, 'pi-accounts', 'p2'))).toBe(false)
-      // The per-dir installer the add verb uses writes the SAME body (one builder, one shim path).
-      const fresh = path.join(dataDir, 'pi-accounts', 'p3')
-      fs.mkdirSync(fresh, { recursive: true })
-      installServerPiCanvasSkillInto(fresh)
-      expect(fs.readFileSync(path.join(fresh, 'skills', 'manage-nodeterm-canvas', 'SKILL.md'), 'utf8')).toBe(
-        fs.readFileSync(skill, 'utf8')
-      )
+      expect(fs.existsSync(shim)).toBe(true)
+      expect(fs.existsSync(path.join(acctDir, 'skills'))).toBe(false)
+      expect(fs.existsSync(path.join(home, '.pi'))).toBe(false)
+      expect(fs.existsSync(path.join(home, '.claude'))).toBe(false)
+
+      // The lifecycle as server/index.ts builds it (canvas shim = this edition's), asked the way the
+      // add verb asks it: the account gets the SAME body the system pi dir gets.
+      createIntegrationLifecycle({
+        settings: () => ({ ...settings(), agentIntegrations: { agents: { pi: 'enabled' }, origin: 'asked' } }),
+        userDataDir: () => dataDir,
+        shims: () => ({ canvas: serverCanvasShimPath(), context: path.join(dataDir, 'context-links', 'context.sh') })
+      }).installIntoPiAccount(acctDir)
+      const skill = path.join(acctDir, 'skills', CANVAS_SKILL, 'SKILL.md')
+      const body = fs.readFileSync(skill, 'utf8')
+      expect(body).toContain(shim)
+      expect(body).toBe(skillsFor('pi', { canvas: serverCanvasShimPath(), context: '/unused/context.sh' }).get(CANVAS_SKILL))
     }
   )
 })
@@ -254,7 +264,8 @@ describe('initServerCanvasControl', () => {
       paneOwner,
       sendEnvelope,
       hasLiveSession: () => true,
-      sessionExists: async () => true
+      sessionExists: async () => true,
+      paneProbeTimeoutMs: () => 2000
     } as unknown as PtyManager
     const settings = (): Settings => ({ ...DEFAULT_SETTINGS })
 
@@ -272,8 +283,7 @@ describe('initServerCanvasControl', () => {
       codexSharedIdentity: async () => true,
       // Pinned, never this machine's codex: the line depends on what the CLI advertises. `true`
       // also proves the Server Edition's opens carry `--no-daemon` (shared/agents/codex-daemon.ts).
-      codexCaps: async () => ({ approvalValues: null, noDaemon: true }),
-      installAgentIntegrations: false
+      codexCaps: async () => ({ approvalValues: null, noDaemon: true })
     })
 
     const shim = path.join(dataDir, 'canvas-control', 'nodeterm.sh')
@@ -282,11 +292,6 @@ describe('initServerCanvasControl', () => {
     expect(shimBody).toContain('CODEX_THREAD_ID')
     expect(shimBody).toContain(path.join(dataDir, 'codex-thread-nodes'))
     expect(fs.statSync(shim).mode & 0o111).not.toBe(0)
-    const accountDir = path.join(dataDir, 'test-account')
-    runtime.installSkillInto(accountDir)
-    expect(
-      fs.readFileSync(path.join(accountDir, 'skills', 'manage-nodeterm-canvas', 'SKILL.md'), 'utf8')
-    ).toContain(shim)
 
     const opened = await runtime.handler({
       verb: 'open-agent',
@@ -381,6 +386,8 @@ describe('initServerCanvasControl', () => {
     const writes: Array<{ text: string; enter: boolean | undefined }> = []
     let pasted = ''
     const legacySendEnvelope = vi.fn(async () => true)
+    // The Server shell must hand messaging the pane's own read budget (ptyPaneProbeDeps).
+    const paneProbeTimeoutMs = vi.fn((_nodeId: string) => 2000)
     const pty = {
       ...headlessShell(),
       createHeadless: vi.fn(async () => ({ sessionId: 'unused', fresh: true })),
@@ -412,15 +419,15 @@ describe('initServerCanvasControl', () => {
       })),
       sendEnvelope: legacySendEnvelope,
       hasLiveSession: () => true,
-      sessionExists: async () => true
+      sessionExists: async () => true,
+      paneProbeTimeoutMs
     } as unknown as PtyManager
 
     runtime = await initServerCanvasControl({
       workspaceStore: store,
       ptyManager: pty,
       settings: () => ({ ...DEFAULT_SETTINGS }),
-      boardLog: { append: async () => false },
-      installAgentIntegrations: false
+      boardLog: { append: async () => false }
     })
 
     const opened = await runtime.handler({
@@ -455,6 +462,7 @@ describe('initServerCanvasControl', () => {
     expect(writes[0]).toMatchObject({ enter: false })
     expect(writes[1]).toEqual({ text: '', enter: true })
     expect(legacySendEnvelope).not.toHaveBeenCalled()
+    expect(paneProbeTimeoutMs).toHaveBeenCalledWith(targetId)
   })
 
   it('publishes its own writes on server-change, never on the outside-edit channel', async () => {
@@ -505,15 +513,15 @@ describe('initServerCanvasControl', () => {
       paneOwner: vi.fn(async () => null),
       sendEnvelope: vi.fn(async () => true),
       hasLiveSession: () => true,
-      sessionExists: async () => true
+      sessionExists: async () => true,
+      paneProbeTimeoutMs: () => 2000
     } as unknown as PtyManager
 
     runtime = await initServerCanvasControl({
       workspaceStore: store,
       ptyManager: pty,
       settings: () => ({ ...DEFAULT_SETTINGS }),
-      boardLog: { append: async () => false },
-      installAgentIntegrations: false
+      boardLog: { append: async () => false }
     })
     fake.sent.length = 0
 

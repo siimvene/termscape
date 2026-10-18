@@ -18,6 +18,11 @@ paths:
   - "src/renderer/components/kanban/ModalTerminal.tsx"
   - "src/session-host/**"
   - "src/shared/ssh-server.ts"
+  - "src/core/da-reply-gate.ts"
+  - "src/shared/terminal-width.ts"
+  - "src/shared/scrollback.ts"
+  - "src/renderer/lib/bulkPause.ts"
+  - "src/renderer/state/pendingPause.ts"
 ---
 # Terminal sessions: tmux continuity, PTY lifecycle, cold restore, xterm seeding, TerminalNode
 
@@ -84,6 +89,22 @@ addon's `select()` must never touch the clipboard. Canvas node and kanban modal 
 settings preview; attached once per xterm (it survives park/adopt) and written via the bridge's
 `{ quiet: true }` path so a failed write raises no toast per drag.
 
+**Every viewer answers the tmux client's handshake; only one answer may reach it** (issue #1172).
+A new tmux client queries the terminal it is drawn in (DA1 `ESC[c`, DA2 `ESC[>c`, XTVERSION, OSC
+10/11 — measured on 3.4). With N viewers on one pty (two Server Edition tabs, a canvas node plus its
+kanban card modal, a relay peer) all N xterms answer; tmux consumes ONE DA answer inside its ~5 s
+query timeout and passes the rest — and a lone late one — to the pane as typed input, so
+`1;2c0;276;0c` landed in front of agent launch lines (the echo check passes: the line itself is
+intact) and in live prompts on every reattach. OSC replies are always consumed by tmux. The gate is
+`core/da-reply-gate.ts`, per Session, fed from `proc.onData` and applied in `PtyManager.write`: a write
+made ONLY of DA1/DA2 replies spends one open query of its kind per reply, and a reply with no open
+query (a duplicate, an unsolicited one, or one past `DA_REPLY_TTL_TMUX_MS` = 4 s for a real tmux
+client) is dropped. Rules: match only `CSI ? … c` / `CSI > … c` — no key produces them, while a
+broader report match eats keystrokes (`ESC[1;2R` is CPR AND Shift+F3); touch only whole reply-only
+writes (xterm.js emits each reply as its own data event, so a mixed write is a person); never close
+the gate for the session's life (a pane app's DCS-passthrough query shows up as the same `ESC[c` and
+gets exactly one answer).
+
 **A tmux client is not necessarily a watcher.** `SessionInfo.clients` is a COUNT
 (`#{session_attached}`), never a boolean, because one session can hold several: the app's painter,
 the user's own `tmux -L node-terminal attach`, a second nodeterm on the same socket, and our own
@@ -104,6 +125,21 @@ Lifecycle, by intent:
   See the Terminal node lifecycle section for the two invariants (mount-stable observer;
   `session.source` remote gate). Note the released node is a DETACHED tmux session — it joins
   the session reaper's candidate pool (6 h grace still protects it).
+- **A hidden window counts as offscreen (2026-10)** → close-to-tray (the Windows default), macOS
+  hide-on-close and minimize send `app:window-visibility` (`main/window-visibility.ts`); the
+  renderer flag (`terminal/window-backgrounded.ts`) makes every node report itself offscreen
+  through the SAME mount-stable observer path, so the release runs at `min(offscreen setting,
+  BACKGROUND_RELEASE_DWELL_MS = 2 min)` behind every existing gate (live-work, held launch, Eco,
+  remote, selected, `0 = never`); after that dwell Canvas runs the memory-pressure reclaim pair
+  (`runReclaimLevers`), which now frees the on-screen terminals' WebGL contexts too because they
+  all read hidden. Show cancels the dwell and revives warm. It feeds existing levers — it is not a
+  new one — and an occluded window or a Server Edition tab switch never triggers it (explicit IPC,
+  not `visibilitychange`; the bridge declares it a no-op). Eco and the liveness poll see a hidden
+  window as "nobody watching" too. **A raw Electron `hide` is NOT the signal**: on macOS
+  `BrowserWindow` emits `hide`/`show` from occlusion changes (a window merely covered by another
+  app, another Space, ⌘H), so main forwards `hide` only when the close branch set
+  `windowHiddenByApp` before its own `win.hide()`; `minimize` always counts. A focused renderer
+  clears the flag (fail-safe for a WM that restores without a `restore` event).
 - **Every memory lever must ask whether the kill ends live work** (`terminal/live-work.ts`). The
   renderer reclaims terminal memory in FOUR places — park window expiry, the park's LRU cap, the
   memory-pressure drop (all three in `park-budget.ts`) and the offscreen viewer release
@@ -203,6 +239,18 @@ Lifecycle, by intent:
   `'off'` drops GPU rendering entirely.
 - **Window close / app quit** → clients detach (`PtyManager.killAll()`); the tmux session keeps
   running. `killAll()` deliberately does NOT kill sessions.
+- **Window close off macOS = background mode** (`settings.runInBackgroundOnClose`, `'auto'` = on for
+  Windows, off for Linux; `resolveBackgroundOnClose` in `main/background-mode.ts`): the × HIDES the
+  window into a notification-area tray (`main/tray.ts`, pure model `tray-model.ts`: Open / unread /
+  phone-access status / Quit) so the phone relay host, hook server, notifications and updater keep
+  running — the Dock analogue. A hide is not a quit, so no confirm dialog; tray **Quit** is plain
+  `app.quit()` (before-quit + confirm run as for the menu Quit — File → Exit on Windows, where
+  Electron's quit role has NO Ctrl+Q accelerator; never set `quitting` before it, a cancelled
+  confirm must leave the × hiding). Hide only while the tray actually EXISTS
+  (`backgroundOnCloseActive`), so a failed tray never turns × into a hide with no way back. The
+  updater/update-prep quits keep flipping `quitting` first, or a hidden window would block them.
+  First hide posts a one-time toast (userData marker file, not a settings key — the renderer's
+  full-snapshot saves would overwrite a main-side settings write).
 - **Node reopen / app relaunch** (nothing parked) → a new PTY attaches to the same
   `nt-<nodeId>` session and tmux redraws current state.
 - **User clicks ×** → `destroy(persistKey)` runs `tmux kill-session`, permanently ending it. For a
@@ -222,6 +270,68 @@ Lifecycle, by intent:
   The refusal is **only** in `spawnNew` — a co-attach JOIN to a live session for that node id is
   still correct. An offline node reports itself to `SshReconnector`, so the canvas heals itself;
   `retryNow` (banner Reconnect / node Reconnect) skips the backoff and clears the refuse window.
+  **Whether a node is remote comes from its PROJECT, never from its own fields** (issue #1186,
+  `@shared/ssh-project-nodes`). `requireRemote`/`sshRemoteTmux` used to be stamped only by this
+  machine's node factories, but an SSH project's `project.json` lives on the host and other writers
+  put nodes into it — above all the host's own desktop, which opens the same folder as a LOCAL
+  project (`cwd: "."`, no `ssh` fields). Such a node ran on the VIEWING machine in an unrelated
+  folder, under the id the host was running. Three layers: (1) `fileToProject` routes every session
+  node of an SSH project to the project's host (`routeSshProjectNodes`: `ssh` = the project server,
+  `sshRemoteTmux`, cwd resolved POSIX-style against `remoteCwd`; editor/video/files get `sshFs`),
+  and `persistedCanvases` / `getNodeResolved` read the cache the same way; (2) `projectToFile`
+  writes the SSH mirror NEUTRAL (`neutralSshProjectNodes` drops those fields, cwd back to `./x`),
+  because the file is shared LAYOUT — a node stamped "runs over ssh on <host>" cannot run on the
+  host's own desktop at all; (3) core refuses a local spawn whose `ownerProjectId` is an SSH project
+  (`PtyManager.setSshProjectCheck`, wired in BOTH shells from the index) even without
+  `requireRemote`. Kept as written: a plain `ssh <host>` terminal (`ssh` without `sshRemoteTmux` —
+  `shell: 'ssh'` at the spawn) and a foreign host ATTACHMENT (`sshRemoteTmux` + another host). The one
+  local terminal an SSH canvas may hold is a LOCAL-account login node, marked in memory only
+  (`renderer/lib/localOnSshCanvas.ts` → `localOnSshCanvas` on the create; a scoped relay guest's is
+  deleted); after a restart it routes to the host like any other node. **Downgrade:** a build older
+  than this one reads the neutral file's nodes as local (the bug it already had for host-made nodes).
+  **The phone's relay `pty.attach` is the other way in, and it is closed the same way**
+  (`PtyManager.prepareRelayAttach`, pure routing in `core/relay-attach-plan.ts`). It used to call
+  `attachDetached(nodeId)` → `tmux new-session -A` on the LOCAL socket for whatever id the phone
+  named, with no `sshRemote` and no `requireRemote` — so an SSH project's node opened on the phone
+  before the desktop mounted it became a local shell in this machine's `$HOME` (no context meter, ⌘M
+  fell back to Markdown, work ran on the wrong machine), and the desktop's later mount created a
+  SECOND `nt-<id>` on the host: one node id, two sessions, two machines. Rules a refactor must not
+  undo:
+  - **Where is decided from THIS machine's records, never the phone's words.** The desktop wires
+    `setRelayNodeResolver` (`workspaceStore.relayNodePlacements` — EVERY project holding the id, the
+    node as that project recorded it — plus `SshProjectManager.spawnRefFor` and the index's SSH
+    identity). A node is remote when it carries `sshRemoteTmux` + `ssh` (a host attachment routes
+    over its attachment scope, as `sshConnectionScope` does) or sits in an SSH project; a plain
+    `ssh` terminal (`ssh` without `sshRemoteTmux`) runs `ssh` locally, as the renderer does. The
+    phone's optional `projectId` may only CHOOSE among those placements, or REFUSE (an unknown id it
+    places in an SSH project) — it never routes a node anywhere on its own.
+  - **Remote = over the project's live master, with `requireRemote`, or refused** with a sentence
+    the phone shows (`{message, reason}`: `not-connected` / `no-ssh` / `still-connecting` /
+    `unregistered-remote`). Never a local fallback. A master whose connect setup has not finished
+    (`Conn.setupDone`, set exactly where `connected` is emitted) may only JOIN a session the host
+    positively lists — the renderer's `waitForSshRemote` rule: a session created before the setup
+    chain carries no hook/account env and no tmux.conf, for life.
+  - **The env is the desktop's, from the one builder.** The plan hands `spawnSession` the node's
+    recorded `agentId` / `agentModel` / `accountId` / `cwd` / `shell` / `ownerProjectId`, so
+    `buildPtyEnv` (agent id, canvas-control grant, permission wait), the account dir and project
+    overrides apply exactly as on a desktop create; no second env is written for the relay. The
+    shared pre-spawn refusals (`requireRemote`, the managed-Codex scope) are ONE helper,
+    `spawnRefusal`, used by `spawnNew` and the relay. Pane ownership is still NOT recorded for a
+    relay-created session (unchanged): the owner would be derived from project files, which is the
+    one source that ledger refuses to trust.
+  - **One id in a local AND an SSH project** (the same committed canvas opened in two folders) is
+    answered by whichever session exists: a live LOCAL one wins, otherwise the remote one.
+  - **Existing damage is reported, never killed.** A stray local `nt-<id>` the old path left for a
+    node that only lives remotely is never attached from the relay again (and the desktop's own
+    mounts already pass `requireRemote`), and a relay attach that finds one logs a `[relay] … left
+    untouched` warning. It is not killed automatically: it may hold work typed into it, and nothing
+    proves it idle. Do NOT point a user at the session-memory panel's × for it — a delete resolves
+    remoteness from the index (`planRemoteEnd`) and would end the REAL remote session too; the
+    manual cleanup is `tmux -L node-terminal kill-session -t =nt-<id>`.
+  - Server Edition: no phone relay host, no resolver wired — `prepareRelayAttach` there is the bare
+    local attach it always was. Tests: `relay-attach-plan.test.ts` (matrix),
+    `pty-relay-attach.test.ts` (real PtyManager, node-pty mocked), `remote-security.test.ts`
+    (host reply), `main/relay-attach-wiring.test.ts` (the desktop wire, at source level).
 - **Codex's auto-started shared daemon: every nodeterm Codex TUI runs `--no-daemon`** (2026-09-30).
   From codex-cli **0.157.0** the `daemon_auto_start` feature is `stable, true` (0.156.1:
   `experimental, false`; 0.148.0: no such feature): a plain `codex` TUI no longer runs in-process
@@ -285,8 +395,10 @@ Lifecycle, by intent:
     plain terminal, or by an agent through `open-terminal --cmd codex` / `write` — carries that
     node's `NODETERM_NODE_ID` and, on 0.157+, can still start the account's daemon with it; managed
     threads' tool shells then keep the leaked id (the prelude skips a set one). Changing the prelude
-    to prefer the thread record over a set id was rejected: a bind-refused fallback pane legitimately
-    runs a thread another node's record names. (2) A launch-command override or custom `launchCmd`
+    to prefer the thread record over a set id was rejected FOR TOOL SHELLS: a bind-refused fallback
+    pane legitimately runs a thread another node's record names. HOOKS are different (#1175, below):
+    their payload names the event's own thread, so the codex hook script lets that thread's record
+    outrank an inherited id unless the pane is marked `NODETERM_CODEX_PLAIN=1`. (2) A launch-command override or custom `launchCmd`
     that runs a DIFFERENT codex than PATH's (`npx @openai/codex@0.148.0`) is given the flag from
     PATH's probe and dies on it; the fix there is the user's (drop the pin or add the flag to their
     own command) — we cannot probe an arbitrary command line. (3) The Windows argv planner
@@ -343,7 +455,7 @@ Lifecycle, by intent:
   window, non-recurring, without live subagents (`planHibernation` +
   `lib/hibernationCandidates.ts`, both pure/tested). tmux + shell survive; node shows a clickable
   SLEEPING chip; wake (view / chip / modal open) verifies a SHELL owns the pane
-  (`isShellCommand` OR the persisted `hibernatedPane` the exit settled on — nu/pwsh users) before
+  (`isShellCommand` OR the persisted `hibernatedPane` the exit settled on — xonsh/elvish users) before
   the KILL_LINE'd, echo-verified `withPermissionMode(resumeCommand(...))`. Sweep/wake/menu-restart
   share ONE `guardConcurrentRestart` set. Load-bearing rules a refactor must not undo:
   (1) **recurring fact is durable** — both loop-card dismiss surfaces route through
@@ -361,8 +473,9 @@ Lifecycle, by intent:
   restart nothing can hibernate and deferring would make Eco a memory regression). Eco is
   structurally inert for sessions with no turn in the current app run, and that is now a DECISION,
   not a follow-up: the persisted `agentStatus.lastSeen` clock (see **Status-grouped sessions**, `.claude/rules/agents.md`) is
-  deliberately never an idle proof — see "A restored clock is not an idle proof" in
-  `terminal/hibernation-policy.ts`.
+  deliberately never an idle proof FOR ECO — see "A restored clock is not an idle proof" in
+  `terminal/hibernation-policy.ts`. (A user-confirmed bulk pause is the one place it is read as weak
+  evidence; see **Bulk pause** and the `lastSeen` rules under **Status-grouped sessions**.)
   The deferral is also unaware of `paused`: a deep-paused node's freshly recycled shell keeps its
   xterm alive until the hard cap, waiting for a hibernation that (being already exited, or having
   no CLI to exit) can never come — a second documented follow-up.
@@ -388,6 +501,63 @@ Lifecycle, by intent:
   on the manual path, closed here on the automatic one. Node menu only today (canvas right-click +
   the sessions sidebar row menu, which shares the same `selectionItems` builder, plus a read-only
   kanban card badge and a clickable one in the card modal); no command palette entry.
+- **Bulk pause** (tab menu and sessions-sidebar project menu: *Pause project* / *Cancel pending
+  pauses* / *Resume all*; group frame menu: *Pause group*; a multi-selection of ≥2 agents: *Pause N
+  sessions*; a count badge on the tab) → the shallow "Pause session" above, applied to many nodes
+  at once, and it works on nodes that are NOT mounted (a project that is not on screen has no
+  `TerminalNode`, so no registered pause closure). It never recycles a tmux session. Rules a
+  refactor must not undo:
+  (1) **Typing into a pane by node id is ONE primitive, `PtyManager.sendPaneKeys(persistKey, data)`**
+  (`pty:send-pane-keys`, `HOST_ONLY`, classified `EDITOR_ONLY` in the relay access policy and
+  `SCOPED_REFUSED` for a scoped guest). Keys go over stdin to `tmux source-file -` through the
+  existing `controlInputPlan` / `remoteControlInputPlan`, never argv, to the exact `=nt-<id>:`.
+  (2) **An SSH-project node is never read or typed into on the local socket.** `paneRemoteRef`
+  resolves an unmounted SSH node through `remoteNodeOwner` (the machine-local index); a
+  disconnected master, or a stray LIVE local session for an SSH-project node, is `not-connected` /
+  unreachable, never a local fallback. `paneCommand` / `paneOwner` take an opt-in
+  `{ resolveUnmounted: true }` and **the default stays the legacy live-only path ON PURPOSE**:
+  agent messaging and `terminateForeground` also call them, and if they resolved an unmounted
+  remote node they would prove an owner on the HOST and then act on the LOCAL socket. Zellij, the
+  Windows session host, a native Windows pane and a plain shell answer `unsupported-backend`.
+  (3) **`planBulkPause` (`lib/bulkPause.ts`) is the whole decision**: `now` (idle `done`, or an
+  UNKNOWN state whose persisted `agentStatus.lastSeen.state` is `done` — `idleForPause`),
+  `whenDone` (working / waiting / blocked, or a held question/approval ticket — typing `/exit` into
+  those would answer a prompt), `alreadyExited` (hibernated by Eco: nothing to type, just mark it
+  paused), and named skips, exactly the `BulkPauseSkip` reasons: `not-agent`, `no-session-id`,
+  `not-resumable` (also an agent with no `exitSequence`, e.g. antigravity: resumable, but nothing
+  can ask it to quit), `already-paused`, `relay`, `dropped`, `ended`, `state-unknown`. The
+  unknown-state rule exists because state is transient: right after an app restart every node reads
+  unknown, and an idle CLI and one mid-turn look the same — typing an exit into a running turn
+  abandons it. `lastSeen` is the one clock that survives the restart, so a node last seen `done` is
+  paused and every other unknown node is skipped, never guessed at (the runner re-asks the same
+  rule at fire time). A skipped node says why; nothing is silently dropped, and the result line
+  (`bulkPauseResultText`) counts EVERY outcome — paused, pending, unreachable, `unverified`, not
+  eligible, still running, skipped — so a batch against a disconnected host never reads "Paused 0".
+  (4) **`whenDone` is `state/pendingPause.ts`, TRANSIENT** (never persisted: after a restart nothing
+  is watched, so a stored mark would lie). It fires on a CLEAN `done` edge only (not errored,
+  interrupted or held), the mark is removed BEFORE the fire so a second edge cannot double it, and
+  Resume, Cancel, node delete or the fire clear it, and the watcher also drops a mark when the node
+  is paused elsewhere or its status disappears. **A mark is bound to the session it was planned
+  against** (`BulkPauseTarget.sessionId`): the watcher drops it unfired when the node's session id
+  changes, the runner refuses a mismatch, and every Canvas funnel that replaces the CLI —
+  `restartAgentNode` (restart, fresh shell, model switch, reopen as), the Claude and Codex account
+  switches, the bulk idle restart and both `transport.recycle` sites — removes it, or a mark taken
+  for one turn would quit the NEW session on its first turn end.
+  (5) **Every exit holds `guardConcurrentRestart(nodeId, …)`** (the Eco / Pause / restart set) and
+  runs through ONE `createHostLimiter(BULK_PAUSE_HOST_CAP = 3)` per host key, shared by the batch
+  and the pending fires; owner reads are bounded. The host key is `local` or the **SSH project id**,
+  not the host: ControlMasters are per project, so the cap bounds channels per master.
+  `pauseNodeHeadless` (`terminal/headless-pause.ts`) is `performExitPhase` over `sendPaneKeys`, with
+  the menu restart's late window (`RESTART_LATE_EXIT_MS`) so a CLI that quits just after the base
+  6 s is paused rather than reported "still running"; a failed key write ends that wait at once
+  (`unreachable`). A pane owner that cannot be read before the exit (no live ControlMaster, a hung
+  read) is `unverified`, distinct from `not-eligible` (read and refused): nothing is typed in
+  either case.
+  (6) **Resume all is the active project only**: waking is the mounted node's `wakeHibernatedNode`,
+  so elsewhere the row is disabled with `Open the project to resume`.
+  Surfaces: Desktop full (local + SSH); Server Edition has the core primitive and a real ws-bridge
+  leg, but pending fires need an open browser tab (the watcher is the renderer's); relay tabs are
+  refused; the kanban card menus inherit the rows through `nodeActionItems`; Mobile: follow-up.
 
 The node id is the `persistKey` (passed to `transport.create`), so it must stay stable.
 If tmux is unavailable, `PtyManager` falls back to a plain shell (no cross-restart
@@ -400,6 +570,26 @@ unreachable there by construction; a Linux host is expected to have its own. Und
 `electron-vite dev` the last candidate resolves against `process.cwd()`, which is where
 `scripts/build-tmux.mjs` writes its artifact. If tmux is unavailable from all three,
 `PtyManager` still falls back to a plain shell; `TMUX`/`TMUX_PANE` are stripped from the child env to avoid nesting refusal.
+The same strip, one layer up, applies to a LAUNCHER that was itself an agent session: started from a
+Claude Code terminal, the app used to hand `CLAUDE_CODE_CHILD_SESSION` and its siblings to every pane,
+and the Claude CLI there then turned transcript saving off (no ⌘M view, no context meter, nothing for
+`--resume`). `buildPtyEnv` deletes the explicit, measured `NESTED_AGENT_ENV_STRIP` list
+(`core/nested-agent-env.ts`) and `ACCOUNT_SCOPE_UPDATE_ENV` lists the same names, so a tmux server
+seeded from such an environment does not hand them back (the #419 mechanism). Explicit names, never a
+`CLAUDE*` prefix sweep: `CLAUDE_CONFIG_DIR` and `CODEX_HOME` are how a managed account is selected.
+
+**The local tmux CLIENT is spawned from `localTmuxClientCwd()` (home, else `/`), never the node's
+cwd — the pane's directory rides `new-session -c` only** (issue #1131). Any client can be the one
+that starts the shared server, the server keeps that client's cwd for life, and from tmux 3.7
+`spawn.c` applies a pane's `-c` only when the server's own `getcwd()` succeeds: once the dir the
+server started in is deleted (a removed worktree), every NEW pane on the server inherits the deleted
+dir whatever `-c` said, and agents launched there hang. MEASURED on a locally built tmux 3.7c
+(private socket): client in the doomed dir → `-c <proj>` pane at `<gone> (deleted)`; client in
+`$HOME` → pane at `<proj>`. tmux 3.4–3.6 honour `-c` either way, which is why CI cannot reproduce it
+and the guard is a spawn-options assertion (`pty-tmux-client-cwd.test.ts`). The plain-shell fallback
+is the pane itself and keeps the project cwd; remote tmux is started from an ssh exec channel, which
+sshd places in the login home. A server started by an earlier build keeps its old cwd until it is
+restarted (`tmux -L node-terminal kill-server`, which ends every session).
 
 **A session-host session follows its most recently ACTIVE viewer, like tmux's `window-size
 latest`** (issue #914). Under tmux a relay-mirrored phone is its own tmux client, so dismissing its
@@ -683,7 +873,10 @@ seed** — the cases are:
   neither the `screen` capture (`capture-pane` carries no private modes) nor a SIGWINCH redraw
   re-sends them — so the joiner's wheel can't scroll tmux history until a keystroke makes the app
   re-request mouse. `join()` therefore sets `PtyCreateResult.coAttachMouse` for tmux-backed joins
-  (gated on `persistKey`, on BOTH the screen and resize branches) and the renderer writes
+  (gated on a REAL tmux client — `tmuxBacked && !sessionHost`, the same local that gates
+  `coAttachAltScreen`/`tmuxClient`; NOT `persistKey`, which a Windows session-host session also
+  carries and whose joiner then sent wheel/drag to the shell as SGR reports — on BOTH the screen
+  and resize branches) and the renderer writes
   `CO_ATTACH_MOUSE_SEQ` into the fresh xterm (both `ModalTerminal` and `TerminalNode`). tmux is
   always `mouse on`, so this matches its invariant client state; the enable is idempotent. Was the
   "can't scroll the kanban card-modal terminal until you press a key" bug. **A co-attach joiner
@@ -715,7 +908,28 @@ seed** — the cases are:
 xterm's own `scrollback` (`xtermScrollback(settings.tmuxScrollback)`, floored at 1000, capped at
 `XTERM_SCROLLBACK_MAX` = 10000) is kept for the sessions tmux does *not* back (a plain shell when
 tmux is unavailable) and for the cold-snapshot replay — it is not what the user scrolls in a tmux
-session.
+session. **The Windows session host's headless emulator (and `NativeWindowsPane`) uses the SAME
+clamp** (`src/shared/scrollback.ts`, re-clamped inside the host for older clients), never the raw
+`tmuxScrollback`: xterm holds every line at full width (cols × 12 B, ~72 MB for 50k × 120 cols per
+session) where tmux stores only used cells, and nothing above the renderer's cap is ever shown.
+tmux's `history-limit` keeps the raw value.
+
+### Character widths — one table for every emulator (`@shared/terminal-width`)
+
+Every xterm in the stack sizes characters through `activateTerminalWidths`: the renderer's
+terminals (`renderer/terminal/unicode-width.ts`, which explains the move off Unicode 6) and the
+Windows session host's headless emulator, which is what a reattaching viewer is repainted from.
+The table is Unicode 11 plus one rule xterm's tables lack: **a one-cell emoji followed by VS16
+(U+FE0F) is two cells**, as are the keycap sequences (`1️⃣`). The program writing to the pane
+(`string-width` in every Node agent CLI) and tmux (`variation-selector-always-wide`, on by default)
+both count those pairs as two cells; xterm counted one, and every repaint by absolute position after
+such a character landed a column short and left stale text behind. Measured with claude-hud's
+`⏱️` status line, which read `113` for `11%` and `2h 327` for `2h 32m`. VS15 is deliberately left
+alone (`string-width` sizes `⭐︎` by its base, as xterm already does), and so is an ASCII base
+with VS16 alone (`1️` is not an RGI emoji) and the unqualified keycap `1⃣` (one cell, as tmux sizes
+it; some `string-width` releases say two). Known xterm limitation: in insert mode (IRM) a widened
+join overwrites the next cell instead of shifting the line. Agreement is the goal, not a particular
+number: change the table in that one module, never in one emulator.
 
 ## Session host client: a failed write is an UNDELIVERED frame, not a failed request
 
@@ -785,10 +999,19 @@ automatic host restart is performed. Legacy clients still use the existing `send
 - The xterm container is `nodrag nowheel`; a transparent **hover-guard** overlay sits on top
   until you dwell `settings.panHoverDelay` (so quick drag = move node, scroll = pan). After
   the dwell the guard is removed and xterm takes input. The header stays draggable.
-- **Click to focus** (`settings.terminalFocusFollowsPointer`, default ON = the dwell above; issue
-  #757, Settings → Behavior). Off, the pointer decides nothing: no dwell, and `mouseleave` no
-  longer blurs, re-arms or releases. A click (`HoverGuard` pointer events → `onGuardClick` → `enterNow`) or a "go to node" takes the
-  keyboard, and the node's active flag, presence focus AND guard then follow DOM focus. ONE hook
+- **Sloppy focus** (default, `settings.terminalFocusFollowsPointer` ON): the dwell above TAKES the
+  keyboard, and `mouseleave` only re-arms the guard — it never blurs the xterm or drops the active
+  flag / presence focus. The terminal keeps the keyboard until another node takes it (its dwell, a
+  click) or the user clicks elsewhere. This replaced strict focus-follows-mouse, where leaving the
+  node released everything and typing with the pointer resting on the canvas went nowhere. Release
+  follows DOM focus through the SAME hook click to focus uses (below), so a dwell onto a node whose
+  ⌘M view covers its xterm blurs the OTHER terminal's xterm (`dwellBlursForeignTerminal`) — else the
+  previous pane keeps eating keystrokes while another node reads as active. The guard stays a
+  POINTER contract in this mode: the hook's `setArmed` is a no-op here (`focusDrivesGuard`).
+- **Click to focus** (`settings.terminalFocusFollowsPointer` OFF; issue #757, Settings → Behavior):
+  the pointer decides nothing: no dwell, and `mouseleave` changes nothing. A click (`HoverGuard`
+  pointer events → `onGuardClick` → `enterNow`) or a "go to node" takes the keyboard, and the
+  node's active flag, presence focus AND guard then follow DOM focus. ONE hook
   owns all of it, `nodes/useClickToFocus.ts`, and it binds to the stable `.term-node` ROOT, never
   the React Flow wrapper: focus mode MOVES that root into the fullscreen surface
   (`surface.appendChild(root)`), so a listener or containment check captured on the wrapper went
@@ -799,7 +1022,11 @@ automatic host restart is performed. Legacy clients still use the existing `send
   focuses its wrapper, MEASURED in Electron 42) hands it back to the element that lost it (the ⌘M
   composer) or the xterm (`reclaimTarget`), anything else — another node, a field, the empty canvas
   (`onPaneClick` blurs the xterm textarea, `shouldReleasePaneFocus`) — releases it and re-arms the
-  guard. One document capture `pointerdown` does the rest: outside the node it releases activity
+  guard. A press on the ⌘M chat's MESSAGE TEXT (`.term-chat__msgs`) is the start of a drag-selection, so
+  its reclaim waits for the press to end (`reclaim-on-release` → `reclaimOnRelease`): a plain click
+  still hands the keyboard back to the composer, but a press that selected text leaves the
+  selection (and Cmd/Ctrl+C) alone — reclaiming at once moved the selection into the textarea and
+  nothing in the chat could be highlighted or copied. One document capture `pointerdown` does the rest: outside the node it releases activity
   claimed WITHOUT focus (go-to-node under the ⌘M view, Canvas's own `setActive` on a jump — no
   focusout ever comes, `outsidePressReleases`), and a document capture `focusin` landing outside
   the node (its own wrapper counts as inside) does the same for KEYBOARD focus moves — ⌘M open,

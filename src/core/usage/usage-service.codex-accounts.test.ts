@@ -51,6 +51,7 @@ const { fetchCodexUsage, otherFetchers } = vi.hoisted(() => {
     // Every billing provider is a SPY so a test can assert it was NOT called: the mirror's
     // Codex-only refresh must leave these untouched.
     otherFetchers: {
+      cursor: vi.fn(async () => row('cursor')),
       gemini: vi.fn(async () => row('gemini')),
       grok: vi.fn(async () => row('grok')),
       kimi: vi.fn(async () => row('kimi')),
@@ -61,6 +62,7 @@ const { fetchCodexUsage, otherFetchers } = vi.hoisted(() => {
 })
 
 vi.mock('./codex-usage', () => ({ fetchCodexUsage }))
+vi.mock('./cursor-usage', () => ({ fetchCursorUsage: otherFetchers.cursor }))
 vi.mock('./gemini-usage', () => ({ fetchGeminiUsage: otherFetchers.gemini }))
 vi.mock('./grok-usage', () => ({ fetchGrokUsage: otherFetchers.grok }))
 vi.mock('./kimi-usage', () => ({ fetchKimiUsage: otherFetchers.kimi }))
@@ -306,6 +308,7 @@ describe('providersSnapshot / refreshProvidersIfStale (mirror feed)', () => {
     for (const f of ALL_OTHER) expect(f).toHaveBeenCalledTimes(1)
     expect(rows.map((r) => r.provider)).toEqual([
       'codex',
+      'cursor',
       'gemini',
       'grok',
       'kimi',
@@ -337,6 +340,7 @@ describe('providersSnapshot / refreshProvidersIfStale (mirror feed)', () => {
       ['codex', undefined],
       ['codex', 'a'],
       ['codex', 'b'],
+      ['cursor', undefined],
       ['gemini', undefined],
       ['grok', undefined],
       ['kimi', undefined],
@@ -557,6 +561,7 @@ describe('providersSnapshot / refreshProvidersIfStale (mirror feed)', () => {
       expect(rows.map((r) => [r.provider, r.accountId])).toEqual([
         ['codex', undefined],
         ['codex', 'a'],
+        ['cursor', undefined],
         ['gemini', undefined],
         ['grok', undefined],
         ['kimi', undefined],
@@ -663,5 +668,61 @@ describe('mirror ⇄ usage service integration (flush → refresh → onCacheUpd
     const fileCodex = onDisk.usage.accounts.filter((a: { agentId: string }) => a.agentId === 'codex')
     expect(fileCodex.map((a: { accountId: string | null }) => a.accountId)).toEqual([null, 'cx1'])
     expect(fileCodex[1]).toMatchObject({ label: 'Codex Work', email: 'work@codex', status: 'ok' })
+  })
+})
+
+describe('a rate-limited Codex read keeps the last good numbers (issue #1168)', () => {
+  it('holds each account row through a 429, marked error + rateLimited', async () => {
+    const limit = {
+      kind: 'session', group: 'session', usedPercent: 40, severity: null,
+      resetsAt: null, windowMinutes: 300, scopeLabel: null, isActive: false
+    }
+    service = startUsageService({ shouldPoll: () => false })
+    fetchCodexUsage.mockImplementationOnce(async () => ({
+      provider: 'codex', account: null, limits: [limit], updatedAt: Date.now(), status: 'ok'
+    }))
+    await platform.handlers[IPC.usageProviders](true)
+    fetchCodexUsage.mockImplementationOnce(async () => ({
+      provider: 'codex', account: null, limits: [], updatedAt: Date.now(), status: 'error', rateLimited: true
+    }))
+    const rows = codexRows((await platform.handlers[IPC.usageProviders](true)) as ProviderUsage[])
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ status: 'error', rateLimited: true, limits: [limit] })
+  })
+
+  // Fork: the phone mirror refreshes Codex through its own Codex-only leg (refreshCodexRows), not the
+  // popover's full run. The hold sits where the leg lands, so a 429 there must not blank the row the
+  // popover path would have held.
+  it('the mirror-only Codex refresh holds the same way (fork: hold lives in the Codex leg)', async () => {
+    const limit = {
+      kind: 'session', group: 'session', usedPercent: 40, severity: null,
+      resetsAt: null, windowMinutes: 300, scopeLabel: null, isActive: false
+    }
+    let accounts: { id: string; home: string; label: string }[] = []
+    service = startUsageService({
+      shouldPoll: () => false,
+      mirrorMayBeRead: () => true,
+      codexAccounts: () => accounts
+    })
+    fetchCodexUsage.mockImplementationOnce(async () => ({
+      provider: 'codex', account: null, limits: [limit], updatedAt: Date.now(), status: 'ok'
+    }))
+    service.refreshProvidersIfStale()
+    for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0))
+    expect(codexRows(service.providersSnapshot())[0]).toMatchObject({ status: 'ok', limits: [limit] })
+
+    // The account set changes ⇒ the mirror re-fetches Codex only; the system read is now a 429.
+    accounts = [{ id: 'a', home: '/isolated/a', label: 'Work' }]
+    fetchCodexUsage.mockImplementationOnce(async () => ({
+      provider: 'codex', account: null, limits: [], updatedAt: Date.now(), status: 'error', rateLimited: true
+    }))
+    service.refreshProvidersIfStale()
+    for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0))
+    const rows = codexRows(service.providersSnapshot())
+    expect(rows).toHaveLength(2)
+    expect(rows[0].accountId).toBeUndefined()
+    expect(rows[0]).toMatchObject({ status: 'error', rateLimited: true, limits: [limit] })
+    // The new account never inherits the system row's numbers.
+    expect(rows[1]).toMatchObject({ accountId: 'a', limits: [] })
   })
 })

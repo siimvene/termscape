@@ -12,6 +12,11 @@ paths:
   - "src/renderer/lib/nodeIcon*.ts"
   - "src/renderer/lib/triggerCard.ts"
   - "src/main/webview-context-menu.ts"
+  - "src/core/simulator/**"
+  - "src/shared/simulator.ts"
+  - "src/core/run-service.ts"
+  - "src/shared/run-config.ts"
+  - "src/shared/run-preview.ts"
 ---
 # Node kinds (incl. trigger), node icons, group frames, editor/diff/video/web/browser nodes, resize hit-area, webview keep-alive
 
@@ -31,9 +36,14 @@ paths:
   lifecycle: capture on mount + a ↻ refresh, a request token that drops stale/late answers, an
   explicit empty state ('' is an answer; a rejected capture is a failure, not empty), only the
   LAST `MD_OUTPUT_MAX_LINES` (5000) lines rendered and announced when cut, scrolled to the latest
-  output. Entering the view (output or ChatPanel) blurs the xterm; leaving it restores focus
+  output. Entering the view (output or ChatPanel) blurs the xterm and, for the ChatPanel, puts the
+  keyboard in its composer (only when focus was nowhere, in this node or in a terminal — never out
+  of a text field elsewhere; a lazy-loading or disabled composer takes it when it mounts/enables,
+  and an exit cancels the request); leaving it restores focus
   only if the terminal had it on entry AND focus is now nowhere or still inside this node
-  (`terminal/useMdModeFocus.ts`). While the view is open, every "take the keyboard" path (hover
+  (`terminal/useMdModeFocus.ts`). The open view is PERSISTED (`CanvasNodeState.mdMode`, written only
+  when open), so a project switch or a reload brings the node back on the view it was left on.
+  While the view is open, every "take the keyboard" path (hover
   dwell, click, sidebar/notification jump) goes through `focusXtermUnlessCovered` and leaves the
   hidden xterm unfocused — the overlay sits inside the node body, so a dwell over it used to route
   keystrokes into a pane nobody could see. The body's file DROP / file PASTE handlers (which focus
@@ -143,7 +153,18 @@ paths:
   never guesses from the browser. Standalone `ssh` terminal nodes remain URL-only because they
   have no remote fs API with which to verify a token; relay tabs do have a core-bound, jailed fs
   API and therefore support file links. Windows existence matching is case-insensitive and accepts
-  both separators; UNC tokens are refused whole before they can be reinterpreted as cwd-relative. A path an
+  both separators; UNC tokens are refused whole before they can be reinterpreted as cwd-relative.
+  **Dropped / pasted file paths** follow the same core-platform rule (`dropDialect` /
+  `quoteDroppedPath`, `terminal/file-drop.ts`): POSIX backslash-escaping everywhere — every SSH
+  pane and Git Bash included, byte-identical to before — except a Windows core, where `\` is the
+  separator and is never doubled: bare when nothing needs quoting, else double-quoted (pwsh/agent
+  panes single-quote a path holding `$` or a backtick; an UNSET shell is spelled for PowerShell,
+  the core's own Windows default, so a `$` path is not expanded). The image receipt strips one pair
+  of quotes before reading the extension. `isShellCommand` likewise normalises the session host's
+  image names (`pwsh.exe`, `C:\…\cmd.exe`) — leading `-`, either separator, case, `.exe` — which is
+  why the session host's `paneCommand` walk (`process-tree.ts`) answers a shell name only when EVERY
+  process in the tree is a shell: claude's Bash/PowerShell tool or a `cmd /c npx` MCP launcher is a
+  shell LEAF under a live agent, and must not read as "the CLI let go of the pane". A path an
   agent TUI wrapped under a **hanging indent** (Codex: 2 spaces, broken after a `/` or at a space)
   is neither a soft nor a hard wrap, so it is offered as extra READINGS (`hangingReadings` — the
   seam as nothing, and as one space), tried BEFORE the plain row's tokens by both the provider and
@@ -280,6 +301,180 @@ paths:
 - **files** (`FilesNode.tsx`) — a file-manager node: one directory listing (`data.cwd`, persisted)
   pinned beside the terminals working in it. Adds no new IPC (runs on `FsApi`). Deep reference:
   `.claude/rules/files-node.md`.
+- **Run node** (a `terminal` node carrying `data.runConfig`, NOT a new NodeKind;
+  `@shared/run-config`, `core/run-service.ts`, `nodes/RunBar.tsx`) — VS Code's "Run Without
+  Debugging" for any `.vscode/launch.json` configuration. The toolbar picks a folder (defaults to
+  the project's; sibling and `*.worktrees/*` folders with a launch.json or a Flutter pubspec are
+  offered), a configuration or compound (stored by NAME, re-read at every run) and, for Flutter, a
+  device. **launch.json runs nothing by itself** — each `type` belongs to an extension — so
+  `planLaunch` is the table of what each extension would run: dart (flutter run / flutter test /
+  dart run / dart test), node/pwa-node/node-terminal, python/debugpy, go, php, coreclr,
+  lldb/cppdbg, and chrome/msedge (a browser node). Everything else is REFUSED with a sentence,
+  never guessed: debugging itself, `"request": "attach"`, unknown types, PHP "listen for Xdebug",
+  and variables that need an editor or extension (`${file}`, `${input:}`, `${command:}` except the
+  Python interpreter one, `${config:}`). `preLaunchTask` (+ `dependsOn`, `${defaultBuildTask}`)
+  runs shell/process/npm/dart/flutter/typescript/cargo tasks first; a background (watch) task is
+  refused. Compounds run their first member in the node and open the rest beside it, started.
+  Rules a refactor must keep: (1) **nothing from a repo is ever typed into a shell** — the host
+  writes a POSIX launcher (`buildLauncher`, every token single-quoted, owner-only via
+  `writeFileAtomic`) and only `sh '<launcher>'` is typed; env and `envFile` values live in that
+  file, never in shell history; tested against injection and run for real under `/bin/sh`;
+  (2) the launcher records its pid and exit status, and traps INT/TERM with a HANDLER (`trap ':'`,
+  never `''`, which children would inherit as "ignore"); **Stop is SIGINT to the launcher's process
+  group** (Ctrl+C), SIGTERM if it will not go, and only the launcher + its children when it is not
+  a group leader — never a group that could hold the user's shell; (3) a pid is signalled only
+  while `ps` says it is still ours (the launcher's path, or flutter for hot reload/restart, which
+  are SIGUSR1/SIGUSR2 to `flutter run --pid-file`); (4) Flutter reload on save is a core
+  `fs.watch` of `<dir>/lib` that deliberately OUTLIVES the node's view; (5) the terminal is hidden
+  by default (`runConfig.showTerminal`, toggled by ⋯ with the extra-args field): collapse's
+  `display: none` path via `.term-node:has(.run-bar--compact)` and a node height fitted to the
+  rows; a run that ends without our Stop says where to look; (6) **switching folders keeps the app
+  when it can** (`canHotSwitch`: a running Flutter run, same device, same flavor, Flutter on both
+  sides): the toolbar offers **Switch (keep app)** beside **Rebuild** — type `d` (flutter's own
+  detach: the tool exits, the app keeps running), `flutter attach` from the new folder (only the
+  flags attach accepts survive, `attachArgs`, MEASURED against `flutter attach --help` — attach has
+  no `--flavor`), wait until it prints its key help AFTER its own `▶ flutter attach` line
+  (`attachConnected`), then a hot RESTART — never a reload: a freshly attached tool only pushes
+  files changed after it connected (MEASURED live, Flutter 3.47 / iOS 27.1 simulator: a reload
+  after attaching from the other checkout "Reloaded 0 libraries" and the old code kept running; a
+  SIGUSR2 restart swapped it in 2.6 s, same app pid, no rebuild). **On an iOS simulator attach
+  needs `--debug-url`**: it finds an already-running app by mDNS, which the simulator barely
+  supports ("The Dart VM Service was not discovered after 30 seconds"), and the URL `flutter run`
+  printed is its DDS proxy, gone with the detached tool. `simulatorVmServiceUrl` reads the app's
+  own "The Dart VM service is listening on …" line from `simctl spawn <udid> log show` (~3 s) and
+  takes the newest one whose process is still alive (`parseVmServiceLog`); not found ⇒ the switch
+  is refused with Rebuild offered. Some Macs ship no registered `Simulator.app` (`open -a
+  Simulator` fails); booting falls back to the active Xcode's copy and otherwise runs headless. Flutter REFUSES a hand-passed `FLUTTER_APP_FLAVOR`, so after an
+  attach `appFlavor` is the pubspec default; an app whose `lib/` reads `appFlavor` is refused the
+  switch with that reason. Dart `"request": "attach"` configurations run as `flutter attach` too;
+  every other attach is still refused. No "bring simulator forward":
+  Simulator.app can only be activated as a whole (same-named simulators are told apart by id in
+  the dropdown). Add menus: **New view ▸ New run configuration**. Local projects only (disabled
+  with `RUN_SSH_HINT` in SSH projects; relay stub answers "managed on the host"); POSIX only
+  (refused on Windows). Server Edition: real. Kanban card modal: not yet. Mobile: N/A.
+- **simulator** (`SimulatorNode.tsx`, `core/simulator/`, `@shared/simulator`) — a live iOS simulator
+  screen on the canvas: click = tap, drag = swipe, wheel = a swipe, typing goes to the device (HID
+  keyboard usages from `KeyboardEvent.code`; ⌘-chords stay with nodeterm), Home / Lock buttons, a
+  device picker with Boot, and a Cover/Inner screen choice on foldables. DeviceHub (Xcode 27's
+  replacement for Simulator.app) cannot be embedded — it exposes only a `devices://` URL scheme and
+  macOS has no cross-app window embedding — so the node draws the device itself through
+  `nt-simbridge`, a small Swift helper whose SOURCE ships in `simbridge-source.ts` and is compiled on
+  first use with `xcrun swiftc` into `<userData>/simulator-bridge/<hash>/` (hash = source + version +
+  Xcode build, so an Xcode update recompiles; MEASURED ~3 s). It uses Xcode's PRIVATE simulator
+  frameworks (CoreSimulator / SimulatorKit — what DeviceHub uses), resolved at RUNTIME (dlopen /
+  NSClassFromString / dlsym) so a moved symbol fails with a sentence, never a link-time crash; the
+  Indigo HID message layout follows facebook/idb (MIT). Rules a refactor must keep, all MEASURED on
+  Xcode 27: (1) frames are the display's IOSurface, encoded only when its seed changes (0 cost while
+  still; ~19–30 fps while moving; first frame ~0.4 s); (2) a device can have SEVERAL main-class
+  displays — a foldable ("iPhone Duo") has an inner and a cover screen and only one is lit — so the
+  helper shows the lit one and follows a fold (switches when the shown one is still and another just
+  changed), with a manual pin; (3) touches go to the SHOWN screen's own digitizer, `0x40000000 |
+  screenID` (`screenProperties.screenID`): the generic main-screen target 0x32 reached neither screen
+  on the foldable; (4) Home/Lock are HID Consumer usages (Menu 0x40 / Power 0x30) to 0x32 — a Face ID
+  device ignores the legacy home-button source — falling back to the legacy source (0x33) when
+  refused; (5) the display state objects are ROCK proxies: no key-value coding, message primitives
+  through typed `objc_msgSend`. Input from the renderer is re-validated (`normalizeSimulatorInput`)
+  before it reaches the helper. A run node with a simulator device shows a 📱 button that opens (or
+  focuses) the Simulator node for it. **Desktop only** (iOS devices need macOS; Android ones run
+  everywhere): the add rows are disabled with `SIMULATOR_UNAVAILABLE_HINT` in a browser tab and
+  with `SIMULATOR_RELAY_HINT` in a relay tab (`simulatorRefusal`, one rule for the menu, the Dock,
+  the palette and `addSimulator`), and a Simulator node that reaches a relay tab anyway (it is in
+  the host's project file) shows that reason instead of streaming — a relay tab's project is the
+  host's, and the devices this renderer can reach are THIS machine's. `simulator:*` is also in
+  `HOST_ONLY_CHANNEL_PREFIXES`, so a relay peer is refused host-side. Kanban: not a card. Mobile: N/A.
+  **A device takes input from its FIRST HID client only** (MEASURED: a second client's touches are
+  dropped without an error). So the host runs ONE helper per device, shared by every node showing
+  it (`bridges` keyed by UDID, a late joiner replayed the last displays/ready). That is why the
+  Simulator node's OWN Boot is headless (`bootSimulator(id, { openWindow: false })`): a window
+  showing the device is a client too, and it took touch input away from the node. A run node's
+  Boot (`run:boot-device`) still opens Simulator.app as it always has — a user with no Simulator
+  node must still see the device. "Open in DeviceHub" (⋯ menu) says so in its tooltip.
+  **The ⋯ menu** (`simulatorMenu.tsx`, pure) is a complete map of DeviceHub's menus, from the
+  `…MenuItemProvider` names in Xcode 27's DeviceKit: what nodeterm can do runs — HID buttons
+  (Home/Lock/Side/Siri/Volume/Play-Pause) and rotation through the helper; everything else through
+  public `simctl` in `core/simulator/simulator-actions.ts` (appearance, text size, Increase
+  Contrast, location set/scenario/clear, status-bar overrides, shake and Face/Touch ID via the
+  simulator's own `notifyutil` notifications, Open URL, push, privacy, pasteboard sync, install,
+  add media, screenshot/recording, restart, erase) — and what it cannot is listed greyed out with
+  "(Not Supported)" and the reason (App Switcher: the edge-swipe gesture is not recognised from
+  outside DeviceHub; Action Button; Grayscale/Reduce Motion/Reduce Transparency/Liquid Glass: no
+  public command; tvOS/watchOS/visionOS controls; device management). Actions are re-validated
+  (`normalizeSimulatorAction`) and every argument is its own argv entry. All the simctl actions
+  were run live against an iOS 27 simulator; `simctl location list` is a TABLE
+  (`parseLocationScenarios` reads the first column).
+  **Edge swipes carry the panel edge they start on** (`touchEdge`, `TOUCH_EDGE_MARGIN` 2.5%):
+  iOS recognises its system edge gestures — the home swipe up from the bottom — from the Indigo
+  contact's edge field, not from where the finger lands. MEASURED (Xcode 27): without the flag a
+  swipe up from the very bottom only scrolled the app; 1 top / 2 left / 3 bottom / 4 right name
+  PHYSICAL panel edges (an iPad turned left went home with 2, turned right with 4; top inferred), so
+  the node computes the edge after mapping the touch to the panel and it holds for the whole
+  contact. A swipe down from the top worked without it.
+  **Inside a run node.** The screen, toolbar, ⋯ menu and input are one component, `SimulatorView`;
+  `SimulatorNode` is a thin box around it (title, close, resize handles, fit-to-screen), and a run
+  node mounts the same view under its control rows when `data.runSimulator` is present (persisted,
+  `normalizeInlineSimulatorConfig`: the device only — the panel FILLS the node, so resizing the
+  node scales the screen, letterboxed; no size of its own is stored). 📱 on every run node toggles that panel
+  (the run's device preselected when it is an iOS UDID or an Android emulator's adb serial,
+  `SimulatorDevice.serial`; else empty to pick); ⇱ splits it into a Simulator node carrying
+  `dockTo: <runNodeId>`, whose ⇲ (or the run node's 📱) docks it back. The inline stream is keyed
+  `<runNodeId>.sim`. While it is open the compact (terminal hidden) height fit stands down — the
+  node's size is the user's — and the run bar flexes to fill the node; opening grows the node by
+  `INLINE_SIM_HEIGHT`, closing hands that back. Inline there is no node of its own to snap to the
+  screen's shape, so Actual Size / Fit to Screen are greyed out there (pop out for those).
+  **The browser panel** (`@shared/run-preview`) is the same idea for a run whose result is a page:
+  there is NO choice — a node runs one thing, so the button shows the panel the run calls for (📱
+  or 🌐, `previewKindFor`), and an OPEN panel follows the run (switch the device to Chrome and the
+  simulator becomes the browser, and back) — a `chrome`/`msedge` launch configuration,
+  a Flutter web device, picked OR named by the configuration itself (`-d chrome` in its args — a
+  rule that read only the picker showed 📱 for exactly those runs), or a run with no device, i.e.
+  a dev server). `data.runBrowser` (persisted, http(s) only) holds the page: a browser
+  configuration's own `url` (its Run/Open now lands in this panel, or in a panel popped out of it,
+  instead of a separate browser node), else the URL picked out of the run's own output by
+  `localUrlFromOutput` (the newest local http(s) URL on a "served at / Local: / listening on" line;
+  DevTools / VM-service lines skipped; `0.0.0.0` opened as `localhost`), polled with `pty.capture`
+  only while the panel is open, the run is up and no page is known. A picked-out URL is marked
+  `auto` and re-read on the next run (the port may change); one the person navigated to is kept.
+  A Flutter `chrome`/`edge` run is EMBEDDED only when the configuration opts in
+  (`runConfig.embedBrowser: true`, ⋯ → "Show web inside this node", shown for a Flutter web run;
+  `embedsFlutterWeb` is the one rule for host and bar) — an existing configuration keeps Flutter's
+  own Chrome window. Opted in, `planLaunch` swaps the device for
+  `web-server` (`webServerDevice`, `PlanContext.webServer`) wherever it is named — the pick, `-d` /
+  `--device-id` / `-d=` in args or toolArgs, or Dart-Code's `deviceId` field (which used to be
+  dropped, not passed as `-d`) — because Chrome would open a window of Flutter's own while the web
+  server serves the same app to any browser and prints its URL; Run then opens the browser panel
+  by itself. ⇱ pops it into a browser node with `dockTo`; its ⇲
+  (`nodeterm:dock-preview`, shared with the Simulator node) or 🌐 docks it back. A run node holds
+  one panel at a time. The inline page is not part of the browser-node keep-alive pool, so a
+  project switch reloads it.
+  **Android virtual devices** use the same node (`core/simulator/android-*.ts`). A device id is
+  `avd:<name>` (the AVD name is stable; adb serials are not) in the same persisted `udid` field.
+  The picker lists every AVD read from files (`<avdHome>/<name>.ini` → `config.ini`; no
+  avdmanager, which needs a JDK), booted ones from the emulator's discovery files
+  (`…/avd/running/pid_<pid>.ini`, pid checked: a crash leaves the file). Boot runs
+  `emulator -avd <name> -no-window`, headless like iOS, logging to `<userData>/android-emulator/`.
+  Everything streams over the emulator's own gRPC interface, spoken with a hand-written protobuf
+  codec over `node:http2` (`android-grpc.ts`, no dependency), authenticated with the per-run
+  `grpc.token` from the discovery file. MEASURED (emulator 36.6.11): PNG frames fitted into a
+  SQUARE box (one box serves both orientations; width alone is ignored) run ~25 fps while moving
+  and send nothing while still; keys need the full USB usage (`0x70000 | usage`, a bare usage
+  types nothing); Home/Back/Recents/Power are W3C key names (`GoHome`, `GoBack`, `AppSwitch`,
+  `Power`); rotation is `setPhysicalModel` ROTATION z (90 = turned left) and frames then arrive
+  ALREADY TURNED while touches stay in PORTRAIT panel pixels — so the node does not turn an Android
+  picture (`picturePreRotated`) but maps touches with the same `displayToFramebuffer`. A rotation
+  of a portrait-locked app changes no guest pixels, so the stream sends nothing; the session takes
+  a `getScreenshot` after each rotation. Input is queued and sent one call at a time (drag points
+  coalesced) so it reaches the emulator in order. ⌘V sets the device clipboard (`setClipboard`)
+  and presses Ctrl+V. Menu actions use gRPC where it exists (battery, GPS, clipboard, fingerprint,
+  restart, shutdown, screenshots) and `adb -s emulator-<port>` otherwise (night mode, font scale,
+  demo-mode status bar, URLs, APK installs, media) — every `adb shell` argument single-quoted for
+  the DEVICE's shell. Not yet: screen recording, wipe data, foldables, the run node's 📱 for an
+  Android emulator. The node is offered in the desktop app on every OS (iOS devices are simply
+  absent off macOS); the Server Edition and relay tabs still refuse it. Install / Add Media accept a
+  POSIX or a Windows drive path (`C:\…`, `C:/…`; UNC refused), since the emulator runs on Windows too.
+  The emulator's discovery file is trusted only when every directory from the temp/runtime/home
+  base down and the file itself are ours (uid, no symlink, file opened `O_NOFOLLOW`), and a pid we
+  may not signal (EPERM) is another user's, not our emulator — `/tmp/android-<user>` can be created
+  by anyone first, and a planted `grpc.port` would receive every key typed into the device.
 - **dino** (`DinoNode.tsx`) — a small self-contained T-Rex-style runner on a canvas (no PTY);
   high score persists via `data.highScore`.
 - **trigger** (`TriggerNode.tsx`) — a canvas-owned schedule (cron / interval / once) that
@@ -358,6 +553,14 @@ raw-HTML tokens as escaped TEXT (a program's `<stdin>` is not markup; parsed as 
 stripped it) and trims capture-pane's trailing padding. The escape is on the `html` token, never a
 global pre-escape of `<`, which would double-escape code spans/fences.
 
+**The rendered-Markdown font is a setting** (`markdownFontFamily` / `markdownFontSize`, Settings →
+Appearance; `@shared/markdown-font`). App.tsx publishes it as `--md-font-family` / `--md-font-size`
+on <html>, plus `--md-code-font-family` = the TERMINAL font family; styles.css keeps the defaults on
+`:root`. Every rule that sizes rendered Markdown reads the tokens — `.term-md__content` (⌘M output
+view, editor preview, the kanban file preview), `.term-chat__msg` and the ⌘M composer input —
+headings are `em`, and code is `0.92em` of the body (relative, so it stays in proportion).
+`styles.markdown-font.test.ts` pins this. Sticky notes keep their own font on purpose.
+
 **A link in rendered markdown must never navigate the app window.** DOMPurify keeps an anchor's
 href as written, and agents write relative links constantly (`[pty-manager.ts](src/core/pty-manager.ts:4100)`).
 A click resolved it against the app document: on the desktop another `file://` path, which the old
@@ -380,6 +583,49 @@ click, relative or http(s), navigated the app's own tab away. Two layers now:
   main-frame navigation ONLY to the entry document itself (scheme + host + decoded pathname; hash
   and query ignored, so reload and dev HMR work); a safe external scheme goes to the OS; everything
   else — any other `file://` path, any other dev-server path — is blocked.
+
+### Browser control geometry (#539)
+
+`browser-actions.ts` waits for quiet layout metrics after wheel input and before resolving
+click/type targets; the CDP acknowledgement itself is not a rendered frame. Polling has an
+initial grace period, a quiet window and a bounded sample count. A continuously moving page
+returns a refusal instead of a misleading movement report.
+
+`driveBrowser` permits only one active action per guest session so a click cannot overtake a
+scroll's settlement. Revocation during a polling delay aborts without reattaching the debugger.
+
+**`--screenshot --full true` renders the page as ONE viewport** (`browser-screenshot.ts`
+`captureFullPage`). `captureBeyondViewport` alone paints off-viewport layers without re-laying the
+page out: MEASURED on Electron 42.9.1 against a page scrolled 400px, the sticky header came out at
+y=400 and the fixed footer mid-image — the reported "header twice / overlapping" shot. The capture
+now sends `Emulation.setDeviceMetricsOverride` (width unchanged, height = content height, capped at
+`MAX_VIEWPORT_OVERRIDE` 16384 and said so), settles, captures, clears in `finally`, and puts the
+scroll back with one wheel (an override that tall clamps scroll to 0 and clearing does not restore
+it — measured); a position it could not restore is in the reply. Rules a refactor must keep:
+- **The allowlist admits exactly that shape** — the four keys, bounded integers,
+  `deviceScaleFactor: 0`, `mobile: false`, plus a parameterless clear; every other Emulation method
+  stays default-denied. No agent value reaches it; a caller-sized viewport (a resize verb, #539's
+  feature ask) is a separate decision with its own validator.
+- **The override survives `debugger.detach()` and a reload** (measured), so its lifecycle is the
+  LEASE's: `BrowserSession.metricsOverridden` goes up when the set is sent and down only on a
+  confirmed clear; every detach we make sends the clear first (measured to take effect when sent
+  immediately before `detach()`), and after a detach we did not make the FIRST command of the next
+  attach is the clear. The screenshot never reattaches a released lease to clear or restore.
+- Side effect, stated in the agent text: the page sees one resize, so `100vh` content renders
+  taller (one bounded re-measure follows growth).
+- Residual, stated: a detach we did not make (not our release/idle/revoke, not page teardown) in
+  the sub-second capture window leaves the page tall until the node is next driven. No path we
+  know triggers one today (DevTools does not detach the lease — see browser-lease.ts's probe note).
+The disposable probe `scripts/probes/browser-539.ts` asserts all of it on a real Electron
+(header once at the top, footer once at the bottom, scroll restored, release clears).
+
+`browser` and `open-browser` reject unknown flags through ONE gate, `browserFlagRefusal`
+(`core/canvas-control-core.ts`): the Server Edition runs it inside `parseControlRequest`, and desktop
+main calls it directly, because that handler never runs the parser (the `--issue` trap — #918's first
+version only reached the Server Edition). This does not add resize, console, network or
+attribute-reading actions. Server Edition retains its explicit
+browser-control refusal; its supported `open-browser` route shares flag validation. Mobile has
+no new wire fields or UI; host-side Desktop control inherits the fix.
 
 ### Webview keep-alive across project switches (browser/web nodes)
 

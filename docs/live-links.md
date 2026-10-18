@@ -244,9 +244,14 @@ A keyframe is `PtyManager.captureVisible(sessionId)`: **the visible screen, neve
   what makes it visible-only);
 - **SSH:** the same over the project's ControlMaster (`remoteCaptureVisibleArgs`), again without the
   `-S -200` the existing remote builder always adds; proven under a real `/bin/sh`;
-- **Windows session host and the direct Windows pty: none.** `sessionHostCapture` returns ~200 lines of
-  scrollback, not the visible screen; a visible-only read needs an additive, negotiated session-host
-  command (a follow-up). Never history instead. **A plain shell with no tmux: none.**
+- **Windows session host:** the host's negotiated `captureVisible` (`sessionHostCaptureVisible`) — the
+  visible rows of its headless emulator's ACTIVE buffer, the viewport cursor, and `altScreen` from that
+  buffer (no tmux client sits between the pane and the stream, so the pane's buffer IS the stream's;
+  this is the one route whose capture sets `VisibleCapture.altScreen`, and the link host prefers it over
+  the join's). It keeps the private-mode tail (bracketed paste, application cursor keys, mouse) a
+  mid-stream viewer never saw. A host from a build before the feature answers nothing, so `unavailable`;
+  never the ~200-line scrollback `capture` in its place.
+- **The direct Windows pty: none.** **A plain shell with no tmux: none.**
 - **A Zellij node (the optional local backend, `settings.sessionBackend`): none.** Its Session is marked
   `tmuxBacked` like a tmux one, but there is no tmux session to capture, so `visibleCaptureRoute` routes
   it to none rather than aiming the tmux socket at it. A viewer still co-attaches to a Zellij painter
@@ -618,23 +623,47 @@ everything.
 
 ### The create dialog
 
-- The role radios read "Viewer · Can watch", "Commenter · Can watch and chat" and "Control · Can watch,
-  chat and type". `controlSupport(nodeId)` is asked once; only `unsupported` disables Control.
-- With Control picked, the dialog shows the password field with Generate and an inline validation line,
-  and **both warnings**, one box each: the watch warning first (anyone with the LINK alone still sees
-  everything the terminal shows; the sentence "They can't type or resize it." is left out), then the
-  typing warning, with "and" in bold: "Anyone with this link **and** the password can type in this
-  terminal as you. In a shell that means running any command on <machine>; in an agent session,
-  giving the agent any instruction. Send the password separately from the link."
+Figma's share-dialog shape (`LiveLinkDialog.tsx`, `MenuSelect.tsx`): a head with the node's title
+and ✕, then one grouped list whose rows read as sentences, the warnings, and the actions.
+
+- **Rows.** "Anyone with the link · can watch ▾" (the role menu), "Password · <field> ↻" (Control
+  only), "Expires · in 1 hour ▾" (the expiry menu) and "Viewers see you as · <name>" (the label, an
+  inline field that shows its box on hover and focus). The role menu's options read "can watch —
+  Sees the terminal", "can chat — Watches and chats with you" and "can type — Also types, with a
+  password" (`ROLE_CHOICE`). The expiry menu reads "in 15 minutes" … "in 24 hours", then "never —
+  This link works until you stop it." `controlSupport(nodeId)` is asked once; only `unsupported`
+  disables "can type", and the disabled option's hint is the reason.
+- **The menus render inside their row**, absolutely positioned and opaque, never in a portal: the
+  dialog is a backdrop root under Liquid Glass. Keyboard: ArrowDown/ArrowUp open a menu; the arrows,
+  Home and End move over the options that can be picked; Enter/Space pick; Escape and Tab close it
+  and give focus back to the trigger. The menu's Escape never reaches the dialog's, so it does not
+  close the dialog. The role menu's trigger takes the focus when the dialog opens (D2/M3).
+- **Picking "can type" fills a generated password** (16 symbols, the same generator as before) when
+  the field is empty, so a Control link is two clicks; ↻ ("New password") replaces it, and the owner
+  can still type their own. A password already there (typed, or kept from switching away and back) is
+  left alone. The validation line sits under the row once something invalid is typed.
+- **Warnings.** Control shows the typing warning, with "and" in bold, in a red wash: "With this link
+  **and** the password, anyone can type here as you: run any command on <machine>, or instruct the
+  agent in this terminal." Under it, for every role, one muted sentence of what watching exposes:
+  "Viewers see everything this terminal shows: scrollback, anything printed later (tokens too), and
+  other tmux sessions if you open the session chooser or switch sessions." Neither is behind a
+  toggle.
 - **The typing warning names the machine where the commands run**: `thisMachine()` ("this Mac", "this
   PC", "this computer") for a local node; `user@host` for an SSH-project node or a node attached to an
   SSH host. A remote tmux node on its own SSH project's host names the PROJECT's user, the one the
   shell runs as.
+- **The dialog remembers the role and the expiry of the last link this person created**
+  (`lib/liveLinkDefaults.ts`, localStorage `nodeterm.liveLinkDefaults`, saved only after a create
+  succeeds). The first dialog opens on "can watch" for an hour. A remembered Control opens with a
+  fresh generated password and its warning on screen, and on a terminal that cannot take input it
+  falls back to "can watch". Never the password, never the label.
 - Create stays disabled until the password passes the rule. The request carries `password` only for
   Control.
-- The done step shows the password once, read-only, with Copy password, "This is the only time the
-  password is shown. Change it later from the LIVE chip." and "Send the password separately from the
-  link.", then "Anyone with this link and the password can type until …".
+- **The done step**: a status line in the LIVE chip's red ("● Anyone with this link and the password
+  can type until …"), the link with **Copy link**, then for Control the read-only password with
+  **Copy password** and one note ("This is the only time the password is shown. Change it later
+  from the LIVE chip. Send the password separately from the link."). **Stop sharing** is a red text
+  button on the left, **Done** on the right.
 
 ### The viewer page (nodeterm-web)
 
@@ -658,8 +687,8 @@ control again to type.". While typing:
 
 ## Unlimited links
 
-The TTL choice has a fifth option, **Unlimited** (wire value `ttlSeconds: 0`), listed last. While it is
-picked the dialog says "This link works until you stop it." The link has `expiresAt: null` and lives
+The TTL choice has a fifth option, **Unlimited** (wire value `ttlSeconds: 0`), listed last; the
+dialog's expiry menu calls it "never", with the hint "This link works until you stop it." The link has `expiresAt: null` and lives
 until Stop, Stop all, a server 410, node-gone, or (for new joins) a lapse of the owner's Pro.
 
 - **Backend** (nodeterm-server). `watch_links.expires_at` is nullable, and NULL means live everywhere:
@@ -887,16 +916,24 @@ carry it to teammates and the canvas authority would write it into the git-share
   untouched. **Availability is
   checked before the Pro gate** (`liveLinkUnavailable` then `requireProOr`), so a Server Edition or relay
   tab never sees an Upgrade dialog; an unavailable row is disabled with its reason, never hidden.
-- **Desktop where local terminals are not tmux** (Windows' session host; tmux switched off or missing;
-  the Zellij backend): there is no watcher client of its own, so a viewer can co-attach only to a
-  terminal this app has OPEN (mounted, or parked) — after a restart, for a background project or an
+- **Windows' session host** has its own read-only client: a join-only create (a watcher, or a hosted-relay
+  viewer) for a node this app does not hold asks the host STRICTLY (`hasSession`; an unanswered probe
+  refuses) and joins through `watch-attach` — an attachment with no geometry claim and no pause ticket,
+  whose writes and resizes the host refuses and which never spawns. It is never indexed as the node's
+  session, so an owner opening the node gets its own typing attachment. A host from an older build
+  lacks the feature: refused (`join-only`), never an ordinary attach that would cast the viewer's size.
+  The create dialog's note follows `tmuxStatus().persistence.watchJoin` (the CONNECTED host's answer).
+  Control typing needs the node open WHEN THE VIEWER JOINS: a viewer that joined through `watch-attach`
+  keeps that read-only attachment (its input route is decided at join, `none`) even after the owner
+  opens the node, until it rejoins (the session ends, or the link reconnects).
+- **Desktop where local terminals are neither tmux nor such a session host** (tmux switched off or
+  missing; the Zellij backend; an older host): there is no watcher client of its own, so a viewer can
+  co-attach only to a terminal this app has OPEN (mounted, or parked) — after a restart, for a background project or an
   offscreen-released node, viewers wait. This is said, never silent (R63): the create dialog states it
   before the link exists (`watchableOnlyWhileOpen`, from the local core's `tmuxStatus().persistence`; an
   SSH project's node is served by the host's tmux and gets no note), and while a viewer's join is
   refused the chip turns amber (`LIVE · 1 waiting`) and its title and the popover say "Viewers are
-  waiting — open this terminal in nodeterm to let them watch." The fix is a session-host watcher join
-  (an additive, negotiated attach-only subscribe with no size vote, beside the visible capture): a
-  follow-up.
+  waiting — open this terminal in nodeterm to let them watch."
 - **The LIVE chip** (`LiveLinkChip`, one component): node header (beside `PresenceChips`), kanban card,
   card modal header, sessions-sidebar row. `● LIVE`, `● LIVE · 2`, `LIVE · 3 · 1 typing` (someone typed
   in the last 4 s; the title names who, quoted), amber `LIVE · offline` (reconnecting), amber `LIVE · 1
@@ -965,8 +1002,8 @@ Found while building it:
   per viewer at a 2.7 MB/s flood (measured), ≤ 10 viewers per link.
 - **Text typed with no escape after a co-attach join lags** until the next escape or the 2 s keyframe
   (R23): the mid-stream filter swallows it by design.
-- **On a backend with no visible capture** (Windows session host, direct Windows pty, plain shell,
-  Zellij) a throttled viewer shows gaps until the app repaints (R36). A Zellij node with no painter held
+- **On a backend with no visible capture** (a session host from an older build, direct Windows pty,
+  plain shell, Zellij) a throttled viewer shows gaps until the app repaints (R36). A Zellij node with no painter held
   in this process (a closed project, after a restart) cannot be watched at all until one is.
 - **A single capture failure on a tmux/SSH backend is treated as "no capture"**: no repaint until the
   next keyframe or the app's redraw. Retrying there would stall the stream for good on the backends that
@@ -981,9 +1018,10 @@ Found while building it:
   agents included) or a session switch (`C-b (` / `)`) reaches every viewer. It is the owner's own
   action, shown on the owner's own screen too, and the create dialog's warning says so. Following
   `#{client_session}` and treating a switch as a lifecycle event is a possible follow-up.
-- **Windows, and any machine whose local terminals are not tmux:** a link to a terminal that is not
-  open in the app cannot be watched until it is (Surfaces, above). Said, never silent; the session-host
-  watcher join is the follow-up.
+- **Any machine whose local terminals are neither tmux nor a `watch-attach` session host:** a link to a
+  terminal that is not open in the app cannot be watched until it is (Surfaces, above). Said, never
+  silent. On the session host, Control typing still needs the node open at the moment the viewer joins (a
+  viewer already riding a `watch-attach` attachment is not upgraded when the owner opens the node).
 - **A tmux < 3.2 host cannot be watched** (fail closed, "waiting").
 - **After a run whose index was missing, unreadable or corrupt, node-gone waits for the next launch**
   (R44/R54): a link to a node deleted in that run lives until its expiry (≤ 24 h) — an Unlimited link
@@ -1128,8 +1166,9 @@ Visual checks (renderer, Mac and a Server Edition browser tab):
     from Settings → Appearance → Terminal header buttons.
     Card modal header: the broadcast action between ✦ and the comments button; disabled look + tooltip
     (Chromium shows `title` on disabled buttons — confirm on the packaged build).
-29. The create dialog: 460 px `.confirm` shell, radios wrapping, the warning wash, the URL row with
-    Copy/Copied!, "until HH:MM" in 12/24 h locales; long node titles; dark + light; Liquid Glass.
+29. The create dialog: 440 px `.confirm` shell, the grouped rows, the menus, the URL row with
+    Copy link/Copied!, "until HH:MM" in 12/24 h locales; a long node title ellipsizes in the head (full
+    title on hover); dark + light; Liquid Glass.
 30. The dialog opened from the card modal (z 70 over 55), and the UpgradeDialog opened from the card
     modal / board.
 31. Palette: "Manage live links" and "Stop all live links (every machine on this license)" with the
@@ -1235,23 +1274,29 @@ From the build:
 
 Visual checks (Mac, default look and Liquid Glass, dark and light) — the create dialog:
 
-58. Role radios read "Viewer · Can watch", "Commenter · Can watch and chat", "Control · Can watch, chat
-    and type" (name in ink, the rest muted) and wrap cleanly in the 460 px dialog.
-59. On a Zellij node: the Control radio is dimmed (`.live-dialog__off`, not-allowed cursor, tooltip with
-    the reason) and the reason line sits under the radios.
-60. The password block between the roles and "Ends after": a muted "Password" caption, a monospace text
-    field and **Generate**; the red validation line under it only once something is typed.
-61. Control shows TWO stacked warning boxes: the watch exposure first, then the typing warning with a
-    bold "and", naming this machine ("this Mac") for a local node and `user@host` for an SSH-project
-    node, for a node attached to an SSH host in a local project, and for a standalone ssh terminal node.
+58. The form is one grouped list of rows (globe, lock, clock, person icons): "Anyone with the link ·
+    can watch ▾", "Expires · in 1 hour ▾", "Viewers see you as · Enes" (no box until hover/focus).
+    The role and expiry menus open under their trigger, right-aligned, opaque, over the rows and the
+    warnings; a check marks the current choice; hints are muted, one line each. Under Liquid Glass
+    the menu stays opaque (no see-through, no blur inside the dialog). Keyboard: ArrowDown opens a
+    menu, Enter picks, Escape closes only the menu (the dialog stays).
+59. On a Zellij node: "can type" in the role menu is muted and cannot be picked, its hint is the
+    reason. A remembered Control opens on "can watch" there.
+60. Picking "can type" adds the Password row with a generated monospace password and ↻; ↻ changes it;
+    clearing it disables Create; the red validation line sits under the row only once something
+    invalid is typed.
+61. Control shows the typing warning in a red wash with a bold "and", naming this machine ("this Mac")
+    for a local node and `user@host` for an SSH-project node, for a node attached to an SSH host in a
+    local project, and for a standalone ssh terminal node; the muted exposure sentence sits under it.
     A long host wraps inside its box. Check the dialog's height on a small window: Create stays
-    reachable.
-62. "Ends after" has a fifth radio, **Unlimited**; picking it shows "This link works until you stop it."
-    under the row.
-63. The done step for Control: under the URL row, a read-only monospace password row with **Copy
-    password** ("Copied!" for 1.5 s), the two notes, then "Anyone with this link and the password can
-    type until you stop it." (or a time).
-
+    reachable, and the expiry menu is not cut off.
+62. The expiry menu's last option is "never" with "This link works until you stop it."; picking it
+    makes the row read "Expires · never".
+63. The done step for Control: the red status dot and "Anyone with this link and the password can
+    type until …", the URL row with **Copy link**, the read-only monospace password with **Copy
+    password** ("Copied!" for 1.5 s, the buttons the same width), the one note, then Stop sharing
+    (red text, left) and Done. Create a second link: the dialog opens on the role and expiry of the
+    first; the very first dialog after a fresh install opens on "can watch" for an hour.
 The chip and the popover:
 
 64. The unread count pill (13 px, a `--state-unread` wash, `99+` cap) on the 18 px node chip and the

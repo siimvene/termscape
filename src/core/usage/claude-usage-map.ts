@@ -10,7 +10,7 @@
 // contract: when the next model ships, its limit arrives as another array entry and this file
 // does not change. Binding a `fableWeekly` slot (or a `seven_day_fable` field) would recreate
 // the exact rigidity Anthropic just moved away from.
-import type { ClaudeUsage, ClaudeUsageOrganization, ClaudeUsageWindow, UsageLimit } from '../../shared/types'
+import type { ClaudeUsage, ClaudeUsageOrganization, ClaudeUsageWindow, ProviderUsage, UsageLimit } from '../../shared/types'
 import { findLimit } from '../../shared/usage-limits'
 
 /** `percent`/`utilization` are portions USED, 0–100. Clamp — the server is not our validator. */
@@ -194,6 +194,28 @@ export function holdLastGood(
   // Fork: one email can switch between organizations (the per-account org row), and the quota
   // belongs to the org — a failed read for org B must not wear org A's numbers.
   if (next.organization && prev.organization && !sameOrganization(prev.organization, next.organization)) return next
+  if (now - prev.updatedAt > HOLD_LAST_GOOD_MAX_MS) return next
+  if (prev.limits.some((l) => l.resetsAt !== null && l.resetsAt <= now)) return next
+  const { rateLimited: _previousFailure, ...numbers } = prev
+  return { ...numbers, status: 'error', ...(next.rateLimited ? { rateLimited: true } : {}) }
+}
+
+/**
+ * `holdLastGood` for a non-Claude provider row (Codex, issue #1168): a failed read with no numbers
+ * keeps the previous good numbers of the SAME provider and account, marked `error` (and
+ * `rateLimited` when that is why), under the same age and reset bounds. Anything else passes
+ * through unchanged.
+ */
+export function holdLastGoodProvider(
+  prev: ProviderUsage | undefined,
+  next: ProviderUsage,
+  now: number
+): ProviderUsage {
+  if (next.status !== 'error' || next.limits.length > 0) return next
+  if (!prev || prev.limits.length === 0) return next
+  if (prev.status !== 'ok' && prev.status !== 'error') return next
+  if (prev.provider !== next.provider || prev.accountId !== next.accountId) return next
+  if (next.account && prev.account && next.account !== prev.account) return next
   if (now - prev.updatedAt > HOLD_LAST_GOOD_MAX_MS) return next
   if (prev.limits.some((l) => l.resetsAt !== null && l.resetsAt <= now)) return next
   const { rateLimited: _previousFailure, ...numbers } = prev

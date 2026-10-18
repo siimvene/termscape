@@ -1,5 +1,6 @@
-// Impure lifecycle for managed pi accounts: agent-dir creation/deletion, the status-extension
-// install into each dir, login capture (poll auth.json) — AND the account row.
+// Impure lifecycle for managed pi accounts: agent-dir creation/deletion, the consent-gated
+// status-extension + skills install into a new dir (delegated to the integration lifecycle, which
+// also reconciles every existing account dir), login capture (poll auth.json) — AND the account row.
 //
 // Same model as managed Claude accounts (`claude-accounts-service.ts`), with pi as the provider:
 // one account = one isolated PI_CODING_AGENT_DIR (`<userData>/pi-accounts/<id>`), and pi owns
@@ -23,12 +24,12 @@
 // `ipcMain.handle` on the desktop — never `platform().handle` there, which is the peer-reachable
 // table (INVARIANT 4c: a relay guest must not mint or delete accounts on the host).
 import { randomUUID } from 'crypto'
-import { existsSync, promises as fs } from 'fs'
+import { promises as fs } from 'fs'
 import path from 'path'
 import { IPC } from '../shared/ipc'
 import { NEW_PI_ACCOUNT_LABEL, type PiAccount, type PiAccountAddResult, type PiLoginCapture } from '../shared/pi-account'
 import type { Settings } from '../shared/types'
-import { installPiExtensionInto } from './agents/hooks/pi'
+import { currentIntegrationLifecycle } from './agent-integrations'
 import { PI_AUTH_FILE, parsePiLoginCapture, piAccountLabelFor } from './pi-accounts-core'
 import { PI_ACCOUNTS_DIRNAME, piAccountDir } from './pi-config-dir'
 import { platform } from './platform'
@@ -41,9 +42,6 @@ export interface PiAccountsDeps {
   /** Where the account ROW lives. Required: a shell that mints agent dirs without registering
    *  rows is the orphaned-credential bug the shell-owned membership exists to close. */
   settings: AccountRowStore
-  /** Optional per-dir addition run after the status extension (e.g. a canvas-control skill into
-   *  `<agentDir>/skills`, where pi discovers skills). Best-effort: a throw is logged, never fatal. */
-  installSkill?: (agentDir: string) => void
   /** Login poll interval / deadline. Injectable so tests need not wait out the 2 s / 5 min cadence. */
   pollMs?: number
   timeoutMs?: number
@@ -75,23 +73,6 @@ function ownedAccountDir(id: string): string {
   const root = path.join(platform().userDataDir, PI_ACCOUNTS_DIRNAME)
   if (path.dirname(dir) !== root) throw new Error(`invalid account id: ${JSON.stringify(id)}`)
   return dir
-}
-
-/** Plant the status extension (and the shell's optional extra) into one account dir. Fail-open:
- *  a dir without the extension still logs in and runs pi, it only reports no agent status until
- *  the next launch-time pass re-installs it. */
-function installInto(agentDir: string, extra?: (agentDir: string) => void): void {
-  try {
-    installPiExtensionInto(agentDir)
-  } catch (e) {
-    console.warn(`[pi-accounts] status extension install failed for ${agentDir}`, e)
-  }
-  if (!extra) return
-  try {
-    extra(agentDir)
-  } catch (e) {
-    console.warn(`[pi-accounts] per-account install failed for ${agentDir}`, e)
-  }
 }
 
 /**
@@ -136,16 +117,21 @@ export function piAccountsHandlers(deps: PiAccountsDeps): Record<string, (...arg
     })
 
   return {
-    // Mint the dir (+ extension), THEN register the row. A dir whose row could not be persisted is
-    // torn down again before the error reaches the caller, so a failure leaves nothing behind.
-    // Everything that writes into the dir is synchronous and runs BEFORE the persist, so the
+    // Mint the dir (+ extension and skills), THEN register the row. A dir whose row could not be
+    // persisted is torn down again before the error reaches the caller, so a failure leaves nothing
+    // behind. Everything that writes into the dir is synchronous and runs BEFORE the persist, so the
     // rollback's `rm` is the last writer to touch it. Resolves only once the row is on disk.
+    //
+    // The extension and skills go in ONLY when the user consented to the pi integration (upstream
+    // #744), exactly as a Claude account's add is gated: the consent lifecycle owns that decision
+    // (pi enabled, and never under the Server Edition's `installHooks: false` veto), and with none
+    // registered nothing is written (fail-closed). The account itself is minted either way.
     [IPC.piAccountsAdd]: async (): Promise<PiAccountAddResult> => {
       const id = randomUUID()
       const agentDir = ownedAccountDir(id)
       // 0700: pi writes `auth.json` 0600 itself, but the dir also holds sessions and settings.
       await fs.mkdir(agentDir, { recursive: true, mode: 0o700 })
-      installInto(agentDir, deps.installSkill)
+      currentIntegrationLifecycle()?.installIntoPiAccount(agentDir)
       const account = mintPiAccountRow(id)
       try {
         await registerRow(account)
@@ -225,32 +211,5 @@ export function piAccountsHandlers(deps: PiAccountsDeps): Record<string, (...arg
 export function registerPiAccountsIpc(deps: PiAccountsDeps): void {
   for (const [channel, fn] of Object.entries(piAccountsHandlers(deps))) {
     platform().handle(channel, fn)
-  }
-}
-
-/**
- * Re-install the status extension into every managed pi account dir at launch, so an app update's
- * new extension reaches each account (pi loads extensions per agent dir; the system `~/.pi/agent`
- * is covered by `installManagedAgentHooks`). Called by BOTH shells. Best-effort per account: one
- * failing account never blocks boot.
- *
- * A dir that no longer EXISTS is skipped, not recreated: the installer `mkdir -p`s its
- * `extensions/` folder, which would resurrect a deleted account as an empty logged-out dir and
- * hide the spawn's honest missing-dir fallback behind a node that silently asks to log in again.
- */
-export function installPiExtensionIntoLocalAccounts(
-  accounts: readonly { id: string }[],
-  extra?: (agentDir: string) => void
-): void {
-  for (const acct of accounts) {
-    let agentDir: string
-    try {
-      agentDir = piAccountDir(acct.id)
-    } catch (e) {
-      console.warn(`[agent-hooks] pi account ${JSON.stringify(acct.id)} skipped: invalid id`, e)
-      continue
-    }
-    if (!existsSync(agentDir)) continue
-    installInto(agentDir, extra)
   }
 }

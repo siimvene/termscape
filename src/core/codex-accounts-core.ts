@@ -114,6 +114,65 @@ export function systemCodexHome(): string {
   return configured && path.isAbsolute(configured) ? configured : path.join(os.homedir(), '.codex')
 }
 
+/**
+ * Whether this host can reach a Codex app-server over its `ws+unix://` control socket. Not on
+ * Windows: libuv cannot dial an AF_UNIX path through `ws+unix`, and `codexUnixWebSocketUrl` refuses
+ * a drive-letter path (its `:`) anyway — so every identity / title read there would fail after a
+ * daemon start that can only time out. Callers degrade to the on-disk sources instead
+ * (`readCodexAuthEmail`, the relayed title). A named-pipe endpoint is the follow-up once one is
+ * confirmed on a device.
+ */
+export function codexAppServerReachable(hostPlatform: NodeJS.Platform): boolean {
+  return hostPlatform !== 'win32'
+}
+
+/**
+ * The login email from a Codex `auth.json`, read from the `tokens.id_token` JWT's payload (the
+ * `email` claim, else the `https://api.openai.com/profile` claim's `email`). The signature is NOT
+ * verified and does not need to be: the result is a DISPLAY LABEL for the account row only — the
+ * login gate stays the real, non-symlink `auth.json` check. Never throws; anything unreadable is
+ * `null`.
+ */
+export function readCodexAuthEmail(authJson: string): string | null {
+  try {
+    const token = (JSON.parse(authJson) as { tokens?: { id_token?: unknown } } | null)?.tokens?.id_token
+    if (typeof token !== 'string') return null
+    const parts = token.split('.')
+    if (parts.length < 2 || !/^[A-Za-z0-9_-]+={0,2}$/.test(parts[1])) return null
+    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8')) as Record<
+      string,
+      unknown
+    > | null
+    if (!payload || typeof payload !== 'object') return null
+    const pick = (v: unknown): string | null => (typeof v === 'string' && v.trim() ? v.trim() : null)
+    const profile = payload['https://api.openai.com/profile']
+    return (
+      pick(payload.email) ??
+      (profile && typeof profile === 'object' ? pick((profile as Record<string, unknown>).email) : null)
+    )
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Does a Codex `auth.json` carry a credential Codex can run under? A non-empty `tokens.access_token`
+ * (the ChatGPT login — the same field the POSIX identity path and the usage reader gate on), or a
+ * non-empty `OPENAI_API_KEY` (an API-key login, which no app-server can name where there is none to
+ * ask). An empty `{}`, a `{"tokens":{}}`, a lone id_token or a torn write is NOT a login. Never
+ * throws; anything unparseable is false.
+ */
+export function codexAuthHasCredential(authJson: string): boolean {
+  try {
+    const j = JSON.parse(authJson) as { tokens?: { access_token?: unknown } | null; OPENAI_API_KEY?: unknown } | null
+    if (!j || typeof j !== 'object') return false
+    const nonEmpty = (v: unknown): boolean => typeof v === 'string' && v.trim().length > 0
+    return nonEmpty(j.tokens?.access_token) || nonEmpty(j.OPENAI_API_KEY)
+  } catch {
+    return false
+  }
+}
+
 /** System vs managed is presence/absence of an id: no id ⇒ `~/.codex`; a valid id ⇒ its short home. */
 export function codexHomeForAccount(userDataDir: string, accountId?: string): string {
   return accountId ? codexAccountHome(userDataDir, accountId) : systemCodexHome()

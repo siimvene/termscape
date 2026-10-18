@@ -62,6 +62,7 @@ file has been opened yet. A rule you did not load is an invariant you will viola
 | `.claude/rules/files-node.md` | The `files` node (file-manager node) |
 | `.claude/rules/relay.md` | Remote access (phone relay): free, not Pro |
 | `.claude/rules/push-webhook.md` | Push webhook: a script or CI job rings the paired phone |
+| `.claude/rules/open-link.md` | `nodeterm://` links: another app asks to open a node (flag, parser, confirm sheet, delivery) |
 | `.claude/rules/hosted-team-relay.md` | Hosted team relay: the Server Edition as a relay host (share-team, hosted join, team admin) |
 | `.claude/rules/live-links.md` | Live links: Pro browser link to one terminal (watch, chat, or type) |
 | `.claude/rules/dev-server-ports.md` | Dev-server ports: the Ports chip + same-port SSH forwarding |
@@ -136,6 +137,19 @@ means — and what you may assume when writing a feature — is three tiers, not
   platform where they cannot work they must either use a platform-appropriate mechanism or be
   clearly gated off — a feature that throws `EACCES`/`EPERM` on Windows because nobody checked is a
   bug, not an accepted limitation.
+- **Agent launch lines are POSIX source; a Windows-native pane never gets one typed if it can
+  be avoided.** A prompt-bearing builtin agent node carries `data.launchIntent` (bound to its exact
+  `initialCommand`, never serialized); on a local win32 session-host pane whose host recorded a
+  `pwsh`/`windows-powershell`/`cmd` dialect, the launch writer executes it via `pty:execute-launch`
+  (`core/launch-intent-execute.ts` → `prepareAgentLaunch` → `sessionHostExecuteLaunch`). Every
+  other pane answers `unsupported-shell` and keeps the typed line byte-identical. Only a
+  pre-delivery refusal may fall back to typing; `delivery-failed` never does. Details:
+  docs/windows-session-host.md, "Agent launches in a Windows-native shell".
+- **Run configurations (launch.json run node) are gated off for process launches on a Windows core**
+  — the launcher is a POSIX `sh` script stopped and hot-reloaded by POSIX signals. The core's
+  `gateEntriesForPlatform` marks those entries unsupported with `RUN_WINDOWS_REASON` (browser
+  configs and browser-only compounds still run), and the add menu / Dock disable the row (the palette hides it)
+  from the core's own platform (`useCoreIsWindows`). A pwsh launcher is the follow-up.
 - **New code is platform-neutral by default.** Do not hardcode POSIX assumptions. Publish files
   through `renameAtomic`/`writeFileAtomic` (`src/core/fs-atomic.ts`), not a bare `fs.rename` — the
   guard test (`fs-atomic.guard.test.ts`) enforces this. Resolve path separators / absolute-path
@@ -487,6 +501,32 @@ For every OTHER test dir, two layers, both needed:
   `hookServer.stop()` now drop the memo. Found with `strace -f -e trace=mkdir,rename` — an EMPTY
   leftover dir is the signature of a late writer, not of a missing `rm`.
 
+## The test suite never touches the real home
+
+The hook installers write the user's real agent config — `~/.codex/hooks.json` plus the
+`[hooks.state."…"]` trust blocks in `~/.codex/config.toml`, `~/.claude/settings.json`,
+`~/.gemini/settings.json`, grok's and copilot's hook files — and they resolve home through
+`import { homedir } from 'os'`. **A `vi.spyOn(os, 'homedir')` does not reach that binding**:
+measured on a Windows dev box, running `src/core/agents/hooks/index.test.ts` alone (which
+"isolated" home with exactly that spy) rewrote the developer's real `~/.codex/config.toml` and
+`hooks.json`. Runs from several worktrees then raced each other, and the user's own Codex, on those
+files; a Codex session started inside that window had no trust entries for nodeterm's hooks, so its
+hooks never fired and every agent message to it expired as `targetStatusStale`.
+
+- **Every run gets a private home** (`test/setup/home-sandbox.ts` + `home-worker-env.ts`,
+  `src/core/test-home.ts`): HOME and USERPROFILE point at one directory created and removed by
+  `globalSetup`, re-asserted per worker (refusing to run without it), and the agents' relocation
+  variables (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `GROK_HOME`, `COPILOT_HOME`, `GEMINI_CLI_HOME`,
+  `KIMI_CODE_HOME`, `XDG_*`) are cleared. On Windows APPDATA/LOCALAPPDATA move inside it too.
+  `os.homedir()` reads the variable on every call, so every installer and every child process lands
+  in the sandbox whatever its import style. Registered BEFORE the temp sandbox (it lives in the real
+  temp dir and is never counted as a leak there).
+- A test that needs its own home uses a MODULE mock (`vi.mock('os', …)` returning `homedir`, as
+  `install-helper.fs.test.ts` and `codex.ensure.test.ts` do), never the spy.
+- `src/core/test-home.guard.test.ts` runs the real `installCodexHooks()` and proves it wrote the
+  sandbox while the real `~/.codex` (read from `os.userInfo().homedir`, which ignores HOME) kept its
+  size and mtime.
+
 ## Conventions
 
 - **Two docs, two audiences — keep both.** This file holds the deep invariants with their
@@ -543,7 +583,15 @@ For every OTHER test dir, two layers, both needed:
   carries the node's actions (search / dictate / AI-name / comments), accepts file drops
   (`terminal/file-drop.ts`), renders browser webviews (`BrowserSurface`), and its cards support
   right-click actions + `+ New`. When you touch a node's UI, ask "does the board need this too?"
-  and wire it through `KanbanView`/`SessionCard`/`CardModal` in the SAME change. Kanban itself is
+  and wire it through `KanbanView`/`SessionCard`/`CardModal` in the SAME change. Node menu rows live in ONE builder, `renderer/lib/nodeActionItems.tsx` (canvas menu, sessions sidebar, both boards' card menus via `kanban/cardMenu.tsx`); a card takes only `BOARD_NODE_ACTION_IDS` and writes through `nodeWritesFor(projectId)`, because the Omni board acts on nodes of projects that are not on the canvas.
+  The card modal's ⋯ menu takes `BOARD_MODAL_ACTION_IDS` and closes the modal before any action
+  runs, because restart-and-shell, switch model, account switch and pause-and-end recycle the tmux
+  session its terminal is attached to; a card of a project the canvas does not hold shows these
+  rows disabled with 'This terminal is not attached right now.', and a card with no session row
+  (a plain shell, a non-resumable agent) gets no ⋯ button at all. A node the canvas holds but
+  whose terminal was released while off screen is a different case (`NodeActionCtx.onCanvas`
+  true, `attached` false): Refresh stays enabled, since its respawn is what revives the node,
+  and the session rows say the terminal was released (`RELEASED_HINT`). Kanban itself is
   desktop+Server-Edition (pure renderer + `workspace.save`); the iOS board is a separate read/move
   mirror (`nodeterm-ios`, `KanbanGrouping`/`ProjectBoardView`).
 

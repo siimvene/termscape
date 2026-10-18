@@ -217,7 +217,7 @@ never leaves the machine.
 ### Node kinds
 
 🖥 **Terminal** (xterm + tmux, AI naming) · 🤖 **Agent** (Claude Code / Codex / Antigravity /
-Gemini / GitHub Copilot / opencode / Grok / Pi / custom) · 📝 **Sticky note** (link to an agent as context) · 🗂 **Group**
+Gemini / GitHub Copilot / opencode / Grok / Cursor / Pi / custom) · 📝 **Sticky note** (link to an agent as context) · 🗂 **Group**
 (bind to a **git worktree** for agent-per-branch) · ✏️ **Editor** (Monaco, ⌘S) ·
 🔀 **Diff** · 🌐 **Web / Video**
 
@@ -246,7 +246,9 @@ Gemini / GitHub Copilot / opencode / Grok / Pi / custom) · 📝 **Sticky note**
   from your phone — plus push notifications and a mobile board view.
 - **Power & sleep** — while an agent is working, nodeterm keeps the machine from
   idle-sleeping, and lets go the moment it finishes (on by default; toggle in the setup
-  tour or Settings → Behavior). No app can hold a machine awake through a closed lid —
+  tour or Settings → Behavior). It lets the machine sleep anyway on battery below 5% or
+  when the machine runs critically hot. No app can hold a machine awake through a closed lid
+  (a Mac with the lid closed stays awake only while plugged in with an external display) —
   for overnight runs keep the laptop open and plugged in, or run the agents on a box
   that doesn't sleep via the [Server Edition](./docs/SERVER.md).
 - **Command palette** (⌘K), **file explorer** (⌘⇧E), **markdown view** (⌘M),

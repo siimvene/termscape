@@ -12,6 +12,7 @@ import { accountsForProject, sshAccountsHint } from '../state/workspace'
 import { CONTENT_ADD_ITEMS, contentAddItemsToDockRows, type AddHandlers } from '../lib/addMenuSpec'
 import { layoutSubtitle, sortedLayouts } from '../lib/canvasLayoutView'
 import { ZOOM_PRESETS, activeZoomPreset } from '../lib/zoomPresets'
+import { useCoreIsWindows } from '../terminal/use-core-platform'
 import { Tooltip } from './Tooltip'
 
 const isMac = /Mac/i.test(navigator.platform || navigator.userAgent)
@@ -30,6 +31,10 @@ interface DockProps {
   onAddDino: () => void
   onAddTrigger: () => void
   onAddFiles: () => void
+  /** A run node (a launch.json configuration) rooted in the project folder. */
+  onAddRun: () => void
+  /** A Simulator node (macOS desktop). */
+  onAddSimulator: () => void
   onAddAgent: (agentId: AgentId, accountId?: string) => void
   onOpenFile: () => void
   onAddRemote: () => void
@@ -80,6 +85,8 @@ export function Dock({
   onAddDino,
   onAddTrigger,
   onAddFiles,
+  onAddRun,
+  onAddSimulator,
   onAddAgent,
   onOpenFile,
   onAddRemote,
@@ -183,6 +190,7 @@ export function Dock({
   // remote-connection is a different flow than the pane menu's remote picker).
   const hasCwd = !!(activeProject?.ssh?.remoteCwd ?? activeProject?.cwd)
   const isSshProject = !!activeProject?.ssh
+  const isWindowsCore = useCoreIsWindows()
   const dockAddHandlers: AddHandlers = {
     terminal: onAddTerminal,
     remote: onAddRemote,
@@ -193,13 +201,17 @@ export function Dock({
     dino: onAddDino,
     trigger: onAddTrigger,
     files: onAddFiles,
+    run: onAddRun,
+    simulator: onAddSimulator,
     openFile: onOpenFile,
     newFile: onNewFile,
     worktree: onAddWorktree
   }
   const contentRows = contentAddItemsToDockRows(CONTENT_ADD_ITEMS, dockAddHandlers, {
     hasCwd,
-    isSshProject
+    isSshProject,
+    isWindowsCore,
+    isRelayTab: !!activeProject?.remote
   })
   const scienceRow = contentRows.find((row) => row.kind === 'science')
 

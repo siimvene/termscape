@@ -20,6 +20,7 @@ paths:
   - "src/shared/agents/account-*.ts"
   - "src/renderer/components/settings/sections/AccountsSection*.tsx"
   - "src/core/remote-account-env*.ts"
+  - "src/core/shared-entry-link.ts"
 ---
 # Managed Claude/Codex accounts, account switch, usage indicator scope, remote usage
 
@@ -206,7 +207,14 @@ paths:
     by the usage popover, the pickers and the mirror, which read as "Codex shows only one account"
     while Claude showed all of them. A token-bearing `auth.json` with no email claim still resolves
     (`{ email: null }`); one with no token is not a login. The account SWITCH legs in
-    `src/main/codex-accounts.ts` still start the daemon and are untouched by this. Both flows mint an **agent-less terminal** carrying only `accountId`, and
+    `src/main/codex-accounts.ts` still start the daemon and are untouched by this. **On Windows the
+    Codex identity comes from that `auth.json`'s id_token JWT email (`readCodexAuthEmail` — a display
+    label, unverified; the gate stays the real-file check), never the app-server**: `ws+unix` cannot
+    dial there (`codexAppServerReachable`), so no daemon is started per poll (the switch legs'
+    `ensureCodexAccountDaemon` refuses at once there instead of a 15 s start that can only time out)
+    and the codex title read degrades to the relayed copy. Shared assets go in via
+    `linkSharedEntry` (junction / hardlink / warned copy — never a blocking EPERM; POSIX unchanged).
+    Both flows mint an **agent-less terminal** carrying only `accountId`, and
     that shape is why `needsCodexAccountScope` takes an `isCodexAccount` resolver rather than
     reading `!!accountId`: the two account lists share an id alphabet, so the id alone cannot say
     which provider it belongs to. Guessing "codex" refused every managed **Claude** node (#345);
@@ -459,6 +467,11 @@ paths:
   read usage." in both the single-account and multi-account popovers, including beside healthy
   provider rows. Nonempty snapshots retain their last-known bars on error; no error-specific
   authentication advice is inferred from the status.
+  **Local Codex reads (issue #1168)**: an HTTP 429 from the backend returns `rateLimited` and
+  starts a per-home cooldown (`Retry-After`, else 2 min doubling, 30 s–1 h); during it NEITHER
+  tier is asked — the app-server fallback reads the same account's limits, so falling through
+  after a 429 spent the budget twice. The service holds each account row's last good numbers
+  (`holdLastGoodProvider`). The SSH Codex reader has no cooldown yet.
 
 - **Remote usage** (SSH hosts, `src/core/usage/remote-claude-usage.ts`) — the source behind the
   SSH scope above. v1 excluded remote accounts, which left a user whose Claude only ever runs on a

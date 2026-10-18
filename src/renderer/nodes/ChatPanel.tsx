@@ -51,6 +51,7 @@ import { AnswerControlsUpdating, PlanAnswerControls, QuestionAnswerControls } fr
 import type { PermissionAnswer } from '@shared/agents/permission-answer'
 import { ChatComposer } from './ChatComposer'
 import { ChatTurnActions } from './ChatTurnActions'
+import { useCodeBlockCopy } from './CodeBlockCopy'
 import { assistantTurnEnds } from '../lib/chatThread'
 import { FALLBACK_SESSION_NOTE, transcriptReadCwd } from '../lib/transcriptSession'
 
@@ -58,9 +59,17 @@ import { FALLBACK_SESSION_NOTE, transcriptReadCwd } from '../lib/transcriptSessi
 // turn-finish reload, each keystroke re-render). Text is stable per message, so cache per text.
 // `breaks`: a single newline is a line break, as Claude Code's own TUI renders it — without it a
 // multi-line prompt, or a reply quoting one line by line (`> a` / `> b`), collapsed onto one line.
+// Every code block gets a Copy button in its top-right corner (useCodeBlockCopy).
 export const MarkdownText = memo(function MarkdownText({ text }: { text: string }) {
   const html = useMemo(() => renderMarkdown(text, { breaks: true }), [text])
-  return <div className="term-chat__text" dangerouslySetInnerHTML={{ __html: html }} />
+  const ref = useRef<HTMLDivElement>(null)
+  const copyButtons = useCodeBlockCopy(ref, html)
+  return (
+    <>
+      <div ref={ref} className="term-chat__text" dangerouslySetInnerHTML={{ __html: html }} />
+      {copyButtons}
+    </>
+  )
 })
 
 interface ChatPanelProps {
@@ -784,7 +793,7 @@ export function ChatPanel({
   // has them. Object identity is enough: `applyTail` carries an unconfirmed send as the same object.
   const queuedRef = useRef(new WeakSet<ChatMessage>())
 
-  const send = useCallback(async () => {
+  const sendOnce = useCallback(async () => {
     const text = input.trim()
     if (!text) return
     // Read the store at SEND time, not the render-time values: a PermissionRequest (or an Eco
@@ -857,6 +866,19 @@ export function ChatPanel({
       commandReadTimerRef.current = setTimeout(fire, CHAT_LIVE_RELOAD_MIN_MS)
     }
   }, [api, input, nodeId, agentId, onShowTerminal, pollScreen])
+  // A send in flight. A typed send (core/typed-input.ts, claude) takes a moment — core waits for the
+  // pane to show the text before it presses Enter — and the draft is only cleared once it lands, so
+  // a second Enter in that window would send the same prompt twice. Ignore it instead.
+  const sendingRef = useRef(false)
+  const send = useCallback(async () => {
+    if (sendingRef.current) return
+    sendingRef.current = true
+    try {
+      await sendOnce()
+    } finally {
+      sendingRef.current = false
+    }
+  }, [sendOnce])
 
   // The scheduled command read belongs to THIS transcript and this mount.
   useEffect(

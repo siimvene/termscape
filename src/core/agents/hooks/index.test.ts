@@ -25,11 +25,18 @@ vi.mock('../../exec-path', async (orig) => ({
   resolveShellEnvVar: async () => shellAnswer
 }))
 
-let home: string
+// A MODULE mock, not `vi.spyOn(os, 'homedir')`: the installers this reaches (codex.ts, grok, …)
+// `import { homedir } from 'os'`, a binding the spy never touches. With the spy, this file rewrote
+// the developer's real ~/.codex/config.toml and hooks.json — and every other agent's hook file —
+// on every run. The run-wide HOME sandbox (src/core/test-home.ts) is the floor under this.
+let home = ''
+vi.mock('os', async (orig) => {
+  const actual = await orig<typeof import('os')>()
+  return { ...actual, default: { ...actual, homedir: () => home }, homedir: () => home }
+})
 
 beforeEach(() => {
   home = fs.mkdtempSync(path.join(os.tmpdir(), 'grok-home-probe-'))
-  vi.spyOn(os, 'homedir').mockReturnValue(home)
   initPlatform(fakePlatform({ userDataDir: home }))
   _resetGrokHomeProbeForTests()
 })
@@ -50,7 +57,7 @@ describe('installManagedAgentHooks — the $GROK_HOME probe (§8.9)', () => {
     // silent regression.
     expect(grokHomeDir()).not.toBe(elsewhere)
 
-    installManagedAgentHooks()
+    installManagedAgentHooks(new Set(['grok']))
     await new Promise((r) => setTimeout(r, 50))
 
     expect(grokHomeDir()).toBe(elsewhere)
@@ -63,8 +70,27 @@ describe('installManagedAgentHooks — the $GROK_HOME probe (§8.9)', () => {
     // idea of the default instead of the code's.
     shellAnswer = null
     const target = grokHomeDir()
-    installManagedAgentHooks()
+    installManagedAgentHooks(new Set(['grok']))
     await new Promise((r) => setTimeout(r, 20))
     expect(fs.existsSync(path.join(target, 'hooks', GROK_HOOK_FILE))).toBe(true)
+  })
+})
+
+describe('installManagedAgentHooks — consent (issue #744)', () => {
+  it('writes ONLY the agents in the set: no claude/gemini/codex config for a grok-only consent', async () => {
+    shellAnswer = null
+    installManagedAgentHooks(new Set(['grok']))
+    await new Promise((r) => setTimeout(r, 20))
+    expect(fs.existsSync(path.join(grokHomeDir(), 'hooks', GROK_HOOK_FILE))).toBe(true)
+    for (const f of ['.claude/settings.json', '.gemini/settings.json', '.codex/hooks.json']) {
+      expect(fs.existsSync(path.join(home, f)), f).toBe(false)
+    }
+  })
+
+  it('an empty set writes nothing at all, not even the hook scripts dir', async () => {
+    shellAnswer = null
+    installManagedAgentHooks(new Set())
+    await new Promise((r) => setTimeout(r, 20))
+    expect(fs.readdirSync(home)).toEqual([])
   })
 })

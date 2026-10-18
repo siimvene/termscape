@@ -293,13 +293,22 @@ export const EDITOR_ONLY: ReadonlySet<string> = new Set<string>([
   IPC.ptySessionAge,
   IPC.ptySendText,
   IPC.ptySendChatPrompt,
+  IPC.ptySendToEmptyPrompt,
   IPC.ptyPaneOwner,
   // A host filesystem path, not a view of the terminal — a viewer's file links keep the node cwd.
   IPC.ptyPaneCwd,
   IPC.ptyTerminateForeground,
+  // Also HOST_ONLY (host-control.ts): refused for every relay peer before this table is read.
+  IPC.ptySendPaneKeys,
   IPC.ptyReadSessionName,
+  // Executes an agent launch and reads a host-local prompt file. Also HOST-ONLY for every peer
+  // (shared/host-control.ts); a relay tab never sends it (its terminals are not `source: 'local'`).
+  IPC.ptyExecuteLaunch,
   // Workspace, project settings and setup: writes, probes of arbitrary folders, trust, scripts.
   IPC.workspaceSave,
+  // Host-only for every peer (shared/host-control.ts): a peer's claim would make every viewer of
+  // the host stand down from a launch (#1173). A relay tab never sends it.
+  IPC.workspaceClaimLaunch,
   IPC.workspaceProbeFolder,
   IPC.workspaceProjectFileState,
   IPC.projectSettingsRead,
@@ -314,6 +323,8 @@ export const EDITOR_ONLY: ReadonlySet<string> = new Set<string>([
   IPC.projectSetupUnsubscribe,
   IPC.worktreeMaterializeShared,
   // Host settings, credentials and paths.
+  // Agent-integration consent status (#744): host-only, never a viewer's.
+  IPC.integrationsStatus,
   IPC.settingsLoad,
   IPC.settingsSave,
   IPC.agentDiscoverModels,

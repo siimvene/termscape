@@ -32,6 +32,8 @@ import { fakePlatform, type FakePlatform } from './platform-fake'
 import { IPC } from '../shared/ipc'
 import { registerClaudeAccountsIpc } from './claude-accounts-service'
 import { SettingsStore } from './settings-store'
+import { createIntegrationLifecycle, registerIntegrationLifecycle } from './agent-integrations'
+import { DEFAULT_SETTINGS } from '../shared/types'
 import { resetClaudeAccountsSourceForTests } from './claude-config-dir'
 
 let fake: FakePlatform
@@ -63,12 +65,21 @@ beforeEach(() => {
   // shell-owned), so a no-deps registration is not valid here.
   settings = new SettingsStore()
   settings.init()
+  // The consent lifecycle decides whether an account gets the hook (#744); claude is enabled here.
+  registerIntegrationLifecycle(
+    createIntegrationLifecycle({
+      settings: () => ({ ...DEFAULT_SETTINGS, agentIntegrations: { agents: { claude: 'enabled' }, origin: 'asked' } }),
+      userDataDir: () => userDataDir,
+      shims: () => ({ context: path.join(userDataDir, 'context-links', 'context.sh') })
+    })
+  )
   registerClaudeAccountsIpc({ settings })
 })
 afterEach(() => {
   if (realHome === undefined) delete process.env.HOME
   else process.env.HOME = realHome
   delete process.env.USERPROFILE
+  registerIntegrationLifecycle(null)
   resetPlatformForTests()
   resetClaudeAccountsSourceForTests()
   rmSync(root, { recursive: true, force: true })

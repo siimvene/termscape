@@ -70,7 +70,8 @@ one is Pro and the backend is the gate. Reference: **`docs/live-links.md`**. Inv
   viewer holds (`ui-sink-registry.watcher.test.ts`, `pty-reap.test.ts`).
 - The stream filter sees every byte, has NO length cap (a cap leaked a measured clipboard), and every
   join resets it `midStream`, never to text mode and never on a keyframe. `captureVisible` never returns
-  history (exact `=nt-<id>:`, no `-S`; session host, plain shell and a Zellij node get no keyframe). A
+  history (exact `=nt-<id>:`, no `-S`; the session host answers its negotiated `captureVisible`, the
+  only route that sets `altScreen` itself; plain shell and a Zellij node get no keyframe). A
   viewer sizes nothing: `joinOnly` + `sizeVote: false`; its own tmux client is `-E -f ignore-size,read-only`,
   and a Zellij node never gets one (refused, never a Zellij attach — that client could type).
 - Node gone is tri-state (only ABSENT ends a link; a lost or corrupt index is never a complete read —
@@ -82,9 +83,11 @@ one is Pro and the backend is the gate. Reference: **`docs/live-links.md`**. Inv
 - `src/shared/watch-link/` is vendored byte for byte into nodeterm-web: siblings and `tweetnacl` only,
   no Node API, type imports spelled `import type` (`isomorphism.guard.test.ts`); a change there owes the
   web repo a re-vendor. Chat text is stripped of controls AND bidi controls there, capped by code point.
-- Never silent about what a viewer gets. Where local terminals are not tmux (Windows' session host, tmux
-  off or missing, Zellij) a viewer can watch only a terminal the app has OPEN (there is no read-only
-  client to spawn): the create dialog says so, and a refused join turns the chip amber `LIVE · 1
+- Never silent about what a viewer gets. The session host's read-only client is a negotiated
+  `watch-attach` attachment (no claim, no pause ticket, host refuses its writes, never spawns, never
+  indexed as the node's session; an older host means refused, never an ordinary attach). Where local
+  terminals are neither (tmux off or missing, Zellij, an older host) a viewer can watch only a terminal
+  the app has OPEN (there is no read-only client to spawn): the create dialog says so, and a refused join turns the chip amber `LIVE · 1
   waiting` ("Viewers are waiting — open this terminal in nodeterm…"). The stream is the owner's tmux
   CLIENT's output, so its session chooser or a session switch reaches viewers; the warning names it.
   A controller's input that does not reach the pane is reported (`watch:control {controlling,

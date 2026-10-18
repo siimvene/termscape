@@ -9,6 +9,10 @@ import {
   contentAddItemsToMenuItems,
   contentAddItemsToDockRows,
   FILES_NO_CWD_HINT,
+  RUN_SSH_HINT,
+  SIMULATOR_RELAY_HINT,
+  SIMULATOR_SSH_HINT,
+  RUN_WINDOWS_HINT,
   NEW_FILE_NO_CWD_HINT,
   WORKTREE_NO_CWD_HINT,
   WORKTREE_SSH_HINT,
@@ -28,6 +32,8 @@ const handlers = (overrides: Partial<AddHandlers> = {}): AddHandlers => ({
   web: noop,
   sticky: noop,
   files: noop,
+  run: noop,
+  simulator: noop,
   dino: noop,
   trigger: noop,
   openFile: noop,
@@ -40,6 +46,8 @@ const handlers = (overrides: Partial<AddHandlers> = {}): AddHandlers => ({
 const allKinds: AddItem['kind'][] = [
   'terminal',
   'remote',
+  'run',
+  'simulator',
   'browser',
   'science',
   'web',
@@ -52,6 +60,51 @@ const allKinds: AddItem['kind'][] = [
   'spawn-team',
   'worktree'
 ]
+
+describe('Run configuration row', () => {
+  it('is disabled with its reason in an SSH project, on the menu and the Dock alike', () => {
+    const ctx = { hasCwd: true, isSshProject: true }
+    const [row] = contentAddItemsToMenuItems([{ kind: 'run' }], handlers(), ctx)
+    expect(row).toMatchObject({ label: 'New run configuration', disabled: true, hint: RUN_SSH_HINT })
+    const [dock] = contentAddItemsToDockRows([{ kind: 'run' }], handlers(), ctx)
+    expect(dock).toMatchObject({ kind: 'run', disabled: true, hint: RUN_SSH_HINT })
+  })
+  it('is disabled with its reason on a Windows core, menu and Dock alike — SSH keeps its own reason', () => {
+    const ctx = { hasCwd: true, isSshProject: false, isWindowsCore: true }
+    const [row] = contentAddItemsToMenuItems([{ kind: 'run' }], handlers(), ctx)
+    expect(row).toMatchObject({ label: 'New run configuration', disabled: true, hint: RUN_WINDOWS_HINT })
+    const [dock] = contentAddItemsToDockRows([{ kind: 'run' }], handlers(), ctx)
+    expect(dock).toMatchObject({ kind: 'run', disabled: true, hint: RUN_WINDOWS_HINT })
+    const [ssh] = contentAddItemsToMenuItems([{ kind: 'run' }], handlers(), { ...ctx, isSshProject: true })
+    expect(ssh).toMatchObject({ disabled: true, hint: RUN_SSH_HINT })
+  })
+  it('is enabled in a local project, even with no folder yet (it asks for one)', () => {
+    const [row] = contentAddItemsToMenuItems([{ kind: 'run' }], handlers(), { hasCwd: false, isSshProject: false })
+    expect(row).toMatchObject({ label: 'New run configuration' })
+    expect((row as { disabled?: boolean }).disabled).toBeFalsy()
+  })
+})
+
+describe('Simulator row', () => {
+  it('is disabled with its reason in a relay tab — the node would show this machine’s devices', () => {
+    const ctx = { hasCwd: true, isSshProject: false, isRelayTab: true }
+    const [row] = contentAddItemsToMenuItems([{ kind: 'simulator' }], handlers(), ctx)
+    expect(row).toMatchObject({ label: 'New simulator', disabled: true, hint: SIMULATOR_RELAY_HINT })
+    const [dock] = contentAddItemsToDockRows([{ kind: 'simulator' }], handlers(), ctx)
+    expect(dock).toMatchObject({ kind: 'simulator', disabled: true, hint: SIMULATOR_RELAY_HINT })
+  })
+  it('is disabled with its reason in an SSH project, as the run row is', () => {
+    const ctx = { hasCwd: true, isSshProject: true }
+    const [row] = contentAddItemsToMenuItems([{ kind: 'simulator' }], handlers(), ctx)
+    expect(row).toMatchObject({ label: 'New simulator', disabled: true, hint: SIMULATOR_SSH_HINT })
+    const [dock] = contentAddItemsToDockRows([{ kind: 'simulator' }], handlers(), ctx)
+    expect(dock).toMatchObject({ kind: 'simulator', disabled: true, hint: SIMULATOR_SSH_HINT })
+  })
+  it('is enabled in a local desktop project', () => {
+    const [row] = contentAddItemsToMenuItems([{ kind: 'simulator' }], handlers(), { hasCwd: true, isSshProject: false })
+    expect((row as { disabled?: boolean }).disabled).toBeFalsy()
+  })
+})
 
 describe('CONTENT_ADD_ITEMS', () => {
   it('lists every content kind in the canonical order', () => {
@@ -70,6 +123,8 @@ describe('contentAddItemsToMenuItems', () => {
     expect(labels).toEqual([
       'New terminal',
       'New remote…',
+      'New run configuration',
+      'New simulator',
       'New browser',
       'New Claude Science',
       'New web view…',
@@ -173,6 +228,8 @@ describe('contentAddItemsToDockRows', () => {
     // NO 'terminal' and NO 'remote': the Dock draws its own Terminal button and its own
     // "New Remote Connection" flow. Emitting a terminal row here duplicated the Terminal entry.
     expect(rows.map((r) => r.kind)).toEqual([
+      'run',
+      'simulator',
       'browser',
       'science',
       'web',
@@ -307,6 +364,8 @@ describe('buildGroupedAddMenu', () => {
         : []
     }
     expect(children(ADD_GROUP_LABEL.view)).toEqual([
+      'New run configuration',
+      'New simulator',
       'New browser',
       'New web view…',
       'New sticky note',
