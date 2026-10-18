@@ -429,8 +429,10 @@ export function createIntegrationLifecycle(deps: IntegrationLifecycleDeps): Inte
       const skills = skillsFor(agent, shims)
       for (const root of skillRootsFor(agent, settings, deps.userDataDir(), home)) {
         // A managed pi account's skills root (`<account>/skills`) is anchored on the account dir,
-        // for the same reason as its extension above.
-        const anchor = agent === 'pi' && piAccountDirs.includes(path.dirname(root)) ? path.dirname(root) : undefined
+        // for the same reason as its extension above. Every pi root except the system one is an
+        // account root (skillRootsFor lists them afresh, so this must not depend on the snapshot).
+        const anchor =
+          agent === 'pi' && root !== path.join(piAgentDir(), 'skills') ? path.dirname(root) : undefined
         for (const name of [CANVAS_SKILL, CONTEXT_SKILL]) {
           const file = path.join(root, name, 'SKILL.md')
           const body = skills.get(name)
