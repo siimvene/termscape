@@ -14,8 +14,8 @@
 // OWN, never inferred. The wire contract (endpoint file, per-node token, socket-or-TCP) is the one
 // shared plugin client in plugin-hook-client.ts; `normalizePi` reads the payload.
 import fs from 'fs'
-import { mkdirBelow } from '../../integration-files'
-import { isManagedPiAccountDir } from '../../pi-config-dir'
+import { isAnchorGone, mkdirBelow } from '../../integration-files'
+import { isAnyManagedPiAccountDir } from '../../pi-config-dir'
 import { platform } from '../../platform'
 import os from 'os'
 import path from 'path'
@@ -184,11 +184,16 @@ export function installPiHooks(): void {
   const dir = piAgentDir()
   let anchored = false
   try {
-    anchored = isManagedPiAccountDir(dir, platform().userDataDir)
+    anchored = isAnyManagedPiAccountDir(dir, platform().userDataDir)
   } catch {
     /* no platform (a bare test) — the system dir is pi's own */
   }
-  installPiExtensionInto(dir, { anchored })
+  try {
+    installPiExtensionInto(dir, { anchored })
+  } catch (e) {
+    if (anchored && isAnchorGone(e) && !fs.existsSync(dir)) return // the aliased account was removed
+    throw e
+  }
 }
 
 export function removePiHooks(): void {

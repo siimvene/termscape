@@ -6,7 +6,10 @@ import os from 'os'
 import path from 'path'
 import { ReceiptStore, isAnchorGone, mkdirBelow, writeOwnedFile } from './integration-files'
 import { installPiExtensionInto, piExtensionPath, PI_EXTENSION_MARKER } from './agents/hooks/pi'
-import { isManagedPiAccountDir } from './pi-config-dir'
+import { isAnyManagedPiAccountDir, isManagedPiAccountDir } from './pi-config-dir'
+import { initPlatform, resetPlatformForTests } from './platform'
+import { fakePlatform } from './platform-fake'
+import { installPiHooks } from './agents/hooks/pi'
 
 let tmp: string
 beforeEach(() => {
@@ -104,5 +107,34 @@ describe('isManagedPiAccountDir', () => {
     expect(isManagedPiAccountDir(path.join(ud, 'pi-accounts', 'a1', 'skills'), ud)).toBe(false)
     expect(isManagedPiAccountDir(path.join(ud, 'pi-accounts', '..', 'x'), ud)).toBe(false)
     expect(isManagedPiAccountDir(path.join(os.homedir(), '.pi', 'agent'), ud)).toBe(false)
+  })
+})
+
+describe('a managed pi dir of the co-located PEER is anchored too', () => {
+  afterEach(() => resetPlatformForTests())
+
+  it('isAnyManagedPiAccountDir sees own and peer roots', () => {
+    const own = path.join(tmp, 'own')
+    const peer = path.join(tmp, 'peer')
+    initPlatform(fakePlatform({ userDataDir: own, peerUserDataDir: peer } as any))
+    expect(isAnyManagedPiAccountDir(path.join(peer, 'pi-accounts', 'a'), own)).toBe(true)
+    expect(isAnyManagedPiAccountDir(path.join(own, 'pi-accounts', 'a'), own)).toBe(true)
+    expect(isAnyManagedPiAccountDir(path.join(tmp, 'other', 'pi-accounts', 'a'), own)).toBe(false)
+  })
+
+  it('installPiHooks never recreates an inherited (peer) account dir, and is quiet about it', () => {
+    const own = path.join(tmp, 'own')
+    const peer = path.join(tmp, 'peer')
+    initPlatform(fakePlatform({ userDataDir: own, peerUserDataDir: peer } as any))
+    const gone = path.join(peer, 'pi-accounts', 'deleted')
+    const prev = process.env.PI_CODING_AGENT_DIR
+    process.env.PI_CODING_AGENT_DIR = gone
+    try {
+      expect(() => installPiHooks()).not.toThrow()
+      expect(existsSync(gone)).toBe(false)
+    } finally {
+      if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR
+      else process.env.PI_CODING_AGENT_DIR = prev
+    }
   })
 })

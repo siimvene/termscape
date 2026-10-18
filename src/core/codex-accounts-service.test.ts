@@ -119,7 +119,9 @@ describe('registerCodexAccountsIpc — the Server Edition surface', () => {
   it('waitLogin returns the identity for a REAL non-symlink auth.json', async () => {
     register({ pollMs: 5 })
     const { id, home } = await call(IPC.codexAccountsAdd)
-    writeFileSync(path.join(home, 'auth.json'), '{}')
+    // A credential with no email claim: the daemon names it. (`{}` was the fixture here until the
+    // one-credential-rule change; a credential-less file is not a login on any host now.)
+    writeFileSync(path.join(home, 'auth.json'), JSON.stringify({ tokens: { access_token: 'at' } }))
     await expect(call(IPC.codexAccountsWaitLogin, id)).resolves.toEqual({
       email: 'me@example.com'
     })
@@ -220,6 +222,16 @@ describe('registerCodexAccountsIpc — the Server Edition surface', () => {
         authJson({ access_token: 'at', id_token: jwt({ 'https://api.openai.com/profile': { email: 'p@example.com' } }) })
       )
       await expect(call(IPC.codexAccountsIdentity, id)).resolves.toEqual({ email: null })
+    })
+
+    it('a managed file with no credential is not a login even when its daemon answers', async () => {
+      register()
+      const { id, home } = await call(IPC.codexAccountsAdd)
+      readAccount.mockResolvedValue({ email: 'daemon@example.com' })
+      writeFileSync(path.join(home, 'auth.json'), authJson({ id_token: jwt({ email: 'x@example.com' }) }))
+      await expect(call(IPC.codexAccountsIdentity, id)).resolves.toBeNull()
+      writeFileSync(path.join(home, 'auth.json'), authJson({ access_token: ' ' }))
+      await expect(call(IPC.codexAccountsIdentity, id)).resolves.toBeNull()
     })
 
     // The lstat gate and the read are two steps. A symlink swapped in between used to fail the

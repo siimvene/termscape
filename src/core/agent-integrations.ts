@@ -42,7 +42,7 @@ import { buildCanvasSkillBody } from './canvas-control-core'
 import { buildContextLinkSkillBody } from './context-link-core'
 import { claudeConfigDirFor } from './claude-config-dir'
 import { codexHomeForAccount, systemCodexHome } from './codex-accounts-core'
-import { isManagedPiAccountDir, piAccountDirFor } from './pi-config-dir'
+import { isAnyManagedPiAccountDir, piAccountDirFor } from './pi-config-dir'
 import { applySkillShare } from './claude-skill-share'
 import {
   ReceiptStore,
@@ -433,7 +433,7 @@ export function createIntegrationLifecycle(deps: IntegrationLifecycleDeps): Inte
         // not by the snapshot: skillRootsFor lists the accounts afresh, and the "system" root is an
         // account too when the app inherited a managed session's PI_CODING_AGENT_DIR.
         const anchor =
-          agent === 'pi' && isManagedPiAccountDir(path.dirname(root), deps.userDataDir())
+          agent === 'pi' && isAnyManagedPiAccountDir(path.dirname(root), deps.userDataDir())
             ? path.dirname(root)
             : undefined
         for (const name of [CANVAS_SKILL, CONTEXT_SKILL]) {

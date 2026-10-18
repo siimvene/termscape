@@ -41,6 +41,21 @@ export function isManagedPiAccountDir(dir: string, userDataPath: string): boolea
   return rel !== '' && !path.isAbsolute(rel) && !rel.startsWith('..') && !rel.includes(path.sep)
 }
 
+/** `isManagedPiAccountDir` against `userDataPath` OR the co-located peer's userData
+ *  (`CorePlatform.peerUserDataDir`, the Server Edition beside a desktop): an instance launched from
+ *  the PEER's managed pi terminal inherits a PI_CODING_AGENT_DIR under the peer's root, and that
+ *  account is just as deletable underneath it. */
+export function isAnyManagedPiAccountDir(dir: string, userDataPath: string): boolean {
+  if (isManagedPiAccountDir(dir, userDataPath)) return true
+  let peer: string | undefined
+  try {
+    peer = platform().peerUserDataDir
+  } catch {
+    return false
+  }
+  return !!peer && isManagedPiAccountDir(dir, peer)
+}
+
 /** `piAccountDirFor` against this instance's own userData (the platform seam). */
 export function piAccountDir(accountId: string): string {
   return piAccountDirFor(platform().userDataDir, accountId)

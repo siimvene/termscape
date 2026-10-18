@@ -295,6 +295,9 @@ async function accountIdentity(accountId?: string): Promise<{ email: string | nu
     : await fs.readFile(path.join(home, 'auth.json'), 'utf8').catch(() => null)
   if (accountId && text === null) return null
   const hasCredential = text !== null && codexAuthHasCredential(text)
+  // Same rule for a managed file that exists but carries no credential (an id_token alone, a blank
+  // token or key, a torn write): not a login, and the daemon is not asked to say otherwise.
+  if (accountId && !hasCredential) return null
   // The email names the login only next to a credential: an id_token alone (a partial or malformed
   // write) is not a login Codex can run under.
   // Named by the usage reader's own parser (`codexAuthEmailFromText`): the account list and the usage
