@@ -205,8 +205,14 @@ paths:
     (`$CODEX_HOME/packages/standalone/current/codex`) and exits on a Homebrew/npm Codex, so a
     daemon-only reader left every managed account `pending` forever — and pending rows are skipped
     by the usage popover, the pickers and the mirror, which read as "Codex shows only one account"
-    while Claude showed all of them. A token-bearing `auth.json` with no email claim still resolves
-    (`{ email: null }`); one with no token is not a login. The account SWITCH legs in
+    while Claude showed all of them. A credential-bearing `auth.json` with no email claim still
+    resolves (`{ email: null }`); one with no credential is not a login. **One credential rule on
+    every host (2026-10-18): `codexAuthHasCredential` — a non-empty (trimmed) `tokens.access_token`
+    OR a non-empty `OPENAI_API_KEY`** (`codex login --api-key` writes only the key, and before this an
+    API-key managed account stayed pending forever on a Homebrew/npm Codex). The POSIX path names the
+    account with the usage reader's own parser (`codexAuthEmailFromText`, top-level `email` claim
+    only) so the account list and the usage popover never disagree, and reads a MANAGED home through
+    the no-follow descriptor (`readRegularFileNoFollow`). The account SWITCH legs in
     `src/main/codex-accounts.ts` still start the daemon and are untouched by this. **On Windows the
     Codex identity comes from that `auth.json`'s id_token JWT email (`readCodexAuthEmail` — a display
     label, unverified; the gate stays the real-file check), never the app-server**: `ws+unix` cannot

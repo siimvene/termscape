@@ -55,7 +55,7 @@ import { readCodexAccountAt, readCodexThreadAt } from './codex-session-name'
 import { directExecutableInvocation } from './exec-path'
 import { linkSharedEntry } from './shared-entry-link'
 import { readRegularFileNoFollow } from './read-regular-file'
-import { readCodexAuth } from './usage/codex-usage'
+import { codexAuthEmailFromText } from './usage/codex-usage'
 import { platform } from './platform'
 import { findInLoginPath } from './pty-manager'
 import { NEW_CODEX_ACCOUNT_LABEL, type CodexAccount } from '../shared/codex-account'
@@ -280,12 +280,25 @@ async function initializeAccountHome(id: string): Promise<string> {
 async function accountIdentity(accountId?: string): Promise<{ email: string | null } | null> {
   // No app-server on this host (Windows): `auth.json` is the ONLY reader, so it alone decides.
   if (!codexAppServerReachable(hostPlatform())) return authFileIdentity(accountId)
-  const auth = await readCodexAuth(
-    accountId ? localCodexAccountHome(accountId) : systemCodexHome()
-  )
+  // ONE read, ONE credential rule on every host (`codexAuthHasCredential`): a non-empty access token
+  // OR a non-empty OPENAI_API_KEY. Fork, closing two #21 review items: the POSIX path used to demand
+  // `tokens.access_token` alone, so an API-key login (`codex login --api-key`) never resolved and its
+  // row stayed pending forever on a Homebrew/npm Codex (no daemon to name it), while a whitespace-only
+  // token counted as a login. A MANAGED home is read through the no-follow descriptor, the same gate
+  // as its `existingManagedIdentity`/login-wait lstat, so a swap between that gate and this read
+  // cannot hand it a symlink into the system jar. The system home is read as before (following a
+  // dotfile symlink is the user's own setup there).
+  const home = accountId ? localCodexAccountHome(accountId) : systemCodexHome()
+  const text = accountId
+    ? await readRegularFileNoFollow(path.join(home, 'auth.json'))
+    : await fs.readFile(path.join(home, 'auth.json'), 'utf8').catch(() => null)
+  const hasCredential = text !== null && codexAuthHasCredential(text)
   // The email names the login only next to a credential: an id_token alone (a partial or malformed
   // write) is not a login Codex can run under.
-  if (auth.accessToken && auth.email) return { email: auth.email }
+  // Named by the usage reader's own parser (`codexAuthEmailFromText`): the account list and the usage
+  // popover must never disagree about who a home is.
+  const email = hasCredential ? codexAuthEmailFromText(text) : null
+  if (email) return { email }
   try {
     await ensureCodexAccountDaemon(accountId)
     const viaDaemon = await readCodexAccountAt(localCodexSocket(accountId), 5000)
@@ -293,7 +306,7 @@ async function accountIdentity(accountId?: string): Promise<{ email: string | nu
   } catch {
     // No daemon on this install — fall through to what auth.json alone can say.
   }
-  return auth.accessToken ? { email: null } : null
+  return hasCredential ? { email: null } : null
 }
 
 /**

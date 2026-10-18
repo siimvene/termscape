@@ -196,6 +196,32 @@ describe('registerCodexAccountsIpc — the Server Edition surface', () => {
       await expect(call(IPC.codexAccountsIdentity, id)).resolves.toBeNull()
     })
 
+    // Fork (#21 review): ONE credential rule on every host. An API-key login (`codex login --api-key`
+    // writes OPENAI_API_KEY, no tokens) used to stay pending forever here, and a whitespace token
+    // counted as a login.
+    it('an API-key login (OPENAI_API_KEY, no tokens) resolves; a blank key or token does not', async () => {
+      register({ pollMs: 5 })
+      const { id, home } = await call(IPC.codexAccountsAdd)
+      writeFileSync(path.join(home, 'auth.json'), JSON.stringify({ OPENAI_API_KEY: 'sk-test' }))
+      await expect(call(IPC.codexAccountsWaitLogin, id)).resolves.toEqual({ email: null })
+      writeFileSync(path.join(home, 'auth.json'), JSON.stringify({ OPENAI_API_KEY: '   ' }))
+      await expect(call(IPC.codexAccountsIdentity, id)).resolves.toBeNull()
+      writeFileSync(path.join(home, 'auth.json'), authJson({ access_token: '  ', id_token: jwt({ email: 'w@example.com' }) }))
+      await expect(call(IPC.codexAccountsIdentity, id)).resolves.toBeNull()
+    })
+
+    // The account list and the usage popover must name a home identically (one parser): the usage
+    // reader takes the id_token's top-level `email` claim only, so a profile-only claim names nobody.
+    it('names the account by the usage reader\'s parser (top-level email claim only)', async () => {
+      register()
+      const { id, home } = await call(IPC.codexAccountsAdd)
+      writeFileSync(
+        path.join(home, 'auth.json'),
+        authJson({ access_token: 'at', id_token: jwt({ 'https://api.openai.com/profile': { email: 'p@example.com' } }) })
+      )
+      await expect(call(IPC.codexAccountsIdentity, id)).resolves.toEqual({ email: null })
+    })
+
     it('systemIdentity reads the SYSTEM home auth.json instead of rejecting', async () => {
       register()
       writeFileSync(
