@@ -155,7 +155,8 @@ describe('Codex local account lifecycle (Task 5.1)', () => {
 describe('Codex identity on a host with no reachable app-server (Windows)', () => {
   const jwt = (email: string): string =>
     ['h', Buffer.from(JSON.stringify({ email })).toString('base64url'), 's'].join('.')
-  const authJson = (email: string): string => JSON.stringify({ tokens: { id_token: jwt(email) } })
+  const authJson = (email: string): string =>
+    JSON.stringify({ tokens: { id_token: jwt(email), access_token: 'at' } })
 
   beforeEach(async () => {
     const { setCodexAccountsHostPlatformForTests } = await import('./codex-accounts')
@@ -177,8 +178,23 @@ describe('Codex identity on a host with no reachable app-server (Windows)', () =
 
   it('a credential with no readable email still completes the login (email: null)', async () => {
     const { id, home } = (await call(IPC.codexAccountsAdd)) as { id: string; home: string }
-    writeFileSync(path.join(home, 'auth.json'), '{"tokens":{}}')
+    writeFileSync(path.join(home, 'auth.json'), '{"tokens":{"access_token":"at"}}')
     expect(await call(IPC.codexAccountsWaitLogin, id)).toEqual({ email: null })
+    // An API-key login is a credential too (no app-server here could name it instead).
+    writeFileSync(path.join(home, 'auth.json'), '{"OPENAI_API_KEY":"sk-test"}')
+    expect(await call(IPC.codexAccountsIdentity, id)).toEqual({ email: null })
+  })
+
+  // Fork contract: a token-bearing auth.json, as on POSIX. An empty / tokenless file (codex
+  // mid-write, a logout, a hand-made `{}`) or an id_token with no access token is NOT a login.
+  it('an empty or tokenless auth.json is NOT a login, however good its email', async () => {
+    const { id, home } = (await call(IPC.codexAccountsAdd)) as { id: string; home: string }
+    for (const body of ['', '{}', '{"tokens":{}}', '{"tokens":{"access_token":""}}', '{"tok',
+      JSON.stringify({ tokens: { id_token: jwt('x@example.com') } })]) {
+      writeFileSync(path.join(home, 'auth.json'), body)
+      expect(await call(IPC.codexAccountsIdentity, id), body).toBeNull()
+    }
+    expect(readAccount).not.toHaveBeenCalled()
   })
 
   it.skipIf(process.platform === 'win32')('still REFUSES a symlinked auth.json', async () => {
@@ -214,7 +230,9 @@ describe('Codex identity on a host with no reachable app-server (Windows)', () =
     const { setCodexAccountsHostPlatformForTests } = await import('./codex-accounts')
     setCodexAccountsHostPlatformForTests('linux')
     const { id, home } = (await call(IPC.codexAccountsAdd)) as { id: string; home: string }
-    writeFileSync(path.join(home, 'auth.json'), authJson('jwt@example.com'))
+    // An id_token with no access token: the POSIX path's own read declines it, so the app-server
+    // answers (on Windows the same file is not a login at all, see above).
+    writeFileSync(path.join(home, 'auth.json'), JSON.stringify({ tokens: { id_token: jwt('jwt@example.com') } }))
     expect(await call(IPC.codexAccountsWaitLogin, id)).toEqual({ email: 'me@example.com' })
     expect(readAccount).toHaveBeenCalled()
   })

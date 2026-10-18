@@ -108,10 +108,10 @@ Coalesce renderer updates before building the workspace map, without resetting t
 Intermediate publications retain resolved transcript paths only for unchanged identities; changing
 a session/account/location/hook path or removing the target invalidates that cache immediately.
 
-Windows updates (unsigned beta): `release-win` builds `dist:win:release` (`nodeTermUpdates=manual`)
-and uploads `latest.yml`, so the app shows a passive "new version — Download" card; it never
-downloads or installs, and main refuses restart-to-update for any non-self-installing build.
-Keep local `dist:win` on `disabled`, and never upload Windows `*.blockmap`s until signing lands.
+Windows releases (unsigned beta, Termscape fork): `release-win` builds `dist:win:release`
+(`nodeTermUpdates=disabled`, `publish: null`, so no `latest.yml` and no update feed) and uploads
+only `Termscape-Setup-<version>.exe` + `Termscape-*-win.zip`; main refuses restart-to-update for
+any non-self-installing build. Never upload Windows `*.blockmap`s until signing lands.
 
 Updater UX: an update-check button must call `checkForUpdatesNow()` (`state/pendingUpdate.ts`) —
 the card treats every other check as automatic and silent. Never flip quitting flags before

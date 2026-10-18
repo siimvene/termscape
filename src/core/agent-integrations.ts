@@ -36,12 +36,13 @@ import { ensureCodexHooksCurrent, ensureCodexHooksForAccounts } from './agents/h
 import { copilotHomeDir } from './agents/hooks/copilot'
 import { managedHookScriptPath } from './agents/hooks/install-helper'
 import { opencodeConfigDir } from './agents/hooks/opencode'
-import { piAgentDir } from './agents/hooks/pi'
+import { installPiExtensionInto, piAgentDir, removePiExtensionFrom } from './agents/hooks/pi'
 import { grokHomeDir } from './agents/grok-paths'
 import { buildCanvasSkillBody } from './canvas-control-core'
 import { buildContextLinkSkillBody } from './context-link-core'
 import { claudeConfigDirFor } from './claude-config-dir'
 import { codexHomeForAccount, systemCodexHome } from './codex-accounts-core'
+import { piAccountDirFor } from './pi-config-dir'
 import { applySkillShare } from './claude-skill-share'
 import {
   ReceiptStore,
@@ -204,13 +205,37 @@ export function skillRootsFor(
     case 'cursor':
       return [path.join(home, '.cursor', 'skills')]
     // Fork (Termscape): pi discovers skills only from `<agentDir>/skills` (MEASURED on 0.84.1, see
-    // hooks/pi-skills.ts), never `~/.claude/skills`, so the system agent dir is its own root. Managed
-    // pi accounts (each its own PI_CODING_AGENT_DIR) are installed by the shells' per-account loop.
+    // hooks/pi-skills.ts), never `~/.claude/skills`, so the system agent dir is its own root, and so
+    // is every managed pi account dir (each its own PI_CODING_AGENT_DIR) — under the SAME consent,
+    // exactly like the Claude/Codex account roots above.
     case 'pi':
-      return [path.join(piAgentDir(), 'skills')]
+      return [...new Set([piAgentDir(), ...localPiAccountDirs(settings, userDataDir)])].map((d) =>
+        path.join(d, 'skills')
+      )
     default:
       return []
   }
+}
+
+/**
+ * Fork (Termscape): the managed pi account dirs (`<userData>/pi-accounts/<id>`) that EXIST on this
+ * machine. A missing one is skipped, never recreated: the skill and extension writers `mkdir -p`
+ * their parents, which would resurrect a deleted account as an empty logged-out dir and hide the
+ * spawn's honest missing-dir fallback. A hand-edited id outside the alphabet is skipped. Pending
+ * rows are included: their dir was minted by `add` and the login session itself runs pi in it.
+ */
+export function localPiAccountDirs(settings: Settings, userDataDir: string): string[] {
+  const dirs: string[] = []
+  for (const a of settings.piAccounts ?? []) {
+    let dir: string
+    try {
+      dir = piAccountDirFor(userDataDir, a.id)
+    } catch {
+      continue
+    }
+    if (existsSync(dir)) dirs.push(dir)
+  }
+  return dirs
 }
 
 /**
@@ -270,6 +295,10 @@ export interface IntegrationLifecycle {
    *  (it never rejects). Fork: the account `add` verb AWAITS it before persisting the row, so its
    *  rollback `rm` is the last writer to touch the dir (the TUI writer recreates a missing parent). */
   installIntoClaudeAccount(configDir: string): Promise<void>
+  /** Fork (Termscape): for a managed pi account dir just added — the status extension and pi's
+   *  skills, only when pi is enabled and never under the veto (the twin of
+   *  `installIntoClaudeAccount`). Synchronous; never throws. */
+  installIntoPiAccount(agentDir: string): void
   /** Right before a LOCAL Codex session spawns under `codexHome`: repair its hook install if it
    *  drifted — only when codex is enabled (never for a declined or undecided agent, never under the
    *  veto). Never throws. */
@@ -283,7 +312,8 @@ export interface IntegrationLifecycle {
 function accountSignature(s: Settings): string {
   const c = (s.claudeAccounts ?? []).filter((a) => !a.host && !a.pending).map((a) => a.id)
   const x = (s.codexAccounts ?? []).filter((a) => !a.host && !a.pending).map((a) => a.id)
-  return `${c.join(',')}|${x.join(',')}`
+  const p = (s.piAccounts ?? []).map((a) => a.id)
+  return `${c.join(',')}|${x.join(',')}|${p.join(',')}`
 }
 
 export function createIntegrationLifecycle(deps: IntegrationLifecycleDeps): IntegrationLifecycle {
@@ -360,6 +390,19 @@ export function createIntegrationLifecycle(deps: IntegrationLifecycleDeps): Inte
         )
       } catch (e) {
         console.warn('[integrations] codex account hook check failed', e)
+      }
+    }
+    // Fork (Termscape): managed pi accounts — each existing local dir is its own PI_CODING_AGENT_DIR,
+    // where pi loads extensions (and skills, via `skillRootsFor('pi')` below). Enabled: plant the
+    // status extension; declined: remove it (marker-gated, so a user's own file of that name stays).
+    if (enabled.includes('pi') || declined.includes('pi')) {
+      for (const dir of localPiAccountDirs(settings, deps.userDataDir())) {
+        try {
+          if (enabled.includes('pi')) installPiExtensionInto(dir)
+          else removePiExtensionFrom(dir)
+        } catch (e) {
+          console.warn(`[integrations] pi account ${dir} failed`, e)
+        }
       }
     }
     // A $CLAUDE_CONFIG_DIR that moved the system dir leaves the legacy ~/.claude behind.
@@ -446,6 +489,18 @@ export function createIntegrationLifecycle(deps: IntegrationLifecycleDeps): Inte
         console.warn('[integrations] account install failed', configDir, e)
       }
       return tui
+    },
+    installIntoPiAccount(agentDir) {
+      if (deps.veto) return
+      if (integrationsOf(deps.settings()).agents?.pi !== 'enabled') return
+      try {
+        installPiExtensionInto(agentDir)
+        for (const [name, body] of skillsFor('pi', deps.shims())) {
+          writeOwnedFile(receipts, path.join(agentDir, 'skills', name, 'SKILL.md'), body)
+        }
+      } catch (e) {
+        console.warn('[integrations] pi account install failed', agentDir, e)
+      }
     },
     ensureCodexHooksForLaunch(codexHome) {
       if (deps.veto) return

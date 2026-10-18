@@ -25,7 +25,6 @@ import { findInLoginPath } from './exec-path'
 import { isSafeOpencodeSessionId, runOpencodeExportAt } from './opencode-export'
 import { TMUX_SOCKET } from './tmux-naming'
 import {
-  buildContextLinkSkillBody,
   buildContextShimScript,
   buildLinkDoc,
   resolveLinkTranscript,
@@ -43,8 +42,6 @@ import {
 import { hookServer } from './agents/hook-server'
 import { locateClaude, locateCodex, locateGemini, locateGrok, locatePi } from './handoff/locate'
 import { cursorTranscriptText, locateCursorChat } from './cursor-chat'
-import { piSkillPathIn } from './agents/hooks/pi-skills'
-import { shimDialectFor } from '../shared/agents/shim-invocation'
 
 export { setNodeTranscript } from './context-link-core'
 
@@ -75,25 +72,6 @@ function writeCliFiles(): void {
     fs.rmSync(path.join(d, 'context-cli.mjs'), { force: true })
   } catch {
     /* fail open */
-  }
-}
-
-/**
- * Fork (Termscape): the get-linked-context skill for a MANAGED pi account's agent dir. pi is
- * CONTEXT_LINK_CAPABLE but discovers skills only from `<agentDir>/skills` and `~/.agents/skills`, never
- * `~/.claude/skills` (MEASURED on 0.84.1), so each managed account (its own PI_CODING_AGENT_DIR) needs
- * its own copy. The SYSTEM pi dir is the consent lifecycle's (`skillRootsFor('pi')` in
- * core/agent-integrations.ts); the shells' per-account loop calls this only while pi's integration is
- * enabled. Same builder and dialect as the lifecycle's `skillsFor`, so the two can never describe
- * different verbs. Best-effort.
- */
-export function installPiLinkSkillInto(agentDir: string): void {
-  const p = piSkillPathIn(agentDir, 'get-linked-context')
-  try {
-    fs.mkdirSync(path.dirname(p), { recursive: true })
-    fs.writeFileSync(p, buildContextLinkSkillBody(cliShimPath(), shimDialectFor('pi', process.platform)), 'utf8')
-  } catch (e) {
-    console.warn('[context-link] pi skill install failed', p, e)
   }
 }
 

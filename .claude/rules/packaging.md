@@ -55,23 +55,16 @@ Squirrel was not adopted. Builds are **unsigned** (no Windows cert; electron-bui
 signing when no cert env is present; SmartScreen warns on install). Release wiring is
 `release.yml`'s `release-win` job: on every version tag it uploads the NSIS installer + zip as
 GitHub Release assets — **best-effort by design** (the `publish` promote gate does not wait on
-it, so a Windows failure never strands the mac+linux release) and with a **passive notice feed
-only**: it builds `dist:win:release`, which stamps `nodeTermUpdates=manual` →
-`updateDelivery` = `manual-install` (the marker wins over the platform), and uploads `latest.yml`
-beside the installer + zip. The app checks the feed and shows the same "vX is available —
-Download" card a Linux .deb gets; it never downloads, never installs on quit, and main refuses
-`appRestartToUpdate` for any build that is not `self-install`/`dev` (`mayQuitAndInstall`), so
-`quitAndInstall` cannot run on the unsigned beta whatever the renderer sends. A failed
-AUTOMATIC check on that marker build is not carded (offline, or a mirror that does not
-serve `latest.yml` yet, must not raise an error card on every launch) but is recorded
-(`lastUpdateCheck`) and logged as one warning that names a 404 on `latest*.yml` as the mirror
-missing the file (`describeCheckFailure`); a user-initiated check still reports its failure. Local `dist:win`
-keeps `disabled` (never polls). Do not add `*.blockmap` (or a broad `*.yml`) to that job's
-upload globs — differential downloads are the self-install leg, and it waits on signing; guarded
-by `src/main/release-win-workflow.test.ts`. The nodeterm.dev/updates mirror serving `latest.yml`
-lives outside this repo; `release.yml`'s `verify-feed` job (after the promote, never a gate) curls
-each `latest*.yml` there and compares `version:` to the tag — mac/linux are errors, `latest.yml` a
-warning until the mirror is confirmed to serve it. `bootstrap-windows.bat` (repo root) takes a fresh Windows
+it, so a Windows failure never strands the mac+linux release). **Termscape fork: no update feed.**
+It builds `dist:win:release`, which here stamps `nodeTermUpdates=disabled` with `publish: null`
+(the app never polls), so electron-builder writes no `latest.yml` and the job neither requires nor
+uploads one; the assets are named by productName Termscape (`Termscape-Setup-<version>.exe`,
+`Termscape-*-win.zip`, the nsis `${productName}-Setup-${version}` artifactName). Upstream's
+passive notice feed (`nodeTermUpdates=manual` + `latest.yml` on its nodeterm.dev mirror, checked
+by a `verify-feed` job) is removed in the fork. Main still refuses `appRestartToUpdate` for any
+build that is not `self-install`/`dev` (`mayQuitAndInstall`). Do not add `*.blockmap` (or a
+broad `*.yml`) to that job's upload globs; guarded by `src/main/release-win-workflow.test.ts`,
+which also pins the Termscape names and the absence of `latest.yml` and of any feed check. `bootstrap-windows.bat` (repo root) takes a fresh Windows
 machine to a built checkout: it verifies Node ≥ 20 / VS Build Tools C++ / Python 3 with exact
 winget hints (it never installs machine-wide tools itself, and the full bootstrap refuses to run
 elevated) and runs `npm ci`. Its `--check-vs-build-tools` mode is the narrow exception used by

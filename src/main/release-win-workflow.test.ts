@@ -3,11 +3,14 @@ import fs from 'fs'
 import path from 'path'
 
 /**
- * Release guard for the unsigned Windows beta's update notice. `release-win` must build with the
- * `manual` marker (`dist:win:release`) and upload `latest.yml` — without it the shipped app can
- * never learn a new version exists — and must NOT upload blockmaps: differential downloads belong
- * to the self-install story that waits on code signing. Text-level, like the job's own
- * artifact-contract step; no YAML parser needed for a job block this regular.
+ * Release guard for the unsigned Windows beta, in the TERMSCAPE FORK's shape. `dist:win:release`
+ * packages productName Termscape (nsis `${productName}-Setup-${version}`) with `publish: null` and
+ * `nodeTermUpdates=disabled`, so it writes no `latest.yml`: `release-win` must check and upload the
+ * Termscape-named installer + zip, and must neither require nor upload a feed file (upstream's job
+ * failed on the missing `latest.yml` and globbed `nodeterm-*` names this build never produces). No
+ * blockmaps either: differential downloads belong to the self-install story that waits on code
+ * signing. Text-level, like the job's own artifact-contract step; no YAML parser needed for a job
+ * block this regular.
  */
 const WORKFLOW = path.resolve(__dirname, '../../.github/workflows/release.yml')
 
@@ -32,21 +35,32 @@ describe('release.yml release-win', () => {
   const text = fs.readFileSync(WORKFLOW, 'utf8')
   const job = commands(jobBlock(text, 'release-win'))
 
-  it('builds the manual-marker package, not the local never-polling one', () => {
+  const pkg = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../../package.json'), 'utf8').replace(/\r\n/g, '\n')) as {
+    scripts: Record<string, string>
+    build: { productName: string; publish: unknown; nsis: { artifactName: string } }
+  }
+
+  it('builds the release package, which stamps no feed and publishes nowhere', () => {
     expect(job).toMatch(/run: npm run dist:win:release\s*\n/)
-    expect(job).not.toMatch(/run: npm run dist:win\s*\n/)
+    expect(pkg.scripts['dist:win:release']).toContain('nodeTermUpdates=disabled')
+    expect(pkg.scripts['dist:win:release']).toContain('--publish never')
+    expect(pkg.build.publish).toBeNull()
   })
 
-  it('fails the job when latest.yml was not produced', () => {
-    expect(job).toContain('test -f dist/latest.yml')
-  })
-
-  it('uploads latest.yml beside the installer and zip', () => {
+  it('checks and uploads the Termscape-named installer + zip the build actually produces', () => {
+    expect(pkg.build.productName).toBe('Termscape')
+    expect(pkg.build.nsis.artifactName).toBe('${productName}-Setup-${version}.${ext}')
+    expect(job).toContain('test -f "dist/Termscape-Setup-${version}.exe"')
+    expect(job).toContain('ls dist/Termscape-*-win.zip')
     const upload = job.split('\n').find((l) => l.includes('gh release upload'))
     expect(upload).toBeDefined()
-    expect(upload).toContain('dist/nodeterm-Setup-*.exe')
-    expect(upload).toContain('dist/nodeterm-*-win.zip')
-    expect(upload).toContain('dist/latest.yml')
+    expect(upload).toContain('dist/Termscape-Setup-*.exe')
+    expect(upload).toContain('dist/Termscape-*-win.zip')
+    expect(job).not.toContain('dist/nodeterm-')
+  })
+
+  it('neither requires nor uploads latest.yml (the fork has no update feed)', () => {
+    expect(job).not.toContain('latest.yml')
   })
 
   it('uploads no blockmap and no broad yml glob', () => {

@@ -155,6 +155,24 @@ export function readCodexAuthEmail(authJson: string): string | null {
   }
 }
 
+/**
+ * Does a Codex `auth.json` carry a credential Codex can run under? A non-empty `tokens.access_token`
+ * (the ChatGPT login — the same field the POSIX identity path and the usage reader gate on), or a
+ * non-empty `OPENAI_API_KEY` (an API-key login, which no app-server can name where there is none to
+ * ask). An empty `{}`, a `{"tokens":{}}`, a lone id_token or a torn write is NOT a login. Never
+ * throws; anything unparseable is false.
+ */
+export function codexAuthHasCredential(authJson: string): boolean {
+  try {
+    const j = JSON.parse(authJson) as { tokens?: { access_token?: unknown } | null; OPENAI_API_KEY?: unknown } | null
+    if (!j || typeof j !== 'object') return false
+    const nonEmpty = (v: unknown): boolean => typeof v === 'string' && v.trim().length > 0
+    return nonEmpty(j.tokens?.access_token) || nonEmpty(j.OPENAI_API_KEY)
+  } catch {
+    return false
+  }
+}
+
 /** System vs managed is presence/absence of an id: no id ⇒ `~/.codex`; a valid id ⇒ its short home. */
 export function codexHomeForAccount(userDataDir: string, accountId?: string): string {
   return accountId ? codexAccountHome(userDataDir, accountId) : systemCodexHome()

@@ -26,6 +26,8 @@ import { MAX_RETAINED } from './integration-files'
 import { registerClaudeAccountsSource, resetClaudeAccountsSourceForTests } from './claude-config-dir'
 import { accountConfigDir } from './claude-accounts-core'
 import { codexAccountHome } from './codex-accounts-core'
+import { piAccountDirFor } from './pi-config-dir'
+import { PI_EXTENSION_MARKER, piExtensionPath } from './agents/hooks/pi'
 import type { ClaudeAccount } from '../shared/types'
 
 const ENV_KEYS = ['HOME', 'USERPROFILE', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'GROK_HOME', 'COPILOT_HOME', 'XDG_CONFIG_HOME', 'GEMINI_CLI_HOME', 'PI_CODING_AGENT_DIR']
@@ -286,6 +288,68 @@ describe('decline: remove exactly what we wrote', () => {
     lc.onSettingsChanged(settings)
     expect(existsSync(path.join(skills, CANVAS_SKILL, 'SKILL.md'))).toBe(false)
     expect(existsSync(path.join(skills, CONTEXT_SKILL, 'SKILL.md'))).toBe(false)
+  })
+
+  // Fork (Termscape): every managed pi account dir is its own PI_CODING_AGENT_DIR, so it is held to
+  // the SAME consent as the system dir: enabled → extension + both skills; declined → exactly what
+  // we wrote is removed, a user's own extension, an edited skill and every other file stay.
+  it('pi accounts: every existing account dir follows pi consent; a decline removes exactly ours', () => {
+    const live = piAccountDirFor(userData, 'pi-live')
+    const gone = piAccountDirFor(userData, 'pi-gone')
+    const mine = piAccountDirFor(userData, 'pi-mine')
+    mkdirSync(live, { recursive: true })
+    put(piExtensionPath(mine), '// my own pi extension\n')
+    put(path.join(live, 'auth.json'), '{"anthropic":{}}')
+    put(path.join(live, 'skills', 'my-skill', 'SKILL.md'), 'mine\n')
+    const piAccounts = ['pi-live', 'pi-gone', 'pi-mine', '../escape'].map((id) => ({ id, label: 'x', createdAt: 0 }))
+    let settings = withAgents({ pi: 'enabled' }, { piAccounts } as Partial<Settings>)
+    const { lc } = lifecycle(() => settings)
+    lc.reconcile()
+    for (const dir of [live, mine]) {
+      expect(read(path.join(dir, 'skills', CANVAS_SKILL, 'SKILL.md'))).toBe(buildCanvasSkillBody(SHIMS().canvas))
+      expect(read(path.join(dir, 'skills', CONTEXT_SKILL, 'SKILL.md'))).toBe(buildContextLinkSkillBody(SHIMS().context))
+    }
+    expect(read(piExtensionPath(live)).startsWith(PI_EXTENSION_MARKER)).toBe(true)
+    expect(read(piExtensionPath(mine))).toBe('// my own pi extension\n') // marker-gated, never ours
+    expect(existsSync(gone)).toBe(false) // a deleted account is never resurrected
+    expect(existsSync(path.join(userData, 'escape'))).toBe(false)
+
+    const edited = path.join(mine, 'skills', CONTEXT_SKILL, 'SKILL.md')
+    writeFileSync(edited, 'my edit\n')
+    settings = withAgents({ pi: 'declined' }, { piAccounts } as Partial<Settings>)
+    lc.onSettingsChanged(settings)
+    expect(existsSync(piExtensionPath(live))).toBe(false)
+    expect(existsSync(path.join(live, 'skills', CANVAS_SKILL))).toBe(false)
+    expect(existsSync(path.join(live, 'skills', CONTEXT_SKILL))).toBe(false)
+    expect(existsSync(path.join(mine, 'skills', CANVAS_SKILL))).toBe(false)
+    expect(read(piExtensionPath(mine))).toBe('// my own pi extension\n')
+    expect(read(edited)).toBe('my edit\n')
+    expect(lc.lastReport()?.retained).toEqual([edited])
+    // The account itself and the user's own files are untouched.
+    expect(read(path.join(live, 'auth.json'))).toBe('{"anthropic":{}}')
+    expect(read(path.join(live, 'skills', 'my-skill', 'SKILL.md'))).toBe('mine\n')
+    expect(existsSync(gone)).toBe(false)
+  })
+
+  it('pi accounts: an undecided pi, or the veto, writes nothing into an account dir', () => {
+    const dir = piAccountDirFor(userData, 'pi-1')
+    mkdirSync(dir, { recursive: true })
+    const piAccounts = [{ id: 'pi-1', label: 'x', createdAt: 0 }]
+    lifecycle(() => withAgents({ claude: 'enabled' }, { piAccounts } as Partial<Settings>)).lc.reconcile()
+    lifecycle(() => withAgents({ pi: 'enabled' }, { piAccounts } as Partial<Settings>), { veto: true }).lc.reconcile()
+    expect(readdirSync(dir)).toEqual([])
+  })
+
+  it('pi accounts: adding an account re-runs reconcile (the account list is part of the signature)', () => {
+    const dir = piAccountDirFor(userData, 'pi-new')
+    let settings = withAgents({ pi: 'enabled' })
+    const { lc } = lifecycle(() => settings)
+    lc.reconcile()
+    mkdirSync(dir, { recursive: true })
+    settings = withAgents({ pi: 'enabled' }, { piAccounts: [{ id: 'pi-new', label: 'x', createdAt: 0 }] } as Partial<Settings>)
+    lc.onSettingsChanged(settings)
+    expect(existsSync(piExtensionPath(dir))).toBe(true)
+    expect(existsSync(path.join(dir, 'skills', CONTEXT_SKILL, 'SKILL.md'))).toBe(true)
   })
 
   it('never overwrites a skill the user edited while still enabled', () => {

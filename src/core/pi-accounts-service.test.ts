@@ -14,13 +14,10 @@ import path from 'path'
 import { initPlatform, resetPlatformForTests } from './platform'
 import { fakePlatform, type FakePlatform } from './platform-fake'
 import { IPC } from '../shared/ipc'
-import {
-  registerPiAccountsIpc as registerWithDeps,
-  installPiExtensionIntoLocalAccounts,
-  type PiAccountsDeps
-} from './pi-accounts-service'
+import { registerPiAccountsIpc as registerWithDeps, type PiAccountsDeps } from './pi-accounts-service'
 import { piAccountDirFor } from './pi-config-dir'
 import { piExtensionPath, PI_EXTENSION_MARKER } from './agents/hooks/pi'
+import { createIntegrationLifecycle, registerIntegrationLifecycle } from './agent-integrations'
 import { SettingsStore } from './settings-store'
 import { NEW_PI_ACCOUNT_LABEL, type PiAccount } from '../shared/pi-account'
 import type { Settings } from '../shared/types'
@@ -46,9 +43,30 @@ beforeEach(() => {
   settings.init()
 })
 afterEach(() => {
+  registerIntegrationLifecycle(null)
   resetPlatformForTests()
   rmSync(userDataDir, { recursive: true, force: true })
 })
+
+/** Register the consent lifecycle the shells boot, with pi's choice (and the Server Edition's
+ *  `installHooks: false` veto) as given. `add` asks it, exactly like a Claude account's add. */
+function consent(pi: 'enabled' | 'declined' | undefined, opts: { veto?: boolean; canvas?: boolean } = {}): void {
+  registerIntegrationLifecycle(
+    createIntegrationLifecycle({
+      settings: () => ({
+        ...settings.get(),
+        agentIntegrations: { agents: pi ? { pi } : {}, origin: 'asked' }
+      }),
+      userDataDir: () => userDataDir,
+      shims: () => ({
+        canvas: opts.canvas === false ? undefined : path.join(userDataDir, 'canvas-control', 'nodeterm.sh'),
+        context: path.join(userDataDir, 'context-links', 'context.sh')
+      }),
+      veto: opts.veto
+    })
+  )
+}
+const skillFile = (dir: string, name: string): string => path.join(dir, 'skills', name, 'SKILL.md')
 
 describe('registerPiAccountsIpc — the four channels', () => {
   it('registers exactly the four pi-accounts channels', () => {
@@ -63,9 +81,9 @@ describe('registerPiAccountsIpc — the four channels', () => {
     )
   })
 
-  it('add() mints <userData>/pi-accounts/<id> (0700) with the status extension, and returns it', async () => {
-    const skilled: string[] = []
-    register({ installSkill: (d) => skilled.push(d) })
+  it('add() mints <userData>/pi-accounts/<id> (0700); with pi ENABLED it carries the extension + both skills', async () => {
+    consent('enabled')
+    register()
     const res = await call(IPC.piAccountsAdd)
     expect(res.id).toMatch(/^[A-Za-z0-9-]+$/)
     expect(res.agentDir).toBe(path.join(userDataDir, 'pi-accounts', res.id))
@@ -74,18 +92,36 @@ describe('registerPiAccountsIpc — the four channels', () => {
     if (process.platform !== 'win32') expect(statSync(res.agentDir).mode & 0o777).toBe(0o700)
     const ext = readFileSync(piExtensionPath(res.agentDir), 'utf8')
     expect(ext.startsWith(PI_EXTENSION_MARKER)).toBe(true)
-    expect(skilled).toEqual([res.agentDir])
+    expect(readFileSync(skillFile(res.agentDir, 'manage-nodeterm-canvas'), 'utf8')).toContain('name: manage-nodeterm-canvas')
+    expect(readFileSync(skillFile(res.agentDir, 'get-linked-context'), 'utf8')).toContain('name: get-linked-context')
   })
 
-  it('a throwing per-account extra never fails the add (fail-open, logged)', async () => {
-    register({
-      installSkill: () => {
-        throw new Error('skill write failed')
-      }
-    })
+  it('without pi consent the account is still minted, but NOTHING of ours goes into it', async () => {
+    // Undecided, declined, no lifecycle registered (fail-closed), and the Server Edition veto
+    // (`installHooks: false`) even with pi enabled — upstream #744, the Claude add's gate.
+    const cases: Array<() => void> = [
+      () => consent(undefined),
+      () => consent('declined'),
+      () => registerIntegrationLifecycle(null),
+      () => consent('enabled', { veto: true })
+    ]
+    register()
+    for (const arrange of cases) {
+      arrange()
+      const res = await call(IPC.piAccountsAdd)
+      expect(statSync(res.agentDir).isDirectory()).toBe(true)
+      expect(rows()).toContain(res.id)
+      expect(existsSync(path.join(res.agentDir, 'extensions'))).toBe(false)
+      expect(existsSync(path.join(res.agentDir, 'skills'))).toBe(false)
+    }
+  })
+
+  it('no canvas control on this edition: an enabled pi account gets the context skill only', async () => {
+    consent('enabled', { canvas: false })
+    register()
     const res = await call(IPC.piAccountsAdd)
-    expect(existsSync(res.agentDir)).toBe(true)
-    expect(rows()).toEqual([res.id])
+    expect(existsSync(skillFile(res.agentDir, 'get-linked-context'))).toBe(true)
+    expect(existsSync(skillFile(res.agentDir, 'manage-nodeterm-canvas'))).toBe(false)
   })
 
   it('a traversing id is refused on every verb that takes one, not resolved outside the root', async () => {
@@ -211,6 +247,7 @@ describe('pi-accounts — the shell owns row membership', () => {
   })
 
   it('add tears the minted dir down again when the row cannot be persisted (no orphan, no row)', async () => {
+    consent('enabled') // so the extension leg runs, and must land before the row
     let minted: string | undefined
     const failing = {
       get: () => settings.get(),
@@ -282,40 +319,5 @@ describe('pi-accounts — the shell owns row membership', () => {
     mkdirSync(sibling, { recursive: true })
     await call(IPC.piAccountsRemove, 'same-id')
     expect(existsSync(sibling)).toBe(true)
-  })
-})
-
-describe('installPiExtensionIntoLocalAccounts (the launch-time loop both shells run)', () => {
-  it('installs into every existing account dir and skips (never recreates) a deleted one', () => {
-    const live = piAccountDirFor(userDataDir, 'live-1')
-    mkdirSync(live, { recursive: true })
-    const gone = piAccountDirFor(userDataDir, 'gone-1')
-    const extra: string[] = []
-    installPiExtensionIntoLocalAccounts([{ id: 'live-1' }, { id: 'gone-1' }], (d) => extra.push(d))
-    expect(readFileSync(piExtensionPath(live), 'utf8').startsWith(PI_EXTENSION_MARKER)).toBe(true)
-    expect(existsSync(gone)).toBe(false)
-    expect(extra).toEqual([live])
-  })
-
-  it('an invalid (hand-edited) id and a failing account never stop the rest', () => {
-    const ok = piAccountDirFor(userDataDir, 'ok-1')
-    mkdirSync(ok, { recursive: true })
-    const bad = piAccountDirFor(userDataDir, 'bad-1')
-    mkdirSync(bad, { recursive: true })
-    // A FILE where the extensions dir should be makes the real installer throw for this account.
-    writeFileSync(path.join(bad, 'extensions'), 'not a dir')
-    expect(() =>
-      installPiExtensionIntoLocalAccounts([{ id: '../escape' }, { id: 'bad-1' }, { id: 'ok-1' }])
-    ).not.toThrow()
-    expect(existsSync(piExtensionPath(ok))).toBe(true)
-    expect(existsSync(path.join(userDataDir, 'escape'))).toBe(false)
-  })
-
-  it('leaves a user-owned file of the same name alone (marker-gated)', () => {
-    const dir = piAccountDirFor(userDataDir, 'mine-1')
-    mkdirSync(path.join(dir, 'extensions'), { recursive: true })
-    writeFileSync(piExtensionPath(dir), '// my own extension\n')
-    installPiExtensionIntoLocalAccounts([{ id: 'mine-1' }])
-    expect(readFileSync(piExtensionPath(dir), 'utf8')).toBe('// my own extension\n')
   })
 })

@@ -28,10 +28,8 @@ import {
   nodeState
 } from '../core/agent-status-mirror'
 import type { BoardLogHandlers } from '../core/board-log-handlers'
-import { buildCanvasSkillBody, buildControlShimScript } from '../core/canvas-control-core'
+import { buildControlShimScript } from '../core/canvas-control-core'
 import { syncWindowsShLauncher } from '../core/agents/hooks/install-helper'
-import { installPiCanvasSkillsInto } from '../core/agents/hooks/pi-skills'
-import { shimDialectFor } from '../shared/agents/shim-invocation'
 import { codexIdentityCaps } from '../core/codex-identity-caps'
 import { codexThreadIdentityRoot } from '../core/codex-identity-proxy'
 import { claudeCliCaps, type ClaudeCliCaps } from '../core/claude-cli'
@@ -102,18 +100,6 @@ function canvasControlDir(): string {
 
 function shimPath(): string {
   return path.join(canvasControlDir(), 'nodeterm.sh')
-}
-
-/**
- * Fork (Termscape): the per-account pi leg for THIS shell, the twin of `installPiCanvasSkillInto` in
- * main/canvas-control.ts. A managed pi account is its own agent dir and pi discovers skills only from
- * `<agentDir>/skills`, so each account needs its own copy. The system dir is the consent lifecycle's
- * (`skillRootsFor('pi')`); server/index.ts runs the per-account loop only while pi's integration is
- * enabled and canvas control is on. Same builder, shim and dialect as the lifecycle's `skillsFor`, so
- * an account can never carry different verbs. Best-effort.
- */
-export function installServerPiCanvasSkillInto(agentDir: string): void {
-  installPiCanvasSkillsInto(agentDir, buildCanvasSkillBody(shimPath(), shimDialectFor('pi', process.platform)))
 }
 
 function writeShim(): void {

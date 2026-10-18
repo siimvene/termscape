@@ -144,41 +144,54 @@ describe.skipIf(process.platform === 'win32')('RemoteHooks.applyIntegrationRemov
     expect(has('.agents/skills/manage-nodeterm-canvas')).toBe(false)
   })
 
-  it('pi (fork): extension + canvas skill only when the plan installs pi; a decline removes exactly ours', async () => {
+  it('pi (fork): extension + both skills only when the plan installs pi; a decline removes exactly ours', async () => {
     const ext = '.pi/agent/extensions/nodeterm-status.js'
     const skill = '.pi/agent/skills/manage-nodeterm-canvas/SKILL.md'
+    const linkSkill = '.pi/agent/skills/get-linked-context/SKILL.md'
     // A plan without pi writes nothing of pi's.
     const off = new RemoteHooks(hostRunner(), () => plan(['claude'], []))
     await off.installAgentHooks(conn, '/fixture.sock', home)
     await off.installAgentTools(conn, '/fixture.sock', home)
     expect(has(ext)).toBe(false)
     expect(has(skill)).toBe(false)
+    expect(has(linkSkill)).toBe(false)
+    rmSync(path.join(home, '.nodeterm'), { recursive: true, force: true })
 
+    // A pi-ONLY host: no shared skills root applies, yet pi is context-link capable, so it gets the
+    // context shim and get-linked-context in its own agent dir, beside the canvas skill.
     const on = new RemoteHooks(hostRunner(), () => plan(['pi'], []))
     await on.installAgentHooks(conn, '/fixture.sock', home)
     await on.installAgentTools(conn, '/fixture.sock', home)
     expect(read(ext)).toContain('nodeterm managed pi extension')
     expect(read(skill)).toContain('name: manage-nodeterm-canvas')
+    expect(read(linkSkill)).toContain('name: get-linked-context')
+    expect(read(linkSkill)).toContain(path.join(home, '.nodeterm/context.sh'))
+    expect(has('.nodeterm/context.sh')).toBe(true)
+    expect(has('.agents/skills')).toBe(false)
 
     const { retained } = await new RemoteHooks(hostRunner(), () => plan([], ['pi'])).applyIntegrationRemovals(conn, '/fixture.sock', home, [])
     expect(has(ext)).toBe(false)
     expect(has(skill)).toBe(false)
+    expect(has(linkSkill)).toBe(false)
     expect(retained).toEqual([])
   })
 
   it("pi (fork): a decline keeps a user's own extension of the same name and an edited skill", async () => {
     const ext = '.pi/agent/extensions/nodeterm-status.js'
     const skill = '.pi/agent/skills/manage-nodeterm-canvas/SKILL.md'
+    const linkSkill = '.pi/agent/skills/get-linked-context/SKILL.md'
     const on = new RemoteHooks(hostRunner(), () => plan(['pi'], []))
     await on.installAgentTools(conn, '/fixture.sock', home)
     writeFileSync(path.join(home, skill), `${read(skill)}\nmy note\n`)
+    writeFileSync(path.join(home, linkSkill), `${read(linkSkill)}\nmy note\n`)
     mkdirSync(path.join(home, path.dirname(ext)), { recursive: true })
     writeFileSync(path.join(home, ext), '// my own pi extension\nexport default () => {}\n')
 
     const { retained } = await new RemoteHooks(hostRunner(), () => plan([], ['pi'])).applyIntegrationRemovals(conn, '/fixture.sock', home, [])
     expect(read(ext)).toContain('my own pi extension')
     expect(has(skill)).toBe(true)
-    expect(retained).toEqual([path.join(home, skill)])
+    expect(has(linkSkill)).toBe(true)
+    expect(retained).toEqual([path.join(home, skill), path.join(home, linkSkill)])
   })
 
   it("an answered host has older builds' instruction blocks stripped, keeping the user's text", async () => {

@@ -54,7 +54,6 @@ import { wireClaudePaneOrigin } from '../core/agents/claude-pane-origin'
 import { serverEditionControlHandler } from './control-unsupported'
 import {
   initServerCanvasControl,
-  installServerPiCanvasSkillInto,
   serverCanvasShimPath,
   type ServerCanvasControl
 } from './canvas-control'
@@ -72,7 +71,6 @@ import {
 } from '../core/agents/pending-approvals'
 import { answerHeldPermission } from '../core/agents/permission-decision'
 import type { AnswerPermissionPayload } from '../shared/agents/permission-answer'
-import { installPiExtensionIntoLocalAccounts } from '../core/pi-accounts-service'
 import {
   createIntegrationLifecycle,
   detectExistingIntegrations,
@@ -80,8 +78,7 @@ import {
   resolveIntegrationConsentAtBoot
 } from '../core/agent-integrations'
 import { registerIntegrationIpc } from '../core/agent-integrations-ipc'
-import { isAgentIntegrationEnabled } from '../shared/agent-integrations'
-import { contextLinkShimPath, installPiLinkSkillInto } from '../core/context-link'
+import { contextLinkShimPath } from '../core/context-link'
 import {
   initAgentStatusMirror,
   statusSnapshotEvents,
@@ -391,20 +388,9 @@ export async function startServer(
   // between the RPC side (which mints) and the HTTP side (which redeems) — one instance, so a
   // ticket minted over the socket is redeemable by the GET that follows it.
   const downloadTickets = new DownloadTickets()
-  // A managed pi account is its own agent dir, and pi reads skills per agent dir: each account
-  // gets BOTH skills the system dir gets (get-linked-context, and canvas control when that surface
-  // is enabled on this edition), from the same builders — the desktop's `installPiAccountSkills`.
-  // Used by the add verb (`installPiSkill`) and the boot loop below. `installHooks: false`
-  // (tests) skips it like every other integration write.
-  const installPiAccountSkills = (agentDir: string): void => {
-    if (config.installHooks === false) return
-    installPiLinkSkillInto(agentDir)
-    if (config.canvasControl === true) installServerPiCanvasSkillInto(agentDir)
-  }
   const { gitService } = registerCoreHandlers(platform, {
     getSettings: () => settingsStore.get(),
     settingsStore,
-    installPiSkill: installPiAccountSkills,
     onSettingsChange: (cb) => settingsStore.onChange(cb),
     downloadTickets,
     localProjectCwd: (projectId: string) => workspaceStore.localCwdForProject(projectId)
@@ -804,29 +790,10 @@ export async function startServer(
   integrations.reconcile()
   settingsStore.onChange((s) => integrations.onSettingsChanged(s))
   registerIntegrationIpc(integrations)
-  // Fork (Termscape): managed pi accounts. Each is its own PI_CODING_AGENT_DIR, so the status
-  // extension AND the per-account skills are re-installed into every account dir (same loop as the
-  // desktop boot, same installer the add verb uses). The lifecycle above covers only the system
-  // ~/.pi/agent dir (hook + both skills), so this runs under the SAME consent: only while pi is
-  // 'enabled', never under the `installHooks: false` veto, re-run when that choice or the pi
-  // account list changes.
-  if (config.installHooks !== false) {
-    let piAccountsSig = ''
-    const reconcilePiAccounts = (s: ReturnType<typeof settingsStore.get>): void => {
-      const on = isAgentIntegrationEnabled(s, 'pi')
-      const sig = `${on}|${(s.piAccounts ?? []).map((a) => a.id).join(',')}`
-      if (sig === piAccountsSig) return
-      piAccountsSig = sig
-      if (!on) return
-      try {
-        installPiExtensionIntoLocalAccounts(s.piAccounts ?? [], installPiAccountSkills)
-      } catch (e) {
-        console.warn('[integrations] pi account install failed', e)
-      }
-    }
-    reconcilePiAccounts(settingsStore.get())
-    settingsStore.onChange((s) => reconcilePiAccounts(s))
-  }
+  // Fork (Termscape): managed pi accounts (each its own PI_CODING_AGENT_DIR) are covered by the
+  // lifecycle above under pi's own consent and its `installHooks: false` veto: extension + skills
+  // into every existing account dir while pi is enabled, exactly what Termscape wrote removed on a
+  // decline. The add verb asks the same lifecycle (`installIntoPiAccount`).
   const hookStartupWarning = await hookServer.startForApp()
   if (hookStartupWarning) console.error('[nodeterm-server]', hookStartupWarning)
   // Safe default and rollback path. The opt-in runtime replaces this handler only after its

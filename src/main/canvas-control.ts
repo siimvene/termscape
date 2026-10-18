@@ -11,11 +11,9 @@
 import fs from 'fs'
 import path from 'path'
 import { app } from 'electron'
-import { buildCanvasSkillBody, buildControlShimScript } from '../core/canvas-control-core'
+import { buildControlShimScript } from '../core/canvas-control-core'
 import { codexThreadIdentityRoot } from '../core/codex-identity-proxy'
 import { syncWindowsShLauncher, writeManagedHookFileAtomic } from '../core/agents/hooks/install-helper'
-import { installPiCanvasSkillsInto } from '../core/agents/hooks/pi-skills'
-import { shimDialectFor } from '@shared/agents/shim-invocation'
 
 function dir(): string {
   return path.join(app.getPath('userData'), 'canvas-control')
@@ -42,17 +40,6 @@ function writeCliFiles(): void {
   } catch {
     /* fail open */
   }
-}
-
-/**
- * Fork (Termscape): the per-account pi leg. A managed pi account is its own agent dir
- * (`PI_CODING_AGENT_DIR`) and pi discovers skills only from `<agentDir>/skills`, so each account needs
- * its own copy. The consent lifecycle owns the SYSTEM dir (`skillRootsFor('pi')`); the shells'
- * per-account loop calls this only while pi's integration is enabled. Same builder and dialect the
- * lifecycle uses (`skillsFor`), so an account can never carry different verbs from the system dir.
- */
-export function installPiCanvasSkillInto(agentDir: string): void {
-  installPiCanvasSkillsInto(agentDir, buildCanvasSkillBody(canvasControlShimPath(), shimDialectFor('pi', process.platform)))
 }
 
 export function initCanvasControl(): void {

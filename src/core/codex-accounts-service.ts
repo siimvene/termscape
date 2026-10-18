@@ -47,6 +47,7 @@ import {
   legacyCodexAccountHome,
   migrateLegacyCodexAccountHome,
   migrateLegacyCodexAccountHomes,
+  codexAuthHasCredential,
   readCodexAuthEmail,
   systemCodexHome
 } from './codex-accounts-core'
@@ -300,15 +301,17 @@ async function accountIdentity(accountId?: string): Promise<{ email: string | nu
  * daemon start — it could only time out on every poll — just the account's own `auth.json`, under
  * the same gate as the login wait (a REAL file, never a symlink; absent ⇒ `null`). The email is the
  * id_token's claim, a display label only (`readCodexAuthEmail`); a credential with no readable email
- * is still a login. With no second reader to fall back to, a regular `auth.json` is the login here,
- * which is why this branch does not demand the access token the POSIX path above does.
+ * is still a login. Fork contract (.claude/rules/agents-accounts-usage.md): the file must CARRY a
+ * credential (`codexAuthHasCredential`), exactly as the POSIX path above demands the access token —
+ * an empty or tokenless `auth.json` (codex mid-write, a logout, a hand-made file) is not a login, and
+ * resolving it would flip the row out of `pending` under an account that cannot run.
  */
 async function authFileIdentity(accountId?: string): Promise<{ email: string | null } | null> {
   const home = accountId ? localCodexAccountHome(accountId) : systemCodexHome()
   // The gate and the read share ONE descriptor (no lstat-then-read on the name — a swap in between
   // could hand the read a symlink the gate never saw): a link, FIFO, directory or absent file is null.
   const text = await readRegularFileNoFollow(path.join(home, 'auth.json'))
-  if (text === null) return null
+  if (text === null || !codexAuthHasCredential(text)) return null
   return { email: readCodexAuthEmail(text) }
 }
 

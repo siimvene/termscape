@@ -346,13 +346,12 @@ import { buildHandoff, type HandoffRemote } from './handoff'
 import {
   contextLinkShimPath,
   initContextLink,
-  installPiLinkSkillInto,
   onLinkedRead,
   setNodeTranscript
 } from '../core/context-link'
 import { wireClaudePaneOrigin } from '../core/agents/claude-pane-origin'
 import { transcriptPathOf } from '../core/context-link-core'
-import { initCanvasControl, canvasControlShimPath, installPiCanvasSkillInto } from './canvas-control'
+import { initCanvasControl, canvasControlShimPath } from './canvas-control'
 import { DRY_RUN_VERBS, dryRunRequested, dryRunRefusal } from '../shared/control-verbs'
 import { browserFlagRefusal, issueFlagRefusal } from '../core/canvas-control-core'
 import { afterPrFlagRefusal } from '../shared/pr-wait'
@@ -410,7 +409,6 @@ import {
   isSafeRemoteTranscriptPath,
   remoteAccountConfigDirAbs
 } from '../core/claude-accounts-core'
-import { installPiExtensionIntoLocalAccounts } from '../core/pi-accounts-service'
 import {
   createIntegrationLifecycle,
   detectExistingIntegrations,
@@ -418,7 +416,7 @@ import {
   resolveIntegrationConsentAtBoot
 } from '../core/agent-integrations'
 import { registerIntegrationIpc } from '../core/agent-integrations-ipc'
-import { isAgentIntegrationEnabled, remoteIntegrationPlan } from '../shared/agent-integrations'
+import { remoteIntegrationPlan } from '../shared/agent-integrations'
 import { createPairingService } from './pairing-service'
 import {
   initRemoteHost,
@@ -3459,32 +3457,11 @@ app.whenReady().then(async () => {
   integrations.reconcile()
   settingsStore.onChange((s) => integrations.onSettingsChanged(s))
   registerIntegrationIpc(integrations)
-  // Fork (Termscape): managed pi accounts. Each is its own PI_CODING_AGENT_DIR, and pi loads
-  // extensions AND skills per agent dir, so the status extension plus both skills (canvas control +
-  // get-linked-context, from the same builders as the system dir) have to reach every account dir.
-  // The consent lifecycle above covers the system ~/.pi/agent dir only (its hook, and both skills via
-  // skillRootsFor's 'pi' root; it has no per-account loop for pi), so this loop runs here under the
-  // SAME consent: only while pi is 'enabled', re-run when that choice or the pi account list
-  // changes. Never for an undecided or declined pi. Same loop the Server Edition's boot runs.
-  const installPiAccountSkills = (agentDir: string): void => {
-    installPiCanvasSkillInto(agentDir)
-    installPiLinkSkillInto(agentDir)
-  }
-  let piAccountsSig = ''
-  const reconcilePiAccounts = (s: Settings): void => {
-    const on = isAgentIntegrationEnabled(s, 'pi')
-    const sig = `${on}|${(s.piAccounts ?? []).map((a) => a.id).join(',')}`
-    if (sig === piAccountsSig) return
-    piAccountsSig = sig
-    if (!on) return
-    try {
-      installPiExtensionIntoLocalAccounts(s.piAccounts ?? [], installPiAccountSkills)
-    } catch (e) {
-      console.warn('[integrations] pi account install failed', e)
-    }
-  }
-  reconcilePiAccounts(settingsStore.get())
-  settingsStore.onChange((s) => reconcilePiAccounts(s))
+  // Fork (Termscape): managed pi accounts (each its own PI_CODING_AGENT_DIR, where pi loads its
+  // extensions AND skills) are covered by the lifecycle above under pi's own consent: the status
+  // extension and both skills reach every existing account dir while pi is enabled, and a decline
+  // removes exactly what Termscape wrote there (`skillRootsFor('pi')`, the pi account loop in
+  // `reconcile`). The add verb asks the same lifecycle (`installIntoPiAccount`).
   // Fan a normalized agent event to BOTH consumers: the renderer's agentStatus store (canvas badge)
   // and the mobile-facing mirror. Named so the deterministic-approval answer handler below can reuse
   // it for the optimistic flip.
@@ -4919,7 +4896,7 @@ app.whenReady().then(async () => {
   initCodexAccounts(settingsStore, () => sshProjectManager)
   // Managed pi accounts (local-only in v1): core's handler table bound through ipcMain, never the
   // peer-reachable platform table (INVARIANT 4c) — see src/main/pi-accounts.ts.
-  initPiAccounts(settingsStore, installPiAccountSkills)
+  initPiAccounts(settingsStore)
   // The jailed core bridge both phone hosts serve: typed git verbs against the real GitService
   // (cwd-jailed to the shared canvas roots inside the handlers) and phone node registration
   // through the workspace store (written as an outside edit, so the watcher broadcasts it and

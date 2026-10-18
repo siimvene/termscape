@@ -27,11 +27,10 @@ import { IPC } from '../shared/ipc'
 import { DEFAULT_SETTINGS, type Project, type Settings, type Workspace } from '../shared/types'
 import {
   initServerCanvasControl,
-  installServerPiCanvasSkillInto,
   serverCanvasShimPath,
   type ServerCanvasControl
 } from './canvas-control'
-import { CANVAS_SKILL, skillsFor } from '../core/agent-integrations'
+import { CANVAS_SKILL, createIntegrationLifecycle, skillsFor } from '../core/agent-integrations'
 
 /** The minimal workspace/pty deps `initServerCanvasControl` needs to boot (no node is opened). */
 function bootDeps(): { workspaceStore: WorkspaceStore; ptyManager: PtyManager } {
@@ -85,11 +84,11 @@ describe('initServerCanvasControl — managed pi account dirs', () => {
   })
 
   it.skipIf(process.platform === 'win32')(
-    'boot writes no skill anywhere; the per-account installer writes the lifecycle’s pi body',
+    'boot writes no skill anywhere; the lifecycle writes this edition’s pi body into an account dir',
     async () => {
-      // Upstream #744: discovery skills are the consent lifecycle's (core/agent-integrations.ts). The
-      // per-account pi loop moved to server/index.ts (`reconcilePiAccounts`, gated on pi's consent),
-      // so booting the canvas runtime must not write into a pi account dir or the system ~/.pi.
+      // Upstream #744: discovery skills are the consent lifecycle's (core/agent-integrations.ts),
+      // managed pi account dirs included (gated on pi's consent), so booting the canvas runtime must
+      // not write into a pi account dir or the system ~/.pi.
       const acctDir = path.join(dataDir, 'pi-accounts', 'p1')
       fs.mkdirSync(acctDir, { recursive: true })
       const settings = (): Settings => ({
@@ -114,9 +113,13 @@ describe('initServerCanvasControl — managed pi account dirs', () => {
       expect(fs.existsSync(path.join(home, '.pi'))).toBe(false)
       expect(fs.existsSync(path.join(home, '.claude'))).toBe(false)
 
-      // The per-dir installer the add verb and the consent-gated loop use: the SAME body the
-      // lifecycle writes into the system pi dir (one builder, one shim path, one dialect).
-      installServerPiCanvasSkillInto(acctDir)
+      // The lifecycle as server/index.ts builds it (canvas shim = this edition's), asked the way the
+      // add verb asks it: the account gets the SAME body the system pi dir gets.
+      createIntegrationLifecycle({
+        settings: () => ({ ...settings(), agentIntegrations: { agents: { pi: 'enabled' }, origin: 'asked' } }),
+        userDataDir: () => dataDir,
+        shims: () => ({ canvas: serverCanvasShimPath(), context: path.join(dataDir, 'context-links', 'context.sh') })
+      }).installIntoPiAccount(acctDir)
       const skill = path.join(acctDir, 'skills', CANVAS_SKILL, 'SKILL.md')
       const body = fs.readFileSync(skill, 'utf8')
       expect(body).toContain(shim)

@@ -200,6 +200,7 @@ const contextShimPath = (home: string) => `${home}/.nodeterm/context.sh`
 const skillFilePath = (configDir: string, name: string) => `${configDir}/skills/${name}/SKILL.md`
 const accountConfigDir = (home: string, accountId: string) => `${home}/.nodeterm/claude-accounts/${accountId}`
 const PI_CANVAS_SKILL_REL = 'skills/manage-nodeterm-canvas/SKILL.md'
+const PI_CONTEXT_SKILL_REL = 'skills/get-linked-context/SKILL.md'
 
 /**
  * Fork (pi): binds `$NT_PI` to the HOST's pi agent dir for the freshness probe, by the rule
@@ -274,7 +275,10 @@ function canvasControlArtifacts(home: string, agents: ReadonlySet<string>): Agen
 
 function contextLinkArtifacts(home: string, agents: ReadonlySet<string>): AgentToolArtifact[] {
   const roots = skillRoots(home, agents, canContextLink)
-  if (!roots.length) return []
+  // Fork (pi): the canvas twin's reason — pi reads only its OWN agent dir's skills/, so a pi-only
+  // host has no shared root, yet pi is CONTEXT_LINK_CAPABLE and needs the shim and the skill.
+  const pi = agents.has('pi') && canContextLink('pi')
+  if (!roots.length && !pi) return []
   const shim = contextShimPath(home)
   const g = { group: 'context', label: 'context link' }
   return [
@@ -284,7 +288,20 @@ function contextLinkArtifacts(home: string, agents: ReadonlySet<string>): AgentT
       kind: 'file',
       path: skillFilePath(r, 'get-linked-context'),
       body: buildContextLinkSkillBody(shim)
-    }))
+    })),
+    // LAST in the group, for the canvas twin's reasons (lands only after its shim did; a pi dir that
+    // cannot be resolved costs this file alone).
+    ...(pi
+      ? [
+          {
+            ...g,
+            kind: 'file',
+            path: `$PI_CODING_AGENT_DIR/${PI_CONTEXT_SKILL_REL}`,
+            piAgentRel: PI_CONTEXT_SKILL_REL,
+            body: buildContextLinkSkillBody(shim)
+          } satisfies AgentToolArtifact
+        ]
+      : [])
   ]
 }
 
@@ -659,10 +676,10 @@ export class RemoteHooks {
       }
       for (const a of plan.remove) owned.push(`${remoteDir}/agent-hooks/${a}.sh`)
       if (owned.length) await run(`rm -f -- ${owned.map(posixQuote).join(' ')}`)
-      // Fork (pi): pi's integration is its owned extension module plus the canvas skill, both under
-      // the HOST's pi agent dir (resolved by the installer's own rule). The extension goes only when
-      // its first line is our marker (the installer's ownership test — a user's file of the same
-      // name is kept); the skill only by exact content, like every skill below.
+      // Fork (pi): pi's integration is its owned extension module plus both skills (canvas control,
+      // context link), all under the HOST's pi agent dir (resolved by the installer's own rule). The
+      // extension goes only when its first line is our marker (the installer's ownership test — a
+      // user's file of the same name is kept); each skill only by exact content, like every skill below.
       // Its own try: a host whose pi dir cannot be resolved must not cost the other agents' clean-up.
       if (plan.remove.has('pi')) {
         try {
@@ -671,14 +688,19 @@ export class RemoteHooks {
           await run(
             `if [ -f ${ext} ] && [ ! -L ${ext} ] && [ "$(head -n 1 ${ext})" = ${posixQuote(PI_EXTENSION_MARKER)} ]; then rm -f -- ${ext}; fi`
           )
-          const file = `${piHome}/${PI_CANVAS_SKILL_REL}`
-          const receiptKey = `ssh:${conn.user}@${conn.host}:${file}`
-          const sums = [formatCksum(posixCksum(Buffer.from(buildCanvasSkillBody(canvasShimPath(home)), 'utf8')))]
-          const rec = receipts?.get(receiptKey)
-          if (rec) sums.push(rec)
-          const verdict = await this.removeRemoteFileIfOurs(run, file, sums)
-          if (verdict === 'retained') retained.push(file)
-          else receipts?.set(receiptKey, null)
+          for (const [rel, body] of [
+            [PI_CANVAS_SKILL_REL, buildCanvasSkillBody(canvasShimPath(home))],
+            [PI_CONTEXT_SKILL_REL, buildContextLinkSkillBody(contextShimPath(home))]
+          ] as const) {
+            const file = `${piHome}/${rel}`
+            const receiptKey = `ssh:${conn.user}@${conn.host}:${file}`
+            const sums = [formatCksum(posixCksum(Buffer.from(body, 'utf8')))]
+            const rec = receipts?.get(receiptKey)
+            if (rec) sums.push(rec)
+            const verdict = await this.removeRemoteFileIfOurs(run, file, sums)
+            if (verdict === 'retained') retained.push(file)
+            else receipts?.set(receiptKey, null)
+          }
         } catch (e) {
           warnNotInstalled('the pi integration clean-up', e)
         }
