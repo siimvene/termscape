@@ -29,15 +29,22 @@ export const IPC = {
   ptyReadScrollback: 'pty:read-scrollback',
   ptySendText: 'pty:send-text',
   ptySendChatPrompt: 'pty:send-chat-prompt',
+  ptySendToEmptyPrompt: 'pty:send-to-empty-prompt',
   ptyTmuxStatus: 'pty:tmux-status',
   /** The foreground command of a node's tmux pane (`#{pane_current_command}`) — how the in-place
    *  agent restart sees that the CLI has exited and a shell owns the pane again. */
   ptyPaneCommand: 'pty:pane-command',
+  /** Type keys into a node's tmux pane by node id (no mounted terminal). Host-only. */
+  ptySendPaneKeys: 'pty:send-pane-keys',
   /** The live working directory of a node's tmux pane (`#{pane_current_path}`) — where a relative
    *  path an agent printed actually lives when it is not the node's launch cwd (file links). */
   ptyPaneCwd: 'pty:pane-cwd',
   /** Desktop-only (#925): start a node's session with no viewer and deliver its held launch. */
   ptyLaunchHeadless: 'pty:launch-headless',
+  /** Renderer → core: execute a semantic agent launch (`LaunchIntentRequest`) in a node's live
+   *  local Windows session-host pane, encoded for that pane's own shell (core/launch-intent-execute.ts).
+   *  Host-only (shared/host-control.ts): a relay peer must never make the host read a prompt file. */
+  ptyExecuteLaunch: 'pty:execute-launch',
   /** Kernel truth about a node's tmux pane: its root pid, tty, tmux pane id, and the full argv of
    *  its FOREGROUND process group (`PaneOwner`). The name-only `ptyPaneCommand` above cannot tell
    *  an agent from anything else — an npm-installed CLI reports as `node`, and an agent reached
@@ -103,6 +110,7 @@ export const IPC = {
   claudeCliCaps: 'claude-cli:caps',
   grokCliCaps: 'grok-cli:caps',
   grokTakenSessionIds: 'grok-cli:taken-session-ids',
+  cursorCliCaps: 'cursor-cli:caps',
   /** Can a node on this machine get a managed Codex identity? See core/codex-identity-caps.ts. */
   codexIdentityCaps: 'codex-identity:caps',
   codexCliCaps: 'codex-cli:caps',
@@ -170,6 +178,12 @@ export const IPC = {
    *  so the renderer should run its reclaim levers now (hidden WebGL contexts, parked terminals).
    *  Payload: `'warning' | 'critical'`. Re-fired at most once a minute — see core/memory-pressure. */
   appMemoryPressure: 'app:memory-pressure',
+  /** Main → renderer: the main window was put away (`'hidden'` — close-to-tray, macOS
+   *  hide-on-close, minimize) or brought back (`'shown'`). The renderer then treats every terminal
+   *  as offscreen so the existing reclaim levers run on their timers (see
+   *  renderer/terminal/window-backgrounded.ts). Explicit, not `visibilitychange`: an occluded window
+   *  must not release. Mapping: main/window-visibility.ts. */
+  appWindowVisibility: 'app:window-visibility',
   /** Main → renderer: a macOS trackpad gesture (two-finger scroll or pinch) opened or closed on
    *  the main window — edge transitions from main/trackpad-gesture.ts, a handful per physical
    *  gesture. Payload: `boolean` (active). The canvas wheel router uses this as ground-truth
@@ -359,6 +373,14 @@ export const IPC = {
   appUpdatePrepInspect: 'app:update-prep-inspect',
   appUpdatePrepShutdown: 'app:update-prep-shutdown',
   appUpdatePrepQuit: 'app:update-prep-quit',
+  /** main → renderer: restart-to-update was accepted; `{phase:'preparing'|'restarting', version}`. */
+  appUpdateInstalling: 'app:update-installing',
+  /** renderer → main (invoke): the update already staged this run, `{version, notes}` or null. */
+  appGetStagedUpdate: 'app:get-staged-update',
+  /** main → renderer: write any pending canvas edits now (payload: request id). Quit / restart. */
+  appFlushRequest: 'app:flush-request',
+  /** renderer → main: the flush for that request id settled. */
+  appFlushDone: 'app:flush-done',
   licenseActivate: 'license:activate',
   licenseDeactivate: 'license:deactivate',
   licenseStatus: 'license:status',
@@ -402,6 +424,29 @@ export const IPC = {
   wallpaperListStills: 'wallpaper:list-stills',
   wallpaperLoad: 'wallpaper:load',
   wallpaperImport: 'wallpaper:import',
+  // Run node (core/run-service.ts): launch.json entries, devices, launcher, status, stop, signals.
+  runEntries: 'run:entries',
+  runDevices: 'run:devices',
+  runBootDevice: 'run:boot-device',
+  runDiscover: 'run:discover',
+  runStart: 'run:start',
+  runStatus: 'run:status',
+  runStop: 'run:stop',
+  runSignal: 'run:signal',
+  runWatch: 'run:watch',
+  // Simulator node (core/simulator/simulator-service.ts): live screen + touch/keys/buttons.
+  simulatorDevices: 'simulator:devices',
+  simulatorBoot: 'simulator:boot',
+  simulatorStart: 'simulator:start',
+  simulatorStop: 'simulator:stop',
+  simulatorInput: 'simulator:input',
+  simulatorShutdown: 'simulator:shutdown',
+  simulatorAction: 'simulator:action',
+  simulatorState: 'simulator:state',
+  simulatorScreenshot: 'simulator:screenshot',
+  simulatorRecordStart: 'simulator:record-start',
+  simulatorRecordStop: 'simulator:record-stop',
+  simulatorRecording: 'simulator:recording',
   // Trigger nodes (issue #493): machine-local arm/disarm + the card's status/run-now.
   triggersArm: 'triggers:arm',
   triggersDisarm: 'triggers:disarm',
@@ -426,6 +471,9 @@ export const IPC = {
   presencePeer: 'presence:peer',
   // Events broadcast from main to the renderer (sessionId is appended to the channel name).
   ptyData: (sessionId: string) => `pty:data:${sessionId}`,
+  /** Per-node simulator frames / status (Simulator node). */
+  simulatorFrame: (nodeId: string) => `simulator:frame:${nodeId}`,
+  simulatorStatus: (nodeId: string) => `simulator:status:${nodeId}`,
   ptyExit: (sessionId: string) => `pty:exit:${sessionId}`,
   /** Authoritative size of a co-attached session: min(cols) × min(rows) over all subscribers.
    *  Broadcast to every subscriber whenever the subscriber set or any reported size changes. */
@@ -452,6 +500,9 @@ export const IPC = {
   ptyResync: (sessionId: string) => `pty:resync:${sessionId}`,
   workspaceLoad: 'workspace:load',
   workspaceSave: 'workspace:save',
+  /** Exactly-once claim of a renderer-delivered held launch across every viewer of a project
+   *  (core/launch-claim-ledger.ts, issue #1173). Host-only. */
+  workspaceClaimLaunch: 'workspace:claim-launch',
   workspaceProbeFolder: 'workspace:probe-folder',
   /** Is a folder's .nodeterm/project.json present / absent / unreadable — the distinction
    *  `probeFolder`'s null collapses. Recovery of an `unavailable` project needs it (issue #385). */
@@ -588,6 +639,9 @@ export const IPC = {
   filesSaveAlertSound: 'files:save-alert-sound',
   filesReadAlertSound: 'files:read-alert-sound',
   filesClearAlertSound: 'files:clear-alert-sound',
+  /** Agent-integration consent (issue #744): the last reconcile's report (what is enabled,
+   *  declined, and which user-edited files were kept). Host-only. */
+  integrationsStatus: 'integrations:status',
   settingsLoad: 'settings:load',
   settingsSave: 'settings:save',
   sshList: 'ssh:list',
@@ -699,6 +753,15 @@ export const IPC = {
   remoteHostPeerPendingCleared: 'remote:host:peer-pending-cleared',
   remoteHostApprove: 'remote:host:approve',
   remotePhoneApprove: 'remote:phone:approve',
+  // `nodeterm://` links (desktop only, raw ipcMain, main-window sender only — see main/open-link.ts).
+  // main → renderer: an `open` link to confirm, a pair/join link to route, a refusal to toast.
+  openLinkRequest: 'open-link:request',
+  openLinkPair: 'open-link:pair',
+  openLinkNotice: 'open-link:notice',
+  // renderer → main: listening (deliver held links), the human's choice, a dismissal.
+  openLinkReady: 'open-link:ready',
+  openLinkAccept: 'open-link:accept',
+  openLinkCancel: 'open-link:cancel',
   remoteHostReject: 'remote:host:reject',
   // Host canvas mirror: renderer pushes its serialized active-project canvas to main;
   // main pushes a client's mutation back to the host renderer to apply.
@@ -814,5 +877,8 @@ export const IPC = {
   // Electron-only: registered in src/main/index.ts (systemPreferences.askForMediaAccess) and
   // stubbed `async () => true` in src/server/index.ts (browser mic permission is the browser's
   // own prompt, not ours to gate).
-  speechMicConsent: 'speech:mic-consent'
+  speechMicConsent: 'speech:mic-consent',
+  // Electron-only, NOT registered by the server: opens the OS mic-privacy page from a fixed
+  // allowlist (src/main/mic-consent.ts). The browser bridge leaves `openMicSettings` absent.
+  speechOpenMicSettings: 'speech:open-mic-settings'
 } as const

@@ -13,6 +13,8 @@ import path from 'path'
 import { initPlatform, resetPlatformForTests } from '../core/platform'
 import { fakePlatform, type FakePlatform } from '../core/platform-fake'
 import { SettingsStore } from '../core/settings-store'
+import { createIntegrationLifecycle, registerIntegrationLifecycle } from '../core/agent-integrations'
+import { piExtensionPath } from '../core/agents/hooks/pi'
 import { IPC } from '../shared/ipc'
 
 const h: { handlers: Record<string, (...a: any[]) => unknown> } = { handlers: {} }
@@ -30,6 +32,7 @@ beforeEach(() => {
   initPlatform(fake)
 })
 afterEach(() => {
+  registerIntegrationLifecycle(null)
   resetPlatformForTests()
   rmSync(userDataDir, { recursive: true, force: true })
 })
@@ -50,14 +53,21 @@ describe('initPiAccounts (desktop)', () => {
     const { initPiAccounts } = await import('./pi-accounts')
     const settings = new SettingsStore()
     settings.init()
-    const skilled: string[] = []
-    initPiAccounts(settings, (d) => skilled.push(d))
+    // The per-account extension + skills come from the consent lifecycle (pi enabled here).
+    registerIntegrationLifecycle(
+      createIntegrationLifecycle({
+        settings: () => ({ ...settings.get(), agentIntegrations: { agents: { pi: 'enabled' }, origin: 'asked' } }),
+        userDataDir: () => userDataDir,
+        shims: () => ({ context: path.join(userDataDir, 'context-links', 'context.sh') })
+      })
+    )
+    initPiAccounts(settings)
     const res = (await h.handlers[IPC.piAccountsAdd]({ sender: {} })) as {
       id: string
       agentDir: string
     }
     expect(existsSync(res.agentDir)).toBe(true)
-    expect(skilled).toEqual([res.agentDir])
+    expect(existsSync(piExtensionPath(res.agentDir))).toBe(true)
     expect(settings.get().piAccounts.map((a) => a.id)).toEqual([res.id])
     await h.handlers[IPC.piAccountsRemove]({ sender: {} }, res.id)
     expect(existsSync(res.agentDir)).toBe(false)

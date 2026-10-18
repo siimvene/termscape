@@ -58,10 +58,20 @@ agent-registry rules stay in `agents.md`; the full write-up and device checklist
   - **The login node is an explicit `piLogin` flag** (`CanvasNodeState.piLogin`, set only by
     `createPiAccountLoginNode`), never the title or the bare `pi` command: `open-terminal --cmd pi`
     runs the same command, and a shape match made PRE-FLIGHT 3 refuse that plain terminal.
-  - **Both shells give every account dir both skills** (get-linked-context + canvas control when
-    enabled), at boot and on add: the desktop's `installPiAccountSkills`, the server's
-    `installPiAccountSkills` + `installServerPiCanvasSkillInto`, pinned by
-    `server/pi-account-skills-parity.test.ts`. pi reads skills from `<agentDir>/skills` only.
+  - **Every account dir is held to pi's integration consent (upstream #744), by ONE owner: the
+    consent lifecycle** (`core/agent-integrations.ts`), on both shells. While pi is `enabled` each
+    EXISTING account dir gets the status extension and both skills (get-linked-context + canvas
+    control when that surface is on): `skillRootsFor('pi')` lists the account dirs beside
+    `~/.pi/agent`, and `reconcile` plants the extension per dir; a missing dir is never recreated.
+    A `declined` pi removes exactly what Termscape wrote there (the marker-checked extension, the
+    two skills by receipt/content; an edited skill is kept and reported, the user's other files
+    are untouched). Undecided, or the Server Edition's `installHooks: false` veto: nothing. The add
+    verb asks the same lifecycle (`installIntoPiAccount`, the twin of `installIntoClaudeAccount`),
+    so a new account is minted either way but carries nothing of ours without consent. Neither
+    shell has its own per-account loop any more; `server/pi-account-skills-parity.test.ts` pins
+    that. pi reads skills from `<agentDir>/skills` only. On an SSH host pi gets BOTH skills in its
+    own agent dir (`canvasControlArtifacts` / `contextLinkArtifacts` in remote-hooks.ts), and a
+    decline removes both.
   - **A pending row is reconciled**, not abandoned: `AccountsSection` re-arms `waitLogin` for every
     pending pi row while active (the 5-min wait times out mid-OAuth, or the app restarts before the
     capture) and offers Retry login; the chip resolves pi/codex ids against THEIR lists.

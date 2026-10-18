@@ -1,0 +1,531 @@
+// The agent-integration consent lifecycle (issue #744), against a real scratch $HOME.
+//
+// Each case is a promise to the user about their OWN files: nothing is written for an agent they
+// did not enable, a decline removes exactly what nodeterm wrote (a file they edited is kept and
+// reported), and every agent that has canvas control / context link still discovers them.
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'fs'
+import os from 'os'
+import path from 'path'
+import { initPlatform, resetPlatformForTests } from './platform'
+import { fakePlatform } from './platform-fake'
+import { DEFAULT_SETTINGS, type Settings } from '../shared/types'
+import { shimDialectFor } from '../shared/agents/shim-invocation'
+import {
+  CANVAS_SKILL,
+  CONTEXT_SKILL,
+  createIntegrationLifecycle,
+  skillsFor,
+  detectExistingIntegrations,
+  FRESH_INSTALL_MARKER,
+  resolveIntegrationConsentAtBoot
+} from './agent-integrations'
+import { buildCanvasSkillBody, frameCanvasControlBlock } from './canvas-control-core'
+import { buildContextLinkSkillBody, frameInstructionsBlock } from './context-link-core'
+import { MAX_RETAINED } from './integration-files'
+import { registerClaudeAccountsSource, resetClaudeAccountsSourceForTests } from './claude-config-dir'
+import { accountConfigDir } from './claude-accounts-core'
+import { codexAccountHome } from './codex-accounts-core'
+import { piAccountDirFor } from './pi-config-dir'
+import { PI_EXTENSION_MARKER, piExtensionPath } from './agents/hooks/pi'
+import type { ClaudeAccount } from '../shared/types'
+
+const ENV_KEYS = ['HOME', 'USERPROFILE', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'GROK_HOME', 'COPILOT_HOME', 'XDG_CONFIG_HOME', 'GEMINI_CLI_HOME', 'PI_CODING_AGENT_DIR']
+let saved: Record<string, string | undefined>
+let home: string
+let userData: string
+
+beforeEach(() => {
+  saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]))
+  for (const k of ENV_KEYS) delete process.env[k]
+  home = mkdtempSync(path.join(os.tmpdir(), 'nt-integrations-'))
+  userData = path.join(home, 'userData')
+  mkdirSync(userData, { recursive: true })
+  process.env.HOME = home
+  process.env.USERPROFILE = home
+  initPlatform(fakePlatform({ userDataDir: userData }))
+})
+afterEach(() => {
+  for (const k of ENV_KEYS) {
+    if (saved[k] === undefined) delete process.env[k]
+    else process.env[k] = saved[k]
+  }
+  resetPlatformForTests()
+  resetClaudeAccountsSourceForTests()
+  rmSync(home, { recursive: true, force: true })
+})
+
+const SHIMS = () => ({
+  canvas: path.join(userData, 'canvas-control', 'nodeterm.sh'),
+  context: path.join(userData, 'context-links', 'context.sh')
+})
+const withAgents = (agents: Record<string, 'enabled' | 'declined'>, extra: Partial<Settings> = {}): Settings => ({
+  ...DEFAULT_SETTINGS,
+  ...extra,
+  agentIntegrations: { agents, origin: 'asked' }
+})
+const read = (p: string) => readFileSync(p, 'utf8')
+const put = (p: string, body: string) => {
+  mkdirSync(path.dirname(p), { recursive: true })
+  writeFileSync(p, body)
+}
+/** Every file under home, relative — minus our own userData. */
+function filesUnder(root: string): string[] {
+  const out: string[] = []
+  const walk = (d: string) => {
+    for (const n of readdirSync(d, { withFileTypes: true })) {
+      const p = path.join(d, n.name)
+      if (p === userData) continue
+      if (n.isDirectory()) walk(p)
+      else out.push(path.relative(root, p))
+    }
+  }
+  walk(root)
+  return out.sort()
+}
+
+function lifecycle(settings: () => Settings, opts: { veto?: boolean; realHooks?: boolean } = {}) {
+  const hookCalls: { install: string[][]; remove: string[][] } = { install: [], remove: [] }
+  const lc = createIntegrationLifecycle({
+    settings,
+    userDataDir: () => userData,
+    shims: SHIMS,
+    veto: opts.veto,
+    ...(opts.realHooks
+      ? {}
+      : {
+          installHooks: (a) => void hookCalls.install.push([...a].sort()),
+          removeHooks: (a) => void hookCalls.remove.push([...a].sort())
+        })
+  })
+  return { lc, hookCalls }
+}
+
+describe('nothing global is written without consent', () => {
+  it('a new install that has not answered writes NOTHING and removes nothing', () => {
+    put(path.join(home, '.codex', 'AGENTS.md'), '# mine\n')
+    const { lc, hookCalls } = lifecycle(() => DEFAULT_SETTINGS, { realHooks: true })
+    lc.reconcile()
+    expect(filesUnder(home)).toEqual(['.codex/AGENTS.md'])
+    expect(read(path.join(home, '.codex', 'AGENTS.md'))).toBe('# mine\n')
+    expect(hookCalls.install).toEqual([])
+  })
+
+  it('only the enabled agents get hooks — the undecided ones are left alone', () => {
+    const { lc } = lifecycle(() => withAgents({ claude: 'enabled' }), { realHooks: true })
+    lc.reconcile()
+    expect(JSON.stringify(JSON.parse(read(path.join(home, '.claude', 'settings.json'))))).toContain('agent-hooks/claude.sh')
+    expect(existsSync(path.join(home, '.gemini'))).toBe(false)
+    expect(existsSync(path.join(home, '.codex'))).toBe(false)
+    expect(existsSync(path.join(home, '.nodeterm', 'agent-hooks', 'claude.sh'))).toBe(true)
+    expect(existsSync(path.join(home, '.nodeterm', 'agent-hooks', 'codex.sh'))).toBe(false)
+  })
+
+  it('the Server Edition veto (installHooks: false) outranks every choice', () => {
+    const { lc, hookCalls } = lifecycle(() => withAgents({ claude: 'enabled', codex: 'enabled' }), { veto: true })
+    expect(lc.reconcile().vetoed).toBe(true)
+    expect(filesUnder(home)).toEqual([])
+    expect(hookCalls.install).toEqual([])
+  })
+})
+
+describe('discovery: every capable agent still finds canvas control and context link (no regression)', () => {
+  it('each agent gets the skills in ITS OWN skills dir — and nothing in AGENTS.md / GEMINI.md', () => {
+    process.env.GROK_HOME = path.join(home, 'grok-home')
+    process.env.COPILOT_HOME = path.join(home, 'copilot-home')
+    process.env.XDG_CONFIG_HOME = path.join(home, 'xdg')
+    process.env.CODEX_HOME = path.join(home, 'codex-home')
+    const all = { claude: 'enabled', codex: 'enabled', gemini: 'enabled', grok: 'enabled', copilot: 'enabled', opencode: 'enabled' } as const
+    const { lc, hookCalls } = lifecycle(() => withAgents(all))
+    lc.reconcile()
+    // The body depends on THIS host (a Windows runner tells non-claude agents to run the `.cmd`
+    // launcher), so the expectation is derived the same way the installer derives it.
+    const canvas = (agent: string) => buildCanvasSkillBody(SHIMS().canvas, shimDialectFor(agent, process.platform))
+    const context = (agent: string) => buildContextLinkSkillBody(SHIMS().context, shimDialectFor(agent, process.platform))
+    const dirs: Record<string, [string, boolean, boolean]> = {
+      [path.join(home, '.claude', 'skills')]: ['claude', true, true],
+      [path.join(home, 'codex-home', 'skills')]: ['codex', true, true],
+      [path.join(home, '.gemini', 'skills')]: ['gemini', true, true],
+      [path.join(home, 'grok-home', 'skills')]: ['grok', true, true],
+      [path.join(home, 'copilot-home', 'skills')]: ['copilot', true, false], // copilot: canvas control only
+      [path.join(home, 'xdg', 'opencode', 'skills')]: ['opencode', true, true]
+    }
+    for (const [dir, [agent, hasCanvas, hasContext]] of Object.entries(dirs)) {
+      const c = path.join(dir, CANVAS_SKILL, 'SKILL.md')
+      const x = path.join(dir, CONTEXT_SKILL, 'SKILL.md')
+      expect(existsSync(c), c).toBe(hasCanvas)
+      expect(existsSync(x), x).toBe(hasContext)
+      if (hasCanvas) expect(read(c)).toBe(canvas(agent))
+      if (hasContext) expect(read(x)).toBe(context(agent))
+    }
+    for (const f of ['.codex/AGENTS.md', '.gemini/GEMINI.md', 'codex-home/AGENTS.md', 'copilot-home/copilot-instructions.md', 'xdg/opencode/AGENTS.md']) {
+      expect(existsSync(path.join(home, f)), f).toBe(false)
+    }
+    expect(hookCalls.install).toEqual([['claude', 'codex', 'copilot', 'gemini', 'grok', 'opencode']])
+  })
+
+  it('respects $CLAUDE_CONFIG_DIR — never a hardcoded ~/.claude', () => {
+    process.env.CLAUDE_CONFIG_DIR = path.join(home, 'claude-elsewhere')
+    const { lc } = lifecycle(() => withAgents({ claude: 'enabled' }), { realHooks: true })
+    lc.reconcile()
+    expect(existsSync(path.join(home, 'claude-elsewhere', 'skills', CANVAS_SKILL, 'SKILL.md'))).toBe(true)
+    expect(read(path.join(home, 'claude-elsewhere', 'settings.json'))).toContain('agent-hooks/claude.sh')
+    expect(existsSync(path.join(home, '.claude'))).toBe(false)
+  })
+
+  it('every local managed and linked Claude account gets BOTH skills and the hook', () => {
+    const linked = path.join(home, '.claude-2')
+    mkdirSync(linked, { recursive: true })
+    const accounts = [
+      { id: 'acc-1', label: 'a', createdAt: 0 },
+      { id: 'linked', label: 'l', configDir: linked, createdAt: 0 },
+      { id: 'remote', label: 'r', host: 'u@h', createdAt: 0 },
+      { id: 'pending', label: 'p', pending: true, createdAt: 0 }
+    ] as ClaudeAccount[]
+    registerClaudeAccountsSource(() => accounts)
+    const { lc } = lifecycle(() => withAgents({ claude: 'enabled' }, { claudeAccounts: accounts }), { realHooks: true })
+    lc.reconcile()
+    for (const dir of [accountConfigDir(userData, 'acc-1'), linked]) {
+      expect(existsSync(path.join(dir, 'skills', CANVAS_SKILL, 'SKILL.md')), dir).toBe(true)
+      expect(existsSync(path.join(dir, 'skills', CONTEXT_SKILL, 'SKILL.md')), dir).toBe(true)
+      expect(read(path.join(dir, 'settings.json'))).toContain('agent-hooks/claude.sh')
+    }
+    expect(existsSync(accountConfigDir(userData, 'remote'))).toBe(false)
+    expect(existsSync(accountConfigDir(userData, 'pending'))).toBe(false)
+  })
+})
+
+describe('upgrade: the legacy instruction blocks go, the user text stays', () => {
+  it("strips both blocks (the ~17 KB that crowded codex's AGENTS.md) and nothing else", () => {
+    const user = '# my repo rules\n\nAlways run the tests.\n'
+    const legacy =
+      `${user}\n${frameCanvasControlBlock('X'.repeat(12_000))}\n\n${frameInstructionsBlock('Y'.repeat(5_000))}\n`
+    put(path.join(home, '.codex', 'AGENTS.md'), legacy)
+    put(path.join(home, '.gemini', 'GEMINI.md'), `${frameInstructionsBlock('Z')}\n`)
+    const { lc } = lifecycle(() => withAgents({ codex: 'enabled', gemini: 'declined' }))
+    lc.reconcile()
+    expect(read(path.join(home, '.codex', 'AGENTS.md'))).toBe(user)
+    // A file that held NOTHING but our block was ours: it goes, rather than staying behind empty.
+    expect(existsSync(path.join(home, '.gemini', 'GEMINI.md'))).toBe(false)
+  })
+
+  it('an undecided agent\'s instruction file is not touched at all', () => {
+    const legacy = `# mine\n\n${frameCanvasControlBlock('X')}\n`
+    put(path.join(home, '.gemini', 'GEMINI.md'), legacy)
+    const { lc } = lifecycle(() => withAgents({ codex: 'enabled' }))
+    lc.reconcile()
+    expect(read(path.join(home, '.gemini', 'GEMINI.md'))).toBe(legacy)
+  })
+})
+
+describe('decline: remove exactly what we wrote', () => {
+  it("removes our hook (keeping the user's own), our skills and our script; keeps a skill the user edited and reports it", () => {
+    let settings = withAgents({ claude: 'enabled', codex: 'enabled' })
+    const { lc } = lifecycle(() => settings, { realHooks: true })
+    lc.reconcile()
+    // The user adds their own hook beside ours and edits one of our skills.
+    const settingsFile = path.join(home, '.claude', 'settings.json')
+    const cfg = JSON.parse(read(settingsFile)) as { hooks: Record<string, { hooks: { type: string; command: string }[] }[]> }
+    cfg.hooks.Stop.push({ hooks: [{ type: 'command', command: 'my-own-hook' }] })
+    writeFileSync(settingsFile, JSON.stringify(cfg))
+    const edited = path.join(home, '.claude', 'skills', CONTEXT_SKILL, 'SKILL.md')
+    writeFileSync(edited, `${read(edited)}\nmy note\n`)
+
+    settings = withAgents({ claude: 'declined', codex: 'enabled' })
+    lc.onSettingsChanged(settings)
+    const after = read(settingsFile)
+    expect(after).not.toContain('agent-hooks/claude.sh')
+    expect(after).toContain('my-own-hook')
+    expect(existsSync(path.join(home, '.claude', 'skills', CANVAS_SKILL))).toBe(false)
+    expect(existsSync(edited)).toBe(true)
+    expect(lc.lastReport()?.retained).toEqual([edited])
+    expect(existsSync(path.join(home, '.nodeterm', 'agent-hooks', 'claude.sh'))).toBe(false)
+    // codex is still enabled: untouched.
+    expect(existsSync(path.join(home, '.codex', 'skills', CANVAS_SKILL, 'SKILL.md'))).toBe(true)
+  })
+
+  // cursor-agent loads `~/.cursor/skills` ahead of `~/.claude/skills`, so its skills follow ITS consent,
+  // not claude's. Its hooks.json is shared with the Cursor IDE: a decline strips only our entries.
+  it.skipIf(process.platform === 'win32')('cursor: hook and skills in ~/.cursor under its own consent; a decline removes only ours', () => {
+    const bin = path.join(home, '.local', 'bin', 'cursor-agent')
+    put(bin, '#!/bin/sh\n')
+    chmodSync(bin, 0o755)
+    let settings = withAgents({ cursor: 'enabled' })
+    const { lc } = lifecycle(() => settings, { realHooks: true })
+    lc.reconcile()
+    const hooksJson = path.join(home, '.cursor', 'hooks.json')
+    const skills = path.join(home, '.cursor', 'skills')
+    expect(read(hooksJson)).toContain('agent-hooks/cursor.sh')
+    expect(read(path.join(skills, CANVAS_SKILL, 'SKILL.md'))).toBe(buildCanvasSkillBody(SHIMS().canvas))
+    expect(read(path.join(skills, CONTEXT_SKILL, 'SKILL.md'))).toBe(buildContextLinkSkillBody(SHIMS().context))
+    expect(existsSync(path.join(home, '.nodeterm', 'agent-hooks', 'cursor.sh'))).toBe(true)
+    expect(existsSync(path.join(home, '.claude'))).toBe(false)
+    // The IDE (or another tool) adds its own hook beside ours.
+    const cfg = JSON.parse(read(hooksJson)) as { hooks: Record<string, { command: string }[]> }
+    cfg.hooks.stop.push({ command: 'ide-hook' })
+    writeFileSync(hooksJson, JSON.stringify(cfg))
+
+    settings = withAgents({ cursor: 'declined' })
+    lc.onSettingsChanged(settings)
+    const after = read(hooksJson)
+    expect(after).not.toContain('agent-hooks/cursor.sh')
+    expect(after).toContain('ide-hook')
+    expect(existsSync(path.join(skills, CANVAS_SKILL))).toBe(false)
+    expect(existsSync(path.join(skills, CONTEXT_SKILL))).toBe(false)
+    expect(existsSync(path.join(home, '.nodeterm', 'agent-hooks', 'cursor.sh'))).toBe(false)
+  })
+
+  // Fork (Termscape): pi reads skills only from `<agentDir>/skills`, so the system ~/.pi/agent gets
+  // both skills under pi's own consent, and a decline removes exactly ours.
+  it('pi: both skills in ~/.pi/agent/skills under its own consent; a decline removes them', () => {
+    let settings = withAgents({ pi: 'enabled' })
+    const { lc } = lifecycle(() => settings)
+    lc.reconcile()
+    const skills = path.join(home, '.pi', 'agent', 'skills')
+    expect(read(path.join(skills, CANVAS_SKILL, 'SKILL.md'))).toBe(buildCanvasSkillBody(SHIMS().canvas))
+    expect(read(path.join(skills, CONTEXT_SKILL, 'SKILL.md'))).toBe(buildContextLinkSkillBody(SHIMS().context))
+    settings = withAgents({ pi: 'declined' })
+    lc.onSettingsChanged(settings)
+    expect(existsSync(path.join(skills, CANVAS_SKILL, 'SKILL.md'))).toBe(false)
+    expect(existsSync(path.join(skills, CONTEXT_SKILL, 'SKILL.md'))).toBe(false)
+  })
+
+  // Fork (Termscape): every managed pi account dir is its own PI_CODING_AGENT_DIR, so it is held to
+  // the SAME consent as the system dir: enabled → extension + both skills; declined → exactly what
+  // we wrote is removed, a user's own extension, an edited skill and every other file stay.
+  it('pi accounts: every existing account dir follows pi consent; a decline removes exactly ours', () => {
+    const live = piAccountDirFor(userData, 'pi-live')
+    const gone = piAccountDirFor(userData, 'pi-gone')
+    const mine = piAccountDirFor(userData, 'pi-mine')
+    mkdirSync(live, { recursive: true })
+    put(piExtensionPath(mine), '// my own pi extension\n')
+    put(path.join(live, 'auth.json'), '{"anthropic":{}}')
+    put(path.join(live, 'skills', 'my-skill', 'SKILL.md'), 'mine\n')
+    const piAccounts = ['pi-live', 'pi-gone', 'pi-mine', '../escape'].map((id) => ({ id, label: 'x', createdAt: 0 }))
+    let settings = withAgents({ pi: 'enabled' }, { piAccounts } as Partial<Settings>)
+    const { lc } = lifecycle(() => settings)
+    lc.reconcile()
+    for (const dir of [live, mine]) {
+      expect(read(path.join(dir, 'skills', CANVAS_SKILL, 'SKILL.md'))).toBe(buildCanvasSkillBody(SHIMS().canvas))
+      expect(read(path.join(dir, 'skills', CONTEXT_SKILL, 'SKILL.md'))).toBe(buildContextLinkSkillBody(SHIMS().context))
+    }
+    expect(read(piExtensionPath(live)).startsWith(PI_EXTENSION_MARKER)).toBe(true)
+    expect(read(piExtensionPath(mine))).toBe('// my own pi extension\n') // marker-gated, never ours
+    expect(existsSync(gone)).toBe(false) // a deleted account is never resurrected
+    expect(existsSync(path.join(userData, 'escape'))).toBe(false)
+
+    const edited = path.join(mine, 'skills', CONTEXT_SKILL, 'SKILL.md')
+    writeFileSync(edited, 'my edit\n')
+    settings = withAgents({ pi: 'declined' }, { piAccounts } as Partial<Settings>)
+    lc.onSettingsChanged(settings)
+    expect(existsSync(piExtensionPath(live))).toBe(false)
+    expect(existsSync(path.join(live, 'skills', CANVAS_SKILL))).toBe(false)
+    expect(existsSync(path.join(live, 'skills', CONTEXT_SKILL))).toBe(false)
+    expect(existsSync(path.join(mine, 'skills', CANVAS_SKILL))).toBe(false)
+    expect(read(piExtensionPath(mine))).toBe('// my own pi extension\n')
+    expect(read(edited)).toBe('my edit\n')
+    expect(lc.lastReport()?.retained).toEqual([edited])
+    // The account itself and the user's own files are untouched.
+    expect(read(path.join(live, 'auth.json'))).toBe('{"anthropic":{}}')
+    expect(read(path.join(live, 'skills', 'my-skill', 'SKILL.md'))).toBe('mine\n')
+    expect(existsSync(gone)).toBe(false)
+  })
+
+  it('pi accounts: an undecided pi, or the veto, writes nothing into an account dir', () => {
+    const dir = piAccountDirFor(userData, 'pi-1')
+    mkdirSync(dir, { recursive: true })
+    const piAccounts = [{ id: 'pi-1', label: 'x', createdAt: 0 }]
+    lifecycle(() => withAgents({ claude: 'enabled' }, { piAccounts } as Partial<Settings>)).lc.reconcile()
+    lifecycle(() => withAgents({ pi: 'enabled' }, { piAccounts } as Partial<Settings>), { veto: true }).lc.reconcile()
+    expect(readdirSync(dir)).toEqual([])
+  })
+
+  it('pi accounts: adding an account re-runs reconcile (the account list is part of the signature)', () => {
+    const dir = piAccountDirFor(userData, 'pi-new')
+    let settings = withAgents({ pi: 'enabled' })
+    const { lc } = lifecycle(() => settings)
+    lc.reconcile()
+    mkdirSync(dir, { recursive: true })
+    settings = withAgents({ pi: 'enabled' }, { piAccounts: [{ id: 'pi-new', label: 'x', createdAt: 0 }] } as Partial<Settings>)
+    lc.onSettingsChanged(settings)
+    expect(existsSync(piExtensionPath(dir))).toBe(true)
+    expect(existsSync(path.join(dir, 'skills', CONTEXT_SKILL, 'SKILL.md'))).toBe(true)
+  })
+
+  it('never overwrites a skill the user edited while still enabled', () => {
+    const { lc } = lifecycle(() => withAgents({ gemini: 'enabled' }))
+    lc.reconcile()
+    const f = path.join(home, '.gemini', 'skills', CANVAS_SKILL, 'SKILL.md')
+    writeFileSync(f, 'my own version\n')
+    lc.reconcile()
+    expect(read(f)).toBe('my own version\n')
+    expect(lc.lastReport()?.retained).toEqual([f])
+  })
+
+  it('the retained list is bounded', () => {
+    const accounts = Array.from({ length: 30 }, (_, i) => ({ id: `acc-${i}`, label: 'x', createdAt: 0 })) as ClaudeAccount[]
+    registerClaudeAccountsSource(() => accounts)
+    let settings = withAgents({ claude: 'enabled' }, { claudeAccounts: accounts })
+    const { lc } = lifecycle(() => settings)
+    lc.reconcile()
+    for (const a of accounts) {
+      const f = path.join(accountConfigDir(userData, a.id), 'skills', CANVAS_SKILL, 'SKILL.md')
+      writeFileSync(f, 'edited\n')
+    }
+    settings = withAgents({ claude: 'declined' }, { claudeAccounts: accounts })
+    lc.onSettingsChanged(settings)
+    expect(lc.lastReport()?.retained.length).toBe(MAX_RETAINED)
+  })
+})
+
+describe('reconcile cadence', () => {
+  it('re-runs only when the consent or the local account list changes', () => {
+    let settings = withAgents({ codex: 'enabled' })
+    const { lc, hookCalls } = lifecycle(() => settings)
+    lc.reconcile()
+    lc.onSettingsChanged({ ...settings, fontSize: 20 })
+    expect(hookCalls.install).toHaveLength(1)
+    settings = withAgents({ codex: 'enabled', gemini: 'enabled' })
+    lc.onSettingsChanged(settings)
+    expect(hookCalls.install).toHaveLength(2)
+  })
+})
+
+describe('the existing-vs-new default', () => {
+  it('an install whose own hook scripts are on disk is grandfathered as enabled — every agent and every host', () => {
+    mkdirSync(path.join(home, '.nodeterm', 'agent-hooks'), { recursive: true })
+    writeFileSync(path.join(home, '.nodeterm', 'agent-hooks', 'claude.sh'), '#!/bin/sh\n')
+    const existing = detectExistingIntegrations(userData, home)
+    expect(existing).toBe(true)
+    const next = resolveIntegrationConsentAtBoot(DEFAULT_SETTINGS, existing)
+    expect(next?.agentIntegrations?.origin).toBe('grandfathered')
+    expect(next?.agentIntegrations?.agents?.codex).toBe('enabled')
+    expect(next?.agentIntegrations?.hostDefault).toBe('enabled')
+    expect(next?.agentIntegrations?.noticeDismissed).toBeUndefined()
+  })
+
+  it('a new install (nothing of ours on disk) is NOT grandfathered — it is asked', () => {
+    expect(detectExistingIntegrations(userData, home)).toBe(false)
+    expect(resolveIntegrationConsentAtBoot(DEFAULT_SETTINGS, false)).toBeNull()
+    expect(existsSync(path.join(userData, FRESH_INSTALL_MARKER))).toBe(true)
+  })
+
+  // Issue #1149: our canvas/context shims are written on EVERY boot, consent or not, so they say
+  // nothing about a pre-consent install. Counting them grandfathered every fresh install on its
+  // second boot (a systemd restart, the update timer, a desktop quit before the prompt was answered).
+  it('our always-written shims are never evidence of an existing install', () => {
+    mkdirSync(path.join(userData, 'canvas-control'), { recursive: true })
+    mkdirSync(path.join(userData, 'context-links'), { recursive: true })
+    writeFileSync(path.join(userData, 'canvas-control', 'nodeterm.sh'), '#!/bin/sh\n')
+    writeFileSync(path.join(userData, 'context-links', 'context.sh'), '#!/bin/sh\n')
+    expect(detectExistingIntegrations(userData, home)).toBe(false)
+  })
+
+  it('the issue #1149 sequence: boot 1 writes the shims, boot 2 still asks', () => {
+    // Boot 1: nothing of ours on disk.
+    expect(resolveIntegrationConsentAtBoot(DEFAULT_SETTINGS, detectExistingIntegrations(userData, home))).toBeNull()
+    // …then the shells write the shims, as every boot does.
+    mkdirSync(path.join(userData, 'context-links'), { recursive: true })
+    writeFileSync(path.join(userData, 'context-links', 'context.sh'), '#!/bin/sh\n')
+    mkdirSync(path.join(userData, 'canvas-control'), { recursive: true })
+    writeFileSync(path.join(userData, 'canvas-control', 'nodeterm.sh'), '#!/bin/sh\n')
+    // Boot 2: the record is still empty and must stay so.
+    expect(resolveIntegrationConsentAtBoot(DEFAULT_SETTINGS, detectExistingIntegrations(userData, home))).toBeNull()
+  })
+
+  it('a fresh install is never grandfathered on a LATER boot, even once hook scripts appear', () => {
+    expect(detectExistingIntegrations(userData, home)).toBe(false)
+    // A sibling install sharing ~/.nodeterm (desktop + Server Edition) enabled its integrations.
+    mkdirSync(path.join(home, '.nodeterm', 'agent-hooks'), { recursive: true })
+    writeFileSync(path.join(home, '.nodeterm', 'agent-hooks', 'claude.sh'), '#!/bin/sh\n')
+    expect(detectExistingIntegrations(userData, home)).toBe(false)
+    expect(resolveIntegrationConsentAtBoot(DEFAULT_SETTINGS, false)).toBeNull()
+  })
+
+  it('an existing install is not marked fresh, so a failed grandfather save is retried next boot', () => {
+    mkdirSync(path.join(home, '.nodeterm', 'agent-hooks'), { recursive: true })
+    writeFileSync(path.join(home, '.nodeterm', 'agent-hooks', 'claude.sh'), '#!/bin/sh\n')
+    expect(detectExistingIntegrations(userData, home)).toBe(true)
+    expect(existsSync(path.join(userData, FRESH_INSTALL_MARKER))).toBe(false)
+    expect(detectExistingIntegrations(userData, home)).toBe(true)
+  })
+
+  it('an answered record is never rewritten at boot', () => {
+    const answered = withAgents({ claude: 'declined' })
+    expect(resolveIntegrationConsentAtBoot(answered, true)).toBeNull()
+  })
+})
+
+describe('skillsFor — the invocation follows the host and the agent\'s tool shell', () => {
+  const shims = { canvas: 'C:\\nt\\canvas-control\\nodeterm.sh', context: 'C:\\nt\\context-links\\context.sh' }
+
+  it('win32: a PowerShell-run agent is told to run the .cmd launcher', () => {
+    for (const agent of ['codex', 'gemini', 'grok', 'opencode'] as const) {
+      const skills = skillsFor(agent, shims, 'win32')
+      expect(skills.get(CANVAS_SKILL), agent).toContain('& "C:\\nt\\canvas-control\\nodeterm.cmd" <verb> [args]')
+      expect(skills.get(CONTEXT_SKILL), agent).toContain('& "C:\\nt\\context-links\\context.cmd" <command>')
+      expect(skills.get(CANVAS_SKILL), agent).not.toContain('```sh\nsh "')
+    }
+    expect(skillsFor('copilot', shims, 'win32').get(CANVAS_SKILL)).toContain('nodeterm.cmd')
+  })
+
+  it('win32: claude keeps `sh` (its Bash tool is Git Bash) — the exact POSIX body', () => {
+    const skills = skillsFor('claude', shims, 'win32')
+    expect(skills.get(CANVAS_SKILL)).toBe(buildCanvasSkillBody(shims.canvas))
+    expect(skills.get(CONTEXT_SKILL)).toBe(buildContextLinkSkillBody(shims.context))
+  })
+
+  it('every non-win32 host gets the byte-identical POSIX bodies for every agent', () => {
+    for (const host of ['darwin', 'linux']) {
+      for (const agent of ['claude', 'codex', 'gemini', 'grok', 'opencode'] as const) {
+        const skills = skillsFor(agent, { canvas: '/u/nodeterm.sh', context: '/u/context.sh' }, host)
+        expect(skills.get(CANVAS_SKILL)).toBe(buildCanvasSkillBody('/u/nodeterm.sh'))
+        expect(skills.get(CONTEXT_SKILL)).toBe(buildContextLinkSkillBody('/u/context.sh'))
+      }
+    }
+  })
+})
+
+// The codex hook-trust repairs (spawn-time + managed account homes) write the user's real
+// ~/.codex/hooks.json and config.toml, so they obey the same consent as the boot install: a
+// declined or undecided codex — or the Server Edition veto — gets nothing written, ever.
+describe('codex hook repair is consent-gated', () => {
+  const codexAccount = { id: 'acct-1', label: 'work', createdAt: 1 } as Settings['codexAccounts'][number]
+
+  it('a launch repair writes NOTHING for an undecided or declined codex, or under the veto', () => {
+    const cases: Array<[Settings, boolean]> = [
+      [DEFAULT_SETTINGS, false],
+      [withAgents({ codex: 'declined' }), false],
+      [withAgents({ claude: 'enabled' }), false],
+      [withAgents({ codex: 'enabled' }), true]
+    ]
+    for (const [settings, veto] of cases) {
+      const { lc } = lifecycle(() => settings, { veto, realHooks: true })
+      lc.ensureCodexHooksForLaunch(path.join(home, '.codex'))
+      expect(filesUnder(home), JSON.stringify(settings.agentIntegrations ?? 'undecided')).toEqual([])
+    }
+  })
+
+  it('a launch repair installs hooks + trust for an ENABLED codex', () => {
+    const { lc } = lifecycle(() => withAgents({ codex: 'enabled' }), { realHooks: true })
+    lc.ensureCodexHooksForLaunch(path.join(home, '.codex'))
+    expect(read(path.join(home, '.codex', 'hooks.json'))).toContain('agent-hooks')
+    expect(read(path.join(home, '.codex', 'config.toml'))).toContain('trusted_hash')
+  })
+
+  it('managed codex account homes are repaired by reconcile only when codex is enabled', () => {
+    const acctHome = codexAccountHome(userData, codexAccount.id)
+    mkdirSync(acctHome, { recursive: true })
+    const choices: Array<Record<string, 'enabled' | 'declined'>> = [{}, { codex: 'declined' }, { claude: 'enabled' }]
+    for (const agents of choices) {
+      const { lc } = lifecycle(() => withAgents(agents, { codexAccounts: [codexAccount] }), { realHooks: true })
+      lc.reconcile()
+      expect(readdirSync(acctHome), JSON.stringify(agents)).toEqual([])
+    }
+    const { lc } = lifecycle(() => withAgents({ codex: 'enabled' }, { codexAccounts: [codexAccount] }), {
+      realHooks: true
+    })
+    lc.reconcile()
+    expect(read(path.join(acctHome, 'config.toml'))).toContain('trusted_hash')
+  })
+})

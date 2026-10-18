@@ -71,6 +71,13 @@ project's existing ControlMaster, so the URL the tool itself printed just works 
   end to end on Linux: a real tmux session (private socket, sandboxed TMUX_TMPDIR) running a real
   listener two processes below its pane, read back through real `ps` + `ss`
   (`dev-ports.realsh.test.ts`).
+- **Windows: the session host's panes + one PowerShell call** (`collectWin32DevPorts`). No `/bin/sh`
+  and no tmux there, so the panes are the host's `sessionDetails` pids and the process table +
+  listeners come from `Win32_Process` + `Get-NetTCPConnection` (the owning pid is a kernel field —
+  no name to forge), else `netstat -ano` (a listener is a TCP row whose FOREIGN port is 0: the state
+  column is localized). Same `assembleDevPorts`. A failed host read, an older host without pids, or a
+  non-zero PowerShell exit is `unreachable`; `unsupported` only when the session host is not the
+  backend; no nt- session means no PowerShell spawn at all.
 - **Ports in the ephemeral range (≥ 32768) are listed but not counted.** A headless browser's
   debugging endpoint or an MCP helper asks for "any port" and lands there; a dev server a person
   means to open almost never does. The chip counts only the rest and is absent when there are none;

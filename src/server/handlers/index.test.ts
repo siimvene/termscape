@@ -5,6 +5,7 @@ import path from 'path'
 import { execFileSync } from 'child_process'
 import { ServerPlatform } from '../platform-server'
 import { registerCoreHandlers } from './index'
+import { createIntegrationLifecycle, registerIntegrationLifecycle } from '../../core/agent-integrations'
 import { IPC } from '../../shared/ipc'
 import { DEFAULT_SETTINGS, type GitStatus } from '../../shared/types'
 import { initPlatform, resetPlatformForTests } from '../../core/platform'
@@ -16,7 +17,8 @@ import { SettingsStore } from '../../core/settings-store'
 // them here instead of running them: the real installer writes into the USER's `~/.nodeterm`, and
 // a unit test has no business touching the machine it runs on.
 const hookInstalls: string[] = []
-vi.mock('../../core/agents/hooks/claude', () => ({
+vi.mock('../../core/agents/hooks/claude', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../core/agents/hooks/claude')>()),
   installClaudeHooksInto: (dir: string) => {
     hookInstalls.push(dir)
   },
@@ -159,13 +161,22 @@ describe('registerCoreHandlers (download tickets)', () => {
 /**
  * Issue #313 — a browser-only deployment must be able to MANAGE managed Claude accounts, not just
  * select them. Registration lives in `registerCoreHandlers` because the lifecycle is core now; the
- * Server Edition wires neither an `installSkill` (canvas control is not wired here) nor a `remote`
- * (no SSH-project manager), so an account with a projectId still lands locally.
+ * Server Edition wires no `remote` (no SSH-project manager), so an account with a projectId still
+ * lands locally.
  */
 describe('registerCoreHandlers (managed Claude accounts, #313)', () => {
   beforeEach(() => {
     hookInstalls.length = 0
+    // The account's hook comes from the consent lifecycle (#744) — claude enabled here.
+    registerIntegrationLifecycle(
+      createIntegrationLifecycle({
+        settings: () => ({ ...DEFAULT_SETTINGS, agentIntegrations: { agents: { claude: 'enabled' }, origin: 'asked' } }),
+        userDataDir: () => repo,
+        shims: () => ({ context: path.join(repo, 'context-links', 'context.sh') })
+      })
+    )
   })
+  afterEach(() => registerIntegrationLifecycle(null))
 
   it('add() creates the config dir under this host userData and remove() deletes it', async () => {
     const added = (await call(IPC.claudeAccountsAdd)) as { id: string; configDir: string }
@@ -203,12 +214,36 @@ describe('registerCoreHandlers (managed Claude accounts, #313)', () => {
  * ipcMain are registered here through the platform seam, so a browser deployment can manage them.
  */
 describe('registerCoreHandlers (managed pi accounts)', () => {
-  it('add() mints <userData>/pi-accounts/<id> with the status extension; remove() deletes it', async () => {
+  const piLifecycle = (pi: 'enabled' | undefined, veto?: boolean) =>
+    registerIntegrationLifecycle(
+      createIntegrationLifecycle({
+        settings: () => ({ ...DEFAULT_SETTINGS, agentIntegrations: { agents: pi ? { pi } : {}, origin: 'asked' } }),
+        userDataDir: () => repo,
+        shims: () => ({ context: path.join(repo, 'context-links', 'context.sh') }),
+        veto
+      })
+    )
+  afterEach(() => registerIntegrationLifecycle(null))
+
+  it('add() mints <userData>/pi-accounts/<id> with the status extension (pi enabled); remove() deletes it', async () => {
+    piLifecycle('enabled')
     const added = (await call(IPC.piAccountsAdd)) as { id: string; agentDir: string }
     expect(added.agentDir).toBe(path.join(repo, 'pi-accounts', added.id))
     expect(fs.existsSync(path.join(added.agentDir, 'extensions', 'nodeterm-status.js'))).toBe(true)
+    // No canvas control wired on this shell (no canvas shim): the context skill only.
+    expect(fs.existsSync(path.join(added.agentDir, 'skills', 'get-linked-context', 'SKILL.md'))).toBe(true)
+    expect(fs.existsSync(path.join(added.agentDir, 'skills', 'manage-nodeterm-canvas'))).toBe(false)
     await call(IPC.piAccountsRemove, added.id)
     expect(fs.existsSync(added.agentDir)).toBe(false)
+  })
+
+  it('add() under an undecided pi, or the installHooks:false veto, mints the dir and writes nothing into it', async () => {
+    for (const arrange of [() => piLifecycle(undefined), () => piLifecycle('enabled', true)]) {
+      arrange()
+      const added = (await call(IPC.piAccountsAdd)) as { id: string; agentDir: string }
+      expect(fs.existsSync(added.agentDir)).toBe(true)
+      expect(fs.readdirSync(added.agentDir)).toEqual([])
+    }
   })
 
   it('waitLogin and cancelWait are registered (not E_NO_HANDLER)', async () => {

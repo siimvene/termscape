@@ -21,6 +21,8 @@ import { cardAssignees } from '@shared/kanban-labels'
 import { TeamProgressChip } from '../TeamProgressChip'
 import type { TeamStation } from '../../lib/teamProgress'
 import { cardShowsOverdue, sessionNameRepeatsTitle } from '../../lib/cardRedundancy'
+import { PortsChip } from '../PortsChip'
+import { QueuedLaunchChip } from './QueuedLaunchChip'
 
 const PRIO_COLOR = Object.fromEntries(PRIORITIES.map((p) => [p.id, p.color])) as Record<KanbanPriority, string>
 
@@ -54,11 +56,20 @@ interface SessionCardProps {
    *  this machine's LIVE chip, or counts a link as card detail — a relay tab's node with the same
    *  id is another machine's terminal (R57). */
   liveLinkSource: SessionSource | null
+  /** The card's project, when the dev-port scanner covers it (the project on the canvas). Absent =
+   *  no Ports chip: the scanner scans the active project only, so an Omni lane of a background
+   *  project would only ever show a stale or empty list. A stable object per board (memo). */
+  ports?: { projectId: string; remote: boolean }
+  /** A port row was picked: open it in a browser node beside the card's node (on the canvas). */
+  onOpenPort?: (nodeId: string, url: string) => void
+  /** ▶ on the card's QUEUED chip: start the node's held launch now (Canvas's `run` path; on a relay
+   *  tab Canvas answers with a "runs on the host" notice instead). Absent = the chip shows without ▶. */
+  onRunQueued?: (nodeId: string) => void
 }
 
 export const SessionCard = memo(function SessionCard({
   session, meta, labels = [], onOpen, onDragStart, onDragEnd, onDropAt, onContext, pulls,
-  pullFreshness = 'fresh', onOpenIssue, team, onTravel, columnCategory, liveLinkSource
+  pullFreshness = 'fresh', onOpenIssue, team, onTravel, columnCategory, liveLinkSource, ports, onOpenPort, onRunQueued
 }: SessionCardProps) {
   // THIS card's agent status, subscribed per card rather than threaded down from the board.
   // KanbanView used to hold `useAgentStatus((s) => s.byId)` and pass the map through the column:
@@ -156,6 +167,24 @@ export const SessionCard = memo(function SessionCard({
         )}
         {session.kind === 'terminal' && team && team.length > 0 && onTravel && (
           <TeamProgressChip stations={team} onTravel={onTravel} />
+        )}
+        {session.kind === 'terminal' && session.pendingLaunch && (
+          <QueuedLaunchChip
+            nodeId={session.id}
+            pending={session.pendingLaunch}
+            firstOpen={session.launchFirstOpen}
+            onRun={onRunQueued ? () => onRunQueued(session.id) : undefined}
+          />
+        )}
+        {/* The canvas node header's Ports chip — one component, so the two views of a session
+            cannot disagree. It stops its own clicks, so opening it never opens the card. */}
+        {session.kind === 'terminal' && ports && onOpenPort && (
+          <PortsChip
+            nodeId={session.id}
+            projectId={ports.projectId}
+            remote={ports.remote}
+            onOpenUrl={(url) => onOpenPort(session.id, url)}
+          />
         )}
         {session.kind === 'sticky' && <span className="kanban-card__kind">note</span>}
         {session.kind === 'browser' && <span className="kanban-card__kind">web</span>}

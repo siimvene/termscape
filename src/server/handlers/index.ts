@@ -9,9 +9,11 @@ import { registerFsHandlers } from '../../core/fs-handlers'
 import { claudeCliCaps, registerClaudeCliIpc } from '../../core/claude-cli'
 import { readPeerClaudeAccounts } from '../../core/peer-claude-accounts'
 import { registerGrokCliIpc } from '../../core/grok-cli'
+import { registerCursorCliIpc } from '../../core/cursor-cli'
 import { registerCodexIdentityIpc } from '../../core/codex-identity-caps'
 import { registerCodexCliIpc } from '../../core/codex-cli'
 import { registerWallpaperIpc } from '../../core/wallpaper'
+import { registerRunConfigIpc } from '../../core/run-service'
 import { startUsageService } from '../../core/usage/usage-service'
 import { registerClaudeAccountsIpc } from '../../core/claude-accounts-service'
 import { registerCodexAccountsIpc } from '../../core/codex-accounts-service'
@@ -37,11 +39,6 @@ export function registerCoreHandlers(
      *  through its `mutate` (claude-accounts-service.ts / codex-accounts-service.ts), not through
      *  a renderer snapshot. */
     settingsStore: AccountRowStore
-    /** Per-dir addition for a NEW managed pi account (the get-linked-context skill, plus the
-     *  canvas-control skill when that surface is enabled) — pi discovers skills only from
-     *  `<agentDir>/skills`, so without it a fresh account's node cannot find either CLI. The
-     *  desktop passes the same shape to `initPiAccounts`. */
-    installPiSkill?: (agentDir: string) => void
     /** Lets the wallpaper cache prune what a changed choice left behind. */
     onSettingsChange?: (cb: (s: Settings) => void) => unknown
     downloadTickets?: DownloadTickets
@@ -100,6 +97,7 @@ export function registerCoreHandlers(
   // Invariant 11 for probes: registered in BOTH shells, or session-id minting silently works on
   // the desktop and not in the browser, with nothing to say which.
   registerGrokCliIpc()
+  registerCursorCliIpc()
   // The codex CLI's own approval vocabulary, and this one is registered FOR REAL rather than
   // stubbed. `registerCodexIdentityIpc` below declines a shared app-server on purpose; this is the
   // opposite case, and the distinction matters — the Server Edition's Codex sessions run on THIS
@@ -112,6 +110,8 @@ export function registerCoreHandlers(
     get: deps.getSettings,
     onChange: (cb) => deps.onSettingsChange?.(cb)
   })
+  // The run node's host side: core, so the browser's run nodes run on this server.
+  registerRunConfigIpc()
   void claudeCliCaps()
 
   // The answer is populated after server node identity is armed. Early browser callers wait for
@@ -141,10 +141,10 @@ export function registerCoreHandlers(
 
   // Managed PI accounts, the same four verbs the desktop serves (add / wait-login / cancel-wait /
   // remove, src/core/pi-accounts-service.ts). Local-only in v1 — there is no SSH leg to omit. The
-  // store is where the account ROW (and the login-capture flip) is written. `installSkill` is the
-  // per-account skill leg the desktop's `initPiAccounts` gets too (a pi account dir reads its
-  // skills from ITSELF, unlike Claude's canvas skill, which this shell leaves to its boot loop).
-  registerPiAccountsIpc({ settings: deps.settingsStore, installSkill: deps.installPiSkill })
+  // store is where the account ROW (and the login-capture flip) is written. A new account's
+  // extension + skills come from the consent lifecycle (`installIntoPiAccount`), gated on pi's
+  // consent and this edition's `installHooks: false` veto, like a Claude account's add.
+  registerPiAccountsIpc({ settings: deps.settingsStore })
 
   // Claude subscription usage. Previously desktop-only — the browser bridge answered `null`, so
   // the pill never rendered in the Server Edition. The poll runs UNGATED here (the default), not

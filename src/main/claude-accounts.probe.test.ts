@@ -28,11 +28,13 @@ const findInLoginPath = vi.fn<(n: string) => Promise<string | null>>()
 vi.mock('../core/pty-manager', () => ({ findInLoginPath: (n: string) => findInLoginPath(n) }))
 
 // Side effects of Add that are irrelevant here (and would touch the real user's dirs).
-vi.mock('../core/agents/hooks/claude', () => ({
+// Partial: the consent lifecycle (core/agent-integrations.ts, imported by the account service since
+// the #744 merge) pulls the rest of this module in through the hook-installer table.
+vi.mock('../core/agents/hooks/claude', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../core/agents/hooks/claude')>()),
   installClaudeHooksInto: vi.fn(),
   ensureClaudeFullscreenTuiInto: vi.fn()
 }))
-vi.mock('./canvas-control', () => ({ installCanvasSkillInto: vi.fn() }))
 
 let tmp = ''
 vi.mock('../core/claude-config-dir', () => ({

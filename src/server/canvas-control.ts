@@ -1,5 +1,4 @@
 import fs from 'node:fs'
-import os from 'node:os'
 import path from 'node:path'
 
 import {
@@ -8,6 +7,7 @@ import {
   deliverStationNotice,
   messagingEnabledVia,
   onMessagingAgentEvent,
+  ptyPaneProbeDeps,
   restoreDeliveryQueue,
   type AgentMessagingDeps
 } from '../core/agents/agent-messaging'
@@ -28,22 +28,14 @@ import {
   nodeState
 } from '../core/agent-status-mirror'
 import type { BoardLogHandlers } from '../core/board-log-handlers'
-import {
-  buildControlShimScript,
-  buildCanvasControlInstructions,
-  buildCanvasSkillBody,
-  mergeCanvasControlBlock
-} from '../core/canvas-control-core'
-import { piAgentDir } from '../core/agents/hooks/pi'
-import { installPiCanvasSkillsInto } from '../core/agents/hooks/pi-skills'
+import { buildControlShimScript } from '../core/canvas-control-core'
+import { syncWindowsShLauncher } from '../core/agents/hooks/install-helper'
 import { codexIdentityCaps } from '../core/codex-identity-caps'
 import { codexThreadIdentityRoot } from '../core/codex-identity-proxy'
 import { claudeCliCaps, type ClaudeCliCaps } from '../core/claude-cli'
 import { grokCliCaps } from '../core/grok-cli'
 import { codexCliCaps } from '../core/codex-cli'
 import type { CodexCliCaps, GrokCliCaps } from '../shared/types'
-import { installHooksIntoLocalAccounts } from '../core/claude-accounts-service'
-import { installPiExtensionIntoLocalAccounts } from '../core/pi-accounts-service'
 import { platform } from '../core/platform'
 import type { PtyManager } from '../core/pty-manager'
 import type { WorkspaceStore } from '../core/workspace-store'
@@ -82,27 +74,6 @@ export interface ServerCanvasControlDeps {
    *  Absent = those verbs answer that the GitHub lane is unavailable here. */
   githubRead?: Pick<GitHubReadDeps, 'snapshot' | 'dispatch'>
   /**
-   * Whether to write this server's discovery surface into the machine's REAL agent configuration
-   * directories: `~/.claude/skills/manage-nodeterm-canvas/SKILL.md`, the marker block in
-   * `~/.codex/AGENTS.md` and `~/.gemini/GEMINI.md`, and the same skill in every managed Claude
-   * account dir. `true` = the server's `installHooks` gate said yes; `false` = leave them alone.
-   *
-   * REQUIRED, and deliberately not defaulted. A service process editing files inside a user's
-   * `$HOME` is a documented hazard in this repo — those instruction files are loaded by EVERY
-   * agent session on the machine, nodeterm's or not, so a stray write follows the user into work
-   * that has nothing to do with this server (issue #490). The previous shape was an OPTIONAL flag
-   * read as `!== false`, which meant OMITTING the decision installed: the dangerous direction was
-   * the one you got by saying nothing, and a new call site or a test that simply forgot the field
-   * would rewrite the developer's own agent configuration with no diagnostic. Making it required
-   * turns "I did not think about this" into a compile error — the same asymmetry
-   * `session-memory-service.ts` uses for its `remote.isRemoteProject` dep, where
-   * reading-without-knowing is likewise refused at the type level.
-   *
-   * Production passes `config.installHooks !== false`; every test must pass `false` unless it is
-   * specifically exercising the install and has redirected `HOME` to a scratch directory first.
-   */
-  installAgentIntegrations: boolean
-  /**
    * Does this process own the hook endpoint (`hookServer.startForApp()` returned no warning)? The
    * durable orchestration facts (queue, station reports, hand-over holds) belong to the owning
    * instance, like the request ledger: a second instance on the same data dir must neither restore
@@ -120,7 +91,6 @@ export interface ServerCanvasControl {
   stationOutcomes: StationOutcomeStore
   /** Stations with unfinished handed-over work in THIS server run (plain `--after` holds on them). */
   stationHandovers: StationHandoverTracker
-  installSkillInto(configDir: string): void
   stop(): void
 }
 
@@ -132,20 +102,6 @@ function shimPath(): string {
   return path.join(canvasControlDir(), 'nodeterm.sh')
 }
 
-function skillPathIn(configDir: string): string {
-  return path.join(configDir, 'skills', 'manage-nodeterm-canvas', 'SKILL.md')
-}
-
-/**
- * The per-account pi leg for THIS shell — the twin of `installPiCanvasSkillInto` in
- * main/canvas-control.ts: a managed pi account is its own agent dir and pi discovers skills from
- * `<agentDir>/skills`, so each account needs its own copy. Same builder and the same shim path as
- * the system dir's install below, so an account can never carry different verbs. Best-effort.
- */
-export function installServerPiCanvasSkillInto(agentDir: string): void {
-  installPiCanvasSkillsInto(agentDir, buildCanvasSkillBody(shimPath()))
-}
-
 function writeShim(): void {
   const dir = canvasControlDir()
   fs.mkdirSync(dir, { recursive: true })
@@ -155,6 +111,9 @@ function writeShim(): void {
   } catch {
     /* best effort on filesystems without POSIX modes */
   }
+  // The `.cmd` launcher the skill names on a Windows host (skillsFor picks that dialect from this
+  // core's platform); a no-op removal on the Linux hosts the Server Edition targets.
+  syncWindowsShLauncher(dir, 'nodeterm.sh')
   // Same upgrade sweep as desktop: the POSIX shim replaced this Electron-as-Node script.
   try {
     fs.rmSync(path.join(dir, 'canvas-control-cli.mjs'), { force: true })
@@ -163,27 +122,17 @@ function writeShim(): void {
   }
 }
 
-function installInstructions(file: string, body: string): void {
-  try {
-    let existing = ''
-    try {
-      existing = fs.readFileSync(file, 'utf8')
-    } catch {
-      /* first install */
-    }
-    fs.mkdirSync(path.dirname(file), { recursive: true })
-    fs.writeFileSync(file, mergeCanvasControlBlock(existing, body), 'utf8')
-  } catch (error) {
-    console.warn('[server-canvas-control] instruction install failed', file, error)
-  }
+/** The canvas-control shim under the server dataDir (what the canvas skill points at). */
+export function serverCanvasShimPath(): string {
+  return shimPath()
 }
 
 /**
- * Boot the Server Edition canvas runtime and install its discovery surface.
+ * Boot the Server Edition canvas runtime.
  *
  * The shim itself always lives under the configured server dataDir, never under a hard-coded
- * `~/.nodeterm-server`. Writes to real Claude/Codex/Gemini homes are separately controlled by the
- * existing `installHooks` gate, exactly like `initServerContextLink`.
+ * `~/.nodeterm-server`. Its discovery skill is the consent lifecycle's (core/agent-integrations.ts,
+ * issue #744), which also honours `installHooks: false` as a veto.
  */
 export async function initServerCanvasControl(
   deps: ServerCanvasControlDeps
@@ -193,36 +142,6 @@ export async function initServerCanvasControl(
   } catch (error) {
     // The HTTP runtime remains useful even if discovery files cannot be written; fail open and loud.
     console.warn('[server-canvas-control] shim install failed', error)
-  }
-
-  const skillBody = buildCanvasSkillBody(shimPath())
-  const instructions = buildCanvasControlInstructions(shimPath())
-  const installSkillInto = (configDir: string): void => {
-    const file = skillPathIn(configDir)
-    try {
-      fs.mkdirSync(path.dirname(file), { recursive: true })
-      fs.writeFileSync(file, skillBody, 'utf8')
-    } catch (error) {
-      console.warn('[server-canvas-control] skill install failed', file, error)
-    }
-  }
-
-  // Required field, so this is a plain read of a decision the caller had to make — never a
-  // default. See ServerCanvasControlDeps.installAgentIntegrations for why omission must not
-  // be spellable here.
-  if (deps.installAgentIntegrations) {
-    installSkillInto(path.join(os.homedir(), '.claude'))
-    // pi reads its own agent dir's skills/, not ~/.claude/skills — same builder, same body.
-    installPiCanvasSkillsInto(piAgentDir(), skillBody)
-    installInstructions(path.join(os.homedir(), '.codex', 'AGENTS.md'), instructions)
-    installInstructions(path.join(os.homedir(), '.gemini', 'GEMINI.md'), instructions)
-    // Managed accounts resolve skills relative to their own CLAUDE_CONFIG_DIR.
-    installHooksIntoLocalAccounts(deps.settings().claudeAccounts ?? [], installSkillInto)
-    // Managed pi accounts likewise read skills from their own PI_CODING_AGENT_DIR — the same loop
-    // the desktop's boot runs for them (existing dirs only; a removed account is never resurrected).
-    installPiExtensionIntoLocalAccounts(deps.settings().piAccounts ?? [], (agentDir) =>
-      installPiCanvasSkillsInto(agentDir, skillBody)
-    )
   }
 
   // Station task outcomes: built before the factory, which reads them for `--after-success`.
@@ -298,7 +217,7 @@ export async function initServerCanvasControl(
   factoryRef = factory
 
   const messaging: AgentMessagingDeps = {
-    paneOwner: (nodeId) => deps.ptyManager.paneOwner(nodeId),
+    ...ptyPaneProbeDeps(deps.ptyManager),
     // Server delivery has no renderer/xterm echo stream. Capture the headless pane instead and
     // separate paste from Enter so a fresh TUI cannot swallow the first submit keystroke.
     sendEnvelope: (nodeId, envelope) =>
@@ -457,7 +376,6 @@ export async function initServerCanvasControl(
     stationNotices,
     stationOutcomes,
     stationHandovers,
-    installSkillInto,
     stop: () => {
       factory.stop()
       queue.resetForTests()

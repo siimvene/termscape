@@ -13,8 +13,12 @@ import {
   createStickyNode,
   createDinoNode,
   createFilesNode,
+  createRunNode,
+  createSimulatorNode,
   isAccountLoginNode
 } from '@renderer/state/workspace'
+import { normalizeRunConfig } from '@shared/run-config'
+import { normalizeSimulatorConfig } from '@shared/simulator'
 import { absolutePosition, type FocusableNode } from './nodeFocus'
 import { normalizeNodeIcon } from '@shared/node-icon'
 
@@ -164,6 +168,10 @@ function buildBase(snapshot: ReopenNodeSnapshot, ctx: RecreateContext): CanvasNo
           ctx.permissionModeFor(d.agentId)
         )
       }
+      // A run node reopens as a run node (same folder/configuration/device); its run is NOT
+      // restarted — the toolbar's Run is the user's call, as on first open.
+      const runConfig = normalizeRunConfig(d.runConfig)
+      if (runConfig) return createRunNode(0, runConfig)
       return createTerminalNode(0, d.cwd, undefined, undefined, ctx.project?.ssh)
     }
     case 'sticky': {
@@ -189,6 +197,9 @@ function buildBase(snapshot: ReopenNodeSnapshot, ctx: RecreateContext): CanvasNo
       return createBrowserNode(0, d.url ?? '', undefined, d.partition)
     case 'dino':
       return createDinoNode(0, undefined, d.highScore ?? 0)
+    // A Simulator node's whole state is which device it shows.
+    case 'simulator':
+      return createSimulatorNode(0, normalizeSimulatorConfig(d.simulator))
     default:
       return null
   }

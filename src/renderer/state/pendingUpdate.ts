@@ -26,9 +26,19 @@ export const usePendingUpdate = create<PendingUpdateState>((set) => ({
 // Termscape fork: our releases, not upstream's download page (whose DMG is a different app).
 export const RELEASES_URL = 'https://github.com/siimvene/termscape/releases'
 
+/**
+ * A USER-initiated update check. The card listens for `nodeterm:update-checking` to know the user
+ * asked — that is what makes it show progress and "You're up to date", which automatic checks
+ * never do. Every button that checks goes through here.
+ */
+export function checkForUpdatesNow(): void {
+  window.dispatchEvent(new CustomEvent('nodeterm:update-checking'))
+  window.nodeTerminal.updates.check()
+}
+
 /** What clicking the title-bar button does for each pending kind. */
 export function runPendingUpdate(p: PendingUpdate): void {
   if (p.kind === 'downloaded') window.nodeTerminal.updates.restart()
   else if (p.kind === 'manual') window.open(RELEASES_URL, '_blank', 'noopener')
-  else window.nodeTerminal.updates.check()
+  else checkForUpdatesNow()
 }

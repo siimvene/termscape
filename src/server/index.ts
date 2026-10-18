@@ -50,10 +50,11 @@ import { installLogSink } from '../core/log-sink'
 import { registerLogHandlers } from '../core/log-handlers'
 import os from 'os'
 import { hookServer } from '../core/agents/hook-server'
+import { wireClaudePaneOrigin } from '../core/agents/claude-pane-origin'
 import { serverEditionControlHandler } from './control-unsupported'
 import {
   initServerCanvasControl,
-  installServerPiCanvasSkillInto,
+  serverCanvasShimPath,
   type ServerCanvasControl
 } from './canvas-control'
 import { registerStationNoticeIpc } from '../core/agents/station-notice'
@@ -70,10 +71,14 @@ import {
 } from '../core/agents/pending-approvals'
 import { answerHeldPermission } from '../core/agents/permission-decision'
 import type { AnswerPermissionPayload } from '../shared/agents/permission-answer'
-import { installManagedAgentHooks } from '../core/agents/hooks'
-import { installHooksIntoLocalAccounts } from '../core/claude-accounts-service'
-import { installPiExtensionIntoLocalAccounts } from '../core/pi-accounts-service'
-import { installPiLinkSkillInto } from '../core/context-link'
+import {
+  createIntegrationLifecycle,
+  detectExistingIntegrations,
+  registerIntegrationLifecycle,
+  resolveIntegrationConsentAtBoot
+} from '../core/agent-integrations'
+import { registerIntegrationIpc } from '../core/agent-integrations-ipc'
+import { contextLinkShimPath } from '../core/context-link'
 import {
   initAgentStatusMirror,
   statusSnapshotEvents,
@@ -266,7 +271,7 @@ export async function startServer(
   settingsStore.init()
   // The linked-account resolver's one source of truth on this shell. Registered as
   // soon as settings exist and BEFORE anything that resolves a config dir — the mirror settings
-  // provider, `installHooksIntoLocalAccounts`, the transcript jail — because an unregistered
+  // provider, the agent-integration lifecycle's account reconcile, the transcript jail — because an unregistered
   // source means "no linked accounts", i.e. a linked row would resolve to a managed dir that does
   // not exist. The desktop registers the identical getter next to `initTranscriptIndex`.
   registerClaudeAccountsSource(() => settingsStore.get().claudeAccounts ?? [])
@@ -284,6 +289,20 @@ export async function startServer(
     }
   } catch (error) {
     console.warn('[model-gateway] could not migrate the legacy API key to secret storage', error)
+  }
+  // Agent-integration consent (issue #744): grandfather an install from before this feature (our own
+  // hook scripts are on disk) as enabled, before any browser can load settings. Decided once per
+  // install: a first boot without evidence is marked fresh and never grandfathered later (#1149).
+  if (config.installHooks !== false) {
+    try {
+      const grandfathered = resolveIntegrationConsentAtBoot(
+        settingsStore.get(),
+        detectExistingIntegrations(config.dataDir)
+      )
+      if (grandfathered) await settingsStore.save(grandfathered)
+    } catch (error) {
+      console.warn('[integrations] could not record the grandfathered consent', error)
+    }
   }
   settingsStore.registerIpc()
   // Gateway discovery/credential IPC. NO env snapshot on the server: every registered handler
@@ -369,20 +388,9 @@ export async function startServer(
   // between the RPC side (which mints) and the HTTP side (which redeems) — one instance, so a
   // ticket minted over the socket is redeemable by the GET that follows it.
   const downloadTickets = new DownloadTickets()
-  // A managed pi account is its own agent dir, and pi reads skills per agent dir: each account
-  // gets BOTH skills the system dir gets (get-linked-context, and canvas control when that surface
-  // is enabled on this edition), from the same builders — the desktop's `installPiAccountSkills`.
-  // Used by the add verb (`installPiSkill`) and the boot loop below. `installHooks: false`
-  // (tests) skips it like every other integration write.
-  const installPiAccountSkills = (agentDir: string): void => {
-    if (config.installHooks === false) return
-    installPiLinkSkillInto(agentDir)
-    if (config.canvasControl === true) installServerPiCanvasSkillInto(agentDir)
-  }
   const { gitService } = registerCoreHandlers(platform, {
     getSettings: () => settingsStore.get(),
     settingsStore,
-    installPiSkill: installPiAccountSkills,
     onSettingsChange: (cb) => settingsStore.onChange(cb),
     downloadTickets,
     localProjectCwd: (projectId: string) => workspaceStore.localCwdForProject(projectId)
@@ -423,6 +431,10 @@ export async function startServer(
   // on the desktop it would also reach relay peers. A headless server with nobody attached simply
   // gets no answer, the prompt expires, and the shared value stays unused: fail closed on the
   // grant, fail open on the spawn.
+  // A node owned by an SSH project is never spawned on THIS machine (issue #1186). This shell has
+  // no SSH-project manager, so such a node cannot run anywhere here — refusing is the honest answer,
+  // the same one the desktop gives while that project's ControlMaster is down.
+  ptyManager.setSshProjectCheck((projectId) => workspaceStore.sshProjectIds().includes(projectId))
   ptyManager.setProjectSpawnOverrides(
     makeProjectSpawnOverrides({
       readSettings: (projectId) => workspaceStore.readProjectSettings(projectId),
@@ -565,7 +577,7 @@ export async function startServer(
   // rather than an unknown channel when canvas control is off.
   registerStationOutcomeIpc(platform, () => canvasControl?.stationOutcomes ?? null)
   registerStationHandoverIpc(platform, () => canvasControl?.stationHandovers ?? null)
-  const { contextTail, geminiContextTail, codexContextTail, piSessions } = wireAgentStatus(platform, {
+  const { contextTail, geminiContextTail, codexContextTail, cursorContextTail, piSessions } = wireAgentStatus(platform, {
     onEvent: (event) => canvasControl?.onAgentEvent(event)
   })
   // Self-host fork: surface a peer instance's (the desktop app's) agent states — see
@@ -597,6 +609,19 @@ export async function startServer(
       }
     }
     return events
+  })
+  // Cursor NEEDS YOU, same seam as the desktop (core/agents/cursor-approval.ts).
+  hookServer.setPaneReader((nodeId) => ptyManager.captureSession(nodeId))
+  // Which claude may speak for a node (#1112, #1153): the pane tty from THIS shell's PtyManager.
+  // Same call as the desktop's (hook-verified-parity.test.ts).
+  wireClaudePaneOrigin({
+    hooks: hookServer,
+    paneOwner: (nodeId) => ptyManager.paneOwner(nodeId),
+    // No SSH-project manager here: such a node's pane is on another machine, never readable.
+    cannotRead: (nodeId) => !!workspaceStore.sshProjectIdForNode(nodeId),
+    on: (channel, cb) => platform.on(channel, cb),
+    destroyChannel: IPC.ptyDestroy,
+    recycleChannel: IPC.ptyRecycle
   })
   // The ⌘M chat view + the find-bar's transcript index. Registered HERE rather than with the rest
   // of the handlers because the hook-fed path authority is the tail created just above. No remote
@@ -630,6 +655,8 @@ export async function startServer(
           return codexContextTail
         case 'gemini':
           return geminiContextTail
+        case 'cursor':
+          return cursorContextTail
         default:
           return undefined
       }
@@ -745,25 +772,28 @@ export async function startServer(
     mobilePushEnabled: () => settingsStore.get().mobilePushEnabled !== false,
     mobileLiveActivities: () => settingsStore.get().mobileLiveActivities !== false
   })
-  // `installHooks: false` (tests) skips the merge into the user's real ~/.claude et al —
-  // the hook it would write points into `dataDir`, which a test then deletes.
-  if (config.installHooks !== false) {
-    try {
-      // Fail-open: installManagedAgentHooks is itself best-effort, but a throw must never block boot.
-      installManagedAgentHooks()
-    } catch (e) {
-      console.warn('[nodeterm-server] managed hook install failed', e)
-    }
-    // Managed Claude accounts each carry their OWN settings.json (Claude Code resolves it relative
-    // to CLAUDE_CONFIG_DIR), so the hook has to be re-installed there as well or a managed account
-    // reports no agent status at all. Canvas-control adds its skill in its own opt-in initializer;
-    // this baseline hook pass stays unchanged when the feature flag is off.
-    installHooksIntoLocalAccounts(settingsStore.get().claudeAccounts ?? [])
-    // Managed pi accounts: each is its own PI_CODING_AGENT_DIR, so the status extension AND the
-    // per-account skills are re-installed into every account dir as well (same loop as the
-    // desktop boot, same installer the add verb uses).
-    installPiExtensionIntoLocalAccounts(settingsStore.get().piAccounts ?? [], installPiAccountSkills)
-  }
+  // Agent-integration consent (issue #744) — the same lifecycle the desktop boots: hooks + skills
+  // only for the agents the user enabled, a declined one cleaned up, nothing for an undecided one.
+  // `installHooks: false` (tests) is a hard veto that outranks every choice: the hook it would write
+  // points into `dataDir`, which a test then deletes. Managed Claude accounts (each its own
+  // CLAUDE_CONFIG_DIR) are covered by the lifecycle's per-account loop.
+  const integrations = createIntegrationLifecycle({
+    settings: () => settingsStore.get(),
+    userDataDir: () => config.dataDir,
+    shims: () => ({
+      canvas: config.canvasControl === true ? serverCanvasShimPath() : undefined,
+      context: contextLinkShimPath()
+    }),
+    veto: config.installHooks === false
+  })
+  registerIntegrationLifecycle(integrations)
+  integrations.reconcile()
+  settingsStore.onChange((s) => integrations.onSettingsChanged(s))
+  registerIntegrationIpc(integrations)
+  // Fork (Termscape): managed pi accounts (each its own PI_CODING_AGENT_DIR) are covered by the
+  // lifecycle above under pi's own consent and its `installHooks: false` veto: extension + skills
+  // into every existing account dir while pi is enabled, exactly what Termscape wrote removed on a
+  // decline. The add verb asks the same lifecycle (`installIntoPiAccount`).
   const hookStartupWarning = await hookServer.startForApp()
   if (hookStartupWarning) console.error('[nodeterm-server]', hookStartupWarning)
   // Safe default and rollback path. The opt-in runtime replaces this handler only after its
@@ -809,8 +839,7 @@ export async function startServer(
   const contextLink = initServerContextLink({
     ptyManager,
     piPathFor: (sessionId) => piSessions.pathFor(sessionId),
-    canvases: () => workspaceStore.persistedCanvases(),
-    installAgentIntegrations: config.installHooks !== false
+    canvases: () => workspaceStore.persistedCanvases()
   })
   // A governed project's outside edit goes to the canvas authority, which publishes the difference
   // as canvas ops and then the persisted project on `workspace:server-change` (its non-content
@@ -859,7 +888,6 @@ export async function startServer(
           snapshot: (projectId) => github.service.controlSnapshot(projectId),
           dispatch: (projectId) => boardDispatchReports.forProject(projectId)
         },
-        installAgentIntegrations: config.installHooks !== false,
         // The durable orchestration facts follow hook-endpoint ownership, like the request ledger.
         ownsDurableState: hookStartupWarning === null
       })
@@ -902,7 +930,9 @@ export async function startServer(
   // hostMemReader). Kept identical to the desktop shell so the two cannot drift.
   const sessionReaper = createSessionReaper({
     tmuxBin: () => ptyManager.getTmuxBin(),
-    shadowed: (socket) => ptyManager.shadowedTmuxSessions(socket)
+    shadowed: (socket) => ptyManager.shadowedTmuxSessions(socket),
+    // No tmux (Windows): the session host's sessions are reaped under the same budget rules.
+    sessionHost: () => ptyManager.sessionHostReaperBackend()
   })
   sessionReaper.start()
   // Memory pressure (core/memory-pressure.ts): only the reaper leg on this shell. A CRITICAL
@@ -970,6 +1000,8 @@ export async function startServer(
     tmuxBin: () => ptyManager.getTmuxBin(),
     // Zellij-backed sessions are not in the tmux sweep; the panel says how many it did not measure.
     unmeasuredSessions: () => ptyManager.zellijSessionCount(),
+    // Windows (no tmux): the session host's sessions; undefined where it is not the backend.
+    sessionHost: () => ptyManager.sessionHostListing(),
     remote: {
       isRemoteProject: sshScopePredicate({ sshProjectIds: () => workspaceStore.sshProjectIds() })
     }

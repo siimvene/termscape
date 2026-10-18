@@ -13,6 +13,7 @@ paths:
   - "src/renderer/components/ClosedHistorySection.tsx"
   - "src/renderer/components/ClosedTranscriptDialog.tsx"
   - "src/shared/project-name.ts"
+  - "src/renderer/lib/modifierPan.ts"
 ---
 # Projects (tabs): switch, close/park, reopen, delete, open-folder recovery
 
@@ -66,6 +67,18 @@ project's nodes only.** The contract:
   first, so a `useState` initializer would read the default and the opt-in would silently never work)
   and latched to the first run, so flipping the setting mid-session never reaches into storage and
   locks a canvas someone is using. Desktop + Server Edition; **Mobile: N/A** (no canvas).
+  **The lock covers middle-drag on NODES too, and ⌘/Ctrl+middle-drag gets past it** (issue
+  #1130, `renderer/lib/modifierPan.ts`). React Flow's zoom filter accepts a middle-button
+  `mousedown` on a node / edge / selection before it reads `panOnDrag`, so turning `panOnDrag` off
+  never stopped a middle-drag that started on a node header or a terminal's hover guard (the xterm
+  itself was only safe by accident, via the #84 middle-click guard). While locked,
+  `installLockedMiddleGuard` stops a middle `mousedown` in the BUBBLE phase on
+  `.react-flow__viewport` — after the node (tmux, the middle-click paste setting) has seen it, before
+  React Flow's listener on an ancestor. `installModifierPan` is the deliberate way past the lock:
+  ⌘+middle-drag (Ctrl off-mac) pans anywhere, locked or not, by cancelling the pointerdown in the
+  capture phase on the flow wrapper (so no `mousedown` reaches d3, d3-drag or xterm). The
+  `canvas.toggleLock` command ships UNBOUND (⌘⇧L is the sessions sidebar's) and, like every canvas
+  command, does not fire while a terminal has the keyboard.
 - Before any project switch / add / delete, `commitActiveToStore()` serializes the live
   React Flow nodes back into the store, so nothing is lost. Then disk is written. The commit is
   guarded by the epoch tag `nodesProjectIdRef` (`canCommitCanvas`), and **that tag must live in

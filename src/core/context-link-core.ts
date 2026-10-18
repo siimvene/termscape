@@ -15,6 +15,7 @@ import {
 } from './agents/hook-endpoint-failover-sh'
 import { NODE_TOKEN_READ_SH } from './agents/node-token-sh'
 import { codexThreadIdentityResolverSh } from './codex-thread-identity-sh'
+import { shimCommand, shimFence, windowsShimNoteLines, type ShimDialect } from '../shared/agents/shim-invocation'
 
 /** The shim's generic transport-failure sentence — exported so the agent-facing docs below can
  *  quote it verbatim and the parity test holds the two ends together. */
@@ -93,7 +94,10 @@ export function mergeInstructionsBlock(existing: string, block: string): string 
   return existing + sep + full + '\n'
 }
 
-/** The instructions body telling codex/gemini how to read linked-node context. */
+/** The instructions body telling codex/gemini how to read linked-node context.
+ *  NOT INSTALLED since #744: every agent now gets the get-linked-context SKILL in its own skills
+ *  dir (core/agent-integrations.ts); older builds' copies of this block are stripped. Kept only
+ *  until its parity tests move to the skill body (follow-up). */
 export function buildLinkedContextInstructions(shimPath: string): string {
   return [
     '# Reading linked nodeterm nodes (get-linked-context)',
@@ -350,7 +354,10 @@ export const CONTEXT_SHIM_SCRIPT = buildContextShimScript()
 /** The get-linked-context SKILL.md body, pointing at the shim at `shimPath`. Parameterized
  *  because the same skill is installed twice with different paths: into the desktop's config
  *  dirs, and onto an SSH host for remote agent nodes. */
-export function buildContextLinkSkillBody(shimPath: string): string {
+export function buildContextLinkSkillBody(shimPath: string, dialect: ShimDialect = 'posix'): string {
+  // `dialect` as in buildCanvasSkillBody: only a non-claude agent on a Windows host gets the `.cmd`
+  // line; the default keeps the POSIX and SSH bodies byte-identical.
+  const windowsNote = windowsShimNoteLines(shimPath, dialect)
   return `---
 name: get-linked-context
 description: Read the conversation/transcript, a recent summary, or the terminal output of another agent node (Claude, Codex or Gemini) you are linked to on the nodeterm canvas. Use when you need to know what a connected node has been doing, hand off, or continue its work. Only meaningful inside a nodeterm session with a context-link edge. Also reads sticky notes linked to this node as context.
@@ -358,16 +365,16 @@ description: Read the conversation/transcript, a recent summary, or the terminal
 
 # Get linked context
 
-On the nodeterm canvas, this Claude session may be connected to other agent nodes (Claude, Codex or Gemini) by a
+On the nodeterm canvas, this session may be connected to other agent nodes (Claude, Codex, Gemini, opencode or Grok) by a
 context-link edge. When you are linked, you can READ the other node's context on demand by
 running the local CLI shim below. Nothing is pushed to you automatically — pull what you need.
 
 Run the shim (absolute path):
 
-\`\`\`sh
-sh "${shimPath}" <command> [--node <id|title>] [-n <N>]
+\`\`\`${shimFence(dialect)}
+${shimCommand(shimPath, dialect)} <command> [--node <id|title>] [-n <N>]
 \`\`\`
-
+${windowsNote.length ? `\n${windowsNote.join('\n')}\n` : ''}
 Commands:
 - \`list\` — list the nodes you are linked to (start here).
 - \`summary [--node X] [-n 15]\` — the last N lines of a linked node's conversation.

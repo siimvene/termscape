@@ -3,11 +3,13 @@ import { Tooltip } from '../components/Tooltip'
 import { IconChevronDown, IconChevronRight, IconClose } from '../components/icons'
 import { Handle, NodeResizer, Position, useReactFlow, type NodeProps } from '@xyflow/react'
 import { NODE_MIN_SIZES } from '../lib/nodeSizing'
-import { COLLAPSED_HEIGHT, type CanvasNode } from '../state/workspace'
+import { toggleCollapsed, type CanvasNode } from '../state/workspace'
 import { NodeColorSwatches } from '../components/NodeColorSwatches'
 import { ColumnPill } from '../components/kanban/ColumnPill'
 import { NoteMarkdown } from '../components/NoteMarkdown'
 import { relativeTime } from '../lib/relativeTime'
+import { useSettings } from '../state/settings'
+import { backedFillStyle } from '@shared/canvas-backing'
 
 /**
  * A sticky note node: a colored, resizable card with free-text content.
@@ -16,6 +18,8 @@ import { relativeTime } from '../lib/relativeTime'
 export function StickyNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const { updateNodeData, deleteElements, setNodes } = useReactFlow()
   const [showColors, setShowColors] = useState(false)
+  // Settings → Appearance → Sticky note background (issue #1113); 0 = the old see-through look.
+  const backing = useSettings((s) => s.settings.stickyNoteBacking)
   /**
    * The title is a plain SPAN until it is clicked, exactly as on a terminal node.
    *
@@ -47,22 +51,7 @@ export function StickyNode({ id, data, selected }: NodeProps<CanvasNode>) {
     return () => clearInterval(t)
   }, [stampAt])
 
-  const toggleCollapse = () =>
-    setNodes((ns) =>
-      ns.map((n) => {
-        if (n.id !== id) return n
-        const next = !n.data.collapsed
-        const expandedHeight =
-          (n.data.expandedHeight as number) ?? n.measured?.height ?? (n.height as number) ?? 200
-        const height = next ? COLLAPSED_HEIGHT : expandedHeight
-        return {
-          ...n,
-          height,
-          style: { ...n.style, height },
-          data: { ...n.data, collapsed: next, expandedHeight }
-        }
-      })
-    )
+  const toggleCollapse = () => setNodes((ns) => toggleCollapsed(ns as CanvasNode[], [id]))
 
   return (
     <>
@@ -70,7 +59,7 @@ export function StickyNode({ id, data, selected }: NodeProps<CanvasNode>) {
     <ColumnPill nodeId={id} />
     <div
       className={`sticky-node${selected ? ' selected' : ''}${collapsed ? ' collapsed' : ''}`}
-      style={{ background: `${data.color}22`, borderColor: data.color }}
+      style={{ ...backedFillStyle(data.color, '22', backing), borderColor: data.color }}
     >
       <NodeResizer minWidth={NODE_MIN_SIZES.sticky.width} minHeight={NODE_MIN_SIZES.sticky.height} isVisible={selected && !collapsed} color={data.color} />
 

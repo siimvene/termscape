@@ -176,6 +176,11 @@ paths:
        layer (`ok:false` changes no facts). Staleness from the status poll likewise needs **two
        consecutive** failed reads (`WORKTREE_STALE_STRIKES`), and the streak is scoped per project
        so a there-and-back tab switch cannot forget it.
+  - **Path identity** — compare worktree/repo paths through `worktreePathKey` (`shared/worktree.ts`),
+    never by string: git prints `C:/r/wt` on Windows while a typed binding says `C:\r\wt` or `c:/…`.
+    The key folds separators + case only for a Windows-SHAPED path (backslash, drive letter, UNC);
+    a POSIX path keeps exact case — keyed on shape because this module runs in the renderer, whose
+    platform is not the core's. The removal guard also refuses a bare drive root.
   - **Destructive safety** — `createdByApp` gates removal: nodeterm deletes only worktrees it
     created; one the user merely **adopted** unbinds by default, and deleting its directory is an
     explicit opt-in that **defaults to off** (its branch is kept either way).

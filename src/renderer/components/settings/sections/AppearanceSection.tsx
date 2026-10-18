@@ -1,3 +1,4 @@
+import { CANVAS_BACKING_MAX, CANVAS_BACKING_MIN, resolveCanvasBacking } from '@shared/canvas-backing'
 import { useEffect, useState } from 'react'
 import { useSettings } from '../../../state/settings'
 import { useWallpaperBackgroundFor } from '../../../state/wallpaper'
@@ -44,6 +45,16 @@ import {
   resolveTabBarHeight
 } from '@shared/window-chrome-metrics'
 import { NumberField } from '@renderer/ui/NumberField'
+import { FontPicker } from '../FontPicker'
+import { PROSE_FONT_CATALOG, buildProseFontStack } from '@renderer/lib/fontDetect'
+import {
+  DEFAULT_MARKDOWN_FONT_FAMILY,
+  DEFAULT_MARKDOWN_FONT_SIZE,
+  MARKDOWN_FONT_SIZE_MAX,
+  MARKDOWN_FONT_SIZE_MIN,
+  resolveMarkdownFontFamily,
+  resolveMarkdownFontSize
+} from '@shared/markdown-font'
 import { SectionReset } from '../SectionReset'
 import { APPEARANCE_RESET_KEYS } from '@renderer/lib/settingsReset'
 
@@ -59,6 +70,22 @@ const ROWS = {
   tabBarHeight: {
     title: 'Tab bar height',
     keywords: ['tab', 'bar', 'height', 'strip', 'top', 'title bar', 'thickness', 'compact', 'dense']
+  },
+  stickyNoteBacking: {
+    title: 'Sticky note background',
+    keywords: ['sticky', 'note', 'notes', 'transparency', 'transparent', 'opacity', 'opaque', 'solid', 'see-through', 'background', 'readability']
+  },
+  groupFrameBacking: {
+    title: 'Group frame background',
+    keywords: ['group', 'frame', 'frames', 'transparency', 'transparent', 'opacity', 'opaque', 'solid', 'see-through', 'background']
+  },
+  markdownFont: {
+    title: 'Markdown font',
+    keywords: ['markdown', 'font', 'family', 'typeface', 'chat', 'preview', 'reading', 'output', 'text', 'serif', 'sans']
+  },
+  markdownFontSize: {
+    title: 'Markdown font size',
+    keywords: ['markdown', 'font', 'size', 'text', 'bigger', 'larger', 'smaller', 'chat', 'preview', 'reading', 'readability']
   },
   accent: { title: 'Accent', keywords: ['accent', 'color', 'theme', 'appearance'] },
   wallpaper: {
@@ -101,7 +128,7 @@ const ROWS = {
   },
   headerButtons: {
     title: 'Terminal header buttons',
-    keywords: ['terminal', 'header', 'buttons', 'icons', 'hide']
+    keywords: ['terminal', 'header', 'buttons', 'icons', 'hide', 'context', 'meter', 'model', 'usage']
   },
   reset: {
     title: 'Reset appearance',
@@ -228,6 +255,82 @@ function TabBarHeightRow(): React.JSX.Element {
         </div>
       }
     />
+  )
+}
+
+/** How solid a sticky note / group frame is behind its colour tint (issue #1113). 0 = the
+ *  original see-through look; the tint itself never changes. */
+function CanvasBackingRow({ kind }: { kind: 'stickyNoteBacking' | 'groupFrameBacking' }): React.JSX.Element {
+  const value = useSettings((s) => s.settings[kind])
+  const update = useSettings((s) => s.update)
+  const sticky = kind === 'stickyNoteBacking'
+  const label = sticky ? 'Sticky note background' : 'Group frame background'
+  return (
+    <FieldRow
+      label={label}
+      htmlFor={kind}
+      description={sticky
+        ? `How much of what lies behind a sticky note shows through it: 0% is see-through (default), 100% is solid. The note keeps its colour either way.`
+        : `How much of the canvas shows through a group frame: 0% is see-through (default), 100% is solid. The frame keeps its colour either way.`}
+      control={
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <NumberField
+            value={resolveCanvasBacking(value)}
+            min={CANVAS_BACKING_MIN}
+            max={CANVAS_BACKING_MAX}
+            step={10}
+            ariaLabel={label}
+            onChange={(v) => update({ [kind]: resolveCanvasBacking(v) })}
+          />
+          <span style={{ opacity: 0.6 }}>%</span>
+        </div>
+      }
+    />
+  )
+}
+
+/** Applies to the ⌘M output and chat views and the editor's Markdown preview (@shared/markdown-font). */
+function MarkdownFontRows(): React.JSX.Element {
+  const family = useSettings((s) => s.settings.markdownFontFamily)
+  const size = useSettings((s) => s.settings.markdownFontSize)
+  const update = useSettings((s) => s.update)
+  return (
+    <>
+      <SearchableRow {...ROWS.markdownFont}>
+        <FieldRow
+          label="Markdown font"
+          description="Used by the ⌘M output and chat views and the editor's Markdown preview. Code inside them uses your terminal font."
+          control={
+            <FontPicker
+              label="Markdown font"
+              value={resolveMarkdownFontFamily(family)}
+              onChange={(stack) => update({ markdownFontFamily: stack })}
+              catalog={PROSE_FONT_CATALOG}
+              buildStack={buildProseFontStack}
+              systemOption={{ label: 'System font', stack: DEFAULT_MARKDOWN_FONT_FAMILY }}
+            />
+          }
+        />
+      </SearchableRow>
+      <SearchableRow {...ROWS.markdownFontSize}>
+        <FieldRow
+          label="Markdown font size"
+          description={`Body text size in the same views, in pixels (${MARKDOWN_FONT_SIZE_MIN}–${MARKDOWN_FONT_SIZE_MAX}; default ${DEFAULT_MARKDOWN_FONT_SIZE}). Headings and code scale with it.`}
+          control={
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <NumberField
+                value={resolveMarkdownFontSize(size)}
+                min={MARKDOWN_FONT_SIZE_MIN}
+                max={MARKDOWN_FONT_SIZE_MAX}
+                ariaLabel="Markdown font size"
+                onChange={(v) => update({ markdownFontSize: resolveMarkdownFontSize(v) })}
+              />
+              <span style={{ opacity: 0.6 }}>px</span>
+            </div>
+          }
+        />
+      </SearchableRow>
+    </>
   )
 }
 
@@ -475,6 +578,13 @@ export function AppearanceSection({ isActive }: { isActive: boolean }): React.JS
       <SearchableRow {...ROWS.tabBarHeight}>
         <TabBarHeightRow />
       </SearchableRow>
+      <SearchableRow {...ROWS.stickyNoteBacking}>
+        <CanvasBackingRow kind="stickyNoteBacking" />
+      </SearchableRow>
+      <SearchableRow {...ROWS.groupFrameBacking}>
+        <CanvasBackingRow kind="groupFrameBacking" />
+      </SearchableRow>
+      <MarkdownFontRows />
       <SearchableRow {...ROWS.accent}>
         <div className="flex items-center justify-between gap-4 py-2.5">
           <span className="text-[13px] text-text">Accent</span>
@@ -570,7 +680,8 @@ export function AppearanceSection({ isActive }: { isActive: boolean }): React.JS
         <div>
           <h4 className="text-[13px] font-medium text-text">Terminal header buttons</h4>
           <p className="mt-1 text-[13px] leading-relaxed text-muted">
-            Which icon buttons the terminal node header shows. Close and the terminal Search
+            Which icon buttons the terminal node header shows. The model &amp; context meter
+            hides on kanban cards and in the card modal too. Close and the terminal Search
             button are always shown, as are the right-click menu's destructive and recovery
             actions (Delete, Restart agent).
           </p>

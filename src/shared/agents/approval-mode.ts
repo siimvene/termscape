@@ -166,6 +166,39 @@ const CODEX_MODES: Partial<Record<AgentPermissionMode, readonly string[]>> = {
   // `plan` and `acceptEdits` are absent ON PURPOSE — see modeSupported.
 }
 
+// cursor's modes are DIFFERENT flags rather than values of one (`--mode plan`, but a bare `--force`
+// and a bare `--auto-review`) — the fork's full-flag table states that directly, where upstream
+// needed a per-dialect `spell` hook on its flag + value model.
+const CURSOR_MODES: Partial<Record<AgentPermissionMode, readonly string[]>> = {
+  auto: ['--auto-review'],
+  plan: ['--mode', 'plan'],
+  bypassPermissions: ['--force']
+  // MEASURED on cursor-agent 2026.09.28-64d2043: the flags reach the session from BEFORE the `agent`
+  // subcommand (see AGENT_CONFIG.cursor), and the effect is real, not just a footer label. With
+  // `--model composer-2.5 --force agent '<touch a file>'` the shell command ran with no approval
+  // prompt and the footer read "Run Everything"; the same command with no mode flag stopped at
+  // "Run this command? Not in allowlist: touch"; `--mode plan` answered a "create a file" prompt
+  // with a written plan ("Ready to build?") and created nothing.
+  //
+  // `manual` → cursor's own default, NO flag, and that default really prompts: `approvalMode:
+  // "allowlist"` in ~/.cursor/cli-config.json, shell commands off the allowlist stop at a dialog.
+  //
+  // `auto` → `--auto-review` ("Auto-review (Smart Auto): a server classifier auto-runs safe tool
+  // calls and prompts for the rest"). That is the same shape as claude's `--permission-mode auto`
+  // (a classifier decides), so it is the honest equivalent, not a nearest match. MEASURED on
+  // 2026.10.01-e373342: `--auto-review agent '<touch a file>'` ran `touch` with no prompt and the
+  // footer read "Auto-review". `auto` is DEFAULT_PERMISSION_MODE, so this IS what an untouched cursor
+  // node launches with. It was first left bare to avoid widening existing nodes at upgrade (the
+  // gemini `auto_edit` trap), but cursor ships in this same change, so there are no existing nodes,
+  // and the bare allowlist default asked for every command (the user's own report, 2026-10-02).
+  // No flag means "auto-approve edits, prompt for shell", so `acceptEdits` has no candidate and
+  // `unsupportedModesNote` admits it. `--mode ask` (read-only Q&A) and `--sandbox` (a separate
+  // axis, like codex's) are deliberately not touched.
+  //
+  // `--force` over its alias `--yolo`: same code path ("Run Everything"), and `--force` is the name
+  // `--help` gives first.
+}
+
 /**
  * The agents that need a translation: each mode mapped to the exact argv to append.
  *
@@ -189,6 +222,10 @@ const APPROVAL_DIALECTS: Partial<Record<AgentId, ApprovalDialect>> = {
     manualGapNote:
       'That default asks only when the model chooses to: `untrusted`, the policy that meant ' +
       'ask-every-time, was removed in codex-cli 0.149.0 and has no replacement.'
+  },
+  cursor: {
+    modes: CURSOR_MODES,
+    manualIsDefault: true
   }
 }
 
@@ -314,7 +351,8 @@ function codexSuppressors(appendedFlag: string): readonly string[] {
  *
  * WHERE the flag lands is decided one layer up, by `createAgentNode`: with no `argvPromptSeparator`
  * (claude, gemini, codex) it goes LAST, keeping those command lines byte-identical; with one
- * (grok's `--`) it must go BEFORE the separator, because `--` is end-of-options.
+ * (grok's `--`, cursor's `agent`) it must go BEFORE the separator: `--` is end-of-options, and
+ * cursor's flags are root options that the `agent` subcommand reads (measured, see CURSOR_MODES).
  *
  * **A flag the command already carries is left alone (issue #601).** `cmd` is not always ours:
  * `settings.agentLaunchCommands` lets the user replace the program part with a wrapper, and a

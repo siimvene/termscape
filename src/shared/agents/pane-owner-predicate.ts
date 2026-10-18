@@ -71,7 +71,8 @@ export const AGENT_BINARIES: Record<string, readonly string[]> = {
   // pi is a node script, but MEASURED (0.84.1, a live TUI under a pty) it rewrites its process
   // title: the foreground process reads comm `pi` and argv `pi`, never `node …/cli.js`.
   pi: ['pi'],
-  antigravity: ['agy']
+  antigravity: ['agy'],
+  cursor: ['cursor-agent']
 }
 
 /**
@@ -222,7 +223,7 @@ export function binariesFor(
  *
  * The old gate asked a persisted field what the pane SHOULD be running. `agentId` is durable and
  * outlives the CLI, so a plain terminal whose claude exited weeks ago still read as an agent — and
- * `isShellCommand` is a SEVEN-NAME allowlist (zsh/bash/sh/fish/dash/ksh/tcsh), so `nu`, `pwsh`,
+ * `isShellCommand` was then a SEVEN-NAME allowlist (zsh/bash/sh/fish/dash/ksh/tcsh), so `nu`, `pwsh`,
  * `xonsh`, `ssh` and `python` all fell through its negation and were admitted as agents. Text
  * delivered to any of those EXECUTES, because sendText appends Enter.
  *

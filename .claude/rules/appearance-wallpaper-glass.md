@@ -61,8 +61,15 @@ explicit "None", is kept.
   names into that cache — which is no wider than the caller's own `fs:read`. Chromium cannot decode HEIC, so macOS converts with `/usr/bin/sips` to a JPEG
   ≤ 3840px — and `sips -Z` also UPSCALES (measured: 320px → 3840px), so it is passed only when the
   image is larger. An import is copied untouched unless it must be converted (HEIC, over 3840px or
-  over the 25 MB load cap — re-encoding everything would flatten PNG/WebP alpha); off macOS, HEIC or
-  an over-cap image is refused at import time, where the picker shows the reason.
+  over the 25 MB load cap — re-encoding everything would flatten PNG/WebP alpha); where no converter
+  can do it, HEIC or an over-cap image is refused at import time, where the picker shows the reason.
+  **Conversion is a seam, `WallpaperImageOps`**: macOS always uses `sipsImageOps` (its `id` stays
+  `'sips'` because it feeds the cache key — renaming it would orphan every existing cache file), the
+  Electron shell registers `nativeImageWallpaperOps` (`main/wallpaper-native-image.ts`) on **win32
+  only**, and Linux / the Server Edition register none (no stills, same refusals as before). With
+  ops, Windows lists `%WINDIR%\Web\Wallpaper` stills as `win:` ids (same re-resolve-against-a-scan
+  jail as `mac:`). nativeImage decodes no HEIC (`canHeic:false`, still refused) and cannot measure
+  WebP, so an unmeasurable file is COPIED there (`convertUnknownSize:false`), never handed to it.
 - **The cache is pruned on a SAVED change and on import, never at boot.** `SettingsStore.init`
   answers an unreadable settings.json with the defaults, and pruning against that would delete the
   image the user chose. Only hash-named full-size files are candidates; thumbnails, temps and

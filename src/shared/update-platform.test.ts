@@ -2,8 +2,12 @@ import { describe, expect, it } from 'vitest'
 import fs from 'fs'
 import path from 'path'
 import {
+  MANUAL_UPDATE_MODE,
   isManualUpdatePlatform,
+  installReadiness,
+  mayQuitAndInstall,
   noSelfInstallCopy,
+  releaseNotesText,
   shouldEnableUpdater,
   toUpdateAvailablePayload,
   updateDelivery
@@ -53,10 +57,16 @@ describe('local dist scripts opt out of the production update feed', () => {
     fs.readFileSync(path.join(__dirname, '..', '..', 'package.json'), 'utf8')
   ) as { scripts: Record<string, string> }
   const MARKER = '-c.extraMetadata.nodeTermUpdates=disabled'
+  const MANUAL = `-c.extraMetadata.nodeTermUpdates=${MANUAL_UPDATE_MODE}`
+  // The one dist-named script that is a RELEASE package: upstream's unsigned Windows beta, which
+  // there checks the feed but never self-installs. In this fork it carries the marker like the rest
+  // (no feed to check), so it is NOT excluded from the sweep below.
+  const WIN_RELEASE = 'dist:win:release'
 
   it('every dist script carries the marker — not just the one whose 404 was noticed', () => {
     const dist = Object.keys(pkg.scripts).filter((s) => s === 'dist' || s.startsWith('dist:'))
-    expect(dist.length).toBeGreaterThanOrEqual(2) // dist, dist:linux
+    expect(dist).toContain(WIN_RELEASE)
+    expect(dist.length).toBeGreaterThanOrEqual(4) // dist, dist:linux, dist:win, dist:win:release
     expect(dist.filter((s) => !pkg.scripts[s].includes(MARKER))).toEqual([])
   })
 
@@ -68,6 +78,24 @@ describe('local dist scripts opt out of the production update feed', () => {
   // If an upstream merge flips this back, the fork is wrong.
   it('release carries it too — this fork has no update feed, upstream or its own', () => {
     expect(pkg.scripts.release).toContain(MARKER)
+    expect(pkg.scripts.release).not.toContain(MANUAL)
+  })
+
+  it('plain dist:win stays a local package that never polls', () => {
+    expect(pkg.scripts['dist:win']).toContain(MARKER)
+    expect(pkg.scripts['dist:win']).not.toContain(MANUAL)
+  })
+
+  // Fork contract (Termscape): upstream stamps its Windows release package `manual` — it checks
+  // upstream's feed and shows a passive notice. With no feed of its own, the fork stamps it
+  // `disabled` like every other package, so it never polls nodeterm.dev at all.
+  it('the Windows release package is disabled too — no feed check, no self-install', () => {
+    const cmd = pkg.scripts[WIN_RELEASE]
+    expect(cmd).toContain(MARKER)
+    expect(cmd).not.toContain(MANUAL)
+    expect(cmd).toContain('--win')
+    // It still never publishes from the build step; release.yml uploads the assets itself.
+    expect(cmd).toContain('--publish never')
   })
 
   it('package.json points at no update feed at all — an EXPLICIT null, not an absent key', () => {
@@ -97,18 +125,46 @@ describe('toUpdateAvailablePayload', () => {
       notes: '',
       manual: false
     })
+    expect(toUpdateAvailablePayload({ version: '1.2.0', releaseNotes: 42 }, false).notes).toBe('')
+  })
+
+  it('flattens the fullChangelog array form instead of dropping it', () => {
     expect(
-      toUpdateAvailablePayload({ version: '1.2.0', releaseNotes: [{ note: 'x' }] }, false).notes
-    ).toBe('')
+      toUpdateAvailablePayload(
+        { version: '1.2.0', releaseNotes: [{ version: '1.2.0', note: '- a' }, { note: null }, { version: '1.1.0', note: '- b' }] },
+        false
+      ).notes
+    ).toBe('- a\n- b')
+  })
+
+  it('caps very long notes', () => {
+    expect(releaseNotesText('x'.repeat(100_000)).length).toBe(16 * 1024)
+  })
+})
+
+describe('installReadiness', () => {
+  it('nothing downloaded is never installable, on any platform', () => {
+    for (const p of ['darwin', 'linux', 'win32'])
+      expect(installReadiness(p, { downloaded: false, nativeReady: true })).toBe('none')
+  })
+
+  it('macOS waits for Squirrel.Mac to stage the download', () => {
+    expect(installReadiness('darwin', { downloaded: true, nativeReady: false })).toBe('preparing')
+    expect(installReadiness('darwin', { downloaded: true, nativeReady: true })).toBe('ready')
+  })
+
+  it('AppImage / NSIS install from the downloaded file: ready at once', () => {
+    expect(installReadiness('linux', { downloaded: true, nativeReady: false })).toBe('ready')
+    expect(installReadiness('win32', { downloaded: true, nativeReady: false })).toBe('ready')
   })
 })
 
 
 /**
- * Issue #814: a Windows build carries `nodeTermUpdates=disabled` (no signed release job, no
- * `latest.yml`), so the updater never wires a feed — and the one thing that branch DID wire was a
- * manual check answering "up to date". These pin the three delivery paths apart, and pin that the
- * macOS and Linux release paths are untouched by the new one.
+ * Issue #814: a local package carries `nodeTermUpdates=disabled` (no feed), so the updater never
+ * wires a feed — and the one thing that branch DID wire was a manual check answering "up to date".
+ * These pin the delivery paths apart, and pin that the macOS and Linux release paths are untouched
+ * by the Windows `manual` marker.
  */
 describe('updateDelivery', () => {
   const pkgd = { isPackaged: true, updateMode: undefined as unknown, hasAppImage: false }
@@ -148,6 +204,24 @@ describe('updateDelivery', () => {
     }
   })
 
+  it('the manual marker is a feed check that never self-installs (the unsigned Windows beta)', () => {
+    expect(updateDelivery({ ...pkgd, updateMode: 'manual', platform: 'win32' })).toBe('manual-install')
+    expect(shouldEnableUpdater(true, 'manual')).toBe(true)
+  })
+
+  it('the manual marker wins over the platform — even where self-install would work', () => {
+    expect(updateDelivery({ ...pkgd, updateMode: 'manual', platform: 'darwin' })).toBe('manual-install')
+    expect(
+      updateDelivery({ ...pkgd, updateMode: 'manual', platform: 'linux', hasAppImage: true })
+    ).toBe('manual-install')
+  })
+
+  it('an unpackaged run with the manual marker is still dev', () => {
+    expect(
+      updateDelivery({ isPackaged: false, updateMode: 'manual', platform: 'win32', hasAppImage: false })
+    ).toBe('dev')
+  })
+
   it('stays composed from the two primitives — no second definition to drift', () => {
     for (const platform of ['win32', 'darwin', 'linux']) {
       for (const hasAppImage of [false, true]) {
@@ -160,6 +234,20 @@ describe('updateDelivery', () => {
         }
       }
     }
+  })
+})
+
+describe('mayQuitAndInstall', () => {
+  it('only a self-installing build (or dev, unchanged) may reach quitAndInstall', () => {
+    expect(mayQuitAndInstall('self-install')).toBe(true)
+    expect(mayQuitAndInstall('dev')).toBe(true)
+    expect(mayQuitAndInstall('manual-install')).toBe(false)
+    expect(mayQuitAndInstall('no-channel')).toBe(false)
+  })
+
+  it('the unsigned Windows beta can never install from the feed', () => {
+    const d = updateDelivery({ isPackaged: true, updateMode: 'manual', platform: 'win32', hasAppImage: false })
+    expect(mayQuitAndInstall(d)).toBe(false)
   })
 })
 
