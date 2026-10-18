@@ -10,6 +10,7 @@
 // remote side becomes a thin sh+curl client and the desktop does the reading and the parsing.
 import type { LinkDoc, LinkDocEntry } from './context-link-core'
 import { linesFromPi } from './pi-session'
+import { linesFromCursor } from './cursor-chat'
 
 export type ContextLinkVerb = 'list' | 'summary' | 'transcript' | 'terminal'
 
@@ -314,6 +315,9 @@ export function renderTranscriptLines(agent: string | undefined, buf: string): s
   if (agent === 'gemini') return linesFromGemini(buf)
   if (agent === 'grok') return linesFromGrok(buf)
   if (agent === 'pi') return linesFromPi(buf)
+  // cursor's transcript text is newline-delimited message JSON built from its SQLite store
+  // (`cursorTranscriptText`), not a file on disk.
+  if (agent === 'cursor') return linesFromCursor(buf)
   const parse = agent === 'codex' ? linesFromCodex : linesFromClaude
   const lines: string[] = []
   for (const raw of buf.split('\n')) {

@@ -169,7 +169,7 @@ describe('AccountsSection — Codex on an SSH host', () => {
     render({ codex: [{ id: 'c1', label: 'Prod codex', host: PROD }] })
     act(() => byLabel('Remove Codex account')!.click())
     expect(document.body.textContent).toContain('Codex home on deploy@prod-box will be deleted')
-    await act(async () => buttonIn(document.body, 'Remove')!.click())
+    await act(async () => buttonIn(document.querySelector('.confirm') as HTMLElement, 'Remove')!.click())
     expect(codexApi.remove).toHaveBeenCalledWith('c1', { projectId: 'p1' })
     expect(useSettings.getState().settings.codexAccounts).toEqual([])
   })
@@ -178,7 +178,7 @@ describe('AccountsSection — Codex on an SSH host', () => {
     render({ codex: [{ id: 'c1', label: 'Prod codex', host: PROD }], connected: false })
     act(() => byLabel('Remove Codex account')!.click())
     expect(document.body.textContent).toContain('not connected, so nodeterm only forgets it')
-    await act(async () => buttonIn(document.body, 'Remove')!.click())
+    await act(async () => buttonIn(document.querySelector('.confirm') as HTMLElement, 'Remove')!.click())
     // The shell drops the row; with no ctx it never reaches the SSH leg, and its local verb reads
     // the row's `host` from disk and skips every local teardown for it.
     expect(codexApi.remove).toHaveBeenCalledTimes(1)
@@ -191,7 +191,7 @@ describe('AccountsSection — Codex on an SSH host', () => {
     codexApi.remove.mockRejectedValueOnce(new Error('Codex account is reserved by an account switch'))
     render({ codex: [{ id: 'c1', label: 'Mine' }] })
     act(() => byLabel('Remove Codex account')!.click())
-    await act(async () => buttonIn(document.body, 'Remove')!.click())
+    await act(async () => buttonIn(document.querySelector('.confirm') as HTMLElement, 'Remove')!.click())
     expect(useSettings.getState().settings.codexAccounts).toHaveLength(1)
     expect(host.textContent).toContain('reserved by an account switch')
   })
@@ -211,7 +211,7 @@ describe('AccountsSection — Claude on an SSH host', () => {
     render({ claude: [{ id: 'a1', label: 'Server login', host: PROD, createdAt: 0 }], connected: false })
     act(() => byLabel('Remove account')!.click())
     expect(document.body.textContent).toContain('is not connected, so the account cannot be removed yet')
-    await act(async () => buttonIn(document.body, 'Remove')!.click())
+    await act(async () => buttonIn(document.querySelector('.confirm') as HTMLElement, 'Remove')!.click())
     // Routed at the host's (saved, disconnected) project, never a local remove.
     expect(claudeApi.remove).toHaveBeenCalledWith('a1', { projectId: 'p1' })
     expect(useSettings.getState().settings.claudeAccounts).toEqual([
@@ -223,7 +223,7 @@ describe('AccountsSection — Claude on an SSH host', () => {
   it('removes it ON the host when connected', async () => {
     render({ claude: [{ id: 'a1', label: 'Server login', host: PROD, createdAt: 0 }] })
     act(() => byLabel('Remove account')!.click())
-    await act(async () => buttonIn(document.body, 'Remove')!.click())
+    await act(async () => buttonIn(document.querySelector('.confirm') as HTMLElement, 'Remove')!.click())
     expect(claudeApi.remove).toHaveBeenCalledWith('a1', { projectId: 'p1' })
   })
 })

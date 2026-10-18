@@ -15,11 +15,9 @@
 // that already knows the difference. The link documents are also still written to
 // <userData>/context-links/ as a debugging aid.
 import fs from 'fs'
-import os from 'os'
 import path from 'path'
 import { platform } from './platform'
-import { writeManagedHookFileAtomic } from './agents/hooks/install-helper'
-import { mergeInstructionFile } from './agents/hooks/settings-file'
+import { syncWindowsShLauncher, writeManagedHookFileAtomic } from './agents/hooks/install-helper'
 import { IPC } from '../shared/ipc'
 import type { ContextLinkInfo, ContextLinkMap } from '../shared/types'
 import { type PtyManager } from './pty-manager'
@@ -27,11 +25,9 @@ import { findInLoginPath } from './exec-path'
 import { isSafeOpencodeSessionId, runOpencodeExportAt } from './opencode-export'
 import { TMUX_SOCKET } from './tmux-naming'
 import {
-  buildContextShimScript,
   buildContextLinkSkillBody,
+  buildContextShimScript,
   buildLinkDoc,
-  buildLinkedContextInstructions,
-  mergeInstructionsBlock,
   resolveLinkTranscript,
   transcriptPathOf,
   type LinkDoc,
@@ -46,9 +42,9 @@ import {
 } from './context-link-render'
 import { hookServer } from './agents/hook-server'
 import { locateClaude, locateCodex, locateGemini, locateGrok, locatePi } from './handoff/locate'
-import { opencodeConfigDir } from './agents/hooks/opencode'
-import { piAgentDir } from './agents/hooks/pi'
+import { cursorTranscriptText, locateCursorChat } from './cursor-chat'
 import { piSkillPathIn } from './agents/hooks/pi-skills'
+import { shimDialectFor } from '../shared/agents/shim-invocation'
 
 export { setNodeTranscript } from './context-link-core'
 
@@ -60,8 +56,10 @@ export function contextLinkDir(): string {
 function cliShimPath(): string {
   return path.join(contextLinkDir(), 'context.sh')
 }
-function skillPath(): string {
-  return path.join(os.homedir(), '.claude', 'skills', 'get-linked-context', 'SKILL.md')
+/** The context-link shim the get-linked-context skill points at (written by `initContextLink`).
+ *  The skill itself is installed by the consent lifecycle (`core/agent-integrations.ts`). */
+export function contextLinkShimPath(): string {
+  return cliShimPath()
 }
 
 function writeCliFiles(): void {
@@ -69,6 +67,8 @@ function writeCliFiles(): void {
   fs.mkdirSync(d, { recursive: true })
   // Temp + rename, never a truncating write: agents execute this file (see canvas-control.ts).
   writeManagedHookFileAtomic(cliShimPath(), buildContextShimScript(codexThreadIdentityRoot()), undefined, 0o755)
+  // Windows: `context.cmd` beside it for PowerShell-run agents (see canvas-control.ts).
+  syncWindowsShLauncher(d, 'context.sh')
   // Sweep the retired Electron-as-Node CLI off upgraders' disks: the shim no longer execs it,
   // and it would sit there pointing at a binary path that moves with every app update.
   try {
@@ -78,47 +78,22 @@ function writeCliFiles(): void {
   }
 }
 
-function installSkill(): void {
-  try {
-    fs.mkdirSync(path.dirname(skillPath()), { recursive: true })
-    writeManagedHookFileAtomic(skillPath(), buildContextLinkSkillBody(cliShimPath()))
-  } catch (e) {
-    console.warn('[context-link] skill install failed', e)
-  }
-  installPiLinkSkillInto(piAgentDir())
-}
-
 /**
- * The get-linked-context skill for a pi agent dir. pi is CONTEXT_LINK_CAPABLE, but it discovers
- * skills only from `<agentDir>/skills` and `~/.agents/skills` — never `~/.claude/skills` (MEASURED
- * on 0.84.1) — so without this a linked pi node has no way to learn the CLI exists. Same body as
- * the claude skill (pi's SKILL.md envelope is the same), so the two can never describe different
- * verbs. Exported for the per-account loop: a managed pi account is its own agent dir. Best-effort.
+ * Fork (Termscape): the get-linked-context skill for a MANAGED pi account's agent dir. pi is
+ * CONTEXT_LINK_CAPABLE but discovers skills only from `<agentDir>/skills` and `~/.agents/skills`, never
+ * `~/.claude/skills` (MEASURED on 0.84.1), so each managed account (its own PI_CODING_AGENT_DIR) needs
+ * its own copy. The SYSTEM pi dir is the consent lifecycle's (`skillRootsFor('pi')` in
+ * core/agent-integrations.ts); the shells' per-account loop calls this only while pi's integration is
+ * enabled. Same builder and dialect as the lifecycle's `skillsFor`, so the two can never describe
+ * different verbs. Best-effort.
  */
 export function installPiLinkSkillInto(agentDir: string): void {
   const p = piSkillPathIn(agentDir, 'get-linked-context')
   try {
     fs.mkdirSync(path.dirname(p), { recursive: true })
-    fs.writeFileSync(p, buildContextLinkSkillBody(cliShimPath()), 'utf8')
+    fs.writeFileSync(p, buildContextLinkSkillBody(cliShimPath(), shimDialectFor('pi', process.platform)), 'utf8')
   } catch (e) {
     console.warn('[context-link] pi skill install failed', p, e)
-  }
-}
-
-// Codex/Gemini/opencode have no skill system — merge an instructions block into their global
-// instruction files instead (marker-delimited, idempotent, other content preserved).
-function installAgentInstructions(): void {
-  const block = buildLinkedContextInstructions(cliShimPath())
-  const targets = [
-    path.join(os.homedir(), '.codex', 'AGENTS.md'),
-    path.join(os.homedir(), '.gemini', 'GEMINI.md'),
-    path.join(opencodeConfigDir(), 'AGENTS.md')
-  ]
-  for (const p of targets) {
-    // The user's file: the guarded transaction keeps its link and mode (see canvas-control.ts).
-    if (mergeInstructionFile(p, (existing) => mergeInstructionsBlock(existing, block)) === 'failed') {
-      console.warn('[context-link] instructions install failed', p)
-    }
   }
 }
 
@@ -154,15 +129,24 @@ export interface ContextLinkDeps {
 // start mid-line, which only costs that one line (it fails to parse and is dropped).
 const REMOTE_TRANSCRIPT_MAX_BYTES = 2 * 1024 * 1024
 
+// cursor's locator takes (id, cwd?), NOT the shared (id, accountId?), wrapped so an account id can
+// never be read as a cwd. It locates strictly by the whole-UUID chat id.
 const LINK_LOCATORS = {
   claude: locateClaude,
   codex: locateCodex,
   gemini: locateGemini,
   grok: locateGrok,
-  // The tracker's path first (no directory walk when a hook already told us), the strict
-  // by-sessionId scan otherwise — same fail-open shape as every other leg here.
+  cursor: (sessionId: string) => locateCursorChat(sessionId),
+  // Fork (Termscape): the pi tracker's path first (no directory walk when a hook already told us),
+  // the strict by-sessionId scan otherwise — same fail-open shape as every other leg here.
   pi: (sessionId: string, accountId?: string) =>
     Promise.resolve(deps.piPathFor?.(sessionId)).then((p) => p ?? locatePi(sessionId, accountId))
+}
+
+/** Agents whose "transcript path" is not a text file: the path names a store the agent's own reader
+ *  turns into transcript text. Everything else is read as utf-8. */
+const TRANSCRIPT_TEXT_READERS: Record<string, (p: string) => Promise<string | null>> = {
+  cursor: cursorTranscriptText
 }
 
 // The link documents, by node id — the same objects written to disk, kept in memory because they
@@ -244,6 +228,8 @@ async function fetchTranscript(node: LinkDocEntry): Promise<string | null> {
       ? await deps.readRemoteFile(node.id, node.transcriptPath, REMOTE_TRANSCRIPT_MAX_BYTES)
       : null
   }
+  const read = node.agent ? TRANSCRIPT_TEXT_READERS[node.agent] : undefined
+  if (read) return read(node.transcriptPath)
   try {
     return await fs.promises.readFile(node.transcriptPath, 'utf-8')
   } catch {
@@ -410,27 +396,14 @@ export function setContextLinks(map: ContextLinkMap): Promise<void> {
 }
 
 /**
- * Boot Context Link: register the hook-server read handler, (re)write the shim under `dataDir`,
- * and — only when `options.installAgentIntegrations` says so — install the discovery surface into
- * the machine's REAL agent configuration directories (`~/.claude/skills/get-linked-context`, plus
- * the marker block in `~/.codex/AGENTS.md`, `~/.gemini/GEMINI.md` and opencode's `AGENTS.md`).
+ * Boot Context Link: register the hook-server read handler and (re)write the shim under `dataDir`.
  *
- * `options` is REQUIRED and its flag is a plain `boolean`, deliberately: those instruction files
- * belong to the user and are loaded by every agent session on the machine, ours or not, so
- * writing them is a decision each caller owes an answer to (issue #490). The previous shape —
- * an optional options bag whose flag was read as `!== false` — meant the WRITE was what you got
- * by saying nothing, which is the wrong default direction for a filesystem effect outside our own
- * data dir, and it is exactly how a unit test that never thought about `HOME` came to rewrite the
- * developer's own `~/.codex/AGENTS.md` on every run. Same asymmetry as
- * `session-memory-service.ts`'s required `remote.isRemoteProject`: acting-without-knowing is a
- * compile error. `platformDeps` lost its default with it — every caller already passes one, and a
- * defaulted parameter in front of a required one is unreachable anyway.
+ * Nothing here writes outside our own data dir. The discovery surface (the `get-linked-context`
+ * skill in each consented agent's skills dir) is installed by the consent lifecycle
+ * (`core/agent-integrations.ts`, issue #744) — the one place that decides what nodeterm may write
+ * into user-owned agent configuration. `platformDeps` carries the shell's remote reach.
  */
-export function initContextLink(
-  ptyManager: PtyManager,
-  platformDeps: ContextLinkDeps,
-  options: { installAgentIntegrations: boolean }
-): void {
+export function initContextLink(ptyManager: PtyManager, platformDeps: ContextLinkDeps): void {
   pty = ptyManager
   deps = platformDeps
   // Re-derive from the platform this init runs under: a process that boots a second core (the
@@ -448,14 +421,12 @@ export function initContextLink(
       if (f.endsWith('.json')) fs.rmSync(path.join(d, f), { force: true })
     }
     writeCliFiles()
-    if (options.installAgentIntegrations) {
-      installSkill()
-      installAgentInstructions()
-    }
   } catch (e) {
     console.error('[context-link] setup failed', e)
     return
   }
   platform().handle(IPC.contextLinkSetLinks, (map: ContextLinkMap) => setContextLinks(map))
-  platform().handle(IPC.contextLinkInfo, () => ({ shimPath: cliShimPath() }))
+  // `platform` is THIS core's: the renderer words the connect-time note for the machine whose shim
+  // it names (a Windows core's non-claude agents run the `.cmd` launcher), never the viewer's.
+  platform().handle(IPC.contextLinkInfo, () => ({ shimPath: cliShimPath(), platform: process.platform }))
 }

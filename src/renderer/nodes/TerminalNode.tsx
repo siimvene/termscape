@@ -1,6 +1,7 @@
 import { elementOnScreen } from '../terminal/on-screen'
 import { useContextEnsure } from '../terminal/useContextEnsure'
 import { canPlainApprove, sendHeaderAnswer } from '../lib/approveGate'
+import { isLocalOnSshCanvas } from '../lib/localOnSshCanvas'
 import { FIND_DECORATIONS } from '../lib/palette'
 import { ptyRefusal } from '@shared/pty-refusal'
 
@@ -35,7 +36,14 @@ import { ChatPanelFallback } from './ChatPanelFallback'
 // shell has the panel's exact geometry, so a fast load still reads as the panel appearing.
 const ChatPanel = lazy(() => import('./ChatPanel').then((m) => ({ default: m.ChatPanel })))
 import { LocalTransport } from '../terminal/local-transport'
-import { clipboardImages, droppedPaths, pasteHasText, pastedFiles } from '../terminal/file-drop'
+import {
+  clipboardImages,
+  dropDialect,
+  droppedPaths,
+  pasteHasText,
+  pastedFiles,
+  type DropDialect
+} from '../terminal/file-drop'
 import { useFileDropZone } from '../terminal/useFileDropZone'
 import type { TerminalTransport } from '../terminal/transport'
 import { guardMiddleClickPaste } from '../terminal/middle-click'
@@ -72,6 +80,8 @@ import {
 import { useDownloads } from '../lib/useDownloads'
 import { fileLinkDialect } from '../terminal/file-link-dialect'
 import { hostPlatformFor } from '../terminal/host-platform'
+import { executeHeldLaunch } from '../terminal/launch-intent'
+import { uuid } from '../lib/uuid'
 import { sshFs } from '../terminal/ssh-fs'
 import type { FsApi, PendingLaunch, PtyApi } from '@shared/types'
 import {
@@ -110,8 +120,15 @@ import {
 } from '../terminal/terminal-font-zoom'
 import { ensureProjectLaunchInfo } from '../state/projectLaunchInfo'
 import { loseWebglContexts, registerWebglClient, type WebglClientHandle } from '../terminal/webgl-budget'
+import {
+  backgroundReleaseMs,
+  effectiveVisible,
+  isWindowBackgrounded,
+  subscribeWindowBackgrounded
+} from '../terminal/window-backgrounded'
 import { quantizeCharSize } from '../terminal/char-size-quantize'
 import { resyncDomRendererSpacing } from '../terminal/dom-renderer-spacing'
+import { patchViewportScrollSync } from '../terminal/viewport-scroll-sync'
 import {
   parkCap,
   parkWindowMs,
@@ -239,10 +256,13 @@ import { ContextMeter } from '../components/ContextMeter'
 import { isZoomModifierHeld } from '../lib/zoomModifier'
 import { HoverGuard } from './HoverGuard'
 import {
+  dwellBlursForeignTerminal,
+  focusDrivesGuard,
   hoverTakesKeyboard,
-  pointerLeaveReleases,
+  pointerLeaveRearmsGuard,
   resolveFocusFollowsPointer
 } from '../lib/terminalFocusMode'
+import { XTERM_INPUT_CLASS } from '../lib/keyContext'
 import { useClickToFocus } from './useClickToFocus'
 import { reparentKeepingFocus } from './reparentKeepingFocus'
 import { isHidden } from '../lib/ui-visibility'
@@ -261,6 +281,7 @@ import { useLaunchDelivery } from '../state/launchDelivery'
 import {
   beginLaunch,
   erroredDeps,
+  firstOpenInFlight as isFirstOpenInFlight,
   forgetArmed,
   handedOverDeps,
   holdReason,
@@ -285,6 +306,7 @@ import { isGlobalKanbanOpen, isKanbanOpen, isOmniKanbanEnabled, openIssueOnBoard
 import { useSshConn } from '../state/sshConn'
 import { useWorktrees } from '../state/worktrees'
 import { isRemoteSessionNode } from '@shared/worktree'
+import { RunBar } from './RunBar'
 import { useSession, useActiveSessionPresence } from '../session/session'
 import { isHostedReadOnly, useHostedReadOnly } from '../state/hostedTeams'
 import { isBrowserRuntime } from '../bridge/runtime'
@@ -292,9 +314,9 @@ import { liveLinkUnavailable } from '../lib/liveLinkEntry'
 import { useWatchLinks } from '../state/watchLinks'
 import {
   agentLaunchOverride,
-  COLLAPSED_HEIGHT,
   isCodexAccountLoginNode,
   isPiAccountLoginNode,
+  toggleCollapsed,
   type CanvasNode
 } from '../state/workspace'
 import { NodeColorSwatches } from '../components/NodeColorSwatches'
@@ -2142,18 +2164,9 @@ export function TerminalNode({
   // A headless start (#925) is typing this node's launch from core: the badge says so, without the
   // warning, and ▶ stands aside — a click would splice a second copy into the pane.
   const startingNow = launchDelivery?.kind === 'starting'
-  // A node's own first-open launch is in flight: the live `initialCommand` alias is still set
-  // (it is cleared on every outcome) and nothing holds it. Its `pendingLaunch` is only the durable
-  // write-ahead record — and it carries `manualOnly` from the claim until Enter lands — so showing
-  // the chip here painted "⚠ QUEUED" on EVERY freshly opened agent for the length of its delivery.
-  // A real hold (deps, setup script) or a reported failure/stall still shows.
-  const firstOpenInFlight =
-    !!data.initialCommand &&
-    !observedLaunchDelivery &&
-    !(pendingLaunch?.after?.length) &&
-    !pendingLaunch?.awaitSetupGroup &&
-    !pendingLaunch?.afterPr &&
-    !pendingLaunch?.afterSuccess
+  // A node's own first-open launch still in flight hides the chip (lib/pendingLaunch — the board
+  // card asks the same predicate).
+  const firstOpenInFlight = isFirstOpenInFlight(!!data.initialCommand, pendingLaunch, observedLaunchDelivery)
   // `--after-success`: where the wait stands (lib/useSuccessWait — the hold through the shape rule,
   // its stations, and the tooltip, which flips to EXPIRED on its own deadline tick).
   const successWait = useSuccessWait(
@@ -3228,6 +3241,7 @@ export function TerminalNode({
       if (term.element) container.appendChild(term.element)
       // A link tooltip showing when the terminal parked would otherwise reappear where it was.
       if (term.element) hideLinkHints(term.element)
+      patchViewportScrollSync(term)
       applyFit()
     } else {
       term.loadAddon(fit)
@@ -3237,6 +3251,7 @@ export function TerminalNode({
       // Renderer-parity: quantize the char measurement to the device-pixel grid, so a budget
       // grant/release swaps renderers without the text visibly reflowing (see the helper).
       quantizeCharSize(term)
+      patchViewportScrollSync(term)
       applyFit()
       // Reads the STORE, not the component's focusedRef: a parked terminal keeps the closure
       // from the instance that created it, and a ref from a dead instance never updates — the
@@ -3292,6 +3307,7 @@ export function TerminalNode({
                       abs: target.abs,
                       dir: target.dir,
                       mac: isMac,
+                      windows: isWindowsPlatform(),
                       systemOpen: systemOpenRefusal(shellCtx(), target.abs) === null
                     }),
                 ev.clientX,
@@ -3498,6 +3514,13 @@ export function TerminalNode({
     // to the still-live session on first mount); everything below that pushes here is gated on
     // `!parked` so nothing is wired twice.
     const cleanups: Array<() => void> = parked ? parked.cleanups : []
+    // nodeterm itself just delivered this node's resume/relaunch line (in-place restart, wake from
+    // Pause/Eco, and the cold-restore relaunch a model switch or "restart agent and shell" recycles
+    // into). The exit our own quit recorded (`sessionEnded`) no longer describes the pane. Claude
+    // would clear it on its SessionStart anyway; cursor fires none on `--resume`, so without this the
+    // chat composer and the phone keep refusing a running CLI as "exited" until its next turn.
+    // note: a sessionEnd POST that lands after the relaunch re-sets it; none has been observed.
+    const markRelaunched = (): void => useAgentStatus.getState().setSessionEnded(id, false)
 
     // Copy-on-select (issue #759). REGISTERED ONCE, at construction, and disposed WITH THE TERMINAL
     // — the OSC 52 handler's lifecycle, not a per-mount one: its only persistent listener lives on
@@ -3655,7 +3678,10 @@ export function TerminalNode({
           sshRemote,
           // Belt AND braces: the guard above cannot see a `ssh` executable that has gone missing,
           // which is core's other route into the local branch.
-          requireRemote: sshRemoteTmux
+          requireRemote: sshRemoteTmux,
+          // The one local terminal an SSH project's canvas may hold (issue #1186): core refuses
+          // every other local spawn owned by an SSH project. In-memory mark, never node data.
+          ...(isLocalOnSshCanvas(id) ? { localOnSshCanvas: true } : {})
         })
         .then(
         async ({
@@ -4051,7 +4077,21 @@ export function TerminalNode({
           cleanup: (cancel: () => void) => { cleanups.push(cancel) }
         }
         const launchWriter = createLaunchWriter({ ...launchWriterOptions,
-          claimAttempt: (manual, command) => commitLaunch(api, id, command, manual)
+          claimAttempt: (manual, command) => commitLaunch(api, id, command, manual),
+          // A local Windows session-host pane runs pwsh/cmd, where the POSIX launch line breaks on
+          // a quote in the prompt: execute the node's held semantic launch there instead. Every
+          // other pane answers 'fallback' without an IPC (terminal/launch-intent.ts).
+          execute: (command) =>
+            executeHeldLaunch(command, {
+              held: () => (getNode(id) as CanvasNode | undefined)?.data.launchIntent,
+              sessionHost: !!sessionHost,
+              source: session.source,
+              hostPlatform: () => hostPlatformFor(api),
+              executeLaunch: api.pty.executeLaunch
+                ? (request) => api.pty.executeLaunch!(id, request)
+                : undefined,
+              newLaunchId: uuid
+            })
         })
         const writeWhenShellReady = (cmd: string): void => {
           whenShellSettled(() => {
@@ -4069,6 +4109,7 @@ export function TerminalNode({
                   if (outcome === 'line-too-long') {
                     setCo(termKey, { launchTooLongBytes: lineBytes(cmd) })
                   }
+                  if (outcome === 'submitted') markRelaunched()
                 },
                 { killLine: getTerminalKillLine() }
               )
@@ -4377,7 +4418,7 @@ export function TerminalNode({
           // brand new either way — tmux respawned it, whether from the deep "pause & end session"
           // recycle or from a genuine reboot that took a shallow-paused session's tmux with it.
           // The later Resume's pane-recognition (see `decideWakeResume`) would otherwise refuse a
-          // user whose default shell sits outside the `isShellCommand` allowlist (nu/xonsh/pwsh)
+          // user whose default shell sits outside the `isShellCommand` allowlist (xonsh/elvish/…)
           // forever: a PAUSED chip that can never resume, with a live conversation on disk. Record
           // what this fresh pane actually is, the same way the exit half does — replacing any
           // stale record a pre-reboot shallow pause left behind, which described a pane that no
@@ -4478,7 +4519,9 @@ export function TerminalNode({
           if (!clearGate.ok || !sourceAgentId) return 'not-eligible'
           // Identity-gated (same as a model switch): core SIGTERMs the foreground group ONLY if
           // this agent still owns it, so a stale menu can never kill vim or a build in this pane.
-          if (!(await api.pty.terminateForeground(id, sourceAgentId))) return 'not-eligible'
+          const stopped = await api.pty.terminateForeground(id, sourceAgentId)
+          if (stopped === 'unsupported') return 'host-unsupported'
+          if (!stopped) return 'not-eligible'
           transport.recycle(id)
           // `clearEnv` rides the respawn's `transport.create` (read from data above) to strip env at
           // spawn; the cold-restore auto-resume relaunches the same agent against the default provider.
@@ -4528,7 +4571,9 @@ export function TerminalNode({
           if (!selectedModel || session.source === 'relay') return 'not-eligible'
           // Identity-gated: core SIGTERMs the foreground group ONLY if `target`'s harness still
           // owns it, so a stale model-switch menu can never kill vim or a build in this pane.
-          if (!(await api.pty.terminateForeground(id, target))) return 'not-eligible'
+          const stopped = await api.pty.terminateForeground(id, target)
+          if (stopped === 'unsupported') return 'host-unsupported'
+          if (!stopped) return 'not-eligible'
           transport.recycle(id)
           updateNodeData(id, (node) => ({
             agentId: target,
@@ -4642,7 +4687,8 @@ export function TerminalNode({
           onDelivery: (cancel) => {
             if (life.dead) cancel()
             else cleanups.push(cancel)
-          }
+          },
+          onResumed: markRelaunched
         })
       })
     )
@@ -4833,7 +4879,8 @@ export function TerminalNode({
           onDelivery: (cancel) => {
             if (life.dead) cancel()
             else cleanups.push(cancel)
-          }
+          },
+          onResumed: markRelaunched
         })
       })
     })
@@ -5311,159 +5358,182 @@ export function TerminalNode({
   useEffect(() => {
     const container = bodyRef.current
     if (!container || typeof IntersectionObserver === 'undefined') return
+    // The observer's own latest verdict, kept so a window-backgrounded EDGE (which the observer
+    // never sees — a hidden window still has a viewport) can be re-stated through the same path.
+    let intersecting = false
+    let observed = false
+    // One verdict, whoever produced it: the observer, or the window being put away / brought back.
+    // `visible` is already the EFFECTIVE value (`effectiveVisible`) — while the window is
+    // backgrounded every node reports itself offscreen, so every consumer below (WebGL budget,
+    // hibernation sweep, liveness poll, offscreen release) sees "nobody is looking", and every
+    // fire-time gate of the release still applies unchanged.
+    const onVerdict = (visible: boolean): void => {
+      // The renderer half first: it reads `wasVisibleRef` as the PREVIOUS verdict for its
+      // hidden→visible edge test, so the write below must come after it.
+      visibilityReportRef.current?.(visible)
+      const wasVisible = wasVisibleRef.current
+      wasVisibleRef.current = visible
+      // Publish the same verdict for the hibernation sweep, which runs in Canvas and cannot see
+      // this node's box. One observer, two consumers — a second observer would be a second
+      // opinion about the same rectangle.
+      setNodeOffscreen(id, !visible)
+      // …and the wake edge: a hibernated node the user has just panned back to gets its
+      // conversation resumed before they can reach for the chip. No-op (one map lookup) for a
+      // node that is not hibernated, which is every node in the default case. A `paused` node is
+      // excluded — see the mount-timer trigger above for why (`shouldAutoWake`).
+      const stVisible = useAgentStatus.getState().byId[id]
+      if (visible && !wasVisible && shouldAutoWake(stVisible?.hibernated, stVisible?.paused))
+        wakeRef.current()
+      // …and the liveness check, for the same reason and on the same edge: a node whose CLI died
+      // while nobody was looking should say so by the time the user has finished panning to it,
+      // not on the interval's next tick. Cheap — the asker's own gate returns before any I/O for
+      // a node that is not a parked agent.
+      if (visible && !wasVisible) void livenessAskRef.current?.()
+      // A visible node is not in an offscreen stretch at all — the next hidden edge starts a
+      // fresh clock for the Eco deferral's cap.
+      if (visible) offscreenSinceRef.current = null
+      // …and the offscreen-dispose state machine. Every decision is the pure
+      // `planOffscreenVisibility`; this block only executes the plan.
+      // Backgrounded: the shorter of the user's window and the background dwell (`0 = never`
+      // still wins). Only a NEW timer picks this up — one already armed by an earlier pan keeps
+      // its own deadline, which is at most the ordinary offscreen window.
+      const disposeMs = backgroundReleaseMs(
+        offscreenDisposeMs(useSettings.getState().settings.offscreenTerminalMinutes),
+        isWindowBackgrounded()
+      )
+      const plan = planOffscreenVisibility({
+        visible,
+        down: offscreenDownRef.current,
+        timerArmed: !!offscreenTimerRef.current,
+        disposeMs
+      })
+      if (plan.cancelTimer && offscreenTimerRef.current) {
+        clearTimeout(offscreenTimerRef.current)
+        offscreenTimerRef.current = null
+      }
+      if (plan.revive) {
+        offscreenDownRef.current = false
+        setOffscreenDown(false)
+        setOffscreenEpoch((n) => n + 1) // re-run the lifecycle effect → fresh warm tmux attach
+      }
+      if (plan.armTimer && disposeMs !== null) {
+        // When this offscreen stretch began — the clock the Eco deferral's cap is measured
+        // against. Stamped only here, where a NEW timer is armed (the plan refuses to re-arm
+        // while one is pending), so a pan that keeps reporting hidden cannot keep pushing it out.
+        offscreenSinceRef.current = Date.now()
+        const fireRelease = (): void => {
+          offscreenTimerRef.current = null
+          // Every input re-asked at FIRE time, never at arm time: ten minutes is long enough for
+          // all of them to have changed. `wasVisibleRef` is the observer's own latest verdict.
+          if (
+            !mayDisposeOffscreen({
+              visible: wasVisibleRef.current,
+              remote: offscreenRemoteRef.current,
+              selected: selectedRef.current
+            })
+          )
+            return
+          // The setting can also have been switched OFF while this timer counted down; a fire
+          // that disposed anyway would take a buffer the user has just asked us to keep.
+          const liveSettings = useSettings.getState().settings
+          if (!releaseStillEnabled(liveSettings.offscreenTerminalMinutes)) return
+          // Nothing to give back (no session yet, or one that was closed/ended under us) ⇒ no
+          // dispose. A null ref means no lifecycle run is live at all, which answers the same way.
+          if (!offscreenLiveRef.current?.()) return
+          // LIVE WORK ON A PLAIN SHELL (issue #126): this release is only "give the buffer back,
+          // re-attach later" while tmux is underneath. Without it the pty is the shell, so
+          // disposing an offscreen agent node kills the CLI mid-turn — panning away is not a
+          // request to stop it. Defer on the same retry the Eco ordering uses, but with no cap:
+          // what this waits for (the turn ending) always comes, and giving up would BE the bug.
+          // Asked after `offscreenLiveRef`, so the persistence ref is only read for a session
+          // this run actually has.
+          if (
+            shouldDeferReleaseForLiveWork({
+              tmuxBacked: sessionPersistentRef.current,
+              agentState: readAgentStateRef.current(),
+              agentProcess: readAgentProcessRef.current()
+            })
+          ) {
+            // Re-stamp the offscreen clock: this node is not RELEASABLE yet, and the Eco
+            // deferral's cap is measured from the start of the releasable stretch. Without this
+            // a long live-work wait would blow that cap outright, so the release that finally
+            // runs would skip the hibernate-first ordering and forfeit the CLI's hundreds of MB
+            // at the exact moment they became reclaimable. The stretch effectively begins when
+            // the work ends.
+            offscreenSinceRef.current = Date.now()
+            offscreenTimerRef.current = setTimeout(fireRelease, OFFSCREEN_DEFER_RETRY_MS)
+            return
+          }
+          // A HELD LAUNCH ON A PLAIN SHELL (the fifth lever): the `--after` launch this node holds
+          // is typed into the pane by session name, and without tmux the release destroys that
+          // pane. Nothing brings a released node back but the camera, so the launch would sit
+          // QUEUED until the user happened to pan over it. Same cadence, same drain: the hold
+          // ends when the launch fires. (Tmux-backed: released as normal — see the teardown,
+          // which keeps such a session READY because it stays typeable by name.)
+          if (
+            shouldDeferReleaseForHeldLaunch({
+              tmuxBacked: sessionPersistentRef.current,
+              armed: armedRef.current
+            })
+          ) {
+            offscreenSinceRef.current = Date.now()
+            offscreenTimerRef.current = setTimeout(fireRelease, OFFSCREEN_DEFER_RETRY_MS)
+            return
+          }
+          // ECO ORDERING (see `shouldDeferReleaseForEco`): hibernate first, release second. This
+          // release would UNWIRE the node — the lifecycle effect tears down, the hibernate pair
+          // unregisters, and `planHibernation` then reads the node as unwired — and at the
+          // shipped defaults it fires at 10 minutes against a 30-minute idle window, so the
+          // canonical "finish a turn, pan away" session never hibernated at all. The viewer is
+          // ~15 MB; the CLI is hundreds. So wait for the big prize, on the sweep's own cadence,
+          // and only up to the capped total — a node that can never hibernate must not hold its
+          // viewer forever.
+          const ecoStatus = useAgentStatus.getState().byId[id]
+          if (
+            shouldDeferReleaseForEco({
+              ecoEnabled: liveSettings.agentHibernationEnabled,
+              resumableAgent: hibernationTargetRef.current,
+              hibernated: !!ecoStatus?.hibernated,
+              // Same "unknown idle is not idle" rule the policy applies: with no hook event seen
+              // in this run there is no idle clock, `planHibernation` refuses this node outright,
+              // and waiting for a hibernation that cannot come would hold every warm node's
+              // viewer for the full cap after each app restart.
+              idleKnown: ecoStatus?.lastEventAt !== undefined,
+              offscreenElapsedMs: Date.now() - (offscreenSinceRef.current ?? Date.now()),
+              idleMinutes: liveSettings.agentHibernationIdleMinutes,
+              offscreenMinutes:
+                liveSettings.offscreenTerminalMinutes ?? OFFSCREEN_DISPOSE_MS_DEFAULT / 60_000
+            })
+          ) {
+            offscreenTimerRef.current = setTimeout(fireRelease, OFFSCREEN_DEFER_RETRY_MS)
+            return
+          }
+          offscreenDownRef.current = true
+          // The cleanup must DISPOSE, not park: parking keeps the very buffer this feature exists
+          // to give back. Set before the state flip, since that flip is what runs the cleanup.
+          noParkIds.add(termKey)
+          setOffscreenDown(true)
+          setOffscreenEpoch((n) => n + 1)
+        }
+        offscreenTimerRef.current = setTimeout(fireRelease, disposeMs)
+      }
+    }
     const io = new IntersectionObserver(
       (entries) => {
-        const visible = entries[entries.length - 1]?.isIntersecting ?? false
-        // The renderer half first: it reads `wasVisibleRef` as the PREVIOUS verdict for its
-        // hidden→visible edge test, so the write below must come after it.
-        visibilityReportRef.current?.(visible)
-        const wasVisible = wasVisibleRef.current
-        wasVisibleRef.current = visible
-        // Publish the same verdict for the hibernation sweep, which runs in Canvas and cannot see
-        // this node's box. One observer, two consumers — a second observer would be a second
-        // opinion about the same rectangle.
-        setNodeOffscreen(id, !visible)
-        // …and the wake edge: a hibernated node the user has just panned back to gets its
-        // conversation resumed before they can reach for the chip. No-op (one map lookup) for a
-        // node that is not hibernated, which is every node in the default case. A `paused` node is
-        // excluded — see the mount-timer trigger above for why (`shouldAutoWake`).
-        const stVisible = useAgentStatus.getState().byId[id]
-        if (visible && !wasVisible && shouldAutoWake(stVisible?.hibernated, stVisible?.paused))
-          wakeRef.current()
-        // …and the liveness check, for the same reason and on the same edge: a node whose CLI died
-        // while nobody was looking should say so by the time the user has finished panning to it,
-        // not on the interval's next tick. Cheap — the asker's own gate returns before any I/O for
-        // a node that is not a parked agent.
-        if (visible && !wasVisible) void livenessAskRef.current?.()
-        // A visible node is not in an offscreen stretch at all — the next hidden edge starts a
-        // fresh clock for the Eco deferral's cap.
-        if (visible) offscreenSinceRef.current = null
-        // …and the offscreen-dispose state machine. Every decision is the pure
-        // `planOffscreenVisibility`; this block only executes the plan.
-        const disposeMs = offscreenDisposeMs(
-          useSettings.getState().settings.offscreenTerminalMinutes
-        )
-        const plan = planOffscreenVisibility({
-          visible,
-          down: offscreenDownRef.current,
-          timerArmed: !!offscreenTimerRef.current,
-          disposeMs
-        })
-        if (plan.cancelTimer && offscreenTimerRef.current) {
-          clearTimeout(offscreenTimerRef.current)
-          offscreenTimerRef.current = null
-        }
-        if (plan.revive) {
-          offscreenDownRef.current = false
-          setOffscreenDown(false)
-          setOffscreenEpoch((n) => n + 1) // re-run the lifecycle effect → fresh warm tmux attach
-        }
-        if (plan.armTimer && disposeMs !== null) {
-          // When this offscreen stretch began — the clock the Eco deferral's cap is measured
-          // against. Stamped only here, where a NEW timer is armed (the plan refuses to re-arm
-          // while one is pending), so a pan that keeps reporting hidden cannot keep pushing it out.
-          offscreenSinceRef.current = Date.now()
-          const fireRelease = (): void => {
-            offscreenTimerRef.current = null
-            // Every input re-asked at FIRE time, never at arm time: ten minutes is long enough for
-            // all of them to have changed. `wasVisibleRef` is the observer's own latest verdict.
-            if (
-              !mayDisposeOffscreen({
-                visible: wasVisibleRef.current,
-                remote: offscreenRemoteRef.current,
-                selected: selectedRef.current
-              })
-            )
-              return
-            // The setting can also have been switched OFF while this timer counted down; a fire
-            // that disposed anyway would take a buffer the user has just asked us to keep.
-            const liveSettings = useSettings.getState().settings
-            if (!releaseStillEnabled(liveSettings.offscreenTerminalMinutes)) return
-            // Nothing to give back (no session yet, or one that was closed/ended under us) ⇒ no
-            // dispose. A null ref means no lifecycle run is live at all, which answers the same way.
-            if (!offscreenLiveRef.current?.()) return
-            // LIVE WORK ON A PLAIN SHELL (issue #126): this release is only "give the buffer back,
-            // re-attach later" while tmux is underneath. Without it the pty is the shell, so
-            // disposing an offscreen agent node kills the CLI mid-turn — panning away is not a
-            // request to stop it. Defer on the same retry the Eco ordering uses, but with no cap:
-            // what this waits for (the turn ending) always comes, and giving up would BE the bug.
-            // Asked after `offscreenLiveRef`, so the persistence ref is only read for a session
-            // this run actually has.
-            if (
-              shouldDeferReleaseForLiveWork({
-                tmuxBacked: sessionPersistentRef.current,
-                agentState: readAgentStateRef.current(),
-                agentProcess: readAgentProcessRef.current()
-              })
-            ) {
-              // Re-stamp the offscreen clock: this node is not RELEASABLE yet, and the Eco
-              // deferral's cap is measured from the start of the releasable stretch. Without this
-              // a long live-work wait would blow that cap outright, so the release that finally
-              // runs would skip the hibernate-first ordering and forfeit the CLI's hundreds of MB
-              // at the exact moment they became reclaimable. The stretch effectively begins when
-              // the work ends.
-              offscreenSinceRef.current = Date.now()
-              offscreenTimerRef.current = setTimeout(fireRelease, OFFSCREEN_DEFER_RETRY_MS)
-              return
-            }
-            // A HELD LAUNCH ON A PLAIN SHELL (the fifth lever): the `--after` launch this node holds
-            // is typed into the pane by session name, and without tmux the release destroys that
-            // pane. Nothing brings a released node back but the camera, so the launch would sit
-            // QUEUED until the user happened to pan over it. Same cadence, same drain: the hold
-            // ends when the launch fires. (Tmux-backed: released as normal — see the teardown,
-            // which keeps such a session READY because it stays typeable by name.)
-            if (
-              shouldDeferReleaseForHeldLaunch({
-                tmuxBacked: sessionPersistentRef.current,
-                armed: armedRef.current
-              })
-            ) {
-              offscreenSinceRef.current = Date.now()
-              offscreenTimerRef.current = setTimeout(fireRelease, OFFSCREEN_DEFER_RETRY_MS)
-              return
-            }
-            // ECO ORDERING (see `shouldDeferReleaseForEco`): hibernate first, release second. This
-            // release would UNWIRE the node — the lifecycle effect tears down, the hibernate pair
-            // unregisters, and `planHibernation` then reads the node as unwired — and at the
-            // shipped defaults it fires at 10 minutes against a 30-minute idle window, so the
-            // canonical "finish a turn, pan away" session never hibernated at all. The viewer is
-            // ~15 MB; the CLI is hundreds. So wait for the big prize, on the sweep's own cadence,
-            // and only up to the capped total — a node that can never hibernate must not hold its
-            // viewer forever.
-            const ecoStatus = useAgentStatus.getState().byId[id]
-            if (
-              shouldDeferReleaseForEco({
-                ecoEnabled: liveSettings.agentHibernationEnabled,
-                resumableAgent: hibernationTargetRef.current,
-                hibernated: !!ecoStatus?.hibernated,
-                // Same "unknown idle is not idle" rule the policy applies: with no hook event seen
-                // in this run there is no idle clock, `planHibernation` refuses this node outright,
-                // and waiting for a hibernation that cannot come would hold every warm node's
-                // viewer for the full cap after each app restart.
-                idleKnown: ecoStatus?.lastEventAt !== undefined,
-                offscreenElapsedMs: Date.now() - (offscreenSinceRef.current ?? Date.now()),
-                idleMinutes: liveSettings.agentHibernationIdleMinutes,
-                offscreenMinutes:
-                  liveSettings.offscreenTerminalMinutes ?? OFFSCREEN_DISPOSE_MS_DEFAULT / 60_000
-              })
-            ) {
-              offscreenTimerRef.current = setTimeout(fireRelease, OFFSCREEN_DEFER_RETRY_MS)
-              return
-            }
-            offscreenDownRef.current = true
-            // The cleanup must DISPOSE, not park: parking keeps the very buffer this feature exists
-            // to give back. Set before the state flip, since that flip is what runs the cleanup.
-            noParkIds.add(termKey)
-            setOffscreenDown(true)
-            setOffscreenEpoch((n) => n + 1)
-          }
-          offscreenTimerRef.current = setTimeout(fireRelease, disposeMs)
-        }
+        intersecting = entries[entries.length - 1]?.isIntersecting ?? false
+        observed = true
+        onVerdict(effectiveVisible(intersecting, isWindowBackgrounded()))
       },
       { rootMargin: '256px' }
     )
     io.observe(container)
+    // Before the observer's first delivery there is no verdict to re-state; that first delivery
+    // reads the flag itself.
+    const offBackgrounded = subscribeWindowBackgrounded((bg) => {
+      if (observed) onVerdict(effectiveVisible(intersecting, bg))
+    })
     return () => {
+      offBackgrounded()
       io.disconnect()
       if (offscreenTimerRef.current) {
         clearTimeout(offscreenTimerRef.current)
@@ -5606,22 +5676,7 @@ export function TerminalNode({
   // the node whose own membership flipped, and every OTHER terminal is the one being covered.
   useEffect(() => subscribeFocusedNode(() => applyFitRef.current?.()), [])
 
-  const toggleCollapse = () =>
-    setNodes((ns) =>
-      ns.map((n) => {
-        if (n.id !== id) return n
-        const next = !n.data.collapsed
-        const expandedHeight =
-          (n.data.expandedHeight as number) ?? n.measured?.height ?? (n.height as number) ?? 300
-        const height = next ? COLLAPSED_HEIGHT : expandedHeight
-        return {
-          ...n,
-          height,
-          style: { ...n.style, height },
-          data: { ...n.data, collapsed: next, expandedHeight }
-        }
-      })
-    )
+  const toggleCollapse = () => setNodes((ns) => toggleCollapsed(ns as CanvasNode[], [id]))
 
   // ---- hover guard: dwell before entering the terminal ----
   /**
@@ -5694,6 +5749,18 @@ export function TerminalNode({
         return
       }
       setArmed(false)
+      // Sloppy focus: this dwell, not the pointer leaving, takes the keyboard off the terminal the
+      // user came from — even when the ⌘M view leaves nothing here that could take it.
+      const held = document.activeElement
+      if (
+        held instanceof HTMLElement &&
+        dwellBlursForeignTerminal({
+          covered: mdModeRef.current,
+          activeIsForeignXterm: held.classList.contains(XTERM_INPUT_CLASS) && !rootRef.current?.contains(held)
+        })
+      ) {
+        held.blur()
+      }
       focusXtermUnlessCovered(termRef.current, mdModeRef.current)
       useTerminalFocus.getState().remember(id)
       useAgentStatus.getState().setActive(id, true)
@@ -5707,21 +5774,21 @@ export function TerminalNode({
   }
   const onBodyLeave = () => {
     if (dwellRef.current) clearTimeout(dwellRef.current)
-    // Click to focus (#757): the pointer wandering off — to another card, the sidebar, a second
-    // display — leaves the terminal exactly as it is. It keeps the keyboard, the guard stays down
-    // and the node stays active; all of that is released by the focus-loss listener below, which
-    // follows where the KEYBOARD goes rather than where the mouse goes.
-    if (!pointerLeaveReleases(focusFollowsPointer)) return
-    setArmed(true)
-    termRef.current?.blur()
-    useAgentStatus.getState().setActive(id, false)
-    presence.releaseFocus(id)
+    // The pointer wandering off — to the canvas, another card, the sidebar, a second display —
+    // never takes the keyboard away, in either mode: the terminal keeps it and the node stays
+    // active until another node takes it or the user clicks elsewhere (sloppy focus). That release
+    // is the focus-loss listener's below, which follows where the KEYBOARD goes rather than where
+    // the mouse goes. Strict focus-follows-pointer used to blur here, so typing with the mouse
+    // resting off the node silently went nowhere. Only the guard still follows the pointer while
+    // focus follows it: a pass-over scroll must pan the canvas until the next dwell.
+    if (pointerLeaveRearmsGuard(focusFollowsPointer)) setArmed(true)
   }
-  // Click to focus (#757): who holds the keyboard follows DOM focus and deliberate presses, not the
-  // pointer — the whole mechanism, its measurements and its refusals live in `useClickToFocus`.
-  // Every callback is read live from this render; the listeners are bound once per mode switch, to
-  // the node root, which is the one element that survives focus mode's reparent.
-  useClickToFocus(!focusFollowsPointer, {
+  // Who holds the keyboard follows DOM focus and deliberate presses, not the pointer, in BOTH modes
+  // — the whole mechanism, its measurements and its refusals live in `useClickToFocus` (#757). The
+  // modes differ in who owns the guard: focus here only in click to focus, the pointer otherwise.
+  // Every callback is read live from this render; the listeners are bound once, to the node root,
+  // which is the one element that survives focus mode's reparent.
+  useClickToFocus({
     id,
     root: () => rootRef.current,
     xtermTextarea: () => termRef.current?.textarea,
@@ -5729,7 +5796,9 @@ export function TerminalNode({
     reparenting: () => reparentingRef.current,
     acknowledge: () => enterNow(),
     focusXterm: () => focusXtermUnlessCovered(termRef.current, mdModeRef.current),
-    setArmed,
+    setArmed: (armed) => {
+      if (focusDrivesGuard(focusFollowsPointer)) setArmed(armed)
+    },
     remember: () => useTerminalFocus.getState().remember(id),
     isActive: () => useAgentStatus.getState().activeId === id,
     setActive: (active) => useAgentStatus.getState().setActive(id, active),
@@ -5772,6 +5841,18 @@ export function TerminalNode({
   // ---- file drop: paste dropped file paths into the terminal (native-terminal behavior) ----
   // Uploads go over the master this node's PTY runs on (`nodeUploadScope`).
   const dropProjectId = (): string => nodeUploadScope(data.ssh as SshConnection | undefined)
+  // How a LOCAL path is spelled for this pane: POSIX escapes everywhere except a Windows core,
+  // where `\` is the separator and the shell / agent CLI wants quotes. Same core-platform source
+  // as the file links and the kill line — the filesystem-owning core, never the viewer.
+  const dropDialectFor = (agentPane: boolean): DropDialect =>
+    dropDialect({
+      corePlatform: corePlatformRef.current,
+      remote: remoteSession,
+      shell: data.shell || useSettings.getState().settings.defaultShell || undefined,
+      agentPane,
+      localDesktop: session.source === 'local' && !isBrowserRuntime(),
+      viewerWindows: isWindowsPlatform()
+    })
   /**
    * Files arriving by DROP or by PASTE become paths in the terminal — what a native terminal does
    * on a drop, and the only thing a shell (or an agent reading its prompt) can act on. Shared so
@@ -5785,6 +5866,10 @@ export function TerminalNode({
     // one before there is a path to paste — worth the same "this is going somewhere" overlay the
     // SSH upload gets, since neither is instant and both paste nothing until they finish.
     const needsWrite = files.some((f) => !window.nodeTerminal.getPathForFile(f))
+    const st = agentStatusStore.getState().byId[id]
+    const paneAgent = agentId ?? st?.agentId
+    const agentPane = agentProcessInPane(paneAgent, st)
+    const dialect = dropDialectFor(agentPane)
 
     let paths: string[]
     if (data.sshRemoteTmux) {
@@ -5809,7 +5894,7 @@ export function TerminalNode({
       if (uploadNoteTimer.current) clearTimeout(uploadNoteTimer.current)
       setUploadNote({ text: 'Saving pasted file…' })
       try {
-        paths = await droppedPaths(files, { sshRemoteTmux: false, projectId: '' })
+        paths = await droppedPaths(files, { sshRemoteTmux: false, projectId: '', dialect })
       } finally {
         setUploadNote(null)
       }
@@ -5818,7 +5903,7 @@ export function TerminalNode({
         uploadNoteTimer.current = setTimeout(() => setUploadNote(null), 2500)
       }
     } else {
-      paths = await droppedPaths(files, { sshRemoteTmux: false, projectId: '' })
+      paths = await droppedPaths(files, { sshRemoteTmux: false, projectId: '', dialect })
     }
     if (!paths.length) return
     // Enter the terminal and paste the path(s) like a real drop (trailing space to continue).
@@ -5832,13 +5917,11 @@ export function TerminalNode({
     useTerminalFocus.getState().remember(id)
     // A pasted image is only reported as attached once the agent's own pane shows it (claude's
     // `[Image #N]`); otherwise the receipt says the path went in, unconfirmed.
-    const st = agentStatusStore.getState().byId[id]
-    const paneAgent = agentId ?? st?.agentId
     pasteWithImageReceipt(
       term,
       paths.join(' ') + ' ',
       paths,
-      agentProcessInPane(paneAgent, st) ? paneAgent : undefined,
+      agentPane ? paneAgent : undefined,
       pasteReceipt.report
     )
     useAgentStatus.getState().setActive(id, true)
@@ -6061,7 +6144,8 @@ export function TerminalNode({
       onMouseEnter={() => (hoveredRef.current = true)}
       onMouseLeave={() => (hoveredRef.current = false)}
     >
-      <NodeResizer minWidth={NODE_MIN_SIZES.terminal.width} minHeight={NODE_MIN_SIZES.terminal.height} isVisible={selected && !collapsed} color="#0a84ff" />
+      {/* Paint only: the old resize box in its old place (see .nt-resize-ghost in styles.css). */}
+      <NodeResizer isVisible={selected && !collapsed && !focused} color="#0a84ff" lineClassName="nt-resize-ghost" handleClassName="nt-resize-ghost" />
       {/* Invisible source handle so edges to subagent/loop nodes can attach. */}
       <Handle
         id="flow-out"
@@ -6078,32 +6162,6 @@ export function TerminalNode({
         isConnectable={false}
         style={{ opacity: 0, pointerEvents: 'none', top: 0 }}
       />
-      {/* Link handles (all terminal nodes): drag right→left to link. Between two context-capable
-          (Claude) nodes this shares context; from a sticky note it attaches the note as context.
-          Vertically centered on the side edges; raised above the body so they're never buried. */}
-      <Handle
-        id="link-out"
-        type="source"
-        position={Position.Right}
-        className="bridge-handle bridge-handle--out"
-        data-tip={
-          contextLinkCapable
-            ? "Link out — drag to another Claude node so they can read each other's context"
-            : 'Link out — drag to a sticky note to attach it as context'
-        }
-      />
-      <Handle
-        id="link-in"
-        type="target"
-        position={Position.Left}
-        className="bridge-handle bridge-handle--in"
-        data-tip={
-          contextLinkCapable
-            ? 'Link in — drop a link here to share context with this Claude session'
-            : 'Link in — drop a sticky note link here to attach it as context'
-        }
-      />
-
       <div className="term-node__header">
         <Tooltip label={collapsed ? 'Expand' : 'Collapse'}>
           <button
@@ -6682,6 +6740,13 @@ export function TerminalNode({
         />
       )}
 
+      {/* Run node: launch.json run controls over this terminal (see RunBar). Local
+          sessions only — a relay tab's or an SSH node's terminal runs on another machine, whose
+          checkouts and devices this one cannot see. */}
+      {data.runConfig && session.source === 'local' && !data.ssh && !data.sshRemoteTmux && (
+        <RunBar nodeId={id} config={data.runConfig} autoStart={!!data.runAutoStart} simulator={data.runSimulator} browser={data.runBrowser} />
+      )}
+
       {/* Body always mounted (keeps xterm alive); hidden via CSS when collapsed. */}
       <div
         className={`term-node__body${dropZone.dropping ? ' dropping' : ''}`}
@@ -6945,7 +7010,9 @@ export function TerminalNode({
                 pathsForFiles={(files) =>
                   droppedPaths(files, {
                     sshRemoteTmux: !!data.sshRemoteTmux,
-                    projectId: data.sshRemoteTmux ? dropProjectId() : ''
+                    projectId: data.sshRemoteTmux ? dropProjectId() : '',
+                    // The composer feeds the agent CLI, never the shell.
+                    dialect: dropDialectFor(true)
                   })
                 }
                 // `@` lists this node's files where they live: the host's for an SSH node, over the
@@ -6974,6 +7041,40 @@ export function TerminalNode({
         <NodeCommentsPanel id={id} />
       </div>
     )}
+    {/* Link handles (all terminal nodes): drag right→left to link. Between two context-capable
+        (Claude) nodes this shares context; from a sticky note it attaches the note as context.
+        Vertically centered on the side edges; raised above the body so they're never buried.
+        Siblings AFTER the root, like the resizer: inside a glass root (backdrop-filter = its own
+        stacking context) their z-index only counted inside it, so the resize controls covered
+        them and the outer half was clipped. */}
+    <Handle
+      id="link-out"
+      type="source"
+      position={Position.Right}
+      className="bridge-handle bridge-handle--out"
+      data-tip={
+        contextLinkCapable
+          ? "Link out — drag to another Claude node so they can read each other's context"
+          : 'Link out — drag to a sticky note to attach it as context'
+      }
+    />
+    <Handle
+      id="link-in"
+      type="target"
+      position={Position.Left}
+      className="bridge-handle bridge-handle--in"
+      data-tip={
+        contextLinkCapable
+          ? 'Link in — drop a link here to share context with this Claude session'
+          : 'Link in — drop a sticky note link here to attach it as context'
+      }
+    />
+    {/* Sibling of the root, not a child: under Liquid Glass the root has a backdrop-filter,
+        which makes it the containing block for these absolute edges, so they were clipped and
+        covered (only the top edge stayed grabbable). Out here they sit on the node wrapper.
+        AFTER the root, never before it: focus mode reparents the root out of this wrapper, and
+        React inserting a control "before the root" would then throw NotFoundError. */}
+    <NodeResizer minWidth={NODE_MIN_SIZES.terminal.width} minHeight={NODE_MIN_SIZES.terminal.height} isVisible={selected && !collapsed && !focused} color="#0a84ff" />
     </>
   )
 }

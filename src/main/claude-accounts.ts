@@ -4,9 +4,10 @@
 // header of src/core/claude-accounts-service.ts).
 //
 // The logic is core's `claudeAccountsHandlers` (the same table the Server Edition registers through
-// `platform().handle`); this file only BINDS it through `ipcMain.handle` and supplies the two
-// desktop-only deps: the canvas skill (canvas control is not wired on the server) and the SSH legs
-// (the server has no SSH-project manager). `ipcMain.handle`, NOT `platform().handle`: the latter
+// `platform().handle`); this file only BINDS it through `ipcMain.handle` and supplies the one
+// desktop-only dep: the SSH legs (the server has no SSH-project manager). The account's hook +
+// skills come from the consent lifecycle (core/agent-integrations.ts, upstream #744), which `add`
+// and `link` ask in core. `ipcMain.handle`, NOT `platform().handle`: the latter
 // registers into the peer-reachable handler table (platform-electron.ts, "THE INVARIANT (4c)"),
 // which would newly let a paired relay GUEST mint and delete managed accounts on the HOST while the
 // guest's own settings.json records them as its own. Binding through ipcMain keeps desktop reach
@@ -17,7 +18,6 @@ import {
   type ClaudeAccountsRemote
 } from '../core/claude-accounts-service'
 import type { AccountRowStore } from '../core/settings-store'
-import { installCanvasSkillInto } from './canvas-control'
 import type { SshProjectManager } from './remote-ssh/ssh-project'
 
 // Re-exported for this module's other consumers (claude-usage.ts) so their import path is
@@ -47,7 +47,7 @@ export function initClaudeAccounts(
   }
   // The event is stripped exactly as the core seam would strip it: none of the four reads a sender.
   for (const [channel, fn] of Object.entries(
-    claudeAccountsHandlers({ settings, installSkill: installCanvasSkillInto, remote })
+    claudeAccountsHandlers({ settings, remote })
   )) {
     ipcMain.handle(channel, (_event, ...args: any[]) => fn(...args))
   }

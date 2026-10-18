@@ -17,7 +17,7 @@ import type {
   RemoteAccountUsage,
   RemoteUsageQuery
 } from '../../shared/types'
-import { emptyUsage, holdLastGood, usageFromPayload } from './claude-usage-map'
+import { emptyUsage, holdLastGood, holdLastGoodProvider, usageFromPayload } from './claude-usage-map'
 import { classifyUsageResponseStatus, classifyUsageThrow } from './usage-cause'
 import {
   fetchRemoteUsage,
@@ -25,6 +25,7 @@ import {
   type RemoteUsageTarget
 } from './remote-claude-usage'
 import { fetchCodexUsage } from './codex-usage'
+import { fetchCursorUsage } from './cursor-usage'
 import { fetchRemoteCodexUsage } from './remote-codex-usage'
 import { fetchGeminiUsage } from './gemini-usage'
 import { fetchGrokUsage } from './grok-usage'
@@ -103,6 +104,7 @@ const OTHER_PROVIDERS: { id: string; fetch: () => Promise<ProviderUsage> }[] = [
   // Codex is NOT here — it is account-scoped (one system row + one row per managed account,
   // built dynamically in runProviders so each row is keyed by its own accountId and can never
   // collapse into another). See the Codex block in runProviders and S6 §4.3 (no mixing).
+  { id: 'cursor', fetch: () => fetchCursorUsage() },
   { id: 'gemini', fetch: fetchGeminiUsage },
   { id: 'grok', fetch: fetchGrokUsage },
   { id: 'kimi', fetch: fetchKimiUsage },
@@ -488,6 +490,8 @@ export function startUsageService(opts: UsageServiceOptions = {}): UsageService 
   // or relabelled) the cache is busted so a snapshot from a DIFFERENT account set is never served —
   // switching accounts can't show stale numbers (S6 §4.3, cache fingerprint).
   let codexAccountsFingerprint = ''
+  // The last Codex row with numbers, per account (`accountId ?? ''`) — what a failed read holds.
+  const lastGoodCodex = new Map<string, ProviderUsage>()
 
   // A throwing provider must never break the sweep — fail closed to the empty set (system-only),
   // never a fabricated account (S6 §4.3).
@@ -547,7 +551,24 @@ export function startUsageService(opts: UsageServiceOptions = {}): UsageService 
         fetch: () => fetchCodexUsage(account.home, account)
       }))
     ]
-    codexInFlight = Promise.all(codexProviders.map(settle)).then((rows) => ({ rows, fingerprint }))
+    // A failed Codex read (a 429 above all, upstream issue #1168) keeps that row's last good numbers
+    // instead of blanking it — keyed per account, so a held row is only ever its own account's. Held
+    // HERE, where the leg lands, so the full run (popover) and the Codex-only refresh (phone mirror)
+    // hold identically; a reused leg is read back from the cache and is already held.
+    codexInFlight = Promise.all(codexProviders.map(settle)).then((rows) => {
+      const now = Date.now()
+      const held = rows.map((row) => {
+        const key = row.accountId ?? ''
+        const kept = holdLastGoodProvider(lastGoodCodex.get(key), row, now)
+        if (kept.limits.length > 0) lastGoodCodex.set(key, kept)
+        else lastGoodCodex.delete(key)
+        return kept
+      })
+      // A removed account's last good row must not outlive it (nor be served if its id returns).
+      const live = new Set(held.map((row) => row.accountId ?? ''))
+      for (const key of [...lastGoodCodex.keys()]) if (!live.has(key)) lastGoodCodex.delete(key)
+      return { rows: held, fingerprint }
+    })
     try {
       const leg = await codexInFlight
       codexAt = Date.now()

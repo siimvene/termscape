@@ -30,6 +30,8 @@
 import type { ReactNode } from 'react'
 import type { MenuItem } from '../components/ContextMenu'
 import { ACCOUNT_CAPABLE_AGENT_IDS } from '@shared/agents/account-binding'
+import { SIMULATOR_SSH_HINT } from '@shared/simulator'
+import { isBrowserRuntime } from '../bridge/runtime'
 import {
   IconAgent,
   IconBranch,
@@ -39,6 +41,8 @@ import {
   IconExplorer,
   IconGroup,
   IconNote,
+  IconPhone,
+  IconPlay,
   IconRemote,
   IconTerminal,
   IconWeb,
@@ -56,6 +60,8 @@ export type AddPos = { x: number; y: number } | undefined
 export type AddItem =
   | { kind: 'terminal' }
   | { kind: 'remote' }
+  | { kind: 'run' } // disabledOnSsh
+  | { kind: 'simulator' } // macOS desktop only
   | { kind: 'browser' }
   | { kind: 'web' }
   | { kind: 'sticky' }
@@ -77,6 +83,8 @@ export type AddItem =
 export const CONTENT_ADD_ITEMS: readonly AddItem[] = [
   { kind: 'terminal' },
   { kind: 'remote' },
+  { kind: 'run' },
+  { kind: 'simulator' },
   { kind: 'browser' },
   { kind: 'web' },
   { kind: 'sticky' },
@@ -95,6 +103,12 @@ export interface AddCtx {
   hasCwd: boolean
   /** Whether the active project is an SSH project. Disables "New worktree…". */
   isSshProject: boolean
+  /** Whether the core that owns the active project runs on Windows (`hostPlatformFor`). Disables
+   *  "New run configuration" — its launcher is a POSIX `sh` script. Absent = not Windows. */
+  isWindowsCore?: boolean
+  /** Whether the active project is a relay tab (another machine's core). Disables "New simulator":
+   *  the node would show THIS machine's devices inside the host's project. Absent = not relay. */
+  isRelayTab?: boolean
 }
 
 /**
@@ -108,6 +122,10 @@ export interface AddCtx {
 export interface AddHandlers {
   terminal: (at?: AddPos) => void
   remote: (screenPos: { x: number; y: number }) => void
+  /** A run node (a `.vscode/launch.json` configuration with Run/Stop/Restart), in the project folder. */
+  run: (at?: AddPos) => void
+  /** A Simulator node: a live iOS simulator screen with touch, keyboard and buttons. */
+  simulator: (at?: AddPos) => void
   browser: (at?: AddPos) => void
   web: (at?: AddPos) => void
   sticky: (at?: AddPos) => void
@@ -124,6 +142,37 @@ export interface AddHandlers {
 
 /** The SSH worktree hint shown on the disabled row — kept here so every surface shows the same one. */
 export const WORKTREE_SSH_HINT = 'Not supported in SSH projects yet'
+/** A run node's launcher, processes and (Flutter) simulators all live on THIS machine. */
+export const RUN_SSH_HINT = 'Run configurations run on this machine — not in SSH projects yet'
+/** iOS simulators live on the Mac the desktop app runs on; a browser tab (Server Edition) is not it. */
+export const SIMULATOR_UNAVAILABLE_HINT = 'Simulators need the desktop app'
+/** Whether this renderer can show a Simulator node: the desktop app on any OS — Android emulators
+ *  run everywhere; iOS simulators are simply absent from the list off macOS. Not a Server Edition
+ *  tab, whose emulators would be the server's. */
+export function simulatorAvailable(relayTab = false): boolean {
+  return !isBrowserRuntime() && !relayTab
+}
+/** A relay tab's project lives on another machine; this machine's simulators do not belong in it. */
+export const SIMULATOR_RELAY_HINT = 'Simulators run on this machine — not in a relay tab'
+export { SIMULATOR_SSH_HINT }
+/** The simulator row's gate, one rule for the menu, the Dock, ⌘K and the canvas refusal. */
+export function simulatorRefusal(relayTab = false, sshProject = false): string | undefined {
+  if (isBrowserRuntime()) return SIMULATOR_UNAVAILABLE_HINT
+  if (relayTab) return SIMULATOR_RELAY_HINT
+  if (sshProject) return SIMULATOR_SSH_HINT
+  return undefined
+}
+
+/** The core's launcher is a POSIX `sh` script stopped by POSIX signals (see `RUN_WINDOWS_REASON`). */
+export const RUN_WINDOWS_HINT = 'Run configurations that launch a process are not supported on Windows yet'
+
+/** The run row's gate, one rule for the menu and the Dock: SSH first (its reason is the more
+ *  specific one), then a Windows core. */
+function runGate(ctx: AddCtx): { disabled: boolean; hint?: string } {
+  if (ctx.isSshProject) return { disabled: true, hint: RUN_SSH_HINT }
+  if (ctx.isWindowsCore) return { disabled: true, hint: RUN_WINDOWS_HINT }
+  return { disabled: false }
+}
 
 /**
  * The two rows that need a project FOLDER, shown disabled with their reason rather than hidden.
@@ -167,6 +216,25 @@ export function contentAddItemsToMenuItems(
         break
       case 'remote':
         out.push({ label: 'New remote…', icon: <IconTerminal />, onClick: () => handlers.remote(remotePos) })
+        break
+      case 'simulator': {
+        const refusal = simulatorRefusal(ctx.isRelayTab, ctx.isSshProject)
+        out.push({
+          label: 'New simulator',
+          icon: <IconPhone />,
+          disabled: !!refusal,
+          hint: refusal,
+          onClick: () => handlers.simulator(at)
+        })
+        break
+      }
+      case 'run':
+        out.push({
+          label: 'New run configuration',
+          icon: <IconPlay />,
+          ...runGate(ctx),
+          onClick: () => handlers.run(at)
+        })
         break
       case 'browser':
         out.push({ label: 'New browser', icon: <IconRemote />, onClick: () => handlers.browser(at) })
@@ -269,6 +337,27 @@ export function contentAddItemsToDockRows(
         // The Dock uses its own "New Remote Connection" affordance, not the remote picker. Skip
         // here so the Dock's content rows don't duplicate it.
         break
+      case 'simulator': {
+        const refusal = simulatorRefusal(ctx.isRelayTab, ctx.isSshProject)
+        out.push({
+          kind: 'simulator',
+          label: 'Simulator',
+          icon: <IconPhone />,
+          disabled: !!refusal,
+          hint: refusal,
+          onClick: () => handlers.simulator()
+        })
+        break
+      }
+      case 'run':
+        out.push({
+          kind: 'run',
+          label: 'Run Configuration',
+          icon: <IconPlay />,
+          ...runGate(ctx),
+          onClick: () => handlers.run()
+        })
+        break
       case 'browser':
         out.push({ kind: 'browser', label: 'Browser', icon: <IconRemote />, onClick: () => handlers.browser() })
         break
@@ -360,6 +449,8 @@ export type AddGroupId = 'top' | 'view' | 'files' | 'orchestrate'
 export const ADD_ITEM_GROUP: Record<AddItem['kind'], AddGroupId> = {
   terminal: 'top',
   remote: 'top',
+  run: 'view',
+  simulator: 'view',
   browser: 'view',
   web: 'view',
   sticky: 'view',

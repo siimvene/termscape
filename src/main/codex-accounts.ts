@@ -46,6 +46,9 @@ import {
   migrateManagedCodexHomes,
   NEW_CODEX_ACCOUNT_LABEL
 } from '../core/codex-accounts-service'
+// The host-OS seam the app-server legs branch on (upstream's Windows fix, ported into core with
+// the code it guards); re-exported so this module's tests keep their import path.
+export { setCodexAccountsHostPlatformForTests } from '../core/codex-accounts-service'
 import type { CodexAccount } from '../shared/codex-account'
 import { ensureCodexRelayRoot } from './codex-relay-daemon'
 import { platform } from '../core/platform'

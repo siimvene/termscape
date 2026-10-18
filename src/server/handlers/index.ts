@@ -9,9 +9,11 @@ import { registerFsHandlers } from '../../core/fs-handlers'
 import { claudeCliCaps, registerClaudeCliIpc } from '../../core/claude-cli'
 import { readPeerClaudeAccounts } from '../../core/peer-claude-accounts'
 import { registerGrokCliIpc } from '../../core/grok-cli'
+import { registerCursorCliIpc } from '../../core/cursor-cli'
 import { registerCodexIdentityIpc } from '../../core/codex-identity-caps'
 import { registerCodexCliIpc } from '../../core/codex-cli'
 import { registerWallpaperIpc } from '../../core/wallpaper'
+import { registerRunConfigIpc } from '../../core/run-service'
 import { startUsageService } from '../../core/usage/usage-service'
 import { registerClaudeAccountsIpc } from '../../core/claude-accounts-service'
 import { registerCodexAccountsIpc } from '../../core/codex-accounts-service'
@@ -100,6 +102,7 @@ export function registerCoreHandlers(
   // Invariant 11 for probes: registered in BOTH shells, or session-id minting silently works on
   // the desktop and not in the browser, with nothing to say which.
   registerGrokCliIpc()
+  registerCursorCliIpc()
   // The codex CLI's own approval vocabulary, and this one is registered FOR REAL rather than
   // stubbed. `registerCodexIdentityIpc` below declines a shared app-server on purpose; this is the
   // opposite case, and the distinction matters — the Server Edition's Codex sessions run on THIS
@@ -112,6 +115,8 @@ export function registerCoreHandlers(
     get: deps.getSettings,
     onChange: (cb) => deps.onSettingsChange?.(cb)
   })
+  // The run node's host side: core, so the browser's run nodes run on this server.
+  registerRunConfigIpc()
   void claudeCliCaps()
 
   // The answer is populated after server node identity is armed. Early browser callers wait for

@@ -9,7 +9,12 @@ import {
   isWaivableVerb,
   isWaivableCall,
   pruneControlConfirmWaivers,
+  withProjectWaiver,
+  WAIVABLE_VERB_ACTIONS,
+  projectWaiverState,
+  otherWaiverHint,
   sanitizeControlConfirmWaivers,
+  waiveChoices,
   waivedNotice
 } from './control-confirm'
 import { DESTRUCTIVE_VERBS } from './control-verbs'
@@ -20,23 +25,65 @@ describe('which verbs may be waived', () => {
     expect(CONFIRM_WAIVABLE_VERBS.size).toBeLessThan(DESTRUCTIVE_VERBS.size)
   })
 
-  it('never admits open-project, whatever the user asks for', () => {
-    expect(isWaivableVerb('open-project')).toBe(false)
-    // Every lever: the app-run set, the persisted list, and the bypass pair.
+  it('never admits settings, whatever the user asks for', () => {
+    // A settings change can GRANT a capability; a standing waiver covering it would let an agent
+    // hand itself a power on an answer the human gave about something else.
+    expect(isWaivableVerb('settings')).toBe(false)
+    // Every lever: the app-run set, the persisted list, the per-project map, and the bypass pair.
     expect(
-      decideControlConfirm({ verb: 'open-project', sessionWaived: new Set(['open-project']) })
+      decideControlConfirm({ verb: 'settings', sessionWaived: new Set(['settings']) })
     ).toEqual({ skip: false, via: null })
     expect(
-      decideControlConfirm({ verb: 'open-project', persisted: { always: ['open-project'] } })
+      decideControlConfirm({ verb: 'settings', persisted: { always: ['settings'] } })
     ).toEqual({ skip: false, via: null })
     expect(
       decideControlConfirm({
-        verb: 'open-project',
+        verb: 'settings',
+        persisted: { projects: { p1: ['settings'] } },
+        projectId: 'p1'
+      })
+    ).toEqual({ skip: false, via: null })
+    expect(
+      decideControlConfirm({
+        verb: 'settings',
         persisted: { bypassMode: true },
         permissionMode: 'bypassPermissions',
         permissionModeSource: 'global'
       })
     ).toEqual({ skip: false, via: null })
+  })
+
+  it('admits open-project — its dedupe is per caller NODE per app run, so it DID repeat', () => {
+    // The 2026-10 report: an orchestrator in one project opening sessions in another got the
+    // "Allow?" dialog again from every new orchestrator, every spawned station and every restart,
+    // with no box to stop it. It now reads every lever exactly like write/close.
+    expect(isWaivableVerb('open-project')).toBe(true)
+    expect(
+      decideControlConfirm({ verb: 'open-project', sessionWaived: new Set(['open-project']) })
+    ).toEqual({ skip: true, via: 'session' })
+    expect(
+      decideControlConfirm({
+        verb: 'open-project',
+        persisted: { projects: { p1: ['open-project'] } },
+        projectId: 'p1'
+      })
+    ).toEqual({ skip: true, via: 'project' })
+    // Keyed on the CALLER's project: a grant for p1's agents says nothing about p2's.
+    expect(
+      decideControlConfirm({
+        verb: 'open-project',
+        persisted: { projects: { p1: ['open-project'] } },
+        projectId: 'p2'
+      }).skip
+    ).toBe(false)
+    // …and a waiver for `close` in p1 does not reach `open-project` in p1.
+    expect(
+      decideControlConfirm({
+        verb: 'open-project',
+        persisted: { projects: { p1: ['close'] } },
+        projectId: 'p1'
+      }).skip
+    ).toBe(false)
   })
 
   it('does not answer for a verb that has no dialog at all', () => {
@@ -74,7 +121,7 @@ describe('decideControlConfirm — the default is to ask', () => {
     // Reachable: settings.json is hand-editable and the sanitizer runs at read, but the decision
     // must not depend on somebody having called it.
     expect(
-      decideControlConfirm({ verb: 'open-project', persisted: { always: ['open-project'] } }).skip
+      decideControlConfirm({ verb: 'settings', persisted: { always: ['settings'] } }).skip
     ).toBe(false)
   })
 })
@@ -147,8 +194,9 @@ describe('a DERIVED close is never waived — the ropes it targets are forgeable
     expect(isWaivableCall('close')).toBe(true)
     expect(isWaivableCall('close', { derived: false })).toBe(true)
     expect(isWaivableCall('close', { derived: true })).toBe(false)
-    // Still gated by the verb table — an unwaivable verb is unwaivable, derived or not.
-    expect(isWaivableCall('open-project', { derived: false })).toBe(false)
+    // Still gated by the verb table — an unwaivable verb is unwaivable, derived or not. (`settings`,
+    // not `open-project`: upstream made open-project waivable in 2026-10, see the table test above.)
+    expect(isWaivableCall('settings', { derived: false })).toBe(false)
   })
 
   it('asks under a session waiver when derived, skips when the ids were named explicitly', () => {
@@ -196,8 +244,12 @@ describe('a DERIVED close is never waived — the ropes it targets are forgeable
 describe('sanitizeControlConfirmWaivers — settings.json is hostile input', () => {
   it('drops unwaivable and unknown verb names', () => {
     expect(
-      sanitizeControlConfirmWaivers({ always: ['close', 'open-project', 'rm -rf', 42] })
+      sanitizeControlConfirmWaivers({ always: ['close', 'settings', 'rm -rf', 42] })
     ).toEqual({ always: ['close'] })
+    // A waivable verb survives — the table decides, not a list here.
+    expect(sanitizeControlConfirmWaivers({ always: ['open-project'] })).toEqual({
+      always: ['open-project']
+    })
   })
 
   it('collapses duplicates and omits an empty list', () => {
@@ -297,8 +349,8 @@ describe('the per-project waiver — a "don\'t ask again" that lasts, without go
   it('is outranked by the unwaivable table, like every other lever', () => {
     expect(
       decideControlConfirm({
-        verb: 'open-project',
-        persisted: { projects: { p1: ['open-project'] } },
+        verb: 'settings',
+        persisted: { projects: { p1: ['settings'] } },
         projectId: 'p1'
       })
     ).toEqual({ skip: false, via: null })
@@ -340,15 +392,15 @@ describe('sanitizeControlConfirmWaivers — the per-project map is hostile input
   it('applies the verb table per project, exactly as it does to `always`', () => {
     expect(
       sanitizeControlConfirmWaivers({
-        projects: { p1: ['close', 'open-project', 'nonsense', 'close'] }
+        projects: { p1: ['close', 'settings', 'nonsense', 'close', 'open-project'] }
       })
-    ).toEqual({ projects: { p1: ['close'] } })
+    ).toEqual({ projects: { p1: ['close', 'open-project'] } })
   })
 
   it('drops an entry that would waive nothing, key and all', () => {
     // An entry waiving nothing is indistinguishable from no entry to every reader, and keeping it
     // would put a row in Settings offering to revoke a waiver that does not exist.
-    expect(sanitizeControlConfirmWaivers({ projects: { p1: [], p2: ['open-project'] } })).toEqual({})
+    expect(sanitizeControlConfirmWaivers({ projects: { p1: [], p2: ['settings'] } })).toEqual({})
   })
 
   it('degrades a non-object `projects` to nothing rather than throwing', () => {
@@ -409,5 +461,138 @@ describe('waivedNotice names the per-project waiver by project', () => {
     expect(waivedNotice('x', 'session')).toContain('this app run')
     expect(waivedNotice('x', 'always')).toContain('permanently')
     expect(waivedNotice('x', 'bypass')).toContain('Bypass')
+  })
+})
+
+describe('waiveChoices — what the dialog offers, and what each choice promises', () => {
+  it('starts on "ask", which grants nothing — an untouched dialog must not waive anything', () => {
+    const choices = waiveChoices({ id: 'p1', name: 'web-app' })
+    expect(choices[0]).toEqual({ value: 'ask', label: expect.stringContaining('Ask') })
+  })
+
+  it('offers the per-project choice BY NAME, visible without ticking anything first', () => {
+    // The report: the per-repo answer read as missing, because it only appeared after a checkbox.
+    const choices = waiveChoices({ id: 'p1', name: 'web-app' })
+    expect(choices.map((c) => c.value)).toEqual(['ask', 'project', 'session'])
+    const project = choices.find((c) => c.value === 'project')!
+    expect(project.label).toContain('"web-app"')
+    // Names the AGENTS whose calls it covers — the key is the caller's project, not the target.
+    expect(project.label).toContain('agents in')
+  })
+
+  it('says the app-run choice covers EVERY project — it is per verb, not per project', () => {
+    // `state/controlConfirm.ts` keys the app-run waiver on the verb alone. A label implying a
+    // project bound would promise something the grant does not keep.
+    const session = waiveChoices({ id: 'p1', name: 'web-app' }).find((c) => c.value === 'session')!
+    expect(session.label).toContain('any project')
+    expect(session.label).toContain('until nodeterm quits')
+    expect(session.label).not.toContain('web-app')
+  })
+
+  it('does not offer a per-project grant when no project owns the call', () => {
+    // `waiveControlConfirmForProject` would refuse it; offering it would be a promise the grant
+    // cannot keep.
+    for (const project of [undefined, {}, { name: 'x' }, { id: '' }]) {
+      expect(waiveChoices(project).map((c) => c.value)).toEqual(['ask', 'session'])
+    }
+  })
+
+  it('never prints undefined when the name is missing', () => {
+    const project = waiveChoices({ id: 'p1' }).find((c) => c.value === 'project')!
+    expect(project.label).not.toContain('undefined')
+  })
+})
+
+describe('withProjectWaiver — the one write behind every per-project toggle', () => {
+  const live = new Set(['p1', 'p2'])
+
+  it('adds a verb to one project and leaves the rest of the waivers alone', () => {
+    expect(withProjectWaiver({ always: ['write'] }, 'p1', 'close', true, live)).toEqual({
+      always: ['write'],
+      projects: { p1: ['close'] }
+    })
+  })
+
+  it('removes a verb and drops the project key once it waives nothing', () => {
+    const w = { projects: { p1: ['close', 'write'], p2: ['close'] } }
+    expect(withProjectWaiver(w, 'p1', 'close', false, live)).toEqual({
+      projects: { p1: ['write'], p2: ['close'] }
+    })
+    expect(withProjectWaiver(w, 'p2', 'close', false, live)).toEqual({
+      projects: { p1: ['close', 'write'] }
+    })
+  })
+
+  it('is idempotent and prunes projects that no longer exist', () => {
+    const w = { projects: { gone: ['close'], p1: ['close'] } }
+    expect(withProjectWaiver(w, 'p1', 'close', true, live)).toEqual({ projects: { p1: ['close'] } })
+  })
+
+  it('keeps the answer for the target even if that project vanished meanwhile', () => {
+    expect(withProjectWaiver({}, 'late', 'close', true, live)).toEqual({ projects: { late: ['close'] } })
+  })
+
+  it('refuses an unwaivable verb or a missing project — nothing changes', () => {
+    expect(withProjectWaiver({}, 'p1', 'settings', true, live)).toEqual({})
+    expect(withProjectWaiver({}, undefined, 'close', true, live)).toEqual({})
+  })
+
+  it('has a menu label for every waivable verb', () => {
+    for (const v of CONFIRM_WAIVABLE_VERBS) expect(WAIVABLE_VERB_ACTIONS[v], v).toBeTruthy()
+  })
+})
+
+describe('projectWaiverState — what the per-project toggle may honestly show', () => {
+  const base = { verb: 'close', projectId: 'p1' }
+
+  it('asks by default', () => {
+    expect(projectWaiverState(base)).toEqual({ granted: false, skips: false, otherVia: null })
+  })
+
+  it('reports the project grant, with nothing else in play', () => {
+    expect(projectWaiverState({ ...base, persisted: { projects: { p1: ['close'] } } })).toEqual({
+      granted: true,
+      skips: true,
+      otherVia: null
+    })
+  })
+
+  it('names an app-run waiver that skips the dialog with or without the project grant', () => {
+    const session = new Set(['close'])
+    expect(projectWaiverState({ ...base, sessionWaived: session })).toEqual({
+      granted: false,
+      skips: true,
+      otherVia: 'session'
+    })
+    // Removing the project grant would restore nothing — the row must not promise "ask again".
+    expect(
+      projectWaiverState({ ...base, sessionWaived: session, persisted: { projects: { p1: ['close'] } } })
+    ).toEqual({ granted: true, skips: true, otherVia: 'session' })
+  })
+
+  it('names the machine-wide waiver', () => {
+    expect(projectWaiverState({ ...base, persisted: { always: ['close'] } }).otherVia).toBe('always')
+  })
+
+  it('names global Bypass, but never a Bypass that came from the project file', () => {
+    const bypass = { persisted: { bypassMode: true }, permissionMode: 'bypassPermissions' as const }
+    expect(projectWaiverState({ ...base, ...bypass, permissionModeSource: 'global' }).otherVia).toBe('bypass')
+    expect(projectWaiverState({ ...base, ...bypass, permissionModeSource: 'project' })).toEqual({
+      granted: false,
+      skips: false,
+      otherVia: null
+    })
+  })
+
+  it('never reports settings as waivable, whatever the file says', () => {
+    expect(
+      projectWaiverState({ ...base, verb: 'settings', persisted: { projects: { p1: ['settings'] } } })
+    ).toEqual({ granted: false, skips: false, otherVia: null })
+  })
+
+  it('points every other waiver at the place it is revoked', () => {
+    for (const via of ['session', 'always', 'bypass'] as const) {
+      expect(otherWaiverHint(via)).toContain('Settings → Agents')
+    }
   })
 })

@@ -3,6 +3,7 @@ import {
   bodyPressAcknowledges,
   focusLossOutcome,
   outsidePressReleases,
+  reclaimOnRelease,
   reclaimTarget
 } from '../lib/terminalFocusMode'
 
@@ -30,8 +31,11 @@ export interface ClickToFocusHost {
 }
 
 /**
- * Click to focus (#757): the node's "I hold the keyboard" state follows DOM focus and deliberate
- * presses, never the pointer's position.
+ * The node's "I hold the keyboard" state follows DOM focus and deliberate presses, never the
+ * pointer's position. Born for click to focus (#757); since sloppy focus it runs in BOTH modes — a
+ * hover dwell only TAKES the keyboard, and losing it is this hook's job either way. In
+ * focus-follows-pointer mode the host's `setArmed` is a no-op (`focusDrivesGuard`): the guard
+ * belongs to the pointer there.
  *
  * ONE document capture `pointerdown` listener plus `focusin`/`focusout` on the node root. Earlier
  * versions also listened on the React Flow wrapper, captured once when the effect ran — and focus
@@ -50,15 +54,17 @@ export interface ClickToFocusHost {
  * Capture phase on the document, so React Flow's d3-drag (which stops mousedown at the wrapper) can
  * never hide a press. The focus decisions are the pure functions in `lib/terminalFocusMode.ts`.
  */
-export function useClickToFocus(enabled: boolean, host: ClickToFocusHost): void {
+export function useClickToFocus(host: ClickToFocusHost): void {
   const hostRef = useRef(host)
   hostRef.current = host
   useEffect(() => {
-    if (!enabled) return
     const h = () => hostRef.current
     const root = h().root()
     if (!root) return
     let pressedInOwnNode = false
+    let pressedInReadableText = false
+    // Set by a `reclaim-on-release` focusout; settled by the press's pointerup (see focusLossOutcome).
+    let reclaimOnUp: HTMLElement | null = null
     let pressTimer: ReturnType<typeof setTimeout> | null = null
     let reclaimTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -74,9 +80,11 @@ export function useClickToFocus(enabled: boolean, host: ClickToFocusHost): void 
       const inNode = !!target && ownNode.contains(target)
       if (inNode) {
         pressedInOwnNode = true
+        pressedInReadableText = !!target?.closest('.term-chat__msgs')
         if (pressTimer) clearTimeout(pressTimer)
         pressTimer = setTimeout(() => {
           pressedInOwnNode = false
+          pressedInReadableText = false
           pressTimer = null
         }, 0)
       }
@@ -122,11 +130,16 @@ export function useClickToFocus(enabled: boolean, host: ClickToFocusHost): void 
         activeElement: document.activeElement,
         windowFocused: document.hasFocus(),
         pressedInOwnNode,
+        pressedInReadableText,
         lostIsCoveredXterm: h().mdMode() && e.target === h().xtermTextarea()
       })
       if (outcome === 'keep') return
       if (outcome === 'release') {
         release()
+        return
+      }
+      if (outcome === 'reclaim-on-release') {
+        reclaimOnUp = e.target instanceof HTMLElement ? e.target : null
         return
       }
       // 'reclaim': once the press's own focus change has settled, give the keyboard back to what
@@ -165,7 +178,22 @@ export function useClickToFocus(enabled: boolean, host: ClickToFocusHost): void 
       }
     }
 
+    const onPointerUp = () => {
+      const lost = reclaimOnUp
+      if (!lost) return
+      reclaimOnUp = null
+      const sel = window.getSelection()
+      if (
+        reclaimOnRelease({
+          selectionEmpty: !sel || sel.isCollapsed || sel.toString() === '',
+          lostStillInNode: lost.isConnected && root.contains(lost)
+        })
+      )
+        lost.focus()
+    }
+
     document.addEventListener('pointerdown', onPointerDown, true)
+    document.addEventListener('pointerup', onPointerUp, true)
     document.addEventListener('focusin', onDocFocusIn, true)
     root.addEventListener('focusin', onFocusIn)
     root.addEventListener('focusout', onFocusOut)
@@ -173,9 +201,10 @@ export function useClickToFocus(enabled: boolean, host: ClickToFocusHost): void 
       if (pressTimer) clearTimeout(pressTimer)
       if (reclaimTimer) clearTimeout(reclaimTimer)
       document.removeEventListener('pointerdown', onPointerDown, true)
+      document.removeEventListener('pointerup', onPointerUp, true)
       document.removeEventListener('focusin', onDocFocusIn, true)
       root.removeEventListener('focusin', onFocusIn)
       root.removeEventListener('focusout', onFocusOut)
     }
-  }, [enabled])
+  }, [])
 }

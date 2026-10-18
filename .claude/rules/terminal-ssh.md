@@ -103,8 +103,8 @@ carrying `ControlPath` FAILS rather than falling back — so every remote comman
 tunnel of an SSH project failed on a stock Windows machine. Git for Windows' ssh (10.5p1) starts a
 master but every session over it is reset and falls back to a full login per command. So on
 Windows the app does not run the ssh binary for SSH projects at all: `src/core/remote-ssh/native/`
-holds ONE `ssh2` connection per ControlPath and carries every exec, pty, SFTP session and reverse
-unix-socket forward over it. POSIX keeps OpenSSH untouched.
+holds ONE `ssh2` connection per ControlPath and carries every exec, pty, SFTP session, reverse
+unix-socket forward and dev-server `-L` forward over it. POSIX keeps OpenSSH untouched.
 
 - **One switch:** `useNativeSsh()` — always on win32; `NODETERM_NATIVE_SSH=1` turns it on anywhere
   (how it is tested live from macOS against a real host), `=0` forces it off. Decided once per app
@@ -146,7 +146,39 @@ unix-socket forward over it. POSIX keeps OpenSSH untouched.
   overflow connections REUSE the primary's chain (one bastion login; direct-tcpip does not count
   against the bastion's MaxSessions); one-off connections build their own. Known hosts are checked
   under `HostName` (or `HostKeyAlias`), as OpenSSH does — not under the alias as typed.
-  **ProxyCommand stays refused by name**, on the target and on a hop.
+  **ProxyCommand** (`proxy-command.ts`) runs on the target or the FIRST hop, as OpenSSH does:
+  `%h %p %r %n %k %%` expanded (an unknown `%x` is an error by name), POSIX `sh -c 'exec …'`,
+  Windows `cmd.exe /d /s /c`, the child's stdio is the socket, its stderr is in the connect error,
+  ConnectTimeout covers the wait for its first byte, and it is killed with the connection (on
+  Windows as a TREE, `taskkill /t /f` — the proxy is cmd.exe's child, and killing cmd.exe alone
+  orphans it). Every substituted VALUE (`%h %r %n %k`) is refused if it carries a shell/cmd
+  metacharacter or a leading `-`: the line goes to `sh -c` / `cmd.exe /c`, and Windows' OpenSSH
+  (9.5) predates the CVE-2023-51385 host/user check.
+  `ProxyUseFdpass yes` is refused by name. ProxyJump wins when `ssh -G` prints both.
+- **Other honored `~/.ssh/config` options:** `ForwardAgent` (yes / path / `$VAR`) — requested on
+  the TARGET connection's PTY channels only, never on a hop or a background exec/SFTP channel, and
+  a server that refuses it costs one log line, not the terminal. Note what that does NOT buy: sshd
+  creates the agent socket once per CONNECTION, so after the first terminal asks, later sessions on
+  that shared connection (background execs included) also see `SSH_AUTH_SOCK` — exactly what an
+  OpenSSH ControlMaster does. Do not document it as "background calls never get the agent". Options it does NOT honor (`certificatefile`, config `Local/Remote/DynamicForward`)
+  are named in ONE warning per connection (`UNSUPPORTED_OPTIONS`), never silently dropped; user and
+  `@cert-authority` certificates are a later phase.
+- **`-L` dev-server forwards** (`NativeMux.forwardLocal`): the parser accepts ONLY the loopback spec
+  `localFwdSpec` emits; a duplicate spec is re-acknowledged (the port registry's `maybe-ours`
+  adoption depends on it), a busy port is OpenSSH's "Port forwarding failed", and listeners close
+  on `-O cancel`, `-O exit`, `exitAll` and a dropped connection.
+- **No ssh.exe needed.** `resolveSshProgram()` (native-runtime.ts) is the one ssh lookup: the
+  binary (Windows adds `System32\OpenSSH\ssh.exe`), else — under the native transport only — the
+  bare `ssh` sentinel every runner routes to NativeMux. `findSshBinary()` is for the two callers
+  that exec `ssh -G` themselves. Without a binary, `ssh -G` falls back to OpenSSH's no-config
+  defaults (`defaultHostFromQuery`) and logs once per host that `~/.ssh/config` was not read.
+- **Agents on Windows:** the default is the OpenSSH agent service's pipe, else the user's
+  Pageant / KeeAgent pipe (`pageant.<user>.<hash>`, PuTTY ≥ 0.75); `IdentityAgent pageant` maps to
+  that pipe — NEVER to ssh2's `'pageant'` string, which spawns a 32-bit `pagent.exe` we would have
+  to ship and sign (`windows-agent-discovery.ts`).
+- **Recursive downloads** rename children Windows cannot create (`a:b`, `CON`, trailing dots, and
+  case-only collisions) per directory with `localChildName` / `uniqueChildName`
+  (download-name.ts — the ONE rule, also used for the top-level name) and log how many changed.
 - **The Windows ssh-agent only on the user's say-so** (#1080). MEASURED on windows-latest
   (OpenSSH_for_Windows_9.5p2): the agent service REFUSES any lifetime or confirm constraint
   (`ssh-add -t` / `-c` and our `ADD_ID_CONSTRAINED` alike), and an unconstrained key is stored in

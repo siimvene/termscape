@@ -114,6 +114,8 @@ interface ResolvedAgentConfig {
   launchCmd: string;
   promptInjectionMode: PromptInjectionMode;
   argvPromptSeparator?: string;
+  /** `flag-interactive` only: the builtin's own interactive-prompt flag (agy's differs). */
+  promptFlag?: string;
   builtin: boolean;
 }
 
@@ -242,6 +244,7 @@ function resolveTrustedAgentConfig(
       launchCmd: config.launchCmd,
       promptInjectionMode: config.promptInjectionMode,
       argvPromptSeparator: config.argvPromptSeparator,
+      promptFlag: config.promptFlag,
       builtin: true,
     };
   }
@@ -378,19 +381,34 @@ function logicalLaunch(
 
   if (intent.action === "resume") {
     if (!config.builtin || !canResume(config.id)) fail("agent-unavailable");
+    // Same grammar as `resumeCommandWith` (shared/agents/config.ts): copilot and antigravity are
+    // verified only in their `--flag=<id>` spelling, so they keep it here too.
     const resumeArgs =
       config.id === "codex"
         ? ["resume", intent.sessionId]
         : config.id === "opencode"
           ? ["--session", intent.sessionId]
-          : ["--resume", intent.sessionId];
+          : config.id === "copilot"
+            ? [`--resume=${intent.sessionId}`]
+            : config.id === "antigravity"
+              ? [`--conversation=${intent.sessionId}`]
+              : // Fork (pi): `--session-id <id>` is pi's CREATE-OR-RESUME (resumeCommandWith).
+                config.id === "pi"
+                ? ["--session-id", intent.sessionId]
+                : ["--resume", intent.sessionId];
     return { executable, args: [...baseArgs, ...resumeArgs, ...modeFlags] };
   }
 
   const sessionArgs: string[] = [];
   if (intent.newSessionId !== undefined) {
     if (!mintsSessionId(config.id)) fail("invalid-intent");
-    sessionArgs.push("--session-id", intent.newSessionId);
+    // `withSessionId`'s grammar: copilot's verified contract is `--session-id=<uuid>` (1.0.80);
+    // cursor mints by resuming an id that does not exist yet (see withSessionId in shared/agents/launch).
+    if (config.id === "copilot")
+      sessionArgs.push(`--session-id=${intent.newSessionId}`);
+    else if (config.id === "cursor")
+      sessionArgs.push("--resume", intent.newSessionId);
+    else sessionArgs.push("--session-id", intent.newSessionId);
   }
 
   const hasPrompt = Object.hasOwn(intent, "prompt");
@@ -399,9 +417,19 @@ function logicalLaunch(
   // metadata describes a possible stdin transport. Changing that would require a measured child
   // readiness handshake; the generic terminal prompt is not evidence that Gemini is ready.
   const promptInjectionMode =
-    config.builtin && config.id === "gemini"
+    config.builtin && (config.id === "gemini" || config.id === "pi")
       ? "argv"
       : config.promptInjectionMode;
+  // Fork (pi): same contract as gemini (a positional prompt despite the stdin-after-start metadata),
+  // but AFTER every flag, as `assembleLaunchCommand` types it: pi matches its subcommands on argv[0]
+  // only and has no `--` separator, so ordering is what keeps a one-word prompt (`update`, `list`)
+  // reaching the model instead of running the package command.
+  if (config.builtin && config.id === "pi") {
+    return {
+      executable,
+      args: [...baseArgs, ...modeFlags, ...sessionArgs, ...(hasPrompt ? [prompt as string] : [])],
+    };
+  }
   if (promptInjectionMode === "stdin-after-start") {
     return {
       executable,
@@ -410,12 +438,21 @@ function logicalLaunch(
     };
   }
 
-  if (promptInjectionMode === "flag-prompt") {
+  if (
+    promptInjectionMode === "flag-prompt" ||
+    promptInjectionMode === "flag-interactive"
+  ) {
+    // Same flag choice as `assembleLaunchCommand`: copilot's `--interactive`, agy's own
+    // `--prompt-interactive`. A positional here would be read as a subcommand by both.
+    const flag =
+      promptInjectionMode === "flag-prompt"
+        ? "--prompt"
+        : (config.promptFlag ?? "--interactive");
     return {
       executable,
       args: [
         ...baseArgs,
-        ...(hasPrompt ? ["--prompt", prompt as string] : []),
+        ...(hasPrompt ? [flag, prompt as string] : []),
         ...modeFlags,
         ...sessionArgs,
       ],

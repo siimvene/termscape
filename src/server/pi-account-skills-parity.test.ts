@@ -22,9 +22,13 @@ describe('Server Edition — managed pi account skills parity with the desktop',
 
   it('the boot loop hands every existing account dir the same installer', () => {
     const index = read('src/server/index.ts')
+    // Since the upstream consent lifecycle (issue #744) the loop runs from a settings-driven
+    // reconcile, under pi's own consent: only while pi is 'enabled', never for undecided/declined.
     expect(index).toMatch(
-      /installPiExtensionIntoLocalAccounts\(settingsStore\.get\(\)\.piAccounts \?\? \[\], installPiAccountSkills\)/
+      /installPiExtensionIntoLocalAccounts\(s\.piAccounts \?\? \[\], installPiAccountSkills\)/
     )
+    expect(index).toMatch(/const on = isAgentIntegrationEnabled\(s, 'pi'\)/)
+    expect(index).toMatch(/reconcilePiAccounts\(settingsStore\.get\(\)\)/)
     // Both skills, from the same builders the system dir gets.
     expect(index).toMatch(/const installPiAccountSkills = \(agentDir: string\): void => \{/)
     expect(index).toMatch(/installPiLinkSkillInto\(agentDir\)/)

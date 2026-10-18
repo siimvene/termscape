@@ -55,11 +55,23 @@ Squirrel was not adopted. Builds are **unsigned** (no Windows cert; electron-bui
 signing when no cert env is present; SmartScreen warns on install). Release wiring is
 `release.yml`'s `release-win` job: on every version tag it uploads the NSIS installer + zip as
 GitHub Release assets — **best-effort by design** (the `publish` promote gate does not wait on
-it, so a Windows failure never strands the mac+linux release) and with **no update-feed leg**:
-`dist:win` stamps `nodeTermUpdates=disabled`, so the shipped app's updater is cleanly off (no
-latest.yml anywhere, no 404 polling; users update by downloading the next installer). Do not
-add `*.yml`/`*.blockmap` to that job's upload globs — that IS the auto-update leg, and it waits
-on signing. `bootstrap-windows.bat` (repo root) takes a fresh Windows
+it, so a Windows failure never strands the mac+linux release) and with a **passive notice feed
+only**: it builds `dist:win:release`, which stamps `nodeTermUpdates=manual` →
+`updateDelivery` = `manual-install` (the marker wins over the platform), and uploads `latest.yml`
+beside the installer + zip. The app checks the feed and shows the same "vX is available —
+Download" card a Linux .deb gets; it never downloads, never installs on quit, and main refuses
+`appRestartToUpdate` for any build that is not `self-install`/`dev` (`mayQuitAndInstall`), so
+`quitAndInstall` cannot run on the unsigned beta whatever the renderer sends. A failed
+AUTOMATIC check on that marker build is not carded (offline, or a mirror that does not
+serve `latest.yml` yet, must not raise an error card on every launch) but is recorded
+(`lastUpdateCheck`) and logged as one warning that names a 404 on `latest*.yml` as the mirror
+missing the file (`describeCheckFailure`); a user-initiated check still reports its failure. Local `dist:win`
+keeps `disabled` (never polls). Do not add `*.blockmap` (or a broad `*.yml`) to that job's
+upload globs — differential downloads are the self-install leg, and it waits on signing; guarded
+by `src/main/release-win-workflow.test.ts`. The nodeterm.dev/updates mirror serving `latest.yml`
+lives outside this repo; `release.yml`'s `verify-feed` job (after the promote, never a gate) curls
+each `latest*.yml` there and compares `version:` to the tag — mac/linux are errors, `latest.yml` a
+warning until the mirror is confirmed to serve it. `bootstrap-windows.bat` (repo root) takes a fresh Windows
 machine to a built checkout: it verifies Node ≥ 20 / VS Build Tools C++ / Python 3 with exact
 winget hints (it never installs machine-wide tools itself, and the full bootstrap refuses to run
 elevated) and runs `npm ci`. Its `--check-vs-build-tools` mode is the narrow exception used by
@@ -80,6 +92,12 @@ Update preparation must keep saved canvas nodes: exit programs normally, quit, t
 verify and stop any remaining host. Never recommend **End session** (it deletes nodes). Cold agent
 resume depends on supported, saved conversation history; it does not preserve running tasks.
 See `docs/windows-session-host.md` for the user-controlled preparation/recovery steps and limits.
+**Unattended runs wait** (silent or `--updated`, the app's own handoff, which starts while
+nodeterm.exe is still exiting): on preflight exit 10 they poll up to ~30 s; exit 20 stays fatal at
+once, nothing is ever killed, and the machine-wide name match stays (old uninstallers kill by
+name). A timed-out `--updated` install writes `%LOCALAPPDATA%\nodeterm\update-failed.json` and
+relaunches the installed build before quitting; the updater reads + deletes that note on start
+(`main/update-install-marker.ts`). This is the prerequisite for any future Windows self-install.
 
 **Prepare for update (#829 step 2).** The in-app answer to the refusal above, Windows only.
 Rules a refactor must not undo:
@@ -106,6 +124,12 @@ Rules a refactor must not undo:
 - The confirm is a danger `ConfirmDialog` with `enterConfirms={false}` (Cancel focused) and says
   plainly that shells and their unsaved work stop and that nodes are kept. Never route anything
   through End session / node deletion.
+- **A staged host only needs a quit** (U3): the host publishes `exe` (its `process.execPath`) in
+  its state file (optional, additive); `classifyHostImage` / `resolveHostStaging`
+  (`core/session-host-runtime.ts`) answer `staged | install | unknown`, falling back to a process
+  query by pid for 0.4.1–0.4.3 hosts. Only `staged` sets `UpdatePrepInspection.staged`, and only
+  then does the dialog lead with "Quit nodeterm (sessions keep running)" (`prepareEntry`), with
+  stopping sessions as the secondary path. `unknown` is never staged — fail closed to the stop flow.
 - IPC (`app:update-prep-*`) is raw `ipcMain`, main-window senders only, and in
   `HOST_ONLY_CHANNELS`. Server Edition: the bridge stub answers `unsupported` (Linux tmux, no
   installer; a browser must never end every session on the server). Mobile: N/A — a phone cannot
@@ -140,9 +164,9 @@ of a version). Rules a refactor must not undo:
   (protocol v1/v2 + `hello` features); an unsupported one is left running and reported
   (`SessionHostProtocolCompatibilityError`), never killed. ~250 MB of disk per staged version.
 
-**Follow-ups, in order:** code signing, then Windows auto-update wiring (electron-updater NSIS leg
-+ `latest.yml` on the nodeterm.dev feed — blocked on signing: an unsigned auto-update is a
-downgrade in trust), and the fork's PE-identity polish (electron-builder leaves `OriginalFilename`
+**Follow-ups, in order:** code signing, then Windows self-install (drop the `manual` marker from
+`dist:win:release` and upload blockmaps — blocked on signing: an unsigned auto-update is a
+downgrade in trust; the passive notice already ships), and the fork's PE-identity polish (electron-builder leaves `OriginalFilename`
 empty; the fork's
 `resedit`-based afterSign hook fixes it — cosmetic for NSIS, load-bearing only for Squirrel).
 
@@ -185,14 +209,40 @@ claim to the user and to review — unicast LAN access needs the usage descripti
 what makes the denial grantable; it is not itself proof anyone's access came back. Guarded as an
 allowlist-with-reasons by `src/main/info-plist.test.ts`, the sibling of the entitlements guard.
 
-Auto-update uses **electron-updater** (`src/main/updater.ts`, `initUpdater(onBeforeRestart?)` from `index.ts`):
+Auto-update uses **electron-updater** (`src/main/updater.ts`, `initUpdater(hooks)` from `index.ts`):
 runs **only when `app.isPackaged`** (dev = no-op), checks on launch + every 6h, auto-downloads,
 forwards the lifecycle (`update-available` / `download-progress` / `update-downloaded` / errors)
 to the renderer over IPC. `components/UpdateCard.tsx` shows the strip + **Restart to update** →
-`updates.restart()` → `autoUpdater.quitAndInstall()`; on `update-downloaded` an OS notification
-also fires when the window is unfocused. Exposed via `window.nodeTerminal.updates` (`UpdateApi`).
-macOS *silent* self-install requires a signed+notarized build; unsigned builds still surface
-the card for a manual download.
+`updates.restart()` → the guarded `restartToUpdate()` (also the background-mode tray's "Restart to
+update vX" item); on `update-downloaded` an OS notification also fires when the window is
+unfocused. Exposed via `window.nodeTerminal.updates` (`UpdateApi`). macOS *silent* self-install
+requires a signed+notarized build; unsigned builds still surface the card for a manual download.
+Rules a refactor must not undo (pure + tested: `shared/update-gate.ts`, `renderer/lib/updateCardState.ts`):
+- **electron-updater keeps re-announcing a STAGED update** (the running binary is still old, so every
+  6h check emits `update-available` → cached `update-downloaded` again, and on macOS re-stages the zip
+  through Squirrel). The gate forwards and notifies **once per version**; once staged, `autoDownload`
+  goes off and only a strictly newer release is downloaded (`downloadUpdate()` on purpose). The card
+  never downgrades `downloaded`/`required`, never un-minimizes on a repeat, respects a dismissed version.
+  Two consequences that must stay paired with that: a renderer loading after the one-time
+  announcement (⌘R, a recreated window) asks `updates.getStaged()` on mount, and a **failed
+  Squirrel.Mac staging run is re-staged** on the next check (or a Restart click — once per click,
+  never in a loop from the error itself), because with `autoDownload` off nothing else would.
+- **macOS `update-downloaded` fires BEFORE Squirrel.Mac has the update** (MacUpdater dispatches, then
+  asks the native updater to fetch + verify the zip). Until Electron's own `autoUpdater` emits
+  `update-downloaded`, `quitAndInstall()` only queues a listener. So a click there sends
+  `app:update-installing {phase:'preparing'}` and waits; only when ready does it send `restarting`,
+  flush the renderer's canvas save (`main/renderer-flush.ts` — must happen HERE: quitAndInstall closes
+  the windows before `before-quit`), and only THEN run `onBeforeRestart` (the `quitting` /
+  `skipQuitConfirmation` flags). A native/install error calls `onRestartAborted` to put them back.
+- **One error owner, and background failures are not cards**: the `'error'` listener classifies by
+  origin (`classifyUpdaterError`) — an automatic check or background download failing (offline, captive
+  portal, feed 5xx) only logs; a background download retries at 15/30/60/120 min. User-initiated
+  checks (every button goes through `checkForUpdatesNow`, which is how the card knows) get a plain
+  sentence (`friendlyUpdateErrorMessage`). Automatic checks are silent until `downloaded`.
+- The mandatory policy is re-read every 6 h (one 60 s retry after an empty/failed first read); release
+  highlights come from the feed's `releaseNotes` or `/v1/check` `update.notes` + `latestVersion`.
+Server Edition: no updater (stubs; `onInstalling`/`onFlushRequest` are documented no-ops). Mobile: N/A.
+The "auto-download off" setting is NOT here — that is PR #956's.
 
 **Backend check feed** (`src/core/check.ts`, successor to the static `announcements.json`): the
 **main process** calls `GET https://api.nodeterm.dev/v1/check?version=&os=&channel=stable` (so the

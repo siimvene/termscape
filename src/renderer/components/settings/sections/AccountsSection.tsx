@@ -187,9 +187,9 @@ function SystemAccountRow({
           {name}
           <span
             className="rounded-full bg-fill-weak px-2 py-0.5 text-[11px] font-medium text-muted"
-            title="The machine's default login. Used when a node has no account."
+            title="The login this machine already has. Used when you open an agent without picking an account."
           >
-            system
+            Default login
           </span>
         </div>
         {detail ? <p className="text-[12px] text-muted">{detail}</p> : null}
@@ -242,8 +242,11 @@ function ManagedAccountRow({
             onChange={(e) => onLabel(e.target.value)}
           />
           {pending ? (
-            <span className="rounded-full bg-[color:var(--warn)]/15 px-2 py-0.5 text-[11px] font-medium text-[color:var(--warn)]">
-              pending
+            <span
+              className="rounded-full bg-[color:var(--warn)]/15 px-2 py-0.5 text-[11px] font-medium text-[color:var(--warn)]"
+              title="The login was not finished. Use Retry login to open the login terminal again."
+            >
+              Not logged in
             </span>
           ) : null}
           {pills}
@@ -252,8 +255,24 @@ function ManagedAccountRow({
         {blockedReason ? (
           <p className="text-[11px] text-[color:var(--warn)]">{blockedReason}</p>
         ) : null}
-        <AccountColorSwatches label={label} color={color} onPick={onColor} />
-        {extra}
+        {/* The per-account options are folded: a full palette (and, for Claude, the skills switch)
+            under every account made the list unreadable. The summary keeps the current color in
+            view, so a folded row still says what it is set to. */}
+        <details className="group pt-1">
+          <summary className="flex cursor-pointer select-none items-center gap-2 text-[12px] text-muted hover:text-text">
+            <span>{extra ? 'Node color & skills' : 'Node color'}</span>
+            <span
+              aria-hidden
+              className={cn('inline-block size-3 rounded-full', color ? '' : 'border border-border')}
+              style={color ? { background: color } : undefined}
+            />
+            <span className="text-[11px]">{color ? '' : 'agent default'}</span>
+          </summary>
+          <div className="space-y-1 pt-1">
+            <AccountColorSwatches label={label} color={color} onPick={onColor} />
+            {extra}
+          </div>
+        </details>
       </div>
       <div className="flex shrink-0 items-center gap-2">{actions}</div>
     </div>
@@ -1198,9 +1217,14 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
               // "Unlink" for a linked dir: the action really is different (the folder stays), and
               // the label is what a screen reader and the tests both go by.
               aria-label={account.configDir ? 'Unlink account' : 'Remove account'}
+              title={
+                account.configDir
+                  ? 'Stop using this folder as an account. The folder and its login stay as they are.'
+                  : 'Delete this account and its login.'
+              }
               onClick={() => setPendingRemove(account)}
             >
-              <IconClose />
+              {account.configDir ? 'Unlink' : 'Remove'}
             </Button>
           </>
         }
@@ -1246,9 +1270,10 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
             <Button
               variant="ghost"
               aria-label="Remove Codex account"
+              title="Delete this account and its login."
               onClick={() => setPendingRemoveCodex(account)}
             >
-              <IconClose />
+              Remove
             </Button>
           </>
         }
@@ -1340,7 +1365,7 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
     // common one.
     <details className="rounded-md border border-border/60 p-2" open={!!linkPath || !!linkError}>
       <summary className="cursor-pointer text-[12px] font-medium text-text">
-        Link an existing config dir…
+        Already use another Claude login folder? Link it…
       </summary>
       <div className="space-y-2 pt-2">
         <p className="text-[12px] leading-relaxed text-muted">
@@ -1411,7 +1436,7 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
     <SettingsSection
       id="accounts"
       title="Accounts"
-      description="Separate Claude, Codex and Pi logins, grouped by the machine they live on (Pi accounts are local to this machine). Each account has its own login, settings and history; pick one when you open an agent, or move a running node to another from its right-click menu."
+      description="Use more than one Claude, Codex or Pi login side by side, grouped by the machine they live on (Pi accounts are local to this machine). Each account keeps its own login, settings and history. Pick one when you open an agent; move a running agent to another from its right-click menu."
       isActive={isActive}
       searchEntries={ENTRIES}
     >
@@ -1570,14 +1595,18 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
             </div>
           ) : null}
 
-          <p className="text-[12px] leading-relaxed text-muted">
-            An account on an SSH host is created, logged into and removed ON that host — its
-            credentials never leave it — and is only offered in that host&apos;s projects.
-            {hiddenMachines > 0
-              ? ` ${hiddenMachines} saved SSH ${hiddenMachines === 1 ? 'server has' : 'servers have'} no accounts yet and ${hiddenMachines === 1 ? 'appears' : 'appear'} here once connected.`
-              : ''}{' '}
-            A node color applies to nodes opened under that account from then on.
-          </p>
+          <ul className="list-disc space-y-1 pl-5 text-[12px] leading-relaxed text-muted">
+            <li>
+              Accounts are listed per machine. An account on an SSH host lives on that host (its
+              login never leaves it) and is only offered in that host&apos;s projects.
+            </li>
+            {hiddenMachines > 0 ? (
+              <li>
+                {`${hiddenMachines} saved SSH ${hiddenMachines === 1 ? 'server has' : 'servers have'} no accounts yet and ${hiddenMachines === 1 ? 'appears' : 'appear'} here once connected.`}
+              </li>
+            ) : null}
+            <li>A node color is used for agents opened under that account from then on.</li>
+          </ul>
         </div>
       </SearchableRow>
 
