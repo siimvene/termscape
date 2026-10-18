@@ -42,10 +42,11 @@ import { buildCanvasSkillBody } from './canvas-control-core'
 import { buildContextLinkSkillBody } from './context-link-core'
 import { claudeConfigDirFor } from './claude-config-dir'
 import { codexHomeForAccount, systemCodexHome } from './codex-accounts-core'
-import { piAccountDirFor } from './pi-config-dir'
+import { isAnyManagedPiAccountDir, piAccountDirFor } from './pi-config-dir'
 import { applySkillShare } from './claude-skill-share'
 import {
   ReceiptStore,
+  isAnchorGone,
   pushRetained,
   removeOwnedFile,
   stripLegacyBlocks,
@@ -343,6 +344,9 @@ export function createIntegrationLifecycle(deps: IntegrationLifecycleDeps): Inte
     } catch {
       shims = { context: '' }
     }
+    // Fork (Termscape): the managed pi account dirs that exist NOW — the anchors for every write
+    // below that lands in one (see `mkdirBelow`).
+    const piAccountDirs = localPiAccountDirs(settings, deps.userDataDir())
     // Hooks.
     try {
       if (enabled.length) installHooks(new Set(enabled))
@@ -395,12 +399,17 @@ export function createIntegrationLifecycle(deps: IntegrationLifecycleDeps): Inte
     // Fork (Termscape): managed pi accounts — each existing local dir is its own PI_CODING_AGENT_DIR,
     // where pi loads extensions (and skills, via `skillRootsFor('pi')` below). Enabled: plant the
     // status extension; declined: remove it (marker-gated, so a user's own file of that name stays).
+    // The writes are ANCHORED on the account dir (`mkdirBelow`): the existence check in
+    // `localPiAccountDirs` cannot close the window in which the account is removed (by `remove`
+    // mid-reconcile, or by the other shell sharing userData), and an un-anchored `mkdir -p` would
+    // resurrect it as an empty logged-out dir. A vanished account is skipped quietly.
     if (enabled.includes('pi') || declined.includes('pi')) {
-      for (const dir of localPiAccountDirs(settings, deps.userDataDir())) {
+      for (const dir of piAccountDirs) {
         try {
-          if (enabled.includes('pi')) installPiExtensionInto(dir)
+          if (enabled.includes('pi')) installPiExtensionInto(dir, { anchored: true })
           else removePiExtensionFrom(dir)
         } catch (e) {
+          if (isAnchorGone(e) && !existsSync(dir)) continue
           console.warn(`[integrations] pi account ${dir} failed`, e)
         }
       }
@@ -419,11 +428,19 @@ export function createIntegrationLifecycle(deps: IntegrationLifecycleDeps): Inte
       const on = enabled.includes(agent)
       const skills = skillsFor(agent, shims)
       for (const root of skillRootsFor(agent, settings, deps.userDataDir(), home)) {
+        // A managed pi account's skills root (`<account>/skills`) is anchored on the account dir,
+        // for the same reason as its extension above. Decided by location (`isManagedPiAccountDir`),
+        // not by the snapshot: skillRootsFor lists the accounts afresh, and the "system" root is an
+        // account too when the app inherited a managed session's PI_CODING_AGENT_DIR.
+        const anchor =
+          agent === 'pi' && isAnyManagedPiAccountDir(path.dirname(root), deps.userDataDir())
+            ? path.dirname(root)
+            : undefined
         for (const name of [CANVAS_SKILL, CONTEXT_SKILL]) {
           const file = path.join(root, name, 'SKILL.md')
           const body = skills.get(name)
           if (on && body !== undefined) {
-            if (writeOwnedFile(receipts, file, body) === 'retained') pushRetained(report.retained, file)
+            if (writeOwnedFile(receipts, file, body, anchor) === 'retained') pushRetained(report.retained, file)
           } else if (!on) {
             const known = [...skills.values()]
             if (removeOwnedFile(receipts, file, known) === 'retained') pushRetained(report.retained, file)
@@ -494,11 +511,13 @@ export function createIntegrationLifecycle(deps: IntegrationLifecycleDeps): Inte
       if (deps.veto) return
       if (integrationsOf(deps.settings()).agents?.pi !== 'enabled') return
       try {
-        installPiExtensionInto(agentDir)
+        // Anchored: an add whose rollback removed the dir must not see it recreated here.
+        installPiExtensionInto(agentDir, { anchored: true })
         for (const [name, body] of skillsFor('pi', deps.shims())) {
-          writeOwnedFile(receipts, path.join(agentDir, 'skills', name, 'SKILL.md'), body)
+          writeOwnedFile(receipts, path.join(agentDir, 'skills', name, 'SKILL.md'), body, agentDir)
         }
       } catch (e) {
+        if (isAnchorGone(e) && !existsSync(agentDir)) return // the add rolled back: nothing to install into
         console.warn('[integrations] pi account install failed', agentDir, e)
       }
     },

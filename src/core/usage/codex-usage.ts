@@ -89,6 +89,18 @@ function emailFromIdToken(idToken: unknown): string | null {
   }
 }
 
+/** Fork (Termscape): the id_token email of an already-read `auth.json` text, by the SAME parser
+ *  `readCodexAuth` names usage rows with — so an account resolved from one read is named exactly as
+ *  its usage row. Null for anything unparseable. */
+export function codexAuthEmailFromText(raw: string): string | null {
+  try {
+    const tokens = (JSON.parse(raw) as { tokens?: { id_token?: unknown } | null } | null)?.tokens
+    return emailFromIdToken(tokens?.id_token)
+  } catch {
+    return null
+  }
+}
+
 /** Read the access token Codex stores after `codex login`. Never written back. */
 export async function readCodexAuth(home = codexHome()): Promise<CodexAuth> {
   try {

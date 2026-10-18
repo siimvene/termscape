@@ -106,7 +106,7 @@ describe('Codex local account lifecycle (Task 5.1)', () => {
 
   it('the login gate returns the identity for a REAL non-symlink auth.json', async () => {
     const { id, home } = (await call(IPC.codexAccountsAdd)) as { id: string; home: string }
-    writeFileSync(path.join(home, 'auth.json'), '{"tokens":{}}')
+    writeFileSync(path.join(home, 'auth.json'), '{"tokens":{"access_token":"at"}}') // a credential, no email
     expect(await call(IPC.codexAccountsWaitLogin, id)).toEqual({ email: 'me@example.com' })
   })
 
@@ -230,9 +230,10 @@ describe('Codex identity on a host with no reachable app-server (Windows)', () =
     const { setCodexAccountsHostPlatformForTests } = await import('./codex-accounts')
     setCodexAccountsHostPlatformForTests('linux')
     const { id, home } = (await call(IPC.codexAccountsAdd)) as { id: string; home: string }
-    // An id_token with no access token: the POSIX path's own read declines it, so the app-server
-    // answers (on Windows the same file is not a login at all, see above).
-    writeFileSync(path.join(home, 'auth.json'), JSON.stringify({ tokens: { id_token: jwt('jwt@example.com') } }))
+    // A credential whose id_token carries no email claim: the POSIX path's own read cannot name it,
+    // so the app-server answers (Windows has no app-server and settles for { email: null }). A file
+    // with no credential at all is not a login on any host (one credential rule, 2026-10-18).
+    writeFileSync(path.join(home, 'auth.json'), JSON.stringify({ tokens: { access_token: 'at', id_token: 'not-a-jwt' } }))
     expect(await call(IPC.codexAccountsWaitLogin, id)).toEqual({ email: 'me@example.com' })
     expect(readAccount).toHaveBeenCalled()
   })

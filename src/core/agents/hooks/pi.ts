@@ -14,6 +14,9 @@
 // OWN, never inferred. The wire contract (endpoint file, per-node token, socket-or-TCP) is the one
 // shared plugin client in plugin-hook-client.ts; `normalizePi` reads the payload.
 import fs from 'fs'
+import { isAnchorGone, mkdirBelow } from '../../integration-files'
+import { isAnyManagedPiAccountDir } from '../../pi-config-dir'
+import { platform } from '../../platform'
 import os from 'os'
 import path from 'path'
 import { parseEndpointEnv } from '../hook-endpoint-parse'
@@ -144,8 +147,13 @@ ${buildPluginHookClient('/hook/pi')}
 
 /** Plant (or refresh) the managed extension in `agentDir`. A file of the same name WITHOUT our
  *  marker is a user's own and is left alone. Throws only on an unexpected write failure — the
- *  installer registry catches and warns. */
-export function installPiExtensionInto(agentDir: string): void {
+ *  installer registry catches and warns.
+ *
+ *  Fork (Termscape): `{ anchored: true }` is for a managed pi ACCOUNT dir: `agentDir` itself is
+ *  never created (`mkdirBelow`), so an account deleted between the caller's existence check and
+ *  this write stays deleted — the write throws ENOENT/ENOTDIR (`isAnchorGone`) instead. The system
+ *  agent dir keeps `mkdir -p`: pi owns it and an absent one is simply first use. */
+export function installPiExtensionInto(agentDir: string, opts: { anchored?: boolean } = {}): void {
   const p = piExtensionPath(agentDir)
   try {
     const existing = fs.readFileSync(p, 'utf8')
@@ -153,7 +161,8 @@ export function installPiExtensionInto(agentDir: string): void {
   } catch {
     /* absent — plant it */
   }
-  fs.mkdirSync(path.dirname(p), { recursive: true })
+  if (opts.anchored) mkdirBelow(agentDir, path.dirname(p))
+  else fs.mkdirSync(path.dirname(p), { recursive: true })
   // Atomic: pi reads extensions at startup and on `/reload`, so a session starting mid-write must
   // never load a truncated module.
   writeManagedHookFileAtomic(p, buildPiExtension())
@@ -168,9 +177,23 @@ export function removePiExtensionFrom(agentDir: string): void {
   }
 }
 
-/** The system pi home. Managed pi account dirs are installed by their own lifecycle. */
+/** The system pi home. Managed pi account dirs are installed by their own lifecycle.
+ *  Fork (Termscape): anchored when the "system" dir IS a managed account (an app launched from a
+ *  managed pi terminal inherits its PI_CODING_AGENT_DIR), so a deleted account is not recreated. */
 export function installPiHooks(): void {
-  installPiExtensionInto(piAgentDir())
+  const dir = piAgentDir()
+  let anchored = false
+  try {
+    anchored = isAnyManagedPiAccountDir(dir, platform().userDataDir)
+  } catch {
+    /* no platform (a bare test) — the system dir is pi's own */
+  }
+  try {
+    installPiExtensionInto(dir, { anchored })
+  } catch (e) {
+    if (anchored && isAnchorGone(e) && !fs.existsSync(dir)) return // the aliased account was removed
+    throw e
+  }
 }
 
 export function removePiHooks(): void {

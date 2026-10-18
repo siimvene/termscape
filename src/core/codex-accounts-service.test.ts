@@ -14,7 +14,7 @@
  *  - switch the login gate's `fs.lstat` to `fs.stat` ⇒ the symlinked-credential case reddens.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'fs'
+import { lstatSync, mkdirSync, mkdtempSync, promises as fsPromises, readFileSync, rmSync, symlinkSync, writeFileSync } from 'fs'
 import os from 'os'
 import path from 'path'
 
@@ -119,7 +119,9 @@ describe('registerCodexAccountsIpc — the Server Edition surface', () => {
   it('waitLogin returns the identity for a REAL non-symlink auth.json', async () => {
     register({ pollMs: 5 })
     const { id, home } = await call(IPC.codexAccountsAdd)
-    writeFileSync(path.join(home, 'auth.json'), '{}')
+    // A credential with no email claim: the daemon names it. (`{}` was the fixture here until the
+    // one-credential-rule change; a credential-less file is not a login on any host now.)
+    writeFileSync(path.join(home, 'auth.json'), JSON.stringify({ tokens: { access_token: 'at' } }))
     await expect(call(IPC.codexAccountsWaitLogin, id)).resolves.toEqual({
       email: 'me@example.com'
     })
@@ -194,6 +196,66 @@ describe('registerCodexAccountsIpc — the Server Edition surface', () => {
       await expect(call(IPC.codexAccountsIdentity, id)).resolves.toBeNull()
       writeFileSync(path.join(home, 'auth.json'), '{}')
       await expect(call(IPC.codexAccountsIdentity, id)).resolves.toBeNull()
+    })
+
+    // Fork (#21 review): ONE credential rule on every host. An API-key login (`codex login --api-key`
+    // writes OPENAI_API_KEY, no tokens) used to stay pending forever here, and a whitespace token
+    // counted as a login.
+    it('an API-key login (OPENAI_API_KEY, no tokens) resolves; a blank key or token does not', async () => {
+      register({ pollMs: 5 })
+      const { id, home } = await call(IPC.codexAccountsAdd)
+      writeFileSync(path.join(home, 'auth.json'), JSON.stringify({ OPENAI_API_KEY: 'sk-test' }))
+      await expect(call(IPC.codexAccountsWaitLogin, id)).resolves.toEqual({ email: null })
+      writeFileSync(path.join(home, 'auth.json'), JSON.stringify({ OPENAI_API_KEY: '   ' }))
+      await expect(call(IPC.codexAccountsIdentity, id)).resolves.toBeNull()
+      writeFileSync(path.join(home, 'auth.json'), authJson({ access_token: '  ', id_token: jwt({ email: 'w@example.com' }) }))
+      await expect(call(IPC.codexAccountsIdentity, id)).resolves.toBeNull()
+    })
+
+    // The account list and the usage popover must name a home identically (one parser): the usage
+    // reader takes the id_token's top-level `email` claim only, so a profile-only claim names nobody.
+    it('names the account by the usage reader\'s parser (top-level email claim only)', async () => {
+      register()
+      const { id, home } = await call(IPC.codexAccountsAdd)
+      writeFileSync(
+        path.join(home, 'auth.json'),
+        authJson({ access_token: 'at', id_token: jwt({ 'https://api.openai.com/profile': { email: 'p@example.com' } }) })
+      )
+      await expect(call(IPC.codexAccountsIdentity, id)).resolves.toEqual({ email: null })
+    })
+
+    it('a managed file with no credential is not a login even when its daemon answers', async () => {
+      register()
+      const { id, home } = await call(IPC.codexAccountsAdd)
+      readAccount.mockResolvedValue({ email: 'daemon@example.com' })
+      writeFileSync(path.join(home, 'auth.json'), authJson({ id_token: jwt({ email: 'x@example.com' }) }))
+      await expect(call(IPC.codexAccountsIdentity, id)).resolves.toBeNull()
+      writeFileSync(path.join(home, 'auth.json'), authJson({ access_token: ' ' }))
+      await expect(call(IPC.codexAccountsIdentity, id)).resolves.toBeNull()
+    })
+
+    // The lstat gate and the read are two steps. A symlink swapped in between used to fail the
+    // no-follow read and then be re-admitted by the daemon fallback (Codex follows the link itself).
+    it('a managed auth.json swapped for a symlink after the lstat gate is not a login, daemon or not', async () => {
+      register()
+      const { id, home } = await call(IPC.codexAccountsAdd)
+      const elsewhere = path.join(systemHome, 'riding.json')
+      writeFileSync(elsewhere, authJson({ access_token: 'at', id_token: jwt({ email: 'sys@example.com' }) }))
+      symlinkSync(elsewhere, path.join(home, 'auth.json'))
+      readAccount.mockResolvedValue({ email: 'sys@example.com' })
+      const realLstat = fsPromises.lstat
+      const lstat = vi.spyOn(fsPromises, 'lstat').mockImplementation((async (p: any, ...rest: any[]) => {
+        const st = await (realLstat as any)(p, ...rest)
+        if (String(p).endsWith(path.join(id, 'auth.json')) || String(p) === path.join(home, 'auth.json')) {
+          return Object.assign(Object.create(Object.getPrototypeOf(st)), st, { isFile: () => true, isSymbolicLink: () => false })
+        }
+        return st
+      }) as any)
+      try {
+        await expect(call(IPC.codexAccountsIdentity, id)).resolves.toBeNull()
+      } finally {
+        lstat.mockRestore()
+      }
     })
 
     it('systemIdentity reads the SYSTEM home auth.json instead of rejecting', async () => {

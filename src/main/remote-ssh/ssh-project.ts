@@ -2203,7 +2203,7 @@ export class SshProjectManager {
         childArgs(
           c.conn,
           c.controlPath,
-          `if test -f ${posixQuote(auth)} && test ! -L ${posixQuote(auth)}; then echo yes; else echo no; fi`
+          remoteCodexCredentialCheck(auth)
         )
       )
       if (code !== 0) return null
@@ -3127,4 +3127,17 @@ export function initSshProject(
     return r.ok ? { ok: true, url: allowMediaPath(r.localPath) } : r
   })
   return mgr
+}
+
+/**
+ * Fork (Termscape): the remote half of `codexAuthHasCredential`, as a POSIX command that prints only
+ * `yes`/`no` (the credential never crosses the SSH link). `yes` needs a REAL non-symlink auth.json
+ * whose `access_token` or `OPENAI_API_KEY` is a string starting with a non-space character, so `{}`,
+ * a blank token or key, `null`, and a lone id_token are all `no` — the same rule the local hosts
+ * apply. Codex writes this file itself, one key per JSON member, so a line-oriented match is enough.
+ */
+export function remoteCodexCredentialCheck(auth: string): string {
+  const q = posixQuote(auth)
+  const credential = `'"(access_token|OPENAI_API_KEY)"[[:space:]]*:[[:space:]]*"[^"[:space:]]'`
+  return `if test -f ${q} && test ! -L ${q} && grep -Eq ${credential} ${q}; then echo yes; else echo no; fi`
 }

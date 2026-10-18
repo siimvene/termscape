@@ -29,6 +29,33 @@ export function piAccountDirFor(userDataPath: string, accountId: string): string
   return path.join(userDataPath, PI_ACCOUNTS_DIRNAME, accountId)
 }
 
+/**
+ * Fork (Termscape): is `dir` a managed pi account dir of `userDataPath` (`<userData>/pi-accounts/<id>`,
+ * exactly one level below the root)? Writes into such a dir are ANCHORED (`mkdirBelow`) so a deleted
+ * account is never recreated. Decided by LOCATION, not by the account list, because the same dir can
+ * also arrive as the "system" pi dir: an app launched from a managed pi terminal inherits that
+ * session's PI_CODING_AGENT_DIR, and `piAgentDir()` then names the account.
+ */
+export function isManagedPiAccountDir(dir: string, userDataPath: string): boolean {
+  const rel = path.relative(path.join(userDataPath, PI_ACCOUNTS_DIRNAME), path.resolve(dir))
+  return rel !== '' && !path.isAbsolute(rel) && !rel.startsWith('..') && !rel.includes(path.sep)
+}
+
+/** `isManagedPiAccountDir` against `userDataPath` OR the co-located peer's userData
+ *  (`CorePlatform.peerUserDataDir`, the Server Edition beside a desktop): an instance launched from
+ *  the PEER's managed pi terminal inherits a PI_CODING_AGENT_DIR under the peer's root, and that
+ *  account is just as deletable underneath it. */
+export function isAnyManagedPiAccountDir(dir: string, userDataPath: string): boolean {
+  if (isManagedPiAccountDir(dir, userDataPath)) return true
+  let peer: string | undefined
+  try {
+    peer = platform().peerUserDataDir
+  } catch {
+    return false
+  }
+  return !!peer && isManagedPiAccountDir(dir, peer)
+}
+
 /** `piAccountDirFor` against this instance's own userData (the platform seam). */
 export function piAccountDir(accountId: string): string {
   return piAccountDirFor(platform().userDataDir, accountId)

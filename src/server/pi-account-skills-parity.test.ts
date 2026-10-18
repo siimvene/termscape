@@ -29,7 +29,10 @@ describe('managed pi account integration — one consent-gated owner on both she
     }
     const lifecycle = read('src/core/agent-integrations.ts')
     expect(lifecycle).toMatch(/case 'pi':\n\s+return \[\.\.\.new Set\(\[piAgentDir\(\), \.\.\.localPiAccountDirs\(settings, userDataDir\)\]\)\]/)
-    expect(lifecycle).toMatch(/for \(const dir of localPiAccountDirs\(settings, deps\.userDataDir\(\)\)\)/)
+    expect(lifecycle).toMatch(/const piAccountDirs = localPiAccountDirs\(settings, deps\.userDataDir\(\)\)/)
+    expect(lifecycle).toMatch(/for \(const dir of piAccountDirs\)/)
+    // Anchored: a write never recreates an account dir deleted mid-reconcile (see mkdirBelow).
+    expect(lifecycle).toMatch(/installPiExtensionInto\(dir, \{ anchored: true \}\)/)
   })
 
   it('the Server Edition lifecycle carries its veto and gates the canvas skill on canvas control', () => {
