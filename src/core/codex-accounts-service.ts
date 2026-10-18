@@ -285,13 +285,15 @@ async function accountIdentity(accountId?: string): Promise<{ email: string | nu
   // `tokens.access_token` alone, so an API-key login (`codex login --api-key`) never resolved and its
   // row stayed pending forever on a Homebrew/npm Codex (no daemon to name it), while a whitespace-only
   // token counted as a login. A MANAGED home is read through the no-follow descriptor, the same gate
-  // as its `existingManagedIdentity`/login-wait lstat, so a swap between that gate and this read
-  // cannot hand it a symlink into the system jar. The system home is read as before (following a
-  // dotfile symlink is the user's own setup there).
+  // as its `existingManagedIdentity`/login-wait lstat, and a managed home with no REGULAR auth.json is
+  // not logged in — full stop, no daemon fallback: Codex itself follows a swapped-in symlink, so its
+  // answer would re-admit exactly what the file gate refused. The system home is read as before
+  // (following a dotfile symlink is the user's own setup there).
   const home = accountId ? localCodexAccountHome(accountId) : systemCodexHome()
   const text = accountId
     ? await readRegularFileNoFollow(path.join(home, 'auth.json'))
     : await fs.readFile(path.join(home, 'auth.json'), 'utf8').catch(() => null)
+  if (accountId && text === null) return null
   const hasCredential = text !== null && codexAuthHasCredential(text)
   // The email names the login only next to a credential: an id_token alone (a partial or malformed
   // write) is not a login Codex can run under.

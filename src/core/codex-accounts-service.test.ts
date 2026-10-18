@@ -14,7 +14,7 @@
  *  - switch the login gate's `fs.lstat` to `fs.stat` ⇒ the symlinked-credential case reddens.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'fs'
+import { lstatSync, mkdirSync, mkdtempSync, promises as fsPromises, readFileSync, rmSync, symlinkSync, writeFileSync } from 'fs'
 import os from 'os'
 import path from 'path'
 
@@ -220,6 +220,30 @@ describe('registerCodexAccountsIpc — the Server Edition surface', () => {
         authJson({ access_token: 'at', id_token: jwt({ 'https://api.openai.com/profile': { email: 'p@example.com' } }) })
       )
       await expect(call(IPC.codexAccountsIdentity, id)).resolves.toEqual({ email: null })
+    })
+
+    // The lstat gate and the read are two steps. A symlink swapped in between used to fail the
+    // no-follow read and then be re-admitted by the daemon fallback (Codex follows the link itself).
+    it('a managed auth.json swapped for a symlink after the lstat gate is not a login, daemon or not', async () => {
+      register()
+      const { id, home } = await call(IPC.codexAccountsAdd)
+      const elsewhere = path.join(systemHome, 'riding.json')
+      writeFileSync(elsewhere, authJson({ access_token: 'at', id_token: jwt({ email: 'sys@example.com' }) }))
+      symlinkSync(elsewhere, path.join(home, 'auth.json'))
+      readAccount.mockResolvedValue({ email: 'sys@example.com' })
+      const realLstat = fsPromises.lstat
+      const lstat = vi.spyOn(fsPromises, 'lstat').mockImplementation((async (p: any, ...rest: any[]) => {
+        const st = await (realLstat as any)(p, ...rest)
+        if (String(p).endsWith(path.join(id, 'auth.json')) || String(p) === path.join(home, 'auth.json')) {
+          return Object.assign(Object.create(Object.getPrototypeOf(st)), st, { isFile: () => true, isSymbolicLink: () => false })
+        }
+        return st
+      }) as any)
+      try {
+        await expect(call(IPC.codexAccountsIdentity, id)).resolves.toBeNull()
+      } finally {
+        lstat.mockRestore()
+      }
     })
 
     it('systemIdentity reads the SYSTEM home auth.json instead of rejecting', async () => {
