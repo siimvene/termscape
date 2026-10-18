@@ -11,6 +11,10 @@ const sticky = (text: string): CanvasNode =>
   }) as unknown as CanvasNode
 
 describe('toKanbanSession (sticky)', () => {
+  it('keeps Science browser nodes as Science when opened from the board', () => {
+    const node = { ...sticky(''), type: 'browser', data: { browserApp: 'claude-science', title: 'Claude Science' } } as CanvasNode
+    expect(toKanbanSession(node)).toMatchObject({ kind: 'browser', browserApp: 'claude-science', title: 'Claude Science' })
+  })
   // Issue #285: the card modal's textarea is CONTROLLED by session.text. If the projection trims,
   // every space/newline typed at the end of the note is stripped on the round-trip — the space key
   // looks dead in the kanban note editor.

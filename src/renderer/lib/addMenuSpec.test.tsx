@@ -49,6 +49,7 @@ const allKinds: AddItem['kind'][] = [
   'run',
   'simulator',
   'browser',
+  'science',
   'web',
   'sticky',
   'files',
@@ -125,6 +126,7 @@ describe('contentAddItemsToMenuItems', () => {
       'New run configuration',
       'New simulator',
       'New browser',
+      'New Claude Science',
       'New web view…',
       'New sticky note',
       'New file manager',
@@ -199,7 +201,7 @@ describe('contentAddItemsToMenuItems', () => {
     const calls: string[] = []
     const h = handlers({
       terminal: () => calls.push('terminal'),
-      browser: () => calls.push('browser'),
+      browser: (_at, app) => calls.push(app ? 'science' : 'browser'),
       web: () => calls.push('web'),
       sticky: () => calls.push('sticky'),
       dino: () => calls.push('dino'),
@@ -213,7 +215,7 @@ describe('contentAddItemsToMenuItems', () => {
     for (const item of items) {
       if ('onClick' in item) item.onClick()
     }
-    expect(calls.sort()).toEqual(['browser', 'dino', 'spawnTeam', 'sticky', 'terminal', 'web', 'worktree'])
+    expect(calls.sort()).toEqual(['browser', 'dino', 'science', 'spawnTeam', 'sticky', 'terminal', 'web', 'worktree'])
   })
 })
 
@@ -229,6 +231,7 @@ describe('contentAddItemsToDockRows', () => {
       'run',
       'simulator',
       'browser',
+      'science',
       'web',
       'sticky',
       'files',
@@ -336,11 +339,12 @@ describe('buildGroupedAddMenu', () => {
     agent('custom:1', 'New My Agent')
   ]
 
-  it('shows terminal + remote, the account-capable agents, then four submenus — in that order', () => {
+  it('shows terminal + remote + Science, the account-capable agents, then four submenus — in that order', () => {
     const items = buildGroupedAddMenu(CONTENT_ADD_ITEMS, handlers(), ctx, agents)
     expect(topLabels(items)).toEqual([
       'New terminal',
       'New remote…',
+      'New Claude Science',
       'New claude',
       'New Codex',
       'New Pi',
@@ -453,9 +457,10 @@ describe('buildGroupedAddMenu', () => {
       agent('codex', 'New Codex'),
       agent('gemini', 'New Gemini')
     ])
-    expect(topLabels(flatCodex).slice(0, 4)).toEqual([
+    expect(topLabels(flatCodex).slice(0, 5)).toEqual([
       'New terminal',
       'New remote…',
+      'New Claude Science',
       'New Claude Code',
       'New Codex'
     ])
@@ -507,7 +512,7 @@ describe('buildGroupedAddMenu', () => {
     const h = handlers({
       terminal: () => calls.push('terminal'),
       remote: () => calls.push('remote'),
-      browser: () => calls.push('browser'),
+      browser: (_at, app) => calls.push(app ? 'science' : 'browser'),
       web: () => calls.push('web'),
       sticky: () => calls.push('sticky'),
       files: () => calls.push('files'),
@@ -532,6 +537,7 @@ describe('buildGroupedAddMenu', () => {
       'newFile',
       'openFile',
       'remote',
+      'science',
       'scopedCheckout',
       'spawnTeam',
       'sticky',

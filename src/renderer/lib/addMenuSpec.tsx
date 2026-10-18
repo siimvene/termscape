@@ -63,6 +63,7 @@ export type AddItem =
   | { kind: 'run' } // disabledOnSsh
   | { kind: 'simulator' } // macOS desktop only
   | { kind: 'browser' }
+  | { kind: 'science' }
   | { kind: 'web' }
   | { kind: 'sticky' }
   | { kind: 'files' } // requiresCwd
@@ -86,6 +87,7 @@ export const CONTENT_ADD_ITEMS: readonly AddItem[] = [
   { kind: 'run' },
   { kind: 'simulator' },
   { kind: 'browser' },
+  { kind: 'science' },
   { kind: 'web' },
   { kind: 'sticky' },
   { kind: 'files' },
@@ -126,7 +128,7 @@ export interface AddHandlers {
   run: (at?: AddPos) => void
   /** A Simulator node: a live iOS simulator screen with touch, keyboard and buttons. */
   simulator: (at?: AddPos) => void
-  browser: (at?: AddPos) => void
+  browser: (at?: AddPos, app?: 'claude-science') => void
   web: (at?: AddPos) => void
   sticky: (at?: AddPos) => void
   files: (at?: AddPos) => void
@@ -238,6 +240,12 @@ export function contentAddItemsToMenuItems(
         break
       case 'browser':
         out.push({ label: 'New browser', icon: <IconRemote />, onClick: () => handlers.browser(at) })
+        break
+      case 'science':
+        out.push({ label: 'New Claude Science', icon: <IconWeb />,
+          disabled: ctx.isSshProject,
+          hint: ctx.isSshProject ? 'Claude Science runs on the Termscape host. Open it in a local project.' : undefined,
+          onClick: () => handlers.browser(at, 'claude-science') })
         break
       case 'web':
         out.push({ label: 'New web view…', icon: <IconWeb />, onClick: () => handlers.web(at) })
@@ -361,6 +369,12 @@ export function contentAddItemsToDockRows(
       case 'browser':
         out.push({ kind: 'browser', label: 'Browser', icon: <IconRemote />, onClick: () => handlers.browser() })
         break
+      case 'science':
+        out.push({ kind: 'science', label: 'Claude Science', icon: <IconWeb />,
+          disabled: ctx.isSshProject,
+          hint: ctx.isSshProject ? 'Claude Science runs on the Termscape host. Open it in a local project.' : undefined,
+          onClick: () => handlers.browser(undefined, 'claude-science') })
+        break
       case 'web':
         out.push({ kind: 'web', label: 'Web View', icon: <IconWeb />, onClick: () => handlers.web() })
         break
@@ -444,7 +458,8 @@ export type AddGroupId = 'top' | 'view' | 'files' | 'orchestrate'
  *
  * `terminal` and `remote` stay at the top because they are the two fastest paths to a session, and
  * because `remote` is not an agent — the one entry point to an SSH session must not be buried
- * under a menu named "New agent", where nobody would look for it.
+ * under a menu named "New agent", where nobody would look for it. Science also stays in this
+ * first-level session/agent list beside Claude Code, while still opening its managed browser panel.
  */
 export const ADD_ITEM_GROUP: Record<AddItem['kind'], AddGroupId> = {
   terminal: 'top',
@@ -452,6 +467,7 @@ export const ADD_ITEM_GROUP: Record<AddItem['kind'], AddGroupId> = {
   run: 'view',
   simulator: 'view',
   browser: 'view',
+  science: 'top',
   web: 'view',
   sticky: 'view',
   files: 'view',

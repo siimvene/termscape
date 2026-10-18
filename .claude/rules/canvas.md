@@ -164,8 +164,10 @@ paths:
 - **Add menu** = bottom dock (`Dock.tsx`) `+`, mirrored by the pane menu and command palette.
   `lib/addMenuSpec` is the ONE source for which kinds are addable and (since 2026-09) how the two
   `ContextMenu` surfaces GROUP them (`New terminal` · `New remote…` · the account-capable agents ·
-  `New agent ▸` · `New view ▸` · `Files ▸` · `Orchestrate ▸`, then the canvas actions). It replaced a
-  flat 18-row list: the menu need not be EXHAUSTIVE (⌘K and the keybinding registry already carry a
+  `New agent ▸` · `New view ▸` · `Files ▸` · `Orchestrate ▸`, then the canvas actions).
+  Claude Science is a first-level row beside the agent entries on all three surfaces; it continues
+  to create a managed browser panel with the Science consent gate.
+  Grouping replaced a flat 18-row list: the menu need not be EXHAUSTIVE (⌘K and the keybinding registry already carry a
   remappable command per agent and node kind), it has to be FAST. Four rules hold it:
   - **The submenu depth cap is STRUCTURAL:** `ContextMenu` drops a submenu's `colors`/`submenu`
     children (returns `null`), so a third level vanishes silently. Claude's and Codex's account

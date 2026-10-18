@@ -417,6 +417,62 @@ on macOS** and applies to both canvas and kanban terminals.
 See [`docs/SERVER.md`](./docs/SERVER.md) for the Server Edition, and the design docs
 under [`docs/`](./docs) for deeper notes.
 
+## Claude Science
+
+Add **Claude Science** from the main add-menu list beside **Claude Code** in the dock, canvas
+right-click, or sidebar **+** menu, or use the command palette. Allow Science panels when prompted,
+then sign in with your Claude account inside Science.
+The same panel opens from a browser card on the kanban board. Reconnect mints a fresh local login
+link; **Stop Science** stops the shared instance and its running analyses. Closing a panel keeps
+the service and saved work. Revoke panel access in **Settings → Agents → Claude Science panels**.
+
+If Science is missing, click **Install Claude Science** in the panel. Termscape downloads the
+official runtime from Anthropic, verifies its SHA-256 checksum against the official release
+manifest, and installs it into `<userData>/science-bin` without sudo. Each Linux user's
+Termscape instance can install its own runtime; an installation under another user's home
+is not shared. Restoring a saved panel never starts a download. The first start may take
+several minutes while Science prepares its analysis environment. Internet access is required.
+The managed installer supports Linux x64, macOS x64/arm64, and Windows x64/arm64; it reports
+unsupported platforms rather than downloading another architecture's binary.
+
+You can also install Science yourself using
+[Anthropic's setup guide](https://claude.com/docs/claude-science/get-started). Linux requires
+glibc x64, bubblewrap 0.8 or later, system-installed socat, and permitted unprivileged user
+namespaces. Termscape preserves Science's sandbox and approval prompts. Science has its own
+Claude sign-in; Termscape's managed Claude Code accounts are separate.
+
+Each Termscape data directory owns one Science instance, stored in `<userData>/science`.
+All Science panels on that instance share its projects and sign-in. Project files save only the
+browser node's `browserApp: "claude-science"` marker; login links, tokens, and running-service
+details are not saved into the project. The native mobile companion / terminal relay does not
+embed Science; use the Server Edition in a browser.
+
+**Server Edition:** Termscape proxies the UI at `/apps/claude-science/`, through both Termscape
+authentication and Science's own login. Only this trusted app gets a same-origin framing policy;
+the proxy is disabled until Science panels are allowed. Science's preview server must have a
+**different origin**, since generated HTML must not share the app's credentials. For a Tailscale
+deployment, publish the loopback preview port separately:
+
+```sh
+sudo tailscale serve --bg --https=8444 http://127.0.0.1:8766
+```
+
+Set `NODETERM_SCIENCE_APP_ORIGIN=https://your-host.your-tailnet.ts.net` and
+`NODETERM_SCIENCE_PREVIEW_ORIGIN=https://your-host.your-tailnet.ts.net:8444` in the Termscape
+server's environment. The app origin is also allowed to frame Science's previews. Restart Termscape and, if it was already running, stop and reopen
+Science. The preview listener serves Science's token-protected preview URLs, not Termscape's
+application or cookies. Keep it private to the tailnet. Without a configured preview endpoint,
+the panel displays a setup notice; remote interactive HTML previews cannot work through the
+viewer's localhost. Desktop webviews reach the local preview port directly.
+
+Optional host environment overrides: `NODETERM_SCIENCE_BIN` (executable path),
+`NODETERM_SCIENCE_PORT` (default `8765`), and `NODETERM_SCIENCE_PREVIEW_PORT` (default `8766`).
+Use distinct unused ports and adjust the preview proxy if you change them. `NODETERM_SCIENCE_BIN`
+takes precedence and disables the in-app installer. Otherwise Termscape prefers its managed runtime,
+then `~/.local/bin/claude-science`, then the executable on `PATH`. Managed launches disable automatic
+updates. To update, stop Science, remove its managed executable, and use **Install Claude Science**
+again. This keeps updates explicit and preserves projects and sign-in.
+
 ## 🤝 Contributing
 
 Issues and pull requests are welcome. **Start with [CONTRIBUTING.md](./CONTRIBUTING.md)** —

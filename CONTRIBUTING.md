@@ -150,6 +150,15 @@ used, an incompatible one is left running and reported, never killed.
 
 ## Three surfaces
 
+Claude Science panels are `browser` nodes with `browserApp: 'claude-science'`. Their shared
+`ClaudeScienceSurface` renders in both the canvas and card modal, using a browser iframe on
+Server Edition and a webview on desktop. The core service is registered in both shells. Its
+launch/embedding permission (`claudeScienceEnabled`, Settings → Agents) defaults off and is
+machine-local; opening a git-shared project must not silently grant it. Disabling it blocks the
+HTTP proxy and closes existing proxy WebSockets. Keep the generated-preview server on a distinct
+origin, never under the app's proxy path, and never persist nonce URLs in node state. The mobile
+companion / relay deliberately cannot embed this HTTP app. See README → Claude Science for setup.
+
 A feature is not done until you have decided how it behaves on each — even if the decision is "not
 applicable here":
 

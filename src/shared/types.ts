@@ -670,6 +670,8 @@ export interface CanvasNodeState {
   fileMissing?: boolean
   /** web-only: when set, the web node loads this live URL (else it loads `filePath` as local html). */
   url?: string
+  /** Managed application shown by this browser node. Login URLs never enter project state. */
+  browserApp?: 'claude-science'
   /**
    * browser-only: the Electron session partition for an AGENT-opened browser node
    * (`persist:nt-agent-browser-<projectId>`), set once at creation and never mutated. Absent for a
@@ -2361,6 +2363,8 @@ export interface Settings {
    *  ring and unlocks the log viewer. Default off — a debugging tool, not a daily surface.
    *  Toggle in Settings → Application → Debug. */
   debugLogPanel: boolean
+  /** Machine-wide consent to launch and embed the separately installed Claude Science app. */
+  claudeScienceEnabled: boolean
   /** Keep a standing relay host connection so a paired phone can reach this Mac from anywhere
    *  (end-to-end encrypted). Default on — the host only admits SAS-approved, pinned devices, so
    *  an un-paired install just keeps an idle listener. Toggle in Settings → Phone. */
@@ -2620,6 +2624,7 @@ export const DEFAULT_SETTINGS: Settings = {
   // no telemetryEnabled key yet; anyone who already saved settings keeps their stored value.
   telemetryEnabled: true,
   debugLogPanel: false,
+  claudeScienceEnabled: false,
   phoneAccessEnabled: true,
   mobilePushEnabled: true,
   mobilePushNeedsYou: true,
@@ -4628,6 +4633,7 @@ export interface NodeTerminalApi {
   fs: FsApi
   media: MediaApi
   browser: BrowserApi
+  science: import('./claude-science').ClaudeScienceApi
   files: FilesApi
   updates: UpdateApi
   announcements: AnnouncementsApi

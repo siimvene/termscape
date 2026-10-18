@@ -78,6 +78,7 @@ export interface KanbanSession {
   /** Browser node session partition (kind 'browser' only) — threaded to the modal webview so it
    *  shares the canvas node's jar (`browser-partition-parity.test.tsx`). Absent = default session. */
   partition?: string
+  browserApp?: 'claude-science'
   /** The GitHub issue this session was started on (terminal cards only) — see
    *  `CanvasNodeState.issueRef`. The issue card shows the session as a live chip, and this card shows
    *  `#N`: the board is the canvas's other view of the same binding. */

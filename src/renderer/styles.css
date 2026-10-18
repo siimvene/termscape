@@ -18280,6 +18280,16 @@ body.focus-mode .dock:hover {
   border-radius: 3px;
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 60%, transparent);
 }
+/* Claude Science uses the same surface on the canvas and in the board modal. */
+.science-surface { display: flex; flex-direction: column; width: 100%; height: 100%; min-height: 0; }
+.science-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 7px 10px; border-bottom: 1px solid var(--border); font-size: 12px; }
+.science-toolbar > span { margin-right: auto; }
+.science-toolbar button { padding: 4px 8px; border-radius: 5px; cursor: pointer; }
+.science-toolbar button:disabled { opacity: .5; cursor: default; }
+.science-surface > iframe, .science-surface > webview { flex: 1; width: 100%; min-height: 0; border: 0; background: #faf9f5; }
+.science-message { padding: 10px; font-size: 12px; background: var(--surface-raised); overflow-wrap: anywhere; }
+.science-empty { display: grid; place-items: center; flex: 1; padding: 24px; text-align: center; }
+.science-logs { max-height: 240px; overflow: auto; padding: 12px; margin: 0; white-space: pre-wrap; font-size: 11px; }
 
 /* ── Simulator node (nodes/SimulatorNode.tsx) ─────────────────────────────────────────────────
    A live iOS simulator screen: header, a control row, then the screen, which keeps the phone's

@@ -41,7 +41,7 @@ interface DockProps {
   onConnectRemote: () => void
   // Content nodes the Dock used to omit (it lagged the pane menu). Now derived from the same
   // spec as every other add-menu, so the Dock "+" and the canvas right-click stay in parity.
-  onAddBrowser: () => void
+  onAddBrowser: (app?: 'claude-science') => void
   onAddWeb: () => void
   onNewFile: () => void
   onAddWorktree: () => void
@@ -194,7 +194,7 @@ export function Dock({
   const dockAddHandlers: AddHandlers = {
     terminal: onAddTerminal,
     remote: onAddRemote,
-    browser: onAddBrowser,
+    browser: (_at, app) => onAddBrowser(app),
     web: onAddWeb,
     sticky: onAddSticky,
     spawnTeam: onSpawnTeam,
@@ -213,6 +213,7 @@ export function Dock({
     isWindowsCore,
     isRelayTab: !!activeProject?.remote
   })
+  const scienceRow = contentRows.find((row) => row.kind === 'science')
 
   return (
     <>
@@ -238,6 +239,12 @@ export function Dock({
               <TerminalIcon />
               <span>Remote…</span>
             </button>
+            {scienceRow && (
+              <button disabled={scienceRow.disabled} title={scienceRow.hint} onClick={pick(scienceRow.onClick)}>
+                {scienceRow.icon}
+                <span>{scienceRow.label}</span>
+              </button>
+            )}
             {BUILTIN_AGENT_IDS.filter((aid) => !disabledAgents.includes(aid)).flatMap((aid) => {
               const inheriting = inheritingByBase.get(aid) ?? []
               // No inheriting customs → the builtin stays a flat button (with Claude's account
@@ -336,7 +343,7 @@ export function Dock({
                 <span>{c.label}</span>
               </button>
             ))}
-            {contentRows.map((row) => (
+            {contentRows.filter((row) => row.kind !== 'science').map((row) => (
               <button
                 key={row.kind}
                 disabled={row.disabled}

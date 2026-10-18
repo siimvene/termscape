@@ -11,6 +11,7 @@ import type { Auth } from './auth'
 import { proxyAuthAllowed, type TrustProxyConfig } from './proxy-trust'
 import { handleDownload } from './download'
 import type { DownloadTickets } from '../core/download-tickets'
+import type { ClaudeScienceProxy } from './claude-science-proxy'
 
 export const SESSION_COOKIE = 'nt_session'
 
@@ -43,6 +44,7 @@ const COMPRESS_CACHE_MAX_BYTES = 32 * 1024 * 1024
 
 export interface HttpHandlerOpts {
   auth: Auth
+  scienceProxy?: ClaudeScienceProxy
   rendererDir: string
   /**
    * Reverse-proxy SSO trust (issue #29): when set, a request whose TCP peer is inside the
@@ -490,6 +492,8 @@ export function createHttpHandler(
       else sendJson(res, 401, { error: 'unauthorized' })
       return
     }
+
+    if (opts.scienceProxy?.handle(req, res)) return
 
     // Authenticated: an Explorer download redeems its one-shot ticket here (see download.ts).
     if (downloadTickets && (await handleDownload(req, res, url, downloadTickets))) return

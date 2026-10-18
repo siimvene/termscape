@@ -1648,6 +1648,7 @@ describe('live-update: the You: prompt line', () => {
       },
       subscribeNowChange: () => () => {},
       getHostIdentity: () => ({ hostDeviceId: 'h', hostToken: 't', hasPairedPhone: true }) as never,
+      env: {},
       mobilePushEnabled: () => true,
       mobileLiveActivities: () => true,
       isPackaged: () => true,
