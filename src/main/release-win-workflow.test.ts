@@ -61,31 +61,19 @@ describe('release.yml release-win', () => {
   })
 })
 
-// U2: the feed the apps read is a mirror outside this repo; this job is the only thing that
-// notices when it does not serve a release's latest*.yml.
-describe('release.yml verify-feed', () => {
+// TERMSCAPE FORK: upstream's verify-feed job (U2) curls its update mirror at nodeterm.dev after
+// every release. The fork has no update feed and never talks to upstream's backend, so the job is
+// removed; this pins that it stays gone and that nothing else in the workflow polls the mirror.
+describe('release.yml has no upstream feed check (fork)', () => {
   const text = fs.readFileSync(WORKFLOW, 'utf8')
-  const job = commands(jobBlock(text, 'verify-feed'))
 
-  it('runs after the promote, even when the best-effort Windows job did not succeed', () => {
-    expect(job).toMatch(/needs: \[publish, release-win\]/)
-    expect(job).toContain("if: ${{ always() && needs.publish.result == 'success' }}")
+  it('carries no verify-feed job', () => {
+    expect(text.indexOf('\n  verify-feed:\n')).toBe(-1)
   })
 
-  it('checks every platform feed file against the tag on the real update URL', () => {
-    expect(job).toContain('FEED: https://nodeterm.dev/updates')
-    expect(job).toMatch(/STRICT: latest-mac\.yml latest-linux\.yml/)
-    expect(job).toMatch(/ADVISORY: latest\.yml/)
-    expect(job).toContain('want="${GITHUB_REF_NAME#v}"')
-    expect(job).toContain('curl -fsSL')
-    expect(job).toMatch(/s\/\^version:/)
-  })
-
-  it('retries for mirror delay, fails only on strict files, and never gates publish', () => {
-    expect(job).toMatch(/while \[ "\$n" -le 10 \]/)
-    expect(job).toContain('::$level::')
-    expect(job).toContain('exit "$fail"')
-    const publish = commands(jobBlock(text, 'publish'))
-    expect(publish).not.toContain('verify-feed')
+  it('no command line fetches nodeterm.dev', () => {
+    const live = commands(text)
+    expect(live).not.toMatch(/curl[^\n]*nodeterm\.dev/)
+    expect(live).not.toContain('FEED: https://nodeterm.dev')
   })
 })
