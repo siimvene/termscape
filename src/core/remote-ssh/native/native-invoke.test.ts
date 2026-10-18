@@ -19,6 +19,16 @@ import {
 import type { SshConnection } from '../../../shared/ssh'
 import { ed25519KeyPair } from './test-keys'
 
+function caseInsensitiveTmp(): boolean {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nt-case-'))
+  try {
+    fs.writeFileSync(path.join(dir, 'probe'), '')
+    return fs.existsSync(path.join(dir, 'PROBE'))
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+}
+
 const hostKey = ed25519KeyPair()
 const clientKey = ed25519KeyPair()
 
@@ -388,7 +398,10 @@ describe('download() — a remote tree onto a Windows filesystem', () => {
     }
   })
 
-  it.skipIf(process.platform === 'win32')('POSIX: the tree lands byte-for-byte as named', async () => {
+  // TERMSCAPE FORK: also skipped on a case-INSENSITIVE filesystem (the macOS default APFS volume),
+  // where sub/Foo and sub/foo are one file and the expected 7-entry tree cannot exist. Probed, not
+  // keyed on darwin, so a case-sensitive APFS volume still runs it.
+  it.skipIf(process.platform === 'win32' || caseInsensitiveTmp())('POSIX: the tree lands byte-for-byte as named', async () => {
     // Not runnable on Windows: the point is names that Windows cannot create.
     const local = fs.mkdtempSync(path.join(os.tmpdir(), 'nt-dl-'))
     try {

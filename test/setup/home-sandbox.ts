@@ -21,7 +21,11 @@ let saved: Record<string, string | undefined> = {}
 
 export async function setup(): Promise<void> {
   saved = Object.fromEntries(SAVED_KEYS.map((k) => [k, process.env[k]]))
-  dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'ntvh-')))
+  // TERMSCAPE FORK: rooted at /tmp on macOS for the same reason as tmp-sandbox.ts. The per-user
+  // TMPDIR (/private/var/folders/…, ~57 chars after realpath) pushes paths derived from HOME past
+  // their limits: control-master.test.ts measured a 107-char ControlPath against its 87-char cap.
+  const root = process.platform === 'darwin' ? '/tmp' : os.tmpdir()
+  dir = fs.realpathSync(fs.mkdtempSync(path.join(root, 'ntvh-')))
   enterHomeSandbox(dir)
 }
 
