@@ -129,8 +129,18 @@ export function attachWsServer(server: http.Server, opts: WsServerOpts): WebSock
     ws.close(WS_CLOSE_SIGNED_OUT, 'signed out')
     return true
   }
+  // Claude Science tunnels (fork) are raw sockets handed to the proxy, not `ws` clients, so they
+  // get their own token map: the same S3 rule applies, a revoked or expired session ends them.
+  const scienceTokenOf = new Map<Duplex, string>()
+  const endScienceIfSignedOut = (socket: Duplex): void => {
+    const token = scienceTokenOf.get(socket)
+    if (token === undefined || auth.validateSession(token)) return
+    scienceTokenOf.delete(socket)
+    socket.destroy()
+  }
   const offRevoke = auth.onSessionsRevoked(() => {
     for (const ws of [...tokenOf.keys()]) endIfSignedOut(ws)
+    for (const socket of [...scienceTokenOf.keys()]) endScienceIfSignedOut(socket)
   })
   server.on('close', () => offRevoke())
 
@@ -170,6 +180,7 @@ export function attachWsServer(server: http.Server, opts: WsServerOpts): WebSock
       alive.delete(ws)
       ws.ping()
     }
+    for (const socket of [...scienceTokenOf.keys()]) endScienceIfSignedOut(socket)
   }, heartbeatMs)
   // Must never hold the process (or a vitest run) open, and must stop with its server.
   if (heartbeat.unref) heartbeat.unref()
@@ -180,9 +191,14 @@ export function attachWsServer(server: http.Server, opts: WsServerOpts): WebSock
       socket.on('error', () => socket.destroy())
       // upgradeAllowed returns an object since sign-in S3 (and checks the Origin against
       // publicOrigin): test `.ok`, never the object's truthiness.
-      if (!upgradeAllowed(req, auth, trustProxy, publicOrigin).ok) {
+      const science = upgradeAllowed(req, auth, trustProxy, publicOrigin)
+      if (!science.ok) {
         socket.end('HTTP/1.1 401 Unauthorized\r\n\r\n')
         return
+      }
+      if (science.token !== null) {
+        scienceTokenOf.set(socket, science.token)
+        socket.once('close', () => scienceTokenOf.delete(socket))
       }
       opts.scienceProxy.upgrade(req, socket, head)
       return
