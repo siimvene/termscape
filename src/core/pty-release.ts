@@ -3,6 +3,11 @@ import type { IPty } from 'node-pty'
 /** The subset of a node-pty terminal `releasePty` touches (destroy exists on UnixTerminal only). */
 export type ReleasablePty = Pick<IPty, 'kill' | 'resume'> & { destroy?: () => void }
 
+export interface ReleasePtyOptions {
+  /** Force a disposable tmux attach client down before closing its PTY master. */
+  forceKill?: boolean
+}
+
 /**
  * Release a PTY client so its master fd is actually CLOSED, not just signalled.
  *
@@ -16,16 +21,22 @@ export type ReleasablePty = Pick<IPty, 'kill' | 'resume'> & { destroy?: () => vo
  * stream is down), so prefer it. `resume()` first so any already-pending EOF/'close' can flow;
  * fall back to `kill()` where destroy doesn't exist (e.g. the winpty backend).
  */
-export function releasePty(proc: ReleasablePty): void {
+export function releasePty(proc: ReleasablePty, options: ReleasePtyOptions = {}): void {
   try {
     proc.resume()
   } catch {
     /* socket may already be closed */
   }
   try {
+    if (options.forceKill) proc.kill('SIGKILL')
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | null)?.code
+    if (code !== 'ESRCH') console.warn('[pty] Failed to terminate released tmux client', error)
+  }
+  try {
     if (typeof proc.destroy === 'function') proc.destroy()
     else proc.kill()
   } catch {
-    /* process already dead (ESRCH) — nothing to release */
+    /* process already dead (ESRCH) — nothing more to release */
   }
 }

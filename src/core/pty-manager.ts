@@ -1560,6 +1560,20 @@ export class PtyManager {
   }
 
   /**
+   * Release a local tmux attach client without leaving a broken foreground wrapper behind.
+   *
+   * The tmux session/server owns the pane and survives this detach. Remote SSH, Zellij, and
+   * session-host backends have different ownership and retain their normal node-pty teardown path;
+   * a local read-only watcher is still a disposable tmux attach client and follows this path.
+   */
+  private releaseSessionPty(session: Session): void {
+    releasePty(session.proc as ReleasablePty, {
+      forceKill:
+        session.tmuxBacked && !session.sshRemote && !session.sessionHost && !session.zellij
+    })
+  }
+
+  /**
    * Detach this process's pty CLIENT from a session and forget it: the final scrollback snapshot,
    * `releasePty` (never a bare `proc.kill()` — a paused pty never reads EOF, so kill alone leaks
    * the master fd; see pty-release.ts), and the index cleanup. Shared by the last subscriber's
@@ -1588,7 +1602,7 @@ export class PtyManager {
         // released session by NAME, and must ask the backend that owns it (`sessionHostOwns`).
         sessionHost: !!session.sessionHost
       })
-    releasePty(session.proc as ReleasablePty)
+    this.releaseSessionPty(session)
     this.forget(sessionId, session)
   }
 
@@ -8258,7 +8272,7 @@ export class PtyManager {
       // releasePty (not proc.kill()): a paused pty never reads EOF, so kill() alone would leak the
       // master fd — and a session destroyed while a drowning viewer had it paused is exactly that
       // case (see pty-release.ts). It resumes the pty first, so the fd actually closes.
-      releasePty(dying.proc as ReleasablePty)
+      this.releaseSessionPty(dying)
       this.forget(dyingId, dying)
     }
     // Confirmed absence and a solo live session still need an owner reservation: an inactive
@@ -8393,7 +8407,7 @@ export class PtyManager {
         finals.push(
           this.snapshotScrollback(session.persistKey, session.sshRemote, !!session.sessionHost)
         )
-      releasePty(session.proc as ReleasablePty)
+      this.releaseSessionPty(session)
     }
     // Shadows are child processes of OURS, so quitting takes them with us — the tmux sessions they
     // were attached to keep running with no client at all, which is exactly what persistence means.
