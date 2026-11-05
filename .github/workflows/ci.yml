@@ -21,7 +21,10 @@ permissions:
 
 jobs:
   quality:
-    runs-on: ubuntu-latest
+    # PINNED: `ubuntu-latest` moved to 26.04 in late October 2026, and on it the real-tmux
+    # pane-cwd suite and remote-atomic-write's non-permuting chmod stand-in fail on a tree that
+    # is green on 24.04 and on macOS. Move to 26.04 deliberately, with those two fixed.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
 
