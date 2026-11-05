@@ -12,6 +12,7 @@ import { platform } from '../platform'
 import { writeFileAtomic } from '../fs-atomic'
 import { parseEndpointEnv } from './hook-endpoint-parse'
 import { hookSockPath } from './hook-sock-path'
+import { browserRequestRefusal } from './hook-browser-guard'
 import { canControlCanvas, type AgentId } from '../../shared/agents/config'
 import { normalizeFor, type NormalizedAgentEvent } from '../../shared/agents/normalize'
 import {
@@ -830,6 +831,16 @@ export class HookServer {
         if (req.method !== 'POST') {
           res.writeHead(404)
           res.end()
+          return
+        }
+        // Belt-and-braces BEFORE the bearer: a browser page (DNS rebinding included) is refused
+        // on the Origin / Host it cannot help sending, and learns nothing about the bearer — not
+        // even the 403-vs-421 distinction below. The bearer stays the real gate; every client we
+        // ship passes this unchanged (measured list in hook-browser-guard.ts).
+        const browserRefusal = browserRequestRefusal(req.headers)
+        if (browserRefusal) {
+          res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' })
+          res.end(`${browserRefusal}\n`)
           return
         }
         if (!this.tokenMatches(req.headers['x-nodeterm-hook-token'])) {

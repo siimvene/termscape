@@ -344,6 +344,28 @@ function tunnelCancelArgs(conn: SshConnection, controlPath: string, t: HookTunne
     : hookTcpForwardCancelArgs(conn, controlPath, t.remotePort, hookPort)
 }
 
+/**
+ * The remote command that makes `dir` (the host's `~/.nodeterm`) an owner-only umbrella: created
+ * under `umask 077`, and an EXISTING one tightened to 0700 — `mkdir -p` never changes the mode of
+ * a directory that is already there, and every host connected before this shipped has a 0755 one.
+ *
+ * Everything secret inside is 0600 on its own (endpoint files, node tokens), but a directory others
+ * can traverse makes the safety of each future file depend on that file remembering its own mode.
+ *
+ * The tightening refuses three things, each a way of changing a mode that is not ours to change:
+ * a SYMLINK (`chmod` follows it, so a `~/.nodeterm` the user linked to a shared directory would
+ * have that directory's mode changed), anything that is not a directory, and a directory the login
+ * user does not OWN (`-O`: only matters for a root login, the one user whose chmod would succeed on
+ * someone else's directory). `-O` is not POSIX but dash, bash, busybox, zsh and BSD sh all have it;
+ * a shell without it fails the test and so skips the chmod — never the other way round.
+ * No `--` after the mode: BSD chmod does not permute (see remote-atomic-write.ts); the path is
+ * absolute (a validated `$HOME`), so it cannot read as an option.
+ */
+export function privateRemoteDirCommand(dir: string): string {
+  const d = posixQuote(dir)
+  return `umask 077; mkdir -p -- ${d} && if [ -d ${d} ] && [ ! -L ${d} ] && [ -O ${d} ]; then chmod 700 ${d}; fi`
+}
+
 /** Remote loopback port range the TCP fallback draws from (above the usual dev-server ports). */
 export const TCP_FALLBACK_PORT_MIN = 41000
 export const TCP_FALLBACK_PORT_MAX = 60999
@@ -476,7 +498,9 @@ export class RemoteHooks {
           await this.r.run(hookForwardCancelArgs(conn, controlPath, sock, hook.port)).catch(() => {})
         }
         sock = `${remoteDir}/hook-${randomUUID().replace(/-/g, '').slice(0, 20)}.sock`
-        await this.r.run(childArgs(conn, controlPath, `mkdir -p ${posixQuote(remoteDir)}`))
+        // 0700 umbrella, tightened when it already exists (see privateRemoteDirCommand). Its exit
+        // status is ignored as the bare mkdir's always was: a forward that cannot bind says so.
+        await this.r.run(childArgs(conn, controlPath, privateRemoteDirCommand(remoteDir)))
         const fwd = await this.r.run(hookForwardArgs(conn, controlPath, sock, hook.port))
         if (fwd.code !== 0) continue
         verified = await this.verifyTunnel(conn, controlPath, { kind: 'sock', sock }, hook.token)

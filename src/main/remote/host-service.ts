@@ -16,8 +16,9 @@
 //   - RPC `pty.destroy {streamId}` -> the injected `destroyNode` (the phone's "End session"):
 //     permanently ends the stream's tmux session and takes the node off its canvas — the same two
 //     steps the desktop × performs. The target is resolved from the stream, never client params.
-// Output backpressure: when `sendFrame` returns false the host pauses the PTY via `setFlow`
-// and resumes it on the next successful send.
+// Output backpressure: when `sendFrame` returns false the host pauses the PTY via `setFlow`; a
+// 250 ms drain sweep (armed only while a stream is paused) resumes it once the socket is back under
+// 256 KB and repaints the phone with a fresh snapshot — see FLOW_SWEEP_MS.
 //
 // This file is glue over already-tested units (relay-socket, framing, pairing, pty-manager).
 // The pure RPC/frame -> pty-manager mapping lives in `createHostHandlers` so it is unit-
@@ -57,6 +58,8 @@ import { parseRelayKeys } from '../../core/relay-keys'
 import { parseRelayLaunch, type RelayLaunchRequest } from '../../core/relay-launch'
 import { browseHostDirectory, isWithinRootsFor, type BrowseFs } from '../../core/remote/host-fs-rpc'
 import { stripAnsi } from '../../core/transcript-reader'
+import type { VisibleCapture } from '../../core/watch-link/capture-route'
+import { resumeRepaintText } from '../../shared/capture-paint'
 
 // Default relay endpoint; `NODETERM_RELAY_URL` overrides it (mirrors license.ts's API_BASE /
 // CHECKOUT_URL env-override pattern — used both as the dev gate and for local testing).
@@ -71,6 +74,23 @@ const textDecoder = new TextDecoder()
  *  local `tmux has-session` is ~10 ms; this only bounds the pathological case, because the probe
  *  now precedes the attach response and its own timeout is 6 s. */
 const FRESH_PROBE_BUDGET_MS = 750
+
+/**
+ * Relay backpressure recovery for a paused phone stream. `sendFrame` refuses (and DROPS) a frame
+ * once the socket holds more than 8 MB (`MAX_BINARY_BUFFERED_AMOUNT`); the host then pauses the
+ * pty. A paused node-pty emits no `onData`, so a resume driven off "the next successful send" can
+ * never happen — and it did not: after one >8 MB burst the phone's
+ * terminal froze until it detached. The sweep is the drain trigger instead, mirroring
+ * `core/ui-sink-registry.ts` (RESYNC_SWEEP_MS / WS_LOW_WATER: "never the next chunk as the drain
+ * trigger"). It exists only while some stream is paused, so the healthy path pays nothing.
+ */
+const FLOW_SWEEP_MS = 250
+/** Resume below this many buffered bytes — the registry's WS_LOW_WATER, so "less full" never flaps. */
+const FLOW_LOW_WATER = 256_000
+/** A repaint the socket refused is retried on 250 ms, 500, 1 s … capped here. While the relay is
+ *  between transports `bufferedAmount()` reads 0 but every send fails, so without a backoff each
+ *  tick would spawn a `tmux capture-pane` (the registry's RESYNC_BACKOFF_MAX_MS guards the same). */
+const FLOW_BACKOFF_MAX_MS = 10_000
 
 // --- pure host handlers (RPC/frame <-> pty-manager) -------------------------
 
@@ -88,6 +108,10 @@ export interface HostPtyManager {
   /** Where a `pty.scroll` wheel for this stream goes (`PtyManager.scrollRoute`). Optional so a
    *  pre-feature fake keeps today's tmux-only behaviour. */
   scrollRoute?(sessionId: string): Promise<'tmux' | 'app-mouse' | 'local'>
+  /** The stream's VISIBLE screen and cursor in one capture (`PtyManager.captureVisible`), for the
+   *  backpressure resume's repaint. Optional: absent, or `unavailable`, the resume repaints from the
+   *  attach's own capture with no cursor. */
+  captureVisible?(sessionId: string): Promise<VisibleCapture>
   /** The node's recent output as plain text (`PtyManager.captureSession`) — `pty.capture`. */
   captureSession?(persistKey: string, full?: boolean): Promise<string>
   /** Does a session for this node id exist RIGHT NOW? (The destroy path's outcome check.) */
@@ -113,6 +137,10 @@ export interface HostPtyManager {
 export interface HostRelaySocket {
   respond(id: string, ok: boolean, body: unknown): void
   sendFrame(op: number, streamId: number, seq: number, payload: Uint8Array): boolean
+  /** Bytes queued and not yet flushed (RelaySocket.bufferedAmount). Drives the drain sweep that
+   *  resumes a paused stream. Optional so fakes compile; absent reads as 0 (drained), because a
+   *  socket that cannot report must fail toward resuming — never toward "paused forever". */
+  bufferedAmount?(): number
 }
 
 export interface HostHandlers {
@@ -234,6 +262,16 @@ interface Stream {
   seq: number
   /** True while the PTY is paused due to relay backpressure. */
   paused: boolean
+  /** True while a drain-triggered repaint (capture → snapshot → resume) is in flight. */
+  resuming?: boolean
+  /** Refused repaints since the pause, and when the next one may be tried (FLOW_BACKOFF_MAX_MS). */
+  resumeAttempts?: number
+  resumeNotBefore?: number
+  /** The current-screen capture for this stream (the attach's own `prep.snapshot`), kept so a
+   *  resume after backpressure can repaint the phone when no visible capture is available: the
+   *  frame that crossed the 8 MB line was dropped, so the phone's emulator is desynced and only a
+   *  fresh screen can fix it. */
+  snapshot?: () => Promise<string>
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -339,10 +377,81 @@ export function createHostHandlers(
   // reverse (sessionId -> streamId) index is needed.
   const streams = new Map<number, Stream>()
   let streamCounter = 0
+  // The drain sweep (FLOW_SWEEP_MS). Armed on a pause, cleared once no stream is paused.
+  let flowSweep: ReturnType<typeof setInterval> | null = null
+
+  function armFlowSweep(): void {
+    if (flowSweep) return
+    flowSweep = setInterval(() => {
+      for (const [id, s] of streams) if (s.paused) maybeResume(id, s)
+      stopFlowSweepIfIdle()
+    }, FLOW_SWEEP_MS)
+    flowSweep.unref?.() // never the reason the main process stays alive
+  }
+
+  function stopFlowSweepIfIdle(): void {
+    if (!flowSweep) return
+    for (const s of streams.values()) if (s.paused) return
+    clearInterval(flowSweep)
+    flowSweep = null
+  }
+
+  /**
+   * The repaint a resumed stream gets, '' for none. Unlike the attach snapshot (painted into an
+   * EMPTY emulator), this lands on a phone that still shows the old screen and feeds a snapshot in
+   * with no reset of its own — so it clears and homes first, uses CRLF (SwiftTerm runs with
+   * convertEol off; bare LFs staircase), and puts the cursor back when the capture read it. The
+   * visible capture is preferred (screen + cursor in one tmux call); without one the attach's own
+   * capture is used, with the cursor left where the paint ends.
+   */
+  async function resumeRepaint(stream: Stream): Promise<string> {
+    const visible =
+      stream.sessionId && pty.captureVisible ? await pty.captureVisible(stream.sessionId).catch(() => null) : null
+    if (visible && !visible.unavailable) return visible.screen ? resumeRepaintText(visible.screen, visible.cursor) : ''
+    const screen = stream.snapshot ? await stream.snapshot() : ''
+    return screen ? resumeRepaintText(screen, null) : ''
+  }
+
+  /** Resume a paused stream IF its socket has drained: capture → snapshot → resume, in that order.
+   *  While paused no `onData` can fire, so nothing interleaves with the repaint; resuming first
+   *  would let live output race ahead of a now-stale snapshot. */
+  function maybeResume(streamId: number, stream: Stream): void {
+    if (!stream.paused || stream.resuming) return
+    if (Date.now() < (stream.resumeNotBefore ?? 0)) return
+    if ((socket.bufferedAmount?.() ?? 0) > FLOW_LOW_WATER) return
+    stream.resuming = true
+    void (async () => {
+      let screen = ''
+      try {
+        screen = await resumeRepaint(stream)
+      } catch {
+        screen = ''
+      }
+      stream.resuming = false
+      // Killed / closed while the capture was in flight: its pty is released, never resume it.
+      if (streams.get(streamId) !== stream || !stream.paused) return
+      // An empty capture skips the repaint but STILL resumes. Unlike the registry (which keeps a
+      // client desynced and retries on an empty capture), staying here means staying paused —
+      // the very freeze this sweep exists to end. A stale screen beats a frozen one.
+      if (screen && !sendSnapshot(streamId, stream, screen)) {
+        // Refused (refilled, or the relay is reconnecting): stay paused, retry with backoff.
+        const attempts = (stream.resumeAttempts ?? 0) + 1
+        stream.resumeAttempts = attempts
+        stream.resumeNotBefore = Date.now() + Math.min(FLOW_SWEEP_MS * 2 ** (attempts - 1), FLOW_BACKOFF_MAX_MS)
+        return
+      }
+      stream.resumeAttempts = 0
+      stream.resumeNotBefore = 0
+      stream.paused = false
+      pty.setFlow(null, stream.sessionId, true)
+      stopFlowSweepIfIdle()
+    })()
+  }
 
   function dropStream(streamId: number): void {
     const stream = streams.get(streamId)
     streams.delete(streamId)
+    stopFlowSweepIfIdle()
     // Report AFTER the delete: `detached` may consult the live viewer set via its own bookkeeping,
     // and a callback that throws must not leave the stream registered.
     if (stream) {
@@ -374,15 +483,21 @@ export function createHostHandlers(
         socket.sendFrame(OP.Resized, streamId, stream.seq++, payload)
       },
       onData: (data) => {
+        if (stream.paused) {
+          // A batch already queued before the pause took hold. The phone is desynced (a frame was
+          // dropped), so streaming more of it only paints garbage: drop it, and let the repaint
+          // that resumes the stream bring the screen back. A chunk we can see is a free drain check.
+          maybeResume(streamId, stream)
+          return
+        }
         const bytes = textEncoder.encode(data)
         const ok = socket.sendFrame(OP.Output, streamId, stream.seq++, bytes)
-        if (!ok && !stream.paused) {
-          // Relay buffer is full — pause the PTY so the OS pipe backpressures the producer.
+        if (!ok) {
+          // Relay buffer is full — pause the PTY so the OS pipe backpressures the producer. The
+          // sweep, not the next chunk, resumes it (a paused pty produces no next chunk).
           stream.paused = true
           pty.setFlow(null, stream.sessionId, false)
-        } else if (ok && stream.paused) {
-          stream.paused = false
-          pty.setFlow(null, stream.sessionId, true)
+          armFlowSweep()
         }
       },
       onExit: (exitCode) => {
@@ -403,18 +518,22 @@ export function createHostHandlers(
   // (with colors) stays small in practice.
   const SNAPSHOT_CHUNK_BYTES = 256 * 1024
 
-  function sendSnapshot(streamId: number, stream: Stream, text: string): void {
-    socket.sendFrame(OP.SnapshotStart, streamId, stream.seq++, new Uint8Array(0))
+  /** Send `text` as a Start/Chunk…/End snapshot. Returns false if any frame was refused — the
+   *  attach ignores that (as it always has); a backpressure resume retries on the next sweep, and
+   *  the client's reassembler discards a partial buffer on the next Start (snapshot.ts). */
+  function sendSnapshot(streamId: number, stream: Stream, text: string): boolean {
+    let ok = socket.sendFrame(OP.SnapshotStart, streamId, stream.seq++, new Uint8Array(0))
     const bytes = textEncoder.encode(text)
     for (let i = 0; i < bytes.length; i += SNAPSHOT_CHUNK_BYTES) {
-      socket.sendFrame(
-        OP.SnapshotChunk,
-        streamId,
-        stream.seq++,
-        bytes.subarray(i, i + SNAPSHOT_CHUNK_BYTES)
-      )
+      ok =
+        socket.sendFrame(
+          OP.SnapshotChunk,
+          streamId,
+          stream.seq++,
+          bytes.subarray(i, i + SNAPSHOT_CHUNK_BYTES)
+        ) && ok
     }
-    socket.sendFrame(OP.SnapshotEnd, streamId, stream.seq++, new Uint8Array(0))
+    return socket.sendFrame(OP.SnapshotEnd, streamId, stream.seq++, new Uint8Array(0)) && ok
   }
 
   /**
@@ -520,6 +639,7 @@ export function createHostHandlers(
             }
           : {})
       })
+      stream.snapshot = () => prep.snapshot()
       const snapshot = await prep.snapshot().catch(() => '')
       // The stream may have been killed/closed while the capture was in flight.
       if (!streams.has(streamId)) return
@@ -1259,6 +1379,7 @@ export function createHostHandlers(
         pty.kill(null, stream.sessionId)
       }
       streams.clear()
+      stopFlowSweepIfIdle()
       for (const stream of closing) {
         try {
           remoteViewer?.detached(stream.persistKey)

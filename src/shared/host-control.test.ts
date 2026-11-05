@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { IPC } from './ipc'
 import { HOST_ONLY_REFUSAL, isHostOnlyChannel } from './host-control'
-import { WATCH_CHAT_CAST, WATCH_EVENT, WATCH_INPUT_CAST, WATCH_RELEASE_CAST, WATCH_UNLOCK_CAST } from './watch-link/protocol'
+import { WATCH_CHAT_CAST, WATCH_EVENT, WATCH_HISTORY_CAST, WATCH_INPUT_CAST, WATCH_RELEASE_CAST, WATCH_UNLOCK_CAST } from './watch-link/protocol'
 
 /**
  * The ONE list both shells consult. It exists so the desktop's relay admission and any future
@@ -99,7 +99,7 @@ describe('isHostOnlyChannel', () => {
     expect(isHostOnlyChannel('watch:meta')).toBe(false)
     // Every viewer message, Control's included (unlock, input, release, the per-viewer control state
     // and the typing set).
-    const viewer = [...Object.values(WATCH_EVENT), WATCH_CHAT_CAST, WATCH_UNLOCK_CAST, WATCH_INPUT_CAST, WATCH_RELEASE_CAST]
+    const viewer = [...Object.values(WATCH_EVENT), WATCH_CHAT_CAST, WATCH_HISTORY_CAST, WATCH_UNLOCK_CAST, WATCH_INPUT_CAST, WATCH_RELEASE_CAST]
     for (const ch of viewer) {
       expect(ch.startsWith('watch:'), ch).toBe(true)
       expect(isHostOnlyChannel(ch), ch).toBe(false)

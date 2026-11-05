@@ -39,8 +39,10 @@ import {
   TURN_END_RELOAD_DELAYS_MS,
   chatActivity,
   planLiveReload,
+  screenPollTickAllowed,
   shouldPollScreen,
-  turnEndReloadCarries
+  turnEndReloadCarries,
+  windowFocusHint
 } from '../lib/chatLive'
 import { sentCommand } from '@shared/chat-command'
 import { isInteractiveBuiltin } from '@shared/chat-catalog'
@@ -683,20 +685,29 @@ export function ChatPanel({
 
   // Re-read the pane's screen while the view is visible (see `screenBlock`). A read that fails or
   // finds a blank screen changes nothing: unknown is not evidence either way.
+  // Ticks are skipped while the window is unfocused (`screenPollTickAllowed`: ~30 tmux spawns a
+  // minute per chat view otherwise), and coming back — `focus`, or the page turning
+  // visible — re-reads at once, so a dialog that opened meanwhile is on screen before anyone types.
   useEffect(() => {
     if (!pollScreen) {
       setScreenBlock((b) => (b?.live === true ? null : b))
       return
     }
     let cancelled = false
+    // A focus re-tick can land while the interval's read is still out; one read at a time.
+    let inFlight = false
     const tick = async (): Promise<void> => {
       const el = msgsRef.current
-      if (el === null || el.clientHeight === 0 || document.hidden) return
+      if (el === null || el.clientHeight === 0 || inFlight) return
+      if (!screenPollTickAllowed({ hidden: document.hidden, focused: windowFocusHint(document) })) return
       let screen: string
+      inFlight = true
       try {
         screen = await api.pty.capture(nodeId)
       } catch {
         return
+      } finally {
+        inFlight = false
       }
       if (cancelled) return
       const read = readClaudeScreen(screen)
@@ -707,9 +718,14 @@ export function ChatPanel({
     }
     void tick()
     const t = setInterval(() => void tick(), CHAT_SCREEN_POLL_MS)
+    const onReturn = (): void => void tick()
+    window.addEventListener('focus', onReturn)
+    document.addEventListener('visibilitychange', onReturn)
     return () => {
       cancelled = true
       clearInterval(t)
+      window.removeEventListener('focus', onReturn)
+      document.removeEventListener('visibilitychange', onReturn)
     }
   }, [pollScreen, api, nodeId])
 

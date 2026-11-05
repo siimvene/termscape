@@ -15,6 +15,7 @@ import {
 import { approvalFlags } from "../shared/agents/approval-mode";
 import { CODEX_NO_DAEMON_FLAG } from "../shared/agents/codex-daemon";
 import { SAFE_SESSION_ID } from "../shared/session-id";
+import { isRecord } from "../shared/is-record";
 
 /** The parser that owns a live local Windows-profile terminal. */
 export type AgentLaunchDialect =
@@ -153,10 +154,6 @@ const RESUME_FIELDS = new Set([
 
 function fail(code: AgentLaunchPreparationErrorCode): never {
   throw new AgentLaunchPreparationError(code);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function hasOnlyOwnFields(

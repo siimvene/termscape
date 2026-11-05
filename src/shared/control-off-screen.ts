@@ -221,10 +221,10 @@ export function answersOffCanvas(verb: string): boolean {
  *   - `board` is a read, and `assign` writes board METADATA through `setProjectKanban`. Both used
  *     to read `activeProjectId`, which off canvas was a second bug hiding behind the first: after
  *     the travel the two projects were the same, so the wrong read was never wrong in practice.
- *   - the layout verbs (`group`/`ungroup`/`move`/`arrange`/`align`) rewrite node parenting and
- *     position, which this fork applies to the SERIALIZED nodes via the store `ControlSurface`
- *     (`surface.setNodes` → `commitCanvas`), laying out from the persisted sizes rather than the
- *     measured ones upstream refused for.
+ *   - the layout verbs (`group`/`ungroup`/`move`/`arrange`/`align`, and `resize`/`place` from
+ *     upstream #1288) rewrite node parenting, position and size, which this fork applies to the
+ *     SERIALIZED nodes via the store `ControlSurface` (`surface.setNodes` → `commitCanvas`), laying
+ *     out from the persisted sizes rather than the measured ones upstream refused for.
  *
  * Deliberately NOT here — and these REFUSE rather than travel, see `offScreenDisposition`: the four
  * `OFF_SCREEN_REFUSALS` verbs (`branch`, `open-worktree`, `close-worktree`, `browser`), the only
@@ -245,6 +245,11 @@ const STORED_NODE_VERBS: ReadonlySet<string> = new Set([
   'move',
   'arrange',
   'align',
+  // `resize` / `place` (issue #1288) are the same kind of write: pure transforms over the stored
+  // nodes, geometry-only mutations back (`geometryMutations`). An orchestrator rebuilding a layout
+  // after replacing a session is typically NOT the project the user is looking at.
+  'resize',
+  'place',
   'write',
   'close',
   'run',

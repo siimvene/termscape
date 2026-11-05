@@ -26,6 +26,7 @@
 import { isNtScript } from './browser-nt-scripts'
 import { normalizeAddress } from '@shared/browserUrl'
 import { BROWSER_KEYS } from '../core/browser-verb'
+import { isRecord } from '../shared/is-record'
 
 /** What the gate needs to know about the page beyond the command itself: the viewport from the last
  *  `Page.getLayoutMetrics`, so a mouse coordinate can be bounded to what is actually on screen. */
@@ -34,10 +35,6 @@ export interface CdpContext {
 }
 
 type Validator = (params: unknown, ctx: CdpContext) => boolean
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v)
-}
 
 /** A CDP argument for the call-a-function-on-object method is safe ONLY if it carries a single scalar
  *  `value` — never an `objectId` (an agent-chosen live handle) and never a structured value (an

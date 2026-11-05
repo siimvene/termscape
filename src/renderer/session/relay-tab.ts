@@ -41,9 +41,9 @@ const APPROVAL_TIMEOUT_MS = 60_000
 export interface RelayTabDeps {
   /** The preload relay surface — only `onClosed` is needed here (to catch a pre-approval drop). */
   relayClient: Pick<RelayClientApi, 'onClosed'>
-  /** Add an EMPTY project tab (`useProjects.getState().addProject`) → the new project's id. The
-   *  fallback when the host shared nothing (no scoped project) and the reconnect lever (Canvas
-   *  overrides it to reuse the existing project id in place). */
+  /** Add an EMPTY relay tab (`addRelayTab` — marked `remote`, never a plain local project) → the
+   *  new project's id. The fallback when the host shared nothing (no scoped project) and the
+   *  reconnect lever (Canvas overrides it to reuse the existing project id in place). */
   addProject: (label: string) => { id: string }
   /** Adopt the host's shared project as a tab (`useProjects.getState().adoptProject`) → fresh
    *  project id, node ids kept. Used on FIRST connect to populate the tab with the host's actual
@@ -237,8 +237,12 @@ export interface RelayReconnectDeps {
  *
  *  The stale offline session is NOT torn down here: `mount` disposes it only once the fresh session
  *  has rebound the project (see Canvas `mountRemoteMirror`). Disposing it up-front would unbind the
- *  project, so a connect failure or a declined SAS would strand the tab resolved to the LOCAL
- *  session — greyed but no longer recognised as relay, hence no longer reconnectable. */
+ *  project before anything replaced the binding, so a connect failure or a declined SAS would leave
+ *  the tab with no session of its own. It would still be reconnectable (an unbound remote tab
+ *  resolves to the offline relay session, a relay source), but its own session (label, status
+ *  stores) would be gone and `boundSessionForProject` would find nothing for the next reconnect to
+ *  hand over. Keeping the binding until the fresh one lands leaves a failed reconnect exactly where
+ *  it started. */
 export async function reconnectRelayTab(projectId: string, deps: RelayReconnectDeps): Promise<void> {
   const offer = (await deps.promptForOffer())?.trim()
   if (!offer) return

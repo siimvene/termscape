@@ -62,6 +62,7 @@ import { SessionHostSocketRequestQueue } from './socket-request-queue'
 import { trySessionHostHello } from './hello-probe'
 import { killHostSession } from './kill-session'
 import { clampEmulatorScrollback } from '../shared/scrollback'
+import { sleep } from '../shared/sleep'
 
 /** How long a session-less host lingers before exiting — mirrors tmux's own server lifetime rule
  *  ("the server exits when its last session dies"), plus a grace window so an app restart that
@@ -112,10 +113,6 @@ function log(line: string): void {
   } catch {
     /* diagnostics only */
   }
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 /** Poll for a WINNER of the startup race to finish writing its state file and come up — the state

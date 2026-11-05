@@ -429,6 +429,8 @@ export const IPC = {
   wallpaperListStills: 'wallpaper:list-stills',
   wallpaperLoad: 'wallpaper:load',
   wallpaperImport: 'wallpaper:import',
+  wallpaperListAerials: 'wallpaper:list-aerials',
+  wallpaperAerialClips: 'wallpaper:aerial-clips',
   // Run node (core/run-service.ts): launch.json entries, devices, launcher, status, stop, signals.
   runEntries: 'run:entries',
   runDevices: 'run:devices',
@@ -548,6 +550,12 @@ export const IPC = {
    *  bounded retry cannot prove the removal happened; a caller that must know confirms with a
    *  `workspace:load` read-back (the id absent means it is gone). */
   workspaceRemoveNode: 'workspace:remove-node',
+  /** "Store in app data", second half (issue #1145): carry settings over, remove the folder files. */
+  workspaceReleaseFolderFiles: 'workspace:release-folder-files',
+  /** "Store in folder", first half (issue #1145): refuse an occupied folder, carry settings in. */
+  workspacePrepareFolderStorage: 'workspace:prepare-folder-storage',
+  /** Where the store has a project's canvas after a move's save: folder / app data (issue #1145). */
+  workspaceProjectStorage: 'workspace:project-storage',
   projectSettingsRead: 'project-settings:read',
   projectSettingsWriteShared: 'project-settings:write-shared',
   projectSettingsUpdateLocal: 'project-settings:update-local',
@@ -640,6 +648,10 @@ export const IPC = {
   filesSaveUpload: 'files:save-upload',
   /** Write a canvas image into the project's own `.nodeterm/images/` (see core/canvas-images.ts). */
   filesSaveCanvasImage: 'files:save-canvas-image',
+  /** A whiteboard node's side file (core/whiteboards.ts). Addressed by (projectId, nodeId); the
+   *  receiving core derives the path, so a caller can never name one. */
+  filesSaveWhiteboard: 'files:save-whiteboard',
+  filesReadWhiteboard: 'files:read-whiteboard',
   /** Custom agent-alert sounds (issue #289) — stored under the core's data dir, addressed by kind. */
   filesSaveAlertSound: 'files:save-alert-sound',
   filesReadAlertSound: 'files:read-alert-sound',
@@ -800,6 +812,9 @@ export const IPC = {
   relayHostInvite: 'relay:host:invite',
   relayHostRevoke: 'relay:host:revoke',
   relayHostStop: 'relay:host:stop',
+  // Which projects may not be the scope of an invite, and why (core/relay/share-root.ts): invoke,
+  // `projectIds: string[]` → `{ [projectId]: reason }`. The invite UI disables those options.
+  relayHostScopeProblems: 'relay:host:scope-problems',
   relayHostPeerPending: 'relay:host:peer-pending',
   relayHostConfirm: 'relay:host:confirm',
   relayHostOpen: 'relay:host:open',

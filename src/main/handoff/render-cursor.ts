@@ -5,15 +5,14 @@
 // (rules, skills, environment), never something the human said, so it is left out; so is reasoning.
 import { cursorUserText, parseCursorNdjson } from '../../core/cursor-chat'
 import { blockText, fenceJson } from './format'
-
-const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v)
+import { isRecord } from '../../shared/is-record'
 
 export function renderCursorTranscript(raw: string): string {
   const out: string[] = []
   for (const m of parseCursorNdjson(raw)) {
-    if (!isObj(m) || !Array.isArray(m.content)) continue
+    if (!isRecord(m) || !Array.isArray(m.content)) continue
     for (const c of m.content as unknown[]) {
-      if (!isObj(c)) continue
+      if (!isRecord(c)) continue
       if (m.role === 'user' && c.type === 'text' && typeof c.text === 'string') {
         const t = cursorUserText(c.text)
         if (t !== undefined) out.push(`## User\n\n${t}`)

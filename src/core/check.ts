@@ -3,10 +3,13 @@
 // banner AND the mandatory-update policy for the Update Card. It also carries the anonymous
 // install id (deviceId + os/arch/version), which the backend upserts into `devices` as a
 // passive active-install counter — so the version distribution reflects EVERY install, not only
-// the (few) that also opt into the telemetry ping. Nothing personal is sent and the client IP is
-// never stored server-side; a hard opt-out is still DO_NOT_TRACK / NODETERM_TELEMETRY_DISABLED.
+// the (few) that also opt into the telemetry ping. It also states the plan (`pro` | `free`) so a
+// message can be aimed at paid or free users; the backend matches on it and does not store it.
+// Nothing personal is sent and the client IP is never stored server-side; a hard opt-out is still
+// DO_NOT_TRACK / NODETERM_TELEMETRY_DISABLED.
 import { platform } from './platform'
 import { getDeviceId } from './device-id'
+import { isPremium } from './license'
 import type { Announcement, UpdatePolicy } from '../shared/types'
 
 const API_BASE = process.env.NODETERM_API_BASE || 'https://api.nodeterm.dev'
@@ -68,19 +71,31 @@ const NOTES_MAX = 16 * 1024
 /** Test seam: the sanitizer is the whole contract with the feed's shape. */
 export const sanitizeCheckForTest = sanitize
 
-let cache: { at: number; data: CheckResult } | null = null
+type Plan = 'pro' | 'free'
+
+// The plan the response was fetched for. The backend aims messages at paid or free users by the
+// plan WE state (the feed is anonymous — it cannot look a device up), so an answer belongs to the
+// plan it was asked with: a purchase or a lapse must not be served the other plan's messages.
+let cache: { at: number; plan: Plan; data: CheckResult } | null = null
 
 export async function fetchCheck(): Promise<CheckResult> {
   if (!allowed()) return EMPTY
   const now = Date.now()
-  if (cache && now - cache.at < CACHE_MS) return cache.data
+  // Offline token verify, so it is cheap to read per call and already right at boot.
+  const plan: Plan = isPremium() ? 'pro' : 'free'
+  if (cache && cache.plan === plan && now - cache.at < CACHE_MS) return cache.data
+  // A failed read keeps the last good answer, except the messages it fetched for another plan.
+  // The update policy does not depend on the plan, so it survives.
+  const fallback = (): CheckResult =>
+    !cache ? EMPTY : cache.plan === plan ? cache.data : { messages: [], update: cache.data.update }
   try {
     const q = new URLSearchParams({
       deviceId: getDeviceId(),
       version: platform().appVersion,
       os: process.platform,
       arch: process.arch,
-      channel: 'stable'
+      channel: 'stable',
+      plan
     })
     const ctrl = new AbortController()
     const t = setTimeout(() => ctrl.abort(), 8000)
@@ -88,11 +103,11 @@ export async function fetchCheck(): Promise<CheckResult> {
       signal: ctrl.signal,
       cache: 'no-cache'
     }).finally(() => clearTimeout(t))
-    if (!res.ok) return cache?.data ?? EMPTY
+    if (!res.ok) return fallback()
     const data = sanitize(await res.json())
-    cache = { at: now, data }
+    cache = { at: now, plan, data }
     return data
   } catch {
-    return cache?.data ?? EMPTY
+    return fallback()
   }
 }

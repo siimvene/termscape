@@ -12,7 +12,10 @@ import { defaultKanban } from '../../lib/kanban'
 import type { MenuItem } from '../ContextMenu'
 
 vi.mock('../../session/session', () => ({
-  useSession: () => ({ source: 'local', api: window.nodeTerminal })
+  useSession: () => ({ source: 'local', api: window.nodeTerminal }),
+  // The card modal's `ProjectSessionScope` asks for the card project's session and provides it.
+  sessionForProject: () => ({ id: 'local', source: 'local', api: window.nodeTerminal }),
+  SessionProvider: ({ children }: { children: unknown }) => children
 }))
 vi.mock('./CardModal', () => ({
   CardModal: (p: { session: { id: string }; initialView?: string; onDelete?: () => void; onSetColor?: (c: string) => void }) => (

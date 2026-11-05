@@ -211,6 +211,14 @@ update vX" item); on `update-downloaded` an OS notification also fires when the 
 unfocused. Exposed via `window.nodeTerminal.updates` (`UpdateApi`). macOS *silent* self-install
 requires a signed+notarized build; unsigned builds still surface the card for a manual download.
 Rules a refactor must not undo (pure + tested: `shared/update-gate.ts`, `renderer/lib/updateCardState.ts`):
+- **electron-updater is never imported at module scope** (it cost 32–47 ms warm before `ready`, on
+  every launch). `initUpdater` loads it through `UpdaterDeps.loadUpdater` (default: a
+  plain `require`) only where it is used — at init for a build with a feed, on a restart click in
+  dev, never for `no-channel` — and only AFTER the `appGetVersion` / `appGetStagedUpdate` /
+  `appRestartToUpdate` handlers are registered, which stay eager on every build (the renderer
+  invokes them on mount; an invoke with no handler rejects). Tests pass their double through
+  `loadUpdater`, because `vi.mock` does not reach a `require()`. Pinned in
+  `updater.no-channel.test.ts` and `src/main/lazy-deps.source.test.ts`.
 - **electron-updater keeps re-announcing a STAGED update** (the running binary is still old, so every
   6h check emits `update-available` → cached `update-downloaded` again, and on macOS re-stages the zip
   through Squirrel). The gate forwards and notifies **once per version**; once staged, `autoDownload`
@@ -246,6 +254,12 @@ Exposed split over two IPC handlers: `announcements.fetch()` → `messages`, `ap
 in `localStorage`); `update.mandatory`/`minSupported` flips `UpdateCard` into a blocking required-
 update state. The call no-ops under `DO_NOT_TRACK`/`NODETERM_TELEMETRY_DISABLED` or in unpackaged
 builds (unless `NODETERM_API_BASE` targets a local server). Schema example:
-`docs/announcements.example.json`. **Telemetry** (`src/main/telemetry.ts`) is a separate opt-out
+`docs/announcements.example.json`. **The request also states `plan=pro|free`** (offline
+`isPremium()`), because the admin console can aim a message at paid or free users and the feed is
+anonymous — the backend cannot look a device's plan up, and matches only on what we send (a build
+that sends no plan sees only audience-less messages). So an answer belongs to the plan it was asked
+with: the 5-min cache is keyed by plan, a failed read after a plan change keeps the update policy but
+NOT the other plan's messages, and the banner re-asks when `useEntitlement.isPremium` flips — else a
+"try Pro" message stays up for six hours after the user pays. **Telemetry** (`src/main/telemetry.ts`) is a separate opt-out
 ping to `api.nodeterm.dev/v1/ping` (version/OS on launch + daily), gated on
 `settings.telemetryEnabled` + the same build/DNT guards; toggle in Settings → Privacy.

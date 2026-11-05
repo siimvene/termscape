@@ -88,6 +88,8 @@ import {
 import type { PeerIdentity } from '../../shared/presence'
 import type { PaneOwner } from '../../shared/agents/pane-owner-predicate'
 import type { LaunchIntentExecutionResult } from '../../shared/types'
+import type { WhiteboardFile, WhiteboardSaveResult } from '../../shared/whiteboard'
+import { fitsOneWsFrame } from '../../shared/ws-frame'
 import { buildStubApi, unsupported } from './stubs'
 import { sanitizeStationNotices } from '@shared/station-notice'
 import { sanitizeOutcomeRecords } from '@shared/station-outcome'
@@ -383,6 +385,19 @@ export function buildRealApi(
     projectFileState: (folder: string) =>
       client.request(IPC.workspaceProjectFileState, folder) as ReturnType<
         WorkspaceApi['projectFileState']
+      >,
+    // REAL: core registers both (issue #1145), and the Server Edition stores projects the same way.
+    releaseFolderFiles: (projectId: string, removeTracked: boolean) =>
+      client.request(IPC.workspaceReleaseFolderFiles, projectId, removeTracked) as ReturnType<
+        WorkspaceApi['releaseFolderFiles']
+      >,
+    prepareFolderStorage: (projectId: string) =>
+      client.request(IPC.workspacePrepareFolderStorage, projectId) as ReturnType<
+        WorkspaceApi['prepareFolderStorage']
+      >,
+    projectStorage: (projectId: string) =>
+      client.request(IPC.workspaceProjectStorage, projectId) as ReturnType<
+        WorkspaceApi['projectStorage']
       >,
     // REAL: core broadcasts IPC.workspaceMigrated after a v2→v3 migration (workspace-store.ts).
     onMigrated: (cb) => client.subscribe(IPC.workspaceMigrated, cb as Listener),
@@ -690,6 +705,18 @@ export function buildFilesApi(
       client.request(IPC.filesSaveCanvasImage, projectId, name, dataBase64) as Promise<
         string | null
       >,
+    // Real: the whiteboard's side file sits beside the server's project.json.
+    // The server closes the WHOLE socket (code 1009) on a client frame over WS_MAX_PAYLOAD, so a
+    // board too big for one frame is refused here, before sending — the node shows "Not saved"
+    // instead of the browser tab losing its connection to every terminal.
+    saveWhiteboard: (projectId, nodeId, scene, thumbnailBase64, expectedRev) =>
+      fitsOneWsFrame([projectId, nodeId, scene, thumbnailBase64, expectedRev])
+        ? (client.request(IPC.filesSaveWhiteboard, projectId, nodeId, scene, thumbnailBase64, expectedRev) as Promise<
+            WhiteboardSaveResult | string | null
+          >)
+        : Promise.resolve(null),
+    readWhiteboard: (projectId, nodeId, sourceId, withScene) =>
+      client.request(IPC.filesReadWhiteboard, projectId, nodeId, sourceId, withScene) as Promise<WhiteboardFile | null>,
     // Real: the browser holds the picked sound's bytes and the data dir is the server's, so the
     // server stores it and serves it back by kind (issue #289). The browser's own path never leaves
     // the browser — a host-local path would not exist on the server anyway.
@@ -1128,7 +1155,9 @@ export function buildWallpaperApi(client: RpcClient): Pick<NodeTerminalApi, 'wal
     wallpaper: {
       listStills: () => client.request(IPC.wallpaperListStills) as Promise<WallpaperStill[]>,
       load: (w: DesktopWallpaper) => client.request(IPC.wallpaperLoad, w) as Promise<string | null>,
-      importImage: (p: string) => client.request(IPC.wallpaperImport, p) as Promise<DesktopWallpaper>
+      importImage: (p: string) => client.request(IPC.wallpaperImport, p) as Promise<DesktopWallpaper>,
+      listAerials: () => client.request(IPC.wallpaperListAerials) as Promise<WallpaperStill[]>,
+      aerialClips: (w: DesktopWallpaper) => client.request(IPC.wallpaperAerialClips, w) as Promise<string[]>
     }
   }
 }

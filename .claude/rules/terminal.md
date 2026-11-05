@@ -41,6 +41,36 @@ interferes; status bar off, **mouse on**, 50k history, `set-clipboard on` + `ter
 sessions survive when no client is attached. `src/shared/ssh.ts`'s `remoteTmuxConf` is the same
 config for an SSH project's remote tmux.
 
+**Exact tmux targets: every node id that becomes a `-t` goes through `exactPaneTarget` (`=name:`) or
+`exactSessionTarget` (`=name`)** (`core/tmux-naming.ts`, security audit F1/F2, 2026-10). tmux resolves
+a BARE target by exact name, then fnmatch, then PREFIX on a miss, and node ids end in a counter or a
+random tail: with only `nt-term-abc-12` alive, `send-keys -t nt-term-abc-1` typed into it,
+`capture-pane` read it and `display-message '#{pane_pid}'` named its process (measured, tmux 3.4).
+That made every node-keyed verb (send-text, typed chat input, send-keys, capture, pane command/cwd,
+pane owner, terminate-foreground, has-session, the control-mode shadow, an attach-only reattach) a way
+to reach a DIFFERENT node, whether its own session was gone or the id was a relay peer's invention.
+For an existing session `=name:` is the same pane the bare name was (current window, active pane,
+re-measured with three windows and a split). An exact miss is `can't find session` (exit 1), except
+`display-message`, which exits 0 with every format EMPTY — every parser here answers null for that.
+On a REMOTE command line the target is single-quoted: zsh's EQUALS option expands a word starting
+with `=`. Proven against a real tmux driving a real `PtyManager` (`pty-exact-target.realtmux.test.ts`).
+A new tmux call site owes the same, and both helpers refuse a name `sessionName` did not produce.
+
+**Every synchronous tmux call on main is bounded (`TMUX_BOOT_CMD_TIMEOUT_MS`, 2 s, via
+`PtyManager.runTmuxSync`).** `ensureTmux`'s `source-file` runs before the first window exists, and
+`ensureUpdateEnvKeys`' `show-options` / `set-option` run on a spawn; unbounded, a server that accepts
+the connection and never answers held main for the wedge's whole lifetime (4.05 s in a repro, i.e.
+forever against a server that never recovers). The bound kills only our short-lived
+client (SIGKILL, so one that ignores SIGTERM cannot keep `execFileSync` waiting), never the server.
+A timeout is `console.warn`ed and fails open (tmux stays resolved; the spawn goes ahead); "no server
+yet" stays silent, as it always was. A timeout also ends the rest of that call's tmux work — the
+next `set-option` would only wait out the same wedge — and a `show-options` / `set-option` timeout
+starts `TMUX_UPDATE_ENV_COOLDOWN_MS` (60 s) in which `ensureUpdateEnvKeys` makes no tmux call at
+all: every spawn passes the account-scope names, so without it each later spawn on a slow server
+would stall main again (20 terminals ≈ 40 s). After it, the next spawn probes again. Proven against a real client in
+`pty-tmux-wedged.realtmux.test.ts`. A new sync tmux call goes through `runTmuxSync`, not a bare
+`execFileSync`.
+
 **Every REMOTE tmux invocation starts with `remoteTmuxPathPrologue()`** (`shared/ssh.ts` — PATH
 **append**: `/opt/homebrew/bin`, `/usr/local/bin`, `/opt/local/bin`, `$HOME/.local/bin`): an ssh
 exec channel gets a non-login shell, and on a macOS host Homebrew's `shellenv` lives in
@@ -267,9 +297,15 @@ Lifecycle, by intent:
   sides: the renderer never calls `create` when `resolveSshRemote` came back empty
   (`CoState.offline` + the node's Reconnect button), and core refuses in `spawnNew`
   (`PtyCreateResult.unavailable`) so a master that dies inside the round-trip can't sneak through.
-  The refusal is **only** in `spawnNew` — a co-attach JOIN to a live session for that node id is
-  still correct. An offline node reports itself to `SshReconnector`, so the canvas heals itself;
-  `retryNow` (banner Reconnect / node Reconnect) skips the backoff and clears the refuse window.
+  The spawn refusal is in `spawnNew`, and `join` refuses (`'held-elsewhere'`) a `requireRemote`
+  create whose held session is local or on another host (host, user, or port differs) — a join to
+  the SAME remote's live session (a second view over the same endpoint) still attaches, and so does
+  a create that names no `sshRemote` onto a held remote session (its master momentarily down, or a
+  relay tab's create on the host, which carries none). The held session is never killed. A relay /
+  team tab's node, which may carry no `sshRemoteTmux` at all, is kept off this core by the session
+  it runs under plus a renderer-side `spawnBelongsElsewhere` refusal (Projects (tabs)). An
+  offline node reports itself to `SshReconnector`, so the canvas heals itself; `retryNow` (banner
+  Reconnect / node Reconnect) skips the backoff and clears the refuse window.
   **Whether a node is remote comes from its PROJECT, never from its own fields** (issue #1186,
   `@shared/ssh-project-nodes`). `requireRemote`/`sshRemoteTmux` used to be stamped only by this
   machine's node factories, but an SSH project's `project.json` lives on the host and other writers

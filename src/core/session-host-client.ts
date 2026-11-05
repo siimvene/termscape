@@ -52,6 +52,7 @@ import { latestClaimSize, type SizeClaim } from './pty-size'
 import { isTerminalReport } from './terminal-reports'
 import type { PreparedAgentLaunch } from './agent-launch'
 import type { HostImageStaging } from './session-host-runtime'
+import { sleep } from '../shared/sleep'
 
 export interface SessionSubscriber {
   onData(data: string): void
@@ -272,10 +273,6 @@ type ClientSessionState = {
   appliedWatch?: boolean
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
 function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error))
 }
@@ -469,8 +466,17 @@ export class SessionHostClient {
       /** Classify the running host's image for prepare-for-update (`resolveHostStaging`). Absent
        *  (every non-Windows or unpackaged client) ⇒ `unknown`. */
       hostStaging?: (host: { exe?: string; pid: number | null }) => Promise<HostImageStaging>
+      /** The pause between connect polls (the pre-launch publication retries and the post-launch
+       *  wait for the host). Absent = a real timer. Tests inject an immediate one: each failing
+       *  connect waited out 30 × 150 ms = 4.5 s of real time, and the staged/startup-wait suites
+       *  spent ~35 s of CI doing nothing else. Not fake timers: 94005975. */
+      connectPollSleep?: (ms: number) => Promise<void>
     }
   ) {}
+
+  private pollSleep(ms: number): Promise<void> {
+    return (this.deps.connectPollSleep ?? sleep)(ms)
+  }
 
   /** A staged host crashed on start this app run: launch from the installed binary from now on. */
   private stagedRuntimeDisabled = false
@@ -679,7 +685,7 @@ export class SessionHostClient {
     let lastPublicationError: Error | null = null
     const waitStartedAt = Date.now()
     for (let attempt = 0; ; attempt++) {
-      await sleep(150)
+      await this.pollSleep(150)
       try {
         if (await this.tryConnectOnce()) {
           const socket = this.socket
@@ -731,7 +737,7 @@ export class SessionHostClient {
         // Still empty after the small bound — but a host that is heartbeating that lock is simply
         // still starting, so the launch path's own wait owns it rather than failing this create.
         if (this.hostIsStarting()) return false
-        await sleep(50)
+        await this.pollSleep(50)
       }
     }
     throw lastError ?? new Error('session-host state publication did not complete')

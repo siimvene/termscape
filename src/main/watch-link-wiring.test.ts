@@ -64,6 +64,21 @@ describe('live-link wiring', () => {
     expect(s).toMatch(/unseal: corePlatform\.unsealSecret\?\.bind\(corePlatform\)/)
   })
 
+  it('the desktop wires read-back through the phone Chat screen\'s page reader, bound late', () => {
+    const s = read(MAIN)
+    const block = blockAfter(s, 'watchLinks = createWatchLinkService({', '  ')
+    // Both deps are optional: dropping either compiles and ships read-back inert.
+    expect(block).toMatch(/history: async \(nodeId, before\) => \{/)
+    expect(block).toMatch(/chat\.page\(nodeId, /)
+    expect(block).toMatch(/historySupported: \(nodeId\) => \{/)
+    expect(block).toMatch(/canChat\(capabilityAgentId\(agentId\)\)/)
+    // Declared before the service, assigned once host-chat exists (a later const would be a TDZ throw).
+    const decl = s.indexOf("let watchHistoryChat: Pick<HostChatOps, 'page'> | null = null")
+    expect(decl).toBeGreaterThan(-1)
+    expect(decl).toBeLessThan(s.indexOf('watchLinks = createWatchLinkService({'))
+    expect(s.indexOf('watchHistoryChat = hostBridge.chat')).toBeGreaterThan(s.indexOf('chat: createHostChat({'))
+  })
+
   it('the desktop stops the hosts on the FIRST quit pass, inside the raced flush and before killAll', () => {
     const s = read(MAIN)
     const quit = s.slice(s.indexOf("app.on('before-quit'"))

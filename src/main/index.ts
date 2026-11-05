@@ -22,6 +22,14 @@ import { IPC } from '../shared/ipc'
 // in-memory and redacted at its push boundary; the panel/IPC side is gated on the setting.
 const logBuffer = new LogBuffer()
 installLogSink(logBuffer)
+// Process-death telemetry: a GPU-process crash used to leave
+// no trace at all. Registered here, before 'ready', because the GPU process launches during boot
+// and can die there. LOG ONLY — Chromium respawns the GPU process itself; see process-health-log.ts.
+const childProcessGoneLine = createChildProcessGoneLog()
+app.on('child-process-gone', (_event, details) => {
+  const { level, msg } = childProcessGoneLine(details)
+  console[level](`[process] ${msg}`)
+})
 import { nativeMux, setNativeWindowsAgentOptIn, useNativeSsh } from '../core/remote-ssh/native/native-runtime'
 import { writeFilesToClipboard } from './clipboard-files'
 import { writeWindowsFileDrop } from './clipboard-files-win'
@@ -125,6 +133,7 @@ import {
 } from '../core/watch-link/service'
 import { createWatchLinkApi } from '../core/watch-link/api'
 import { WatchLinkStore } from '../core/watch-link/store'
+import { HISTORY_READ_BYTES } from '../core/watch-link/history'
 import { createWatchPty, watchRemoteFor, watchRemoteRecords, type WatchRemote } from '../core/watch-link/pty-seam'
 import { SshStore } from './ssh-store'
 import { GitService } from '../core/git-service'
@@ -190,6 +199,7 @@ import {
 import { answerHeldPermission, isStructuredTicket, type HeldPermissionIo } from '../core/agents/permission-decision'
 import type { AnswerPermissionPayload } from '../shared/agents/permission-answer'
 import { setMainWindow, getMainWindow, sendToMain, closeAction, createCrashReloadPolicy } from './main-window'
+import { createChildProcessGoneLog, createHangTracker, formatRenderProcessGone } from './process-health-log'
 import { WINDOW_VISIBILITY_EVENTS, windowVisibilitySignal } from './window-visibility'
 import {
   MENU_ITEM_ID_CLOSE,
@@ -247,7 +257,8 @@ import {
   workingNodes,
   mirrorEntry,
   pendingTicketsFor,
-  openAskFor
+  openAskFor,
+  nodesForAgentSession
 } from '../core/agent-status-mirror'
 import { mirrorCustomAgents } from '../core/mirror-custom-agents'
 import { paneOwnerProject } from '../core/agents/pane-ownership'
@@ -294,13 +305,14 @@ import { applyCursorRaw, cursorContextParse, readCursorContextSource, releaseCur
 import { GROK_CHAT_HISTORY_FILE } from '../core/agents/grok-paths'
 import { createGrokSubagentFormatter } from '../core/grok-subagent-format'
 import { geminiContextParse } from '../core/gemini-session'
+import { antigravityContextParse, rememberAntigravityModel } from '../core/antigravity-session'
 import { codexContextParse, codexContextModel } from '../core/codex-session'
 import { createCodexSubagentFormatter } from '../core/codex-subagent-format'
 import { codexHome } from '../core/usage/codex-usage'
 import { isAsyncSubagentLaunch, isCursorPayload, grokRawFields, type NormalizedAgentEvent } from '../shared/agents/normalize'
 import { applyGrokHookSession } from '../core/grok-hook-session'
 import { agentAccountColor } from '../shared/agents/account-color'
-import { capabilityAgentId } from '../shared/agents/config'
+import { canChat, capabilityAgentId } from '../shared/agents/config'
 import {
   setRemoteTranscriptReader,
   TITLE_TAIL_BYTES,
@@ -357,6 +369,7 @@ import { DRY_RUN_VERBS, dryRunRequested, dryRunRefusal } from '../shared/control
 import { browserFlagRefusal, issueFlagRefusal } from '../core/canvas-control-core'
 import { afterPrFlagRefusal } from '../shared/pr-wait'
 import { arrangeArgsRefusal } from '../shared/arrange-verb'
+import { geometryArgsRefusal } from '../shared/geometry-verbs'
 import { CONTROL_REQUEST_TIMEOUT_MS } from '../shared/control-confirm'
 import { createControlForwarder, type ControlForwardReply } from './control-forward'
 import { claimOpenedBrowser } from './browser-open-claim'
@@ -384,7 +397,7 @@ import { registerGrokCliIpc } from '../core/grok-cli'
 import { registerCursorCliIpc } from '../core/cursor-cli'
 import { refreshCodexIdentityCaps, registerCodexIdentityIpc } from '../core/codex-identity-caps'
 import { codexCliCaps, registerCodexCliIpc } from '../core/codex-cli'
-import { registerWallpaperIpc, setWallpaperImageOps } from '../core/wallpaper'
+import { registerWallpaperIpc, setWallpaperImageOps, setWallpaperMediaUrl } from '../core/wallpaper'
 import { nativeImageWallpaperOps } from './wallpaper-native-image'
 import { registerRunConfigIpc, stopAllRunWatches } from '../core/run-service'
 import { registerSimulatorIpc, setSimulatorNodeRefusal, shutdownOwnedSimulators, stopAllSimulators } from '../core/simulator/simulator-service'
@@ -424,7 +437,8 @@ import {
   loadOrCreateKeyPair,
   relayAllowed,
   API_BASE as RELAY_API_BASE,
-  RELAY_URL
+  RELAY_URL,
+  type HostChatOps
 } from './remote/host-service'
 import { initStandingHost } from './remote/standing-host'
 import { initRelayHost } from './remote/relay-host-service'
@@ -1398,7 +1412,23 @@ function createWindow(): BrowserWindow {
     })
   }
   const crashReload = createCrashReloadPolicy()
+  // Renderer hangs: Electron declares one after its own input-ack timeout and clears it on the
+  // next ack. One line when declared, one with the duration when it ends; logged, never acted on.
+  const hangs = createHangTracker()
+  win.on('unresponsive', () => {
+    const line = hangs.unresponsive(Date.now())
+    if (line) console[line.level](`[process] ${line.msg}`)
+  })
+  win.on('responsive', () => {
+    const line = hangs.responsive(Date.now())
+    if (line) console[line.level](`[process] ${line.msg}`)
+  })
   win.webContents.on('render-process-gone', (_event, details) => {
+    // The ring's only record that the page died — the reload below wipes the renderer's own console.
+    const gone = formatRenderProcessGone(details)
+    console[gone.level](`[process] ${gone.msg}`)
+    // A hang open on the dead page ends with it; the reloaded page's first hang is a new one.
+    hangs.reset()
     ptyManager.dropClient(presenceId)
     // A dead renderer sends no disarm and no focus-lost report. The reloaded page mounts no
     // recorder and no terminal, so without this the user would come back to an app where ⌘W does
@@ -1741,6 +1771,9 @@ app.whenReady().then(async () => {
   // Windows has no sips: convert (thumbnails, Windows stills, oversized imports) with Chromium's
   // own decoder. macOS keeps sips and Linux keeps no converter, byte for byte.
   if (process.platform === 'win32') setWallpaperImageOps(nativeImageWallpaperOps)
+  // Aerial wallpapers (macOS) stream through nt-media://; core allowlists only the clips and
+  // thumbnails its own manifest scan found.
+  setWallpaperMediaUrl(allowMediaPath)
   registerWallpaperIpc(settingsStore)
   registerRunConfigIpc()
   registerSimulatorIpc()
@@ -2129,8 +2162,11 @@ app.whenReady().then(async () => {
   // `localProjectCwd` is how a canvas image finds the project's own `.nodeterm/images/`. It
   // answers undefined for an SSH project (its cwd is on the host, and the image node reads
   // locally) and for a relay tab (not in this index at all) — both take the app-local fallback.
+  // `whiteboardLocation` is the same idea for a whiteboard, except that a folder project kept in app
+  // data keeps its boards in its own app-data root (see `whiteboardLocationForProject`).
   registerFsHandlers(corePlatform, {
-    localProjectCwd: (projectId: string) => workspaceStore.localCwdForProject(projectId)
+    localProjectCwd: (projectId: string) => workspaceStore.sideFilesFolderForProject(projectId),
+    whiteboardLocation: (projectId: string) => workspaceStore.whiteboardLocationForProject(projectId)
   })
 
   const githubSecret = new ElectronGitHubSecretStore(app.getPath('userData'), safeStorage)
@@ -2223,7 +2259,7 @@ app.whenReady().then(async () => {
         }
         return { kind: 'remote', remoteCwd: ref.remoteCwd, exec, fingerprint }
       }
-      const cwd = workspaceStore.localCwdForProject(projectId)
+      const cwd = workspaceStore.boardLogRootForProject(projectId)
       if (cwd) return { kind: 'local', cwd }
       return { kind: 'unsupported' }
     }
@@ -3085,6 +3121,10 @@ app.whenReady().then(async () => {
     parse: cursorContextParse,
     readSource: readCursorContextSource
   })
+  const antigravityContextTail = createContextTail(pushContextUpdate, {
+    parse: antigravityContextParse,
+    wholeFile: true
+  })
   // Remote (SSH-project) counterparts: a node whose pty runs on a remote host has its Claude
   // transcript on that host, so its meter / subagent transcript / search must read over the
   // project's ControlMaster. One RemoteFile bound to the SSH-project manager's own ssh runner
@@ -3394,6 +3434,8 @@ app.whenReady().then(async () => {
           return geminiContextTail
         case 'cursor':
           return cursorContextTail
+        case 'antigravity':
+          return antigravityContextTail
         default:
           return undefined
       }
@@ -3581,11 +3623,18 @@ app.whenReady().then(async () => {
   // once a minute. The send goes through `sendToMain`, which resolves the window AT SEND TIME and
   // no-ops while it is closed (macOS keeps the app alive without one) — the monitor's own
   // try/catch is the backstop, not the primary.
+  //
+  // The kernel leg (macOS only — absent elsewhere) is the one that actually fires there: the byte
+  // leg is silent on darwin and main's RSS never nears 4 GB. It runs the renderer levers ONLY, on an
+  // escalation of `kern.memorystatus_vm_pressure_level` (at most once per KERNEL_LEVER_GAP_MS at
+  // the same severity, so a flapping level does not re-run them); a kernel CRITICAL deliberately does
+  // NOT sweep the reaper yet — that is a separate, separately measured step (#211).
   createMemoryPressureMonitor({
     onPressure: (severity) => {
       sendToMain(IPC.appMemoryPressure, severity)
       if (severity === 'critical') void sessionReaper.sweep()
-    }
+    },
+    onKernelPressure: (severity) => sendToMain(IPC.appMemoryPressure, severity)
   }).start()
   // Pty-device pressure (core/pty-pressure.ts): the OTHER way this machine runs out, and the one
   // that actually happened. The memory monitor above could not see it — during the 2026-08-11
@@ -3622,6 +3671,17 @@ app.whenReady().then(async () => {
     unmeasuredSessions: () => ptyManager.zellijSessionCount(),
     // Windows (no tmux): the session host's sessions; undefined where it is not the backend.
     sessionHost: () => ptyManager.sessionHostListing(),
+    // The panel's "nodeterm itself" group: pids, types and CPU time only. Memory
+    // is NOT taken from here — on macOS `memory.workingSetSize` is resident size and misses the GPU
+    // helper's IOSurfaces (footprint 1557-1845 MB vs 96-153 MB), and `privateBytes` is Windows-only;
+    // core looks each pid up in the sweep's own footprint table instead. Called once per panel
+    // sweep, never on a timer.
+    appProcesses: () =>
+      app.getAppMetrics().map((m) => ({
+        pid: m.pid,
+        type: m.type,
+        ...(typeof m.cpu.cumulativeCPUUsage === 'number' ? { cpuSeconds: m.cpu.cumulativeCPUUsage } : {})
+      })),
     remote: {
       // Identity, not liveness: a DISCONNECTED SSH project is still someone else's machine, and
       // `connectedHosts()` alone would answer "local" for it — exactly the window the service's
@@ -3658,6 +3718,12 @@ app.whenReady().then(async () => {
   // Server Edition. `init()` decides nothing before the boot workspace load (R40): an empty answer
   // while the index is still being read is not evidence that a node is gone.
   // Where a watcher join goes (core's ONE rule, over this machine's records and its live masters).
+  // Read-back for a link's viewers (docs/live-links.md → Read-back) reads through the phone Chat
+  // screen's page reader (host-chat.ts, `hostBridge.chat` below): the node from this machine's
+  // records, the renderer's session id first, an SSH node read on its host and never here. That reader
+  // is built later in boot, so it is bound late; a read-back before it exists is a failed read the
+  // viewer may repeat. The link host cuts every page at the link's creation; this only reads.
+  let watchHistoryChat: Pick<HostChatOps, 'page'> | null = null
   const watchRemote = (nodeId: string): WatchRemote =>
     watchRemoteFor(nodeId, watchRemoteRecords(workspaceStore, (connectionId) => sshProjectManager?.refForProject(connectionId)))
   watchLinks = createWatchLinkService({
@@ -3692,6 +3758,17 @@ app.whenReady().then(async () => {
     // Zellij is a local-only backend) is not decided by this machine's backend choice: 'ok' (a host
     // with no tmux at all answers every keystroke false, which the link host reports as dropped).
     controlSupport: (nodeId) => (watchRemote(nodeId).requireRemote ? 'ok' : ptyManager.nodeControlSupport(nodeId)),
+    history: async (nodeId, before) => {
+      const chat = watchHistoryChat
+      if (!chat) throw new Error('read-back is not ready yet')
+      const page = await chat.page(nodeId, before === null ? { maxBytes: HISTORY_READ_BYTES } : { before, maxBytes: HISTORY_READ_BYTES })
+      return page === null || page === 'unsupported' ? { kind: 'unsupported' } : { kind: 'page', result: page }
+    },
+    // The same question host-chat's page asks before it reads: an agent the ⌘M view can render.
+    historySupported: (nodeId) => {
+      const agentId = workspaceStore.getNodeResolved(nodeId)?.agentId ?? mirrorEntry(nodeId)?.agentId
+      return !!agentId && canChat(capabilityAgentId(agentId))
+    },
     emit: (channel, ...args) => sendToOwners(corePlatform, channel, ...args)
   })
   registerWatchLinkIpc(corePlatform, watchLinks)
@@ -4004,6 +4081,23 @@ app.whenReady().then(async () => {
       if (p.hook_event_name === 'SessionEnd' && p.session_id) tail.untrack(p.session_id)
       return
     }
+    if (agentId === 'antigravity') {
+      const p = payload as {
+        conversationId?: string
+        transcriptPath?: string
+        modelName?: string
+      }
+      rememberAntigravityModel(p.modelName)
+      const transcriptPath = safeTranscriptPath(p.transcriptPath)
+      if (p.conversationId && transcriptPath) {
+        antigravityContextTail.track(p.conversationId, transcriptPath)
+      }
+      if (nodeId && p.conversationId) nodeContextSession.set(nodeId, p.conversationId)
+      if (nodeId && p.conversationId && transcriptPath) {
+        setNodeTranscript(nodeId, p.conversationId, transcriptPath)
+      }
+      return
+    }
     if (agentId !== 'claude') return
     // Mirror the per-node "what it's doing now" activity line for the phone (mobile-usage-inbox).
     // Runs BEFORE the local/remote split so it covers remote (SSH) nodes too — it needs only
@@ -4199,6 +4293,7 @@ app.whenReady().then(async () => {
       grokContextTail.untrack(sessionId)
       piSessions.untrack(sessionId)
       cursorContextTail.untrack(sessionId)
+      antigravityContextTail.untrack(sessionId)
       remoteContextTail.untrack(sessionId)
       remoteTranscriptBySession.delete(sessionId)
       locatedTranscriptSessions.delete(sessionId)
@@ -4621,6 +4716,11 @@ app.whenReady().then(async () => {
     // ran as a grid.
     const arrangeRefusal = verb === 'arrange' ? arrangeArgsRefusal(args) : null
     if (arrangeRefusal) return { ok: false, error: arrangeRefusal, message: arrangeRefusal }
+    // `resize` / `place` / `list --geometry` / a coordinate or size flag on `move` (issue #1288): same
+    // placement, same reason — without it `move --nodes a --x 10` reached the renderer and pulled a
+    // framed node out to the top level, and a bad `--width` would be the renderer's to explain.
+    const geometryRefusal = geometryArgsRefusal(verb, args)
+    if (geometryRefusal) return { ok: false, error: geometryRefusal, message: geometryRefusal }
     // A station's report about ITSELF: recorded in main's store, board-logged on its own card, and
     // never forwarded — there is no canvas work in it, and the renderer hears the store's push.
     if (verb === 'report-outcome') {
@@ -5112,6 +5212,7 @@ app.whenReady().then(async () => {
     // to have focused (that gap read as "cwd is outside the shared project roots" on the phone).
     workspaceRoots: () => workspaceStore.localProjectCwds()
   }
+  watchHistoryChat = hostBridge.chat
   // The renderer owns the Eco hibernation flag (persisted in ITS localStorage) and main only
   // mirrors it — same direction as `terminalFocused`. Feeds the agent-status mirror so the phone
   // renders SLEEPING (and re-fed at renderer boot from the persisted store, so a desktop restart
@@ -5148,7 +5249,10 @@ app.whenReady().then(async () => {
       nodeOfSession: (sessionId) => ptyManager.nodeOfSession(sessionId),
       projectCwd: (projectId) => workspaceStore.localCwdForProject(projectId),
       projectIsRemote: (projectId) => !!workspaceStore.projectTargetInfo(projectId)?.ssh,
-      hostDataDir: app.getPath('userData')
+      hostDataDir: app.getPath('userData'),
+      // A `context:update` is keyed by the agent session; the mirror says which node runs it, so a
+      // guest gets a meter only for a session of the shared project.
+      nodesOfAgentSession: (sessionId) => nodesForAgentSession(sessionId)
     }
   })
   // Standing (phone) relay host: keep a host connection registered so a paired phone can reach

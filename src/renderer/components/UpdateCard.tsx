@@ -14,9 +14,10 @@ import { noteVersionSeen, releaseHighlights, releaseNotesUrl } from '../lib/rele
 
 // The updater lifecycle as one state machine (lib/updateCardState.ts — every transition rule and
 // why lives there), driving a fixed bottom-right card. The contract, in short: automatic checks are
-// SILENT until an update is downloaded (the card's single prompt — the title-bar button keeps the
-// install path once the card is closed); a user-initiated check shows progress and its answer; a
-// staged update is never downgraded or re-opened by a repeat; a restart click shows
+// SILENT until an update is downloaded (the card's single prompt — the title-bar button already
+// shows from the moment the newer version is known, and keeps the install path once the card is
+// closed); a user-initiated check shows progress and its answer; a staged update is never
+// downgraded or re-opened by a repeat; a restart click shows
 // Preparing…/Restarting… until the app goes away.
 
 /** Re-read the mandatory-update policy this often (main's /v1/check cache refreshes on the same
@@ -171,6 +172,10 @@ export function UpdateCard(): JSX.Element | null {
   useEffect(() => {
     if (status.kind === 'downloaded' || status.kind === 'preparing' || status.kind === 'restarting') {
       setPending({ kind: 'downloaded', version: status.version })
+    } else if (status.kind === 'available') {
+      // Even while the card stays quiet: the button is how an automatic check says "you are on an
+      // old version" without a progress bar nobody asked for.
+      setPending({ kind: 'available', version: status.version })
     } else if (status.kind === 'manual') {
       setPending({ kind: 'manual', version: status.version })
     } else if (status.kind === 'required') {

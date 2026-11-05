@@ -23,9 +23,8 @@ import { isCursorBackgroundEvent, isCursorChildToolEvent, type NormalizedAgentEv
 import type { AgentId } from '../shared/agents/config'
 import type { SubagentTail } from './subagent-tail'
 import { CURSOR_CHAT_ID_RE, cursorConfigDir, cursorToolArg, cursorUserText } from './cursor-chat'
+import { isRecord } from '../shared/is-record'
 
-type Obj = Record<string, unknown>
-const isObj = (v: unknown): v is Obj => !!v && typeof v === 'object' && !Array.isArray(v)
 const REDACTED = '[REDACTED]'
 
 /** One chunk of a child's agent-transcript JSONL as card text. Stateless, fresh per card. */
@@ -39,14 +38,14 @@ export function createCursorSubagentFormatter(): (text: string) => string {
       } catch {
         continue
       }
-      if (!isObj(o)) continue
+      if (!isRecord(o)) continue
       if (o.type === 'turn_ended') {
         out.push(o.status === 'success' ? '✓ done' : `✗ ${typeof o.status === 'string' ? o.status : 'ended'}`)
         continue
       }
-      const content = isObj(o.message) && Array.isArray(o.message.content) ? o.message.content : []
+      const content = isRecord(o.message) && Array.isArray(o.message.content) ? o.message.content : []
       for (const c of content) {
-        if (!isObj(c)) continue
+        if (!isRecord(c)) continue
         if (c.type === 'text' && typeof c.text === 'string') {
           const t = o.role === 'user' ? cursorUserText(c.text) : c.text.replaceAll(REDACTED, '').trim()
           if (t) out.push(t)
@@ -92,7 +91,7 @@ export function createCursorSubagentTracker(deps: {
   const nodes = new Map<string, NodeEntry>()
   return {
     onRaw(agentId, nodeId, payload) {
-      if (!nodeId || !isObj(payload)) return
+      if (!nodeId || !isRecord(payload)) return
       const ev = payload.hook_event_name
       const conv = typeof payload.conversation_id === 'string' ? payload.conversation_id : undefined
       const isTool = ev === 'preToolUse' || ev === 'postToolUse' || ev === 'postToolUseFailure'

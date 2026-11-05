@@ -57,6 +57,22 @@ vi.mock('./pty-devices', async (importOriginal) => ({
   readPtyDevices: () => ({ ceiling: 511, inUse: 8 })
 }))
 
+// The "still JOINS" case holds a REMOTE session, whose spawn needs `findSsh` to resolve (without it
+// the remote branch is skipped) and whose agent-socket probe would run a real `ssh -G`. Every other
+// executable lookup is the real one.
+vi.mock('./exec-path', async (importOriginal) => {
+  const real = await importOriginal<typeof import('./exec-path')>()
+  return {
+    ...real,
+    findExecutableSync: (bin: string, fallbacks?: string[]) =>
+      bin === 'ssh' ? '/usr/bin/ssh' : real.findExecutableSync(bin, fallbacks)
+  }
+})
+vi.mock('./remote-ssh/agent-probe', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./remote-ssh/agent-probe')>()),
+  probeAgentSockToPin: async () => undefined
+}))
+
 describe('pty create: requireRemote never falls back to a local shell', () => {
   let fake: FakePlatform
   let manager: import('./pty-manager').PtyManager
@@ -70,6 +86,7 @@ describe('pty create: requireRemote never falls back to a local shell', () => {
     manager.registerIpc()
   })
   afterEach(() => {
+    vi.restoreAllMocks()
     resetPlatformForTests()
   })
 
@@ -98,11 +115,29 @@ describe('pty create: requireRemote never falls back to a local shell', () => {
     expect(res.sessionId).not.toBe('')
   })
 
-  it('still JOINS a live session for that node — only a fresh local spawn is refused', async () => {
-    // The session is already running (it was created while the master was up). A second view —
-    // the kanban card modal, another window — must attach to it: the session runs wherever it
-    // runs, and refusing the join would break a perfectly healthy remote terminal.
-    const first = await create(ALICE, {})
+  it('still JOINS a live REMOTE session for that node — only a fresh local spawn is refused', async () => {
+    // The session is already running on the host (it was created while the master was up). A
+    // second view — the kanban card modal, another window — whose master is momentarily down must
+    // attach to it: refusing the join would break a perfectly healthy remote terminal. (A held
+    // LOCAL session is the opposite case and is refused: pty-require-remote-join.test.ts.)
+    const internals = manager as unknown as {
+      remoteSessionVerdict: () => Promise<string>
+      captureForResync: (s: string) => Promise<string>
+      paneCursor: (s: string) => Promise<unknown>
+    }
+    // No host to ask: the freshness read answers "absent" (so the first create spawns its ssh
+    // client) and the joiner's paint capture answers nothing, instead of running a real ssh.
+    vi.spyOn(internals, 'remoteSessionVerdict').mockResolvedValue('absent')
+    vi.spyOn(internals, 'captureForResync').mockResolvedValue('')
+    vi.spyOn(internals, 'paneCursor').mockResolvedValue(undefined)
+    const first = await create(ALICE, {
+      requireRemote: true,
+      sshRemote: { controlPath: '/tmp/nt-test-cm-require-remote', conn: { host: 'h1', user: 'u' }, remoteCwd: '/srv/app' }
+    })
+    expect(first.unavailable).toBeUndefined()
+    expect(spawned).toHaveLength(1)
+    expect(spawned[0].file).toBe('/usr/bin/ssh') // the remote branch, never a local shell
+
     const joined = await create(BOB, { requireRemote: true })
 
     expect(spawned).toHaveLength(1)

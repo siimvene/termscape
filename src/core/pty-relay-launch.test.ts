@@ -249,8 +249,9 @@ describe('sendKeys into a session-host pane', () => {
         // A LOCAL node with no client held still goes to the local socket, as before.
         expect(await m.sendKeys('local-n', [{ digit: '1' }, { name: 'Enter' }])).toBe(true)
         expect(fs.readFileSync(log, 'utf8').trim().split('\n')).toEqual([
-          '-L node-terminal send-keys -t nt-local-n -l 1',
-          '-L node-terminal send-keys -t nt-local-n Enter'
+          // The EXACT target (`=name:`): a bare one prefix-matches a longer session on a miss.
+          '-L node-terminal send-keys -t =nt-local-n: -l 1',
+          '-L node-terminal send-keys -t =nt-local-n: Enter'
         ])
       } finally {
         fs.rmSync(dir, { recursive: true, force: true })

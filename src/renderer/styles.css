@@ -204,6 +204,28 @@
   --nt-anim-state: paused;
 }
 
+/* React Flow's own infinite animation joins the gate here. `@xyflow/react/dist/style.css`
+   (imported at the top of this file) runs `dashdraw 0.5s linear infinite` on every `animated`
+   edge — working subagent and loop edges, and the driven-browser rope — and on an animated
+   connection line. That sheet never reads `--nt-anim-state`, so inheriting the variable did
+   nothing and both the idle gate and the covered-canvas gate missed it. MEASURED (dev build, one
+   synthetic edge with React Flow's real classes on a silent 12-terminal canvas, idle gate set,
+   3 alternating 30 s rounds): Liquid Glass 79 % of a core in the GPU process + 36 % renderer and
+   +340 MB GPU footprint; dark 31.5 % + 29 %; with this rule both fell to the no-edge baseline
+   (0.5 % GPU, 3.3 % renderer). The selectors are copied verbatim from xyflow's sheet, so the
+   specificity is identical and this wins on order alone (it comes after the @import); it sets ONLY
+   the play-state, so the shorthand, the dash and the interaction path's `animation: none` are
+   untouched. `styles.animation-gate.test.ts` scans xyflow's sheet too, and fails if an upgrade adds
+   an infinite animation under a selector not listed here.
+
+   This covers idle and covered only. A FOCUSED window still pays the full per-edge cost for as
+   long as an edge works; a cheaper working-edge style is a separate design call, and the driven
+   rope keeps flowing while focused by decision (see CLAUDE.md § Idle energy). */
+.react-flow__edge.animated path,
+.react-flow__connection .animated {
+  animation-play-state: var(--nt-anim-state);
+}
+
 /* ---- Light appearance ----------------------------------------------------------------------
    Set by App.tsx from `settings.appTheme` (see lib/appTheme.ts); absent = dark, so an install
    that never picks one is byte-for-byte unchanged.
@@ -398,7 +420,8 @@ body,
 }
 
 /* Title-bar "Update" button (Figma-style): right after the traffic lights, deliberately loud and
-   not dismissible, shown only while an update is staged / owed (state/pendingUpdate.ts). */
+   not dismissible, shown from the moment a newer version is known until it is installed
+   (state/pendingUpdate.ts). */
 .tabbar__update {
   display: inline-flex;
   align-items: center;
@@ -1048,6 +1071,24 @@ body,
   box-shadow: 0 12px 36px rgba(0, 0, 0, calc(0.55 * var(--shadow-k)));
 }
 
+/* The add menu lists every node kind and agent (860px+ on a stock setup), so on a short window its
+   top ran up under the tab bar and off the screen, where those rows could not be clicked. It is
+   capped to the space between the tab bar and the dock, and its rows scroll inside an inner list:
+   scrolling the menu box itself would scroll its glass `::before` layer away with the rows. 54px
+   is the dock's measured height, 16px the menu's gap above the dock plus a margin below the tab
+   bar. The agent flyouts are portaled out of the list (Dock.tsx). */
+.dock-add-menu {
+  max-height: calc(100vh - var(--tabbar-h) - var(--float-gap) - 54px - 16px);
+}
+.dock-menu__list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
 .dock-menu button {
   display: flex;
   align-items: center;
@@ -1641,8 +1682,8 @@ body,
    way, the scripted gesture 36 s vs 28 s); without it, 0. camera-moving.test.ts pins its absence. */
 /* The blur is re-rasterised for every glass node on every frame of a pan/zoom (their backdrop
    moves under them). With Keep blur while moving OFF (settings.glassBlurWhileMoving), Canvas marks
-   the flow wrapper while the camera moves; the tint stays, and the tint alone is what keeps text at
-   4.5:1, so only the frosting pauses. With it on (the default) the class is never set. */
+   the flow wrapper while the camera moves; the tint stays, plus left of the Readable tick the
+   backdrop squeeze (Liquid Glass block), so text keeps 4.5:1 and only the frosting pauses. With it on (the default) the class is never set. */
 .canvas-moving .term-node.term-node--glass {
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
@@ -4393,6 +4434,26 @@ body,
 }
 .react-flow.has-wallpaper .react-flow__background {
   opacity: 0.3;
+}
+/* An aerial wallpaper's layer (AerialWallpaper.tsx). The canvas layer is a fixed SIBLING before
+   `.canvas-root` with z-index auto: it creates no stacking context, and the root (positioned, later
+   in tree order) paints all of its content over it, exactly as over its own background. The board
+   layer sits inside `.kanban-overlay` (a stacking context already: fixed, z 25) at z-index -1, above
+   the overlay's still and below its content, fixed to the viewport like the board's still. */
+.aerial-wallpaper {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+}
+.aerial-wallpaper--board {
+  z-index: -1;
+}
+.aerial-wallpaper > video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .flow-wrap {
@@ -17152,18 +17213,25 @@ body.focus-mode .dock:hover {
      HIG liquid-glass › Tauri and Electron suggests about 1.2–1.5). */
   --glass-sat: calc(150% + 30% * max(0, 1 - var(--glass-t) / 0.7));
   --glass-refract: url(#nt-refract);
-  --glass-blur: blur(calc(16px + 12px * var(--glass-t))) saturate(var(--glass-sat))
-    var(--glass-refract);
+  /* `--glass-frost` (light only, below) is the backdrop squeeze of lib/glassContrast.ts: last in
+     the text and control chains, a colour matrix that moves no pixels. Unset in dark. */
+  /* Canvas cards and terminal nodes frost far less toward Clear: 4px at Clear (picked by eye, the
+     wallpaper reads through), the same 24.4px as before at the Readable tick, 28px at Tinted. No
+     `--glass-frost` here: the cards' own squeeze (`--glass-node-squeeze`) already carries the frost
+     floor for their slider position, and stacking both washed them out twice. */
+  --glass-blur: blur(calc(16px + 12px * var(--glass-t) - 12px * max(0, 1 - var(--glass-t) / 0.7)))
+    saturate(var(--glass-sat)) var(--glass-refract);
   /* Small controls left of the tick: the backdrop under them is DIMMED (dark theme) or brightened
      (light theme) as the fill thins, toward Apple's "dark dimming layer" for bright content
      (materials.md). 1 at the tick and right of it; `--glass-control-dim` at Clear. The fill alone
      (0.35) left the tab label at 1.98:1 over the Sunrise gradient. It moves backdrop pixels only. */
   --glass-control-dim: 0.7;
   --glass-control-blur: blur(calc(16px + 12px * var(--glass-t))) saturate(var(--glass-sat))
-    brightness(calc(1 - (1 - var(--glass-control-dim)) * max(0, 1 - var(--glass-t) / 0.7))) var(--glass-refract);
+    brightness(calc(1 - (1 - var(--glass-control-dim)) * max(0, 1 - var(--glass-t) / 0.7))) var(--glass-refract)
+    var(--glass-frost,);
   /* Text surfaces never frost less than at the Readable tick (0.7), whatever the slider says. */
   --glass-text-blur: blur(calc(16px + 12px * max(var(--glass-t), 0.7)))
-    saturate(150%) var(--glass-refract);
+    saturate(150%) var(--glass-refract) var(--glass-frost,);
   /* Terminal nodes frost 15% less than the chrome (the user asked for less blur under the terminal
      windows): same curve, radius × 0.85, same saturation and refraction. They also FLATTEN the
      backdrop's luminance (HIG: regular glass "blurs and adjusts the luminosity"): a blurred photo
@@ -17172,7 +17240,7 @@ body.focus-mode .dock:hover {
      keeps the photo (1), Readable 0.3, Tinted 0 (flat — the tint is 0.95 there anyway). Measured
      at Readable, empty glass over the lake photo's snow/water edge: brightness swing 2.2:1 → 1.28:1
      (0.51 still left 1.53:1). */
-  --glass-term-blur: blur(calc((16px + 12px * var(--glass-t)) * 0.85))
+  --glass-term-blur: blur(calc((16px + 12px * var(--glass-t) - 12px * max(0, 1 - var(--glass-t) / 0.7)) * 0.85))
     saturate(var(--glass-sat)) contrast(calc(1 - var(--glass-t))) var(--glass-refract);
 }
 
@@ -17208,7 +17276,8 @@ body.focus-mode .dock:hover {
     .pubdlg,
     .consent-card,
     .github-issue-modal,
-    .mlaunch
+    .mlaunch,
+    .empty-canvas-hint
   ) {
   background: var(--glass-chrome-bg) !important;
   -webkit-backdrop-filter: var(--glass-text-blur);
@@ -17232,7 +17301,23 @@ body.focus-mode .dock:hover {
   -webkit-backdrop-filter: var(--glass-control-blur);
   backdrop-filter: var(--glass-control-blur);
 }
+/* The empty-canvas hint sits straight on the wallpaper, where its faint ink vanished (dark text on a
+   dark wallpaper in light glass). Under glass it is a small text-surface pill instead. */
+:root[data-nt-glass='on'] .empty-canvas-hint {
+  inset: 50% auto auto 50%;
+  transform: translate(-50%, -50%);
+  padding: 14px 20px;
+  border: 1px solid var(--glass-edge);
+  border-radius: 14px;
+  color: var(--text);
+}
+:root[data-nt-glass='on'] .empty-canvas-hint .kbd {
+  opacity: 1;
+}
 :root[data-nt-glass='on'][data-theme='light'] {
+  /* Lifts a black backdrop to grey 0.5 (GLASS_LIGHT_FROST): light glass over a dark wallpaper reads
+     as frost, not mud. Only lifts, so dark ink on it only gains contrast. */
+  --glass-frost: contrast(0.330) brightness(1.504);
   --glass-control-dim: 1.3;
   --muted: rgba(var(--tint-rgb), 0.8);
   --glass-placeholder: rgba(var(--tint-rgb), 0.85);
@@ -17761,7 +17846,7 @@ body.focus-mode .dock:hover {
 /* An empty field must look empty (visual QA round 3, NM1): the placeholder's 4.5:1 floor sits at
    --text's own alpha in light (0.85), so TYPED text in chrome fields takes --text-strong instead.
    Terminal nodes and the card-modal terminal keep their theme ink; notes keep their own. */
-:root[data-nt-glass='on'] :is(input:not([type]), input[type='text'], input[type='search'], textarea):not(.term-node *, .sticky-node *, .kanban-modal__termwrap *, .monaco-editor *) {
+:root[data-nt-glass='on'] :is(input:not([type]), input[type='text'], input[type='search'], textarea):not(.term-node *, .sticky-node *, .kanban-modal__termwrap *, .monaco-editor *, .excalidraw *) {
   color: var(--text-strong);
 }
 :root[data-nt-glass='on'] .settings-nav-row {
@@ -17783,13 +17868,14 @@ body.focus-mode .dock:hover {
 }
 
 /* Every node kind. Terminal nodes keep their own theme-derived tint (.term-node--glass, above);
-   the others take the chrome fill here. Bodies
+   the others take `--glass-node-bg`, the chrome colour at the SLIDER's alpha (App.tsx), with
+   `--glass-node-squeeze` holding their text at 4.5:1 left of the Readable tick. Bodies
    that are another renderer's surface — Monaco, a <webview>, a <video> — stay opaque: they paint
    their own background. Sticky notes keep their colour: the colour IS the note. */
 :root[data-nt-glass='on'] :is(.files-node, .loop-node, .subagent-node, .trigger-node, .dino-node) {
-  background: var(--glass-chrome-bg);
-  -webkit-backdrop-filter: var(--glass-blur);
-  backdrop-filter: var(--glass-blur);
+  background: var(--glass-node-bg);
+  -webkit-backdrop-filter: var(--glass-blur) var(--glass-node-squeeze,);
+  backdrop-filter: var(--glass-blur) var(--glass-node-squeeze,);
 }
 :root[data-nt-glass='on']
   .canvas-moving
@@ -17797,13 +17883,40 @@ body.focus-mode .dock:hover {
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
 }
+/* ...but every node keeps its squeeze: left of the Readable tick it, not the tint, holds the text
+   at 4.5:1. A colour matrix with no blur, so the pan still sheds the expensive part. */
+:root[data-nt-glass='on'] .canvas-moving .term-node {
+  -webkit-backdrop-filter: var(--term-glass-backdrop, none);
+  backdrop-filter: var(--term-glass-backdrop, none);
+}
+:root[data-nt-glass='on'] .canvas-moving :is(.files-node, .loop-node, .subagent-node, .trigger-node, .dino-node) {
+  -webkit-backdrop-filter: var(--glass-node-squeeze, none);
+  backdrop-filter: var(--glass-node-squeeze, none);
+}
+/* Subagent cards: no clay stripe (Liquid Glass drops window accents, the dot keeps the state), and
+   the transcript is ink on the card's glass instead of a black slab with hard-coded grey text. */
+:root[data-nt-glass='on'] .subagent-node {
+  border-color: var(--glass-edge);
+  border-left-width: 1px;
+}
+:root[data-nt-glass='on'] .subagent-node.working .subagent-node__dot {
+  background: var(--state-working);
+}
+:root[data-nt-glass='on'] .subagent-node__term {
+  background: transparent;
+  border-color: var(--glass-edge);
+  color: var(--text);
+}
 
 /* No per-node accent colour on a window (the sessions list and the kanban board keep them). The
    top border and the colour dot are INLINE styles from `data.color`, hence !important. The dot
    stays as a neutral ring: it is also the button that opens the colour picker. */
 :root[data-nt-glass='on'] .term-node {
-  -webkit-backdrop-filter: var(--glass-term-blur);
-  backdrop-filter: var(--glass-term-blur);
+  /* `--term-glass-backdrop` is this node's squeeze (useTerminalGlass): what keeps its text at 4.5:1
+     left of the Readable tick. Unset when the tint alone suffices. Under Reduce Transparency the
+     chain is `none brightness(...)`, which is invalid and so computes to none, as before. */
+  -webkit-backdrop-filter: var(--glass-term-blur) var(--term-glass-backdrop,);
+  backdrop-filter: var(--glass-term-blur) var(--term-glass-backdrop,);
   border-color: var(--glass-edge);
   border-top-width: 1px;
   border-top-color: var(--glass-edge) !important;
@@ -17930,7 +18043,8 @@ body.focus-mode .dock:hover {
 }
 /* The card modal's terminal: the same glass as a terminal node (ModalTerminal sets the
    `--term-glass-*` tint inline). The modal itself is text-surface glass (listed above), so the
-   tint needs no blur of its own; the tint alone carries its foreground's 4.5:1. */
+   tint needs no blur of its own. It never goes clearer than the Readable tick
+   (`useTerminalGlass(theme, true)`), so the tint alone carries its foreground's 4.5:1. */
 /* The card modal's comments & activity panel hard-codes 35–55% ink for its title, times and events
    (3.1–3.6:1 on glass, visual QA M3): secondary label on glass, like the rest of the look. */
 :root[data-nt-glass='on'] :is(.board-log__title, .board-log__hint, .board-log__time, .board-log__event-body) {
@@ -18516,4 +18630,97 @@ body.focus-mode .dock:hover {
   justify-content: flex-end;
   gap: 6px;
   margin-top: 2px;
+}
+
+/* ── Whiteboard node (nodes/WhiteboardNode.tsx) ─────────────────────────────────────────────
+   The node shows a still picture of the board; the live Excalidraw editor is a fixed overlay on
+   document.body laid over the node's box (see the component for why it is not inside the node). */
+.whiteboard-node {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.whiteboard-node.selected {
+  box-shadow: 0 0 0 2px var(--accent);
+}
+.whiteboard-node__header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px;
+  background: var(--surface-overlay);
+}
+.whiteboard-node__body {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg);
+  outline: none;
+  cursor: crosshair;
+}
+.whiteboard-node__thumb {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  pointer-events: none;
+}
+.whiteboard-node__hint {
+  color: var(--muted);
+  font-size: 13px;
+  pointer-events: none;
+}
+.whiteboard-node__save-failed {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--state-error) 15%, transparent);
+  color: var(--state-error);
+  font-size: 11px;
+  font-weight: 600;
+}
+/* "Keep mine" / "Discard my changes": the way forward from a save that did not land. */
+.whiteboard-node__save-action {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text);
+  font-size: 11px;
+  cursor: pointer;
+}
+.whiteboard-node__save-action:hover {
+  background: var(--panel-2);
+  color: var(--text-strong);
+}
+/* The canvas area, in .canvas-root coordinates: clips the live editor to the canvas and stacks it
+   under the sessions sidebar (z 12) and the Dock (z 20), which sit beside .flow-wrap. */
+.whiteboard-clip {
+  position: absolute;
+  z-index: 10;
+  overflow: hidden;
+  pointer-events: none;
+}
+.whiteboard-overlay {
+  position: absolute;
+  overflow: hidden;
+  border-radius: 0 0 9px 9px;
+  background: var(--bg);
+  pointer-events: auto;
+}
+.whiteboard-overlay__loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--muted);
+  font-size: 13px;
 }

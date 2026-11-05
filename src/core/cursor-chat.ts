@@ -36,10 +36,10 @@ import { metaString, summarizeResult } from './transcript-reader'
 import { opencodePageMessages } from './opencode-chat'
 import { isCursorBackgroundEvent, isCursorChildToolEvent } from '../shared/agents/normalize'
 import { recordRawToolEvent } from './agent-status-mirror'
+import { isRecord } from '../shared/is-record'
 
 type ToolPart = Extract<ChatPart, { kind: 'tool' }>
 type Obj = Record<string, unknown>
-const isObj = (v: unknown): v is Obj => !!v && typeof v === 'object' && !Array.isArray(v)
 
 // ── Pure parsing ────────────────────────────────────────────────────────────────────────────────
 
@@ -60,7 +60,7 @@ const ARG_KEYS = ['command', 'pattern', 'glob_pattern', 'path', 'target_director
 
 export function cursorToolArg(args: unknown): string {
   if (typeof args === 'string') return args.slice(0, CHAT_TOOL_ARG_MAX)
-  if (!isObj(args)) return ''
+  if (!isRecord(args)) return ''
   for (const k of ARG_KEYS) {
     const v = args[k]
     if (typeof v === 'string' && v) return v.slice(0, CHAT_TOOL_ARG_MAX)
@@ -72,7 +72,7 @@ export function cursorToolArg(args: unknown): string {
 function resultText(p: Obj): string {
   if (typeof p.result === 'string') return p.result
   if (Array.isArray(p.experimental_content)) {
-    return p.experimental_content.map((c) => (isObj(c) && typeof c.text === 'string' ? c.text : '')).filter(Boolean).join('\n')
+    return p.experimental_content.map((c) => (isRecord(c) && typeof c.text === 'string' ? c.text : '')).filter(Boolean).join('\n')
   }
   return p.result === undefined ? '' : JSON.stringify(p.result)
 }
@@ -101,7 +101,7 @@ export function parseCursorChat(raw: readonly unknown[]): CursorChatParse {
   let skipped = 0
   let lastAssistant: Obj | undefined
   for (const m of raw) {
-    if (!isObj(m)) {
+    if (!isRecord(m)) {
       skipped++
       continue
     }
@@ -113,7 +113,7 @@ export function parseCursorChat(raw: readonly unknown[]): CursorChatParse {
         // A string user message is harness context, never typed. Typed text is a `<user_query>`.
         const texts: ChatPart[] = []
         for (const p of parts) {
-          const t = isObj(p) && p.type === 'text' && typeof p.text === 'string' ? cursorUserText(p.text) : undefined
+          const t = isRecord(p) && p.type === 'text' && typeof p.text === 'string' ? cursorUserText(p.text) : undefined
           if (t !== undefined) texts.push({ kind: 'text', text: t })
         }
         if (texts.length) messages.push({ role: 'user', parts: texts })
@@ -124,7 +124,7 @@ export function parseCursorChat(raw: readonly unknown[]): CursorChatParse {
         const out: ChatPart[] = []
         if (typeof m.content === 'string' && m.content.trim()) out.push({ kind: 'text', text: m.content })
         for (const p of parts) {
-          if (!isObj(p)) {
+          if (!isRecord(p)) {
             skipped++
             continue
           }
@@ -143,7 +143,7 @@ export function parseCursorChat(raw: readonly unknown[]): CursorChatParse {
       }
       case 'tool':
         for (const p of parts) {
-          if (!isObj(p) || p.type !== 'tool-result') {
+          if (!isRecord(p) || p.type !== 'tool-result') {
             skipped++
             continue
           }
@@ -160,8 +160,8 @@ export function parseCursorChat(raw: readonly unknown[]): CursorChatParse {
   const out: CursorChatParse = { messages, skipped }
   const modelOf = (a: Obj | undefined): string | undefined => {
     for (const p of Array.isArray(a?.content) ? (a.content as unknown[]) : []) {
-      const cur = isObj(p) && isObj(p.providerOptions) ? p.providerOptions.cursor : undefined
-      const name = isObj(cur) ? metaString(cur.modelName) : undefined
+      const cur = isRecord(p) && isRecord(p.providerOptions) ? p.providerOptions.cursor : undefined
+      const name = isRecord(cur) ? metaString(cur.modelName) : undefined
       if (name) return name
     }
     return undefined
@@ -349,7 +349,7 @@ export async function readCursorStore(dbPath: string, maxBytes: number = CURSOR_
     db.exec('BEGIN')
     const row = db.prepare("SELECT value FROM meta WHERE key = '0'").get() as { value?: string } | undefined
     const meta: unknown = row?.value ? JSON.parse(Buffer.from(row.value, 'hex').toString('utf8')) : {}
-    const m = isObj(meta) ? meta : {}
+    const m = isRecord(meta) ? meta : {}
     const name = typeof m.name === 'string' ? m.name.trim() : ''
     const store: CursorStore = { messages: [] }
     if (name && name !== DEFAULT_TITLE) store.title = name.slice(0, 200)
@@ -397,13 +397,13 @@ export async function cursorTranscriptText(dbPath: string): Promise<string | nul
   if (!s) return null
   return s.messages
     .map((m) => {
-      if (!isObj(m)) return ''
+      if (!isRecord(m)) return ''
       const { providerOptions: _p, ...rest } = m
       if (Array.isArray(rest.content)) {
         rest.content = rest.content
-          .filter((c) => !(isObj(c) && (c.type === 'reasoning' || c.type === 'redacted-reasoning')))
+          .filter((c) => !(isRecord(c) && (c.type === 'reasoning' || c.type === 'redacted-reasoning')))
           .map((c) => {
-            if (!isObj(c)) return c
+            if (!isRecord(c)) return c
             const { providerOptions: _q, experimental_content: _e, ...keep } = c
             return keep
           })
@@ -478,7 +478,7 @@ export function cursorContextParse(text: string | string[]): { used: number; win
   for (let i = lines.length - 1; i >= 0; i--) {
     try {
       const o: unknown = JSON.parse(lines[i])
-      if (isObj(o) && typeof o.used === 'number' && typeof o.max === 'number' && o.used > 0 && o.max > 0) {
+      if (isRecord(o) && typeof o.used === 'number' && typeof o.max === 'number' && o.used > 0 && o.max > 0) {
         return { used: o.used, window: o.max, model: null }
       }
     } catch {
@@ -501,7 +501,7 @@ export async function trackCursorContext(
   payload: unknown,
   live: () => boolean = () => true
 ): Promise<string | undefined> {
-  const p = isObj(payload) ? payload : {}
+  const p = isRecord(payload) ? payload : {}
   const id = typeof p.conversation_id === 'string' ? p.conversation_id : typeof p.session_id === 'string' ? p.session_id : undefined
   if (!id || tail.pathFor(id)) return id
   const cwd = Array.isArray(p.workspace_roots) && typeof p.workspace_roots[0] === 'string' ? p.workspace_roots[0] : undefined
@@ -553,7 +553,7 @@ export function applyCursorRaw(
   // The phone's "what it is doing now" line, remote nodes included (it needs no file). Translated to
   // the claude-shaped names `recordRawToolEvent` gates on, as grok's branch does; a child's tool
   // call is not the parent's activity.
-  if (nodeId && isObj(payload)) {
+  if (nodeId && isRecord(payload)) {
     const ev = payload.hook_event_name
     if (ev === 'preToolUse' && typeof payload.tool_name === 'string' && !isCursorChildToolEvent(payload)) {
       recordRawToolEvent(nodeId, { hook_event_name: 'PreToolUse', tool_name: payload.tool_name, tool_input: payload.tool_input })

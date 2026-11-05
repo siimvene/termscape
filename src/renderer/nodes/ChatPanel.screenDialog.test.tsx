@@ -70,8 +70,14 @@ async function typeAndEnter(text: string): Promise<void> {
   })
 }
 
+// jsdom's `hasFocus()` is false (nothing focused the test window), and the poll skips unfocused
+// windows — so every test starts with a focused window, and the focus tests flip it.
+let focused = true
+
 beforeEach(() => {
   vi.useFakeTimers()
+  focused = true
+  vi.spyOn(document, 'hasFocus').mockImplementation(() => focused)
   screen.now = IDLE
   capture.mockClear()
   sendChatPrompt.mockReset()
@@ -90,6 +96,7 @@ afterEach(async () => {
     return { byId }
   })
   vi.useRealTimers()
+  vi.restoreAllMocks()
 })
 
 describe('ChatPanel — the agent\'s own dialog on screen', () => {
@@ -177,5 +184,39 @@ describe('ChatPanel — the agent\'s own dialog on screen', () => {
     await typeAndEnter('hello')
 
     expect(sendChatPrompt).toHaveBeenCalledWith(NODE, 'hello', 'claude')
+  })
+
+  it('skips ticks while the window is unfocused, and re-reads the moment it is focused', async () => {
+    focused = false
+    screen.now = TRUST
+    await mount()
+    await tick()
+    await tick()
+
+    // ~30 tmux spawns a minute per chat view while nobody can type into it — none now.
+    expect(capture).not.toHaveBeenCalled()
+    expect(notice()).toBeNull()
+
+    focused = true
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'))
+    })
+
+    // No waiting for the next interval: the dialog is on screen before anyone types.
+    expect(capture).toHaveBeenCalledTimes(1)
+    expect(textarea().disabled).toBe(true)
+    expect(notice()?.textContent).toContain('No, exit')
+  })
+
+  it('polls when the window cannot say whether it is focused (the hint fails toward polling)', async () => {
+    vi.spyOn(document, 'hasFocus').mockImplementation(() => {
+      throw new Error('no focus source')
+    })
+    screen.now = TRUST
+    await mount()
+    await tick()
+
+    expect(capture).toHaveBeenCalled()
+    expect(textarea().disabled).toBe(true)
   })
 })

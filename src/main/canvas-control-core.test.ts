@@ -2,6 +2,9 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { ISSUE_BRANCH_SLUG_MAX } from '../shared/issue-worktree'
+import { ARRANGE_GAP_MAX, arrangeGapGuidanceLines } from '../shared/arrange-verb'
+import { geometryGuidanceLines } from '../shared/geometry-verbs'
+import { NODE_SIZE_MAX } from '../shared/default-node-size'
 import {
   GITHUB_READ_LIMIT_DEFAULT as GH_READ_LIMIT_DEFAULT,
   GITHUB_READ_LIMIT_MAX as GH_READ_LIMIT_MAX,
@@ -132,12 +135,12 @@ describe('parseControlRequest', () => {
       ['skill', buildCanvasSkillBody('/x/shim.sh')],
       ['instructions', buildCanvasControlInstructions('/x/shim.sh')]
     ] as const) {
-      expect(body, name).toContain('- `arrange --group <frameId> [--layout grid|row|column|lineage] [--cols N]`')
+      expect(body, name).toContain('- `arrange --group <frameId> [--layout grid|row|column|lineage] [--cols N] [--gap px]`')
       // The whole-canvas form is in both bodies, and says what Tidy does with an orchestrator.
-      expect(body, name).toContain('- `arrange --group top [--layout tidy|lineage]` — tidy the WHOLE canvas')
+      expect(body, name).toContain('- `arrange --group top [--layout tidy|lineage] [--gap px]` — tidy the WHOLE canvas')
       expect(body, name).toMatch(/each orchestrator is placed first, at the top-left of the nodes and\s+frames it opened/)
       // The `--nodes` form is still there, and still says what it accepts.
-      expect(body, name).toContain('`arrange --nodes <id,id> [--layout grid|row|column] [--cols N]`')
+      expect(body, name).toContain('`arrange --nodes <id,id> [--layout grid|row|column] [--cols N] [--gap px]`')
       expect(body, name).toMatch(/frame's direct children \(a frame nested\s+inside moves as one unit\)/)
       expect(body, name).toMatch(/resizes the frame — and every frame around it — to hold them/)
       expect(body, name).toMatch(/top-left stays where it is/)
@@ -1826,5 +1829,70 @@ describe('the browser verb text matches #539 behaviour, in both bodies', () => {
     expect(flat).toContain('MEASURED once the page stopped moving')
     expect(flat).toContain('an unknown flag (on `browser` or `open-browser`) is refused by name, never ignored')
     expect(flat).toContain('sizes the page\'s viewport to the full content height')
+  })
+})
+
+// Issue #1288 — the geometry verbs. The SHAPE gate is @shared/geometry-verbs (one gate for desktop
+// main, this parser and the renderer belt); these pin that the Server Edition's parser runs it, that
+// main's verb table knows the verbs, and that both agent-facing bodies describe them from the same
+// constants — `geometryGuidanceLines` / `arrangeGapGuidanceLines` — rather than retyping them.
+describe('canvas geometry from the CLI (issue #1288)', () => {
+  it('main forwards resize and place (an unknown verb would answer "Unknown verb")', () => {
+    expect(VERBS_FOR_TEST).toContain('resize')
+    expect(VERBS_FOR_TEST).toContain('place')
+    expect(parseControlRequest('resize', { nodes: 'a', width: '540' })).toEqual({
+      verb: 'resize',
+      args: { nodes: 'a', width: '540' }
+    })
+    expect(parseControlRequest('place', { nodes: 'a', x: '0', y: '-40' })).toEqual({
+      verb: 'place',
+      args: { nodes: 'a', x: '0', y: '-40' }
+    })
+  })
+
+  it('refuses a malformed request before any canvas sees it', () => {
+    expect(parseControlRequest('resize', { nodes: 'a' })).toEqual({
+      error: 'resize requires --width <px>, --height <px>, or both'
+    })
+    expect(parseControlRequest('place', { nodes: 'a', x: '1', dx: '1' })).toEqual({
+      error: 'place takes --x/--y (where) or --dx/--dy (how far), not both'
+    })
+    expect(parseControlRequest('list', { geometry: '' })).toEqual({ error: 'list: --geometry takes on or off (got "")' })
+    expect(parseControlRequest('arrange', { nodes: 'a,b', gap: '-4' })).toMatchObject({
+      error: expect.stringContaining('--gap must be a whole number')
+    })
+    expect(parseControlRequest('list', { geometry: 'on' })).toEqual({ verb: 'list', args: { geometry: 'on' } })
+  })
+
+  it('refuses a coordinate on move — it would pull a framed node to the top level and ignore the x', () => {
+    const r = parseControlRequest('move', { nodes: 'a', x: '10', y: '20' })
+    expect(r).toMatchObject({ error: expect.stringContaining('place --nodes <id> --x <n>') })
+    // Without coordinates `move` is exactly what it was.
+    expect(parseControlRequest('move', { nodes: 'a', group: 'g' })).toEqual({ verb: 'move', args: { nodes: 'a', group: 'g' } })
+  })
+
+  it('both bodies carry the geometry verbs, the gap and the worked example', () => {
+    const skill = buildCanvasSkillBody('/x/shim.sh')
+    const instructions = buildCanvasControlInstructions('/x/shim.sh')
+    for (const [name, body] of [['skill', skill], ['instructions', instructions]] as const) {
+      for (const line of geometryGuidanceLines()) expect(body, `${name}: ${line}`).toContain(line)
+      for (const line of arrangeGapGuidanceLines()) expect(body, `${name}: ${line}`).toContain(line)
+      expect(body, name).toContain('[--cols N] [--gap px]')
+      expect(body, name).toContain('`arrange --nodes a,e,b,f,c,g,d,h --layout grid --cols 2 --gap 0`')
+      expect(body, name).toMatch(/`list \[--geometry on\|off\]`/)
+      expect(body, name).toContain(`${NODE_SIZE_MAX.width}×${NODE_SIZE_MAX.height}`)
+      expect(body, name).toContain(`to ${ARRANGE_GAP_MAX}; omitted, it is`)
+    }
+    // The skill's playbook reaches for the three verbs when asked for an exact, repeatable layout.
+    expect(skill).toContain('"Lay my sessions out exactly / the same way every time" → `list --geometry on`')
+    // The trigger text names them, so the skill is chosen for "resize these nodes".
+    expect(skill).toContain('group/arrange/align/resize/place/rename/move nodes')
+  })
+
+  it('the off-screen paragraph answers resize and place like arrange', () => {
+    const text = buildCanvasControlInstructions('/x/shim.sh')
+    const answered = text.split('\n').find((l) => l.includes('Answered whether or not that project is on screen'))!
+    expect(answered).toMatch(/\bresize\b/)
+    expect(answered).toMatch(/\bplace\b/)
   })
 })

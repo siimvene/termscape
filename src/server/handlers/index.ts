@@ -6,6 +6,7 @@ import { DOWNLOAD_PATH, downloadName } from '../download'
 import { GitService } from '../../core/git-service'
 import { generateCommitMessage } from '../../core/commit-message'
 import { registerFsHandlers } from '../../core/fs-handlers'
+import type { WhiteboardLocation } from '../../core/whiteboards'
 import { claudeCliCaps, registerClaudeCliIpc } from '../../core/claude-cli'
 import { readPeerClaudeAccounts } from '../../core/peer-claude-accounts'
 import { registerGrokCliIpc } from '../../core/grok-cli'
@@ -44,6 +45,8 @@ export function registerCoreHandlers(
     downloadTickets?: DownloadTickets
     /** See fs-handlers' dep of the same name — the canvas-image write directory. */
     localProjectCwd?: (projectId: string) => string | undefined
+    /** See fs-handlers' dep of the same name — where a project's whiteboards go. */
+    whiteboardLocation?: (projectId: string) => Omit<WhiteboardLocation, 'userDataDir'>
   }
 ): { gitService: GitService } {
   // Explorer downloads: mint a one-shot ticket over this (authenticated) channel; the transfer
@@ -63,7 +66,8 @@ export function registerCoreHandlers(
           return { url: `${DOWNLOAD_PATH}?t=${encodeURIComponent(token)}`, name: downloadName(p, dir) }
         }
       : undefined,
-    localProjectCwd: deps.localProjectCwd
+    localProjectCwd: deps.localProjectCwd,
+    whiteboardLocation: deps.whiteboardLocation
   })
 
   const gitService = new GitService()

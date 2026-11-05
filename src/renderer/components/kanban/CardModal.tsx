@@ -91,9 +91,11 @@ const ChatPanel = lazy(() => import('../../nodes/ChatPanel').then((m) => ({ defa
 interface CardModalProps {
   session: KanbanSession
   /** The project whose board this card is on — the active one on the per-project board, the lane's
-   *  on the Omni board. The modal sits OUTSIDE that project's `SessionProvider` (`useSession()`
-   *  here is the app's local session), so anything that depends on which machine the node runs
-   *  on resolves through this id: the LIVE chip (R57) and the "Share live link" action (H4). */
+   *  on the Omni board. Both boards mount the modal under THAT project's session
+   *  (`ProjectSessionScope`: `sessionForProject(projectId)` + `OwningProjectContext`), so
+   *  `useSession()` here and in the terminal, chat and file views below is the core the node runs
+   *  on — a team tab's relay session, never this desktop's local one. The LIVE chip (R57) and the
+   *  "Share live link" action (H4) still resolve through this id. */
   projectId: string
   /** Owning project, supplied by the board (not necessarily the active project in Omni). */
   projectName?: string

@@ -129,6 +129,7 @@ import {
 import { quantizeCharSize } from '../terminal/char-size-quantize'
 import { resyncDomRendererSpacing } from '../terminal/dom-renderer-spacing'
 import { patchViewportScrollSync } from '../terminal/viewport-scroll-sync'
+import { patchShrinkTrim } from '../terminal/shrink-trim'
 import {
   parkCap,
   parkWindowMs,
@@ -252,6 +253,7 @@ import { useTerminalSearch } from '../terminal/useTerminalSearch'
 import { useCopyFeedback } from '../terminal/useCopyFeedback'
 import { pasteWithImageReceipt } from '../terminal/image-paste-confirm'
 import { usePasteReceipt } from '../terminal/usePasteReceipt'
+import { createBoardPauseSlot } from '../terminal/board-render-pause'
 import { ContextMeter } from '../components/ContextMeter'
 import { isZoomModifierHeld } from '../lib/zoomModifier'
 import { HoverGuard } from './HoverGuard'
@@ -307,7 +309,7 @@ import { useSshConn } from '../state/sshConn'
 import { useWorktrees } from '../state/worktrees'
 import { isRemoteSessionNode } from '@shared/worktree'
 import { RunBar } from './RunBar'
-import { useSession, useActiveSessionPresence } from '../session/session'
+import { isRemoteProjectId, useSession, useActiveSessionPresence } from '../session/session'
 import { isHostedReadOnly, useHostedReadOnly } from '../state/hostedTeams'
 import { isBrowserRuntime } from '../bridge/runtime'
 import { liveLinkUnavailable } from '../lib/liveLinkEntry'
@@ -374,6 +376,7 @@ import { applyIconChoice } from '../lib/nodeIconChoice'
 import { normalizeNodeIcon } from '@shared/node-icon'
 import { connectHostAttachment } from '../lib/sshAttachments'
 import { projectMayDialSsh } from '../session/relay-ssh'
+import { REMOTE_PROJECT_SPAWN_REFUSAL, spawnBelongsElsewhere, useOwningProjectId } from '../session/owning-project'
 import { waitForSshRemote } from '../lib/sshRemoteWait'
 
 /** Which physical modifier the registry's abstract `Cmd` resolves to for the find-bar chord. */
@@ -1332,6 +1335,11 @@ export function TerminalNode({
   // namespaces (pty, fs) go through it; app-global ones (clipboard, shell) stay on the global.
   const session = useSession()
   const { api } = session
+  // The project whose nodes this node's subtree renders (Canvas: the project React Flow's store
+  // holds). Read by the create path in the once-mounted lifecycle effect, so a ref.
+  const owningProject = useOwningProjectId()
+  const owningProjectRef = useRef(owningProject)
+  owningProjectRef.current = owningProject
   // A hosted team tab whose role is below Editor (false everywhere else): no "Restart in folder" —
   // it recycles the session, which the host refuses for them.
   const hostedReadOnly = useHostedReadOnly(session.id)
@@ -1352,10 +1360,18 @@ export function TerminalNode({
       live = false
     }
   }, [api])
-  // The ACTIVE session's presence — where our focus/blur casts go. This node renders under Canvas's
-  // active-session provider, so a relay tab reports focus over the relay core and a local tab hits
-  // `defaultPresence` (byte-identical to before). Stable for the node's lifetime (a tab switch
-  // unmounts the node), so capturing it in the once-mounted lifecycle effect below is safe, like `api`.
+  // The ACTIVE project's presence — where our focus/blur casts go. It follows the active project,
+  // not this node's provider: Canvas keys the node subtree's SessionProvider on the project React
+  // Flow's STORE holds (`useFlowStoreOwner`), which flips one commit after the active id. Usually a
+  // node mounts once its project is the active one, so the value the once-mounted lifecycle effect
+  // below captures is the presence of the core this node runs on: a relay tab reports focus over the
+  // relay core, a local tab hits `defaultPresence` (byte-identical to before). NOT always: when the
+  // last team tab closes, the welcome screen sets the active project to null while the store still
+  // holds the team project's nodes, and in a rapid A→B→C switch the store can hold B while C is
+  // active. In those windows this node's `useSession()` (its own core) and this presence (the active
+  // project's) can point at different cores. The effect is negligible today: those nodes cannot be
+  // focused (the welcome screen covers them; B's nodes unmount once C lands). Reading this node's
+  // own session's presence instead is a follow-up.
   const presence = useActiveSessionPresence()
   /**
    * THIS node's agent-status store, for the memory levers that must not kill live work — resolved
@@ -1577,6 +1593,11 @@ export function TerminalNode({
       viewFor(s, useProjects.getState().activeProjectId ?? '') === 'kanban'
   )
   const boardOpenRef = useRef(boardOpen)
+  // The live session's board render pause (attached by the lifecycle effect): while the board
+  // covers this node, xterm stops DRAWING but keeps parsing. Synced from the two effects that
+  // already re-run on what "covered" reads — the board flag and focus mode. See
+  // `terminal/board-render-pause.ts`.
+  const [boardPauseSlot] = useState(createBoardPauseSlot)
   const dwellRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [showColors, setShowColors] = useState(false)
   const [armed, setArmed] = useState(true)
@@ -2717,7 +2738,7 @@ export function TerminalNode({
           webgl = null
           verifyCleanDomState('context-restored')
           fullRepaint()
-          webglHandle?.contextLost()
+          webglHandle?.contextLost('restored')
         })
         // A fresh addon starts from an EMPTY model; the swap's own refresh is the exact one
         // that gets swallowed when this grant races a park/pause. Repaint unconditionally.
@@ -3252,6 +3273,9 @@ export function TerminalNode({
       // grant/release swaps renderers without the text visibly reflowing (see the helper).
       quantizeCharSize(term)
       patchViewportScrollSync(term)
+      // Before the first fit: a narrowing resize must trim the alternate buffer, or the find bar
+      // can crash this node (see the helper).
+      patchShrinkTrim(term)
       applyFit()
       // Reads the STORE, not the component's focusedRef: a parked terminal keeps the closure
       // from the instance that created it, and a ref from a dead instance never updates — the
@@ -3430,6 +3454,22 @@ export function TerminalNode({
         })
       }
     }
+    // Board render pause — per effect run, NOT through `cleanups`: a park keeps the xterm but this
+    // run's closures die with it, so the wrapper is removed by this run's cleanup and the adopting
+    // run installs its own (the module also refuses to stack a second layer). Installed after
+    // open/reattach because the render service only exists once the terminal is open.
+    // Covered = the board is up AND this node is not the focus-mode node: the focus surface (z 40)
+    // sits ABOVE the board (z 25), so a node focused before the board opened is still on screen.
+    // Deliberately NOT folded into `reportVisible`: that verdict feeds the WebGL budget,
+    // hibernation and the offscreen teardown, and the board must not hibernate the sessions it
+    // shows cards for.
+    const releaseBoardPause = boardPauseSlot.attach(
+      term as unknown as Parameters<typeof boardPauseSlot.attach>[0],
+      {
+        covered: () => boardOpenRef.current && focusedNodeId() !== id,
+        onUncover: fullRepaint
+      }
+    )
 
     // Cmd+C (mac) / Ctrl+Shift+C (Linux, Windows) / Ctrl+Insert copy the terminal selection — xterm
     // renders to a canvas, so the DOM-selection copy used elsewhere can't see it. Plain Ctrl+C is
@@ -3592,6 +3632,17 @@ export function TerminalNode({
       // happily start a brand-new tmux session — resurrecting a terminal its owner deliberately
       // killed, or reviving this node in our STALE cwd. The overlay explains the state instead.
       if (noSpawn) return
+      // A node of a REMOTE project (a relay / hosted team tab) under a session that is not a relay
+      // session — this desktop's own core — would create the host's node id HERE. Canvas keys the
+      // subtree on the project React Flow's store holds, and an unbound remote tab resolves to the
+      // offline relay session, so this is the last line: start nothing, before any SSH resolve.
+      // `isRemoteProjectId` is sessionForProject's own rule, so a tab the store deleted still counts.
+      if (spawnBelongsElsewhere(isRemoteProjectId(owningProjectRef.current ?? ''), session.source)) {
+        term.write(
+          `\r\n\x1b[90m${REMOTE_PROJECT_SPAWN_REFUSAL}\x1b[0m\r\n`
+        )
+        return
+      }
       // SSH-project terminal: the project's live ControlMaster controlPath is established by
       // Canvas's active-project effect. On a cold app load child effects run before that parent
       // connect, so wait for it (briefly) before spawning. In Phase 1 a node only exists in the
@@ -3652,10 +3703,11 @@ export function TerminalNode({
           persistKey: id,
           // The project that OWNS this node, for the runtime pane-ownership ledger (agent
           // messaging, src/core/agents/pane-ownership.ts): the ssh project's own scope for a remote
-          // node, else the active project whose canvas this node lives on. Recorded main-side ONLY
-          // on a genuine fresh spawn, so a second project opening another's live node id cannot
-          // claim it. Machine-local id, never the git-shared project.json id.
-          ownerProjectId: sshProjectId ?? useProjects.getState().activeProjectId,
+          // node, else the project whose nodes this subtree renders (`OwningProjectContext` — not
+          // necessarily the active one during a switch), else the active project. Recorded
+          // main-side ONLY on a genuine fresh spawn, so a second project opening another's live
+          // node id cannot claim it. Machine-local id, never the git-shared project.json id.
+          ownerProjectId: sshProjectId ?? owningProjectRef.current ?? useProjects.getState().activeProjectId,
           // Only orders the remote spawn queue: on-screen terminals attach before offscreen ones
           // on a project switch (terminal/on-screen.ts, core/remote-ssh/pty-spawn-gate.ts).
           onScreen: elementOnScreen(container),
@@ -3725,8 +3777,12 @@ export function TerminalNode({
           // this view does not hold), a refused-launch banner about a launch into a session that
           // is not attached, and a letterbox sized to a pty that is not attached. Clear them the
           // way the neighbouring refusals set theirs, say why the pane is empty, and stop;
-          // "Refresh terminal" re-asks on demand.
-          if (unavailable === 'join-only') {
+          // "Refresh terminal" re-asks on demand. `held-elsewhere` is the same shape: core found
+          // this remote node's id held by a session that is not on its host and did not join it —
+          // nothing is offline, and "Try again" would refuse again while that session runs.
+          // `new-only` too: a relay guest's create for a node it added found a session already
+          // running under that name and was refused (core/relay/scoped-guest-policy.ts).
+          if (unavailable === 'join-only' || unavailable === 'held-elsewhere' || unavailable === 'new-only') {
             setCo(termKey, {
               offline: false,
               spawnError: null,
@@ -5205,6 +5261,9 @@ export function TerminalNode({
       searchAddonRef.current = null
       if (applyFitRef.current === applyFit) applyFitRef.current = null
       if (fullRepaintRef.current === fullRepaint) fullRepaintRef.current = null
+      // Hand xterm its own pause back before the terminal is parked or disposed: a parked xterm
+      // must not carry a wrapper whose `covered` reads a dead mount's refs.
+      releaseBoardPause()
       // Free the GPU context on unmount (park or teardown) either way, and unregister from the
       // budget coordinator (which releases any held grant + cancels its timers). The park path must
       // keep releasing it as it always has (contexts are capped ~16, and a parked terminal is
@@ -5669,12 +5728,22 @@ export function TerminalNode({
   useEffect(() => {
     boardOpenRef.current = boardOpen
     applyFitRef.current?.()
+    // …and stop (or resume) drawing under it. After the ref write: the pause reads it.
+    boardPauseSlot.sync()
   }, [boardOpen])
 
   // Focus mode engaged/exited anywhere on the canvas: re-run our size vote (applyFit reads
   // focusedNodeId() live). Mount-stable — the focused-node subscription above only re-renders
   // the node whose own membership flipped, and every OTHER terminal is the one being covered.
-  useEffect(() => subscribeFocusedNode(() => applyFitRef.current?.()), [])
+  // The board pause reads focus too (a focus-mode node stays visible over the board).
+  useEffect(
+    () =>
+      subscribeFocusedNode(() => {
+        applyFitRef.current?.()
+        boardPauseSlot.sync()
+      }),
+    []
+  )
 
   const toggleCollapse = () => setNodes((ns) => toggleCollapsed(ns as CanvasNode[], [id]))
 

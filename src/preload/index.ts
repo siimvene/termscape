@@ -170,6 +170,10 @@ const api: NodeTerminalApi = {
       ipcRenderer.invoke(IPC.workspaceClaimLaunch, nodeId, command, manual),
     probeFolder: (folder: string) => ipcRenderer.invoke(IPC.workspaceProbeFolder, folder),
     projectFileState: (folder: string) => ipcRenderer.invoke(IPC.workspaceProjectFileState, folder),
+    releaseFolderFiles: (projectId: string, removeTracked: boolean) =>
+      ipcRenderer.invoke(IPC.workspaceReleaseFolderFiles, projectId, removeTracked),
+    prepareFolderStorage: (projectId: string) => ipcRenderer.invoke(IPC.workspacePrepareFolderStorage, projectId),
+    projectStorage: (projectId: string) => ipcRenderer.invoke(IPC.workspaceProjectStorage, projectId),
     onMigrated: (cb: (kind: WorkspaceMigrationKind) => void) => {
       // Older mains broadcast no payload; that was the v2→v3 migration.
       const h = (_e: unknown, kind?: WorkspaceMigrationKind) => cb(kind ?? 'v2')
@@ -489,6 +493,10 @@ const api: NodeTerminalApi = {
       ipcRenderer.invoke(IPC.filesSaveUpload, name, dataBase64),
     saveCanvasImage: (projectId: string, name: string, dataBase64: string) =>
       ipcRenderer.invoke(IPC.filesSaveCanvasImage, projectId, name, dataBase64),
+    saveWhiteboard: (projectId: string, nodeId: string, scene: string, thumbnailBase64?: string, expectedRev?: string | null) =>
+      ipcRenderer.invoke(IPC.filesSaveWhiteboard, projectId, nodeId, scene, thumbnailBase64, expectedRev),
+    readWhiteboard: (projectId: string, nodeId: string, sourceId?: string, withScene?: boolean) =>
+      ipcRenderer.invoke(IPC.filesReadWhiteboard, projectId, nodeId, sourceId, withScene),
     saveAlertSound: (kind: AlertSoundKind, name: string, dataBase64: string) =>
       ipcRenderer.invoke(IPC.filesSaveAlertSound, kind, name, dataBase64),
     readAlertSound: (kind: AlertSoundKind) => ipcRenderer.invoke(IPC.filesReadAlertSound, kind),
@@ -591,7 +599,9 @@ const api: NodeTerminalApi = {
   wallpaper: {
     listStills: () => ipcRenderer.invoke(IPC.wallpaperListStills),
     load: (w) => ipcRenderer.invoke(IPC.wallpaperLoad, w),
-    importImage: (p) => ipcRenderer.invoke(IPC.wallpaperImport, p)
+    importImage: (p) => ipcRenderer.invoke(IPC.wallpaperImport, p),
+    listAerials: () => ipcRenderer.invoke(IPC.wallpaperListAerials),
+    aerialClips: (w) => ipcRenderer.invoke(IPC.wallpaperAerialClips, w)
   },
   simulator: {
     devices: (refresh) => ipcRenderer.invoke(IPC.simulatorDevices, refresh === true),
@@ -773,6 +783,7 @@ const api: NodeTerminalApi = {
     invite: (opts?: { projectId?: string; email?: string }) =>
       ipcRenderer.invoke(IPC.relayHostInvite, opts ?? {}),
     stop: () => ipcRenderer.invoke(IPC.relayHostStop),
+    scopeProblems: (projectIds: string[]) => ipcRenderer.invoke(IPC.relayHostScopeProblems, projectIds),
     revoke: (id: string) => ipcRenderer.send(IPC.relayHostRevoke, { id }),
     onPeerPending: subscribeRelayPeerPending,
     confirm: (id: string) => ipcRenderer.send(IPC.relayHostConfirm, { id }),

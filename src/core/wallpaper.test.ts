@@ -5,7 +5,12 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { existsSync, readdirSync } from 'node:fs'
 import { wallpapersToKeep } from '../shared/wallpaper'
 import {
+  aerialClips,
   cachedImagePath,
+  listAerials,
+  parseAerialManifest,
+  scanAerials,
+  setWallpaperMediaUrl,
   importWallpaper,
   listStills,
   loadWallpaper,
@@ -230,5 +235,117 @@ describe('sipsImageOps', () => {
     expect(sipsImageOps.id).toBe('sips')
     expect(sipsImageOps.canHeic).toBe(true)
     expect(sipsImageOps.convertUnknownSize).toBe(true)
+  })
+})
+
+describe('macOS aerials', () => {
+  const L = 'A33A55D9-EDEA-4596-A850-6C10B54FBBB5' // Landscapes
+  const C = '5EF41171-4862-4F93-800C-AD86CE5E6891' // Cities
+  const [A1, A2, A3, B1] = [
+    '11111111-1111-4111-8111-111111111111',
+    '22222222-2222-4222-8222-222222222222',
+    '33333333-3333-4333-8333-333333333333',
+    '44444444-4444-4444-8444-444444444444'
+  ]
+  const manifest = {
+    categories: [
+      { id: C, localizedNameKey: 'AerialCategoryCities', preferredOrder: 1 },
+      { id: L, localizedNameKey: 'AerialCategoryLandscapes', preferredOrder: 0 },
+      { id: 'not-a-uuid', localizedNameKey: 'AerialCategoryBad', preferredOrder: 2 }
+    ],
+    assets: [
+      { id: A1, accessibilityLabel: 'Tahoe Night', categories: [L], includeInShuffle: true, preferredOrder: 5 },
+      { id: A2, accessibilityLabel: 'Tahoe Day', categories: [L], includeInShuffle: true, preferredOrder: 1 },
+      { id: A3, accessibilityLabel: 'Hidden Gem', categories: [L], includeInShuffle: false, preferredOrder: 3 },
+      { id: B1, accessibilityLabel: 'Dubai', categories: [C], includeInShuffle: true, preferredOrder: 2 },
+      { id: '../../etc/passwd', accessibilityLabel: 'Evil', categories: [L], includeInShuffle: true, preferredOrder: 0 }
+    ]
+  }
+  const url = (p: string): string => `nt-media://media${p}`
+  const fixture = (): string => {
+    root = mkdtempSync(path.join(tmpdir(), 'aerials-'))
+    put('manifest/entries.json', 0)
+    writeFileSync(path.join(root, 'manifest/entries.json'), JSON.stringify(manifest))
+    for (const id of [A1, A3, B1]) put(`videos/${id}.mov`, 10)
+    put(`videos/${A2}.mov.download`, 10) // a partial download is not a clip
+    put('videos/notes.txt', 10)
+    for (const id of [A1, A2, A3, B1]) put(`thumbnails/${id}.png`, 10)
+    setWallpaperHostForTests({ platform: 'darwin', aerialsRoot: root })
+    setWallpaperMediaUrl(url)
+    return root
+  }
+  afterEach(() => setWallpaperHostForTests(null))
+
+  it('parses categories and assets by preferredOrder; malformed ids drop', () => {
+    const m = parseAerialManifest(manifest)
+    expect(m.categories.map((c) => c.label)).toEqual(['Landscapes', 'Cities'])
+    expect(m.assets.map((a) => a.label)).toEqual(['Tahoe Day', 'Dubai', 'Hidden Gem', 'Tahoe Night'])
+    expect(parseAerialManifest(null)).toEqual({ categories: [], assets: [] })
+  })
+
+  it('scan: only <UUID>.mov regular files count as downloaded', async () => {
+    const r = fixture()
+    const scan = await scanAerials(r)
+    expect([...scan!.downloaded].sort()).toEqual([A1, A3, B1].sort())
+    expect(scan!.thumbs.size).toBe(4)
+    expect(await scanAerials(path.join(r, 'missing'))).toBeNull()
+  })
+
+  it('lists a shuffle per category (still = first by preferredOrder), then each downloaded aerial', async () => {
+    const r = fixture()
+    const list = await listAerials()
+    expect(list.map((t) => [t.id, t.label])).toEqual([
+      [`aerial-shuffle:${L}`, 'Shuffle Landscapes'],
+      [`aerial-shuffle:${C}`, 'Shuffle Cities'],
+      [`aerial:${A3}`, 'Hidden Gem'],
+      [`aerial:${A1}`, 'Tahoe Night'],
+      [`aerial:${B1}`, 'Dubai']
+    ])
+    expect(list[0].thumb).toBe(url(path.join(r, 'thumbnails', `${A2}.png`)))
+  })
+
+  it('shuffle clips: downloaded AND includeInShuffle, re-scanned per call; single = that clip', async () => {
+    const r = fixture()
+    const video = (id: string): string => url(path.join(r, 'videos', `${id}.mov`))
+    expect(await aerialClips({ kind: 'preset', id: `aerial-shuffle:${L}` })).toEqual([video(A1)])
+    expect(await aerialClips({ kind: 'preset', id: `aerial:${A3}` })).toEqual([video(A3)])
+    put(`videos/${A2}.mov`, 10) // macOS downloaded another one
+    expect(await aerialClips({ kind: 'preset', id: `aerial-shuffle:${L}` })).toEqual([video(A2), video(A1)])
+  })
+
+  it('the still is the first member thumbnail; unknown ids load nothing', async () => {
+    const r = fixture()
+    expect(await loadWallpaper({ kind: 'preset', id: `aerial-shuffle:${C}` })).toBe(
+      url(path.join(r, 'thumbnails', `${B1}.png`))
+    )
+    const unknown = { kind: 'preset', id: 'aerial-shuffle:99999999-9999-4999-8999-999999999999' }
+    expect(await loadWallpaper(unknown)).toBeNull()
+  })
+
+  it('a shuffle with no includeInShuffle clip downloaded plays its own category before any other', async () => {
+    const r = fixture()
+    const video = (id: string): string => url(path.join(r, 'videos', `${id}.mov`))
+    rmSync(path.join(r, 'videos', `${A1}.mov`)) // Landscapes' only shuffle clip; A3 is not in shuffle
+    expect(await aerialClips({ kind: 'preset', id: `aerial-shuffle:${L}` })).toEqual([video(A3)])
+  })
+
+  it('with none of its own downloaded, any downloaded aerial plays; nothing at all = empty', async () => {
+    const r = fixture()
+    const video = (id: string): string => url(path.join(r, 'videos', `${id}.mov`))
+    rmSync(path.join(r, 'videos', `${B1}.mov`)) // Cities now has nothing downloaded
+    expect(await aerialClips({ kind: 'preset', id: `aerial-shuffle:${C}` })).toEqual([video(A3), video(A1)])
+    expect(await aerialClips({ kind: 'preset', id: `aerial:${A2}` })).toEqual([video(A3), video(A1)])
+    rmSync(path.join(r, 'videos'), { recursive: true, force: true })
+    expect(await aerialClips({ kind: 'preset', id: `aerial-shuffle:${L}` })).toEqual([])
+  })
+
+  it('off macOS, or with no media URL minter (the Server Edition), there are no aerials', async () => {
+    fixture()
+    setWallpaperMediaUrl(null)
+    expect(await listAerials()).toEqual([])
+    expect(await aerialClips({ kind: 'preset', id: `aerial:${A1}` })).toEqual([])
+    setWallpaperHostForTests({ platform: 'linux', aerialsRoot: root! })
+    setWallpaperMediaUrl(url)
+    expect(await listAerials()).toEqual([])
   })
 })

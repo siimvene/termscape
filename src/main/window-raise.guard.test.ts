@@ -79,12 +79,21 @@ const ALLOWED = new Map<string, { calls: number; why: string }>([
   [
     'notch-hud.ts',
     {
-      calls: 5,
+      calls: 4,
+      why:
+        'setAlwaysOnTop for the HUD panel itself, which is shown with showInactive and never ' +
+        "takes focus; and restore/show/focus in the HUD row's own click handler — a click on a " +
+        'nodeterm surface'
+    }
+  ],
+  [
+    'dock-presence.ts',
+    {
+      calls: 1,
       why:
         'app.dock.show() (Dock PRESENCE, not a raise — it keeps the focusable:false HUD from ' +
-        'making the app look like an accessory); setAlwaysOnTop for the HUD panel itself, which ' +
-        'is shown with showInactive and never takes focus; and restore/show/focus in the HUD ' +
-        "row's own click handler — a click on a nodeterm surface"
+        'making the app look like an accessory), and only when the app has actually lost its ' +
+        'Dock tile (issue #1305)'
     }
   ],
   [

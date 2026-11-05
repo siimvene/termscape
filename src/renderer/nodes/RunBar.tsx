@@ -32,6 +32,7 @@ import { useSession } from '../session/session'
 import { useProjects } from '../state/projects'
 import { createBrowserNode, createSimulatorNode, terminalNodeSize, type CanvasNode } from '../state/workspace'
 import { IconPlay, IconReload } from '../components/icons'
+import { sleep } from '@shared/sleep'
 
 /**
  * The run node's toolbar: VS Code's "Run Without Debugging" for any `.vscode/launch.json`
@@ -100,8 +101,6 @@ function parseSig(sig: string): Array<{ id: string; title: string; runConfig: { 
       return { id, title, runConfig: { deviceId } }
     })
 }
-
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 export function RunBar({ nodeId, config, autoStart, simulator, browser: browserPanel }: Props) {
   const session = useSession()

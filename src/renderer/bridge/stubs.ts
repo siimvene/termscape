@@ -349,7 +349,9 @@ export function buildStubApi(): Omit<
       // are pure CSS and need no bridge), and import refuses.
       listStills: () => Promise.resolve([]),
       load: () => Promise.resolve(null),
-      importImage: U('wallpaper.importImage')
+      importImage: U('wallpaper.importImage'),
+      listAerials: () => Promise.resolve([]),
+      aerialClips: () => Promise.resolve([])
     },
     simulator: {
       devices: () => Promise.resolve({ devices: [] }),
@@ -546,6 +548,8 @@ export function buildStubApi(): Omit<
       start: U('relayHost.start'),
       invite: U('relayHost.invite'),
       stop: U('relayHost.stop'),
+      // Nothing can be hosted here (start/invite are unsupported), so nothing is refused either.
+      scopeProblems: async () => ({}),
       revoke: noop,
       onPeerPending: noopUnsub,
       confirm: noop,
