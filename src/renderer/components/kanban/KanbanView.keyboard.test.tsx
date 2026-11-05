@@ -13,7 +13,10 @@ import { runBoardKey } from '../../lib/boardKeys'
 import { popDialog, pushDialog, resetDialogStack } from '../dialog-stack'
 
 vi.mock('../../session/session', () => ({
-  useSession: () => ({ source: 'local', api: window.nodeTerminal })
+  useSession: () => ({ source: 'local', api: window.nodeTerminal }),
+  // The card modal's `ProjectSessionScope` asks for the card project's session and provides it.
+  sessionForProject: () => ({ id: 'local', source: 'local', api: window.nodeTerminal }),
+  SessionProvider: ({ children }: { children: unknown }) => children
 }))
 
 // The real modal is exercised by CardModal.test; here it only has to be a dialog on the stack that

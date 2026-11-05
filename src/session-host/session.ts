@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'crypto'
 import * as pty from 'node-pty'
 import { TerminalEmulator } from './terminal-emulator'
 import { CwdReportScanner } from './cwd-report'
+import { windowsConptySpawnOptions } from '../core/windows-conpty-dll'
 import type {
   CaptureVisibleResult,
   ExecuteLaunchResult,
@@ -245,7 +246,10 @@ export class HostSession {
         cols: this.appliedGeometry.cols,
         rows: this.appliedGeometry.rows,
         cwd: spawn.cwd,
-        env: spawn.env
+        env: spawn.env,
+        // Win32: node-pty's bundled ConPTY when it is installed (mouse + alt-screen modes reach
+        // the emulator on Windows 10). `{}` everywhere else — byte-identical options.
+        ...windowsConptySpawnOptions()
       })
     this.term =
       overrides?.term ??

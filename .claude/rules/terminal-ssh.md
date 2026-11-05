@@ -119,7 +119,14 @@ unix-socket forward and dev-server `-L` forward over it. POSIX keeps OpenSSH unt
   master check. A new ssh call site owes the same routing.
 - **Semantics are OpenSSH's:** ControlMaster auto/no, `-O check|exit|forward|cancel`,
   `StrictHostKeyChecking=accept-new` over the user's own known_hosts (hashed entries included —
-  that is why HMAC-SHA1 appears; CodeQL's alert on it is dismissed with the reason), publickey
+  that is why HMAC-SHA1 appears; CodeQL's alert on it is dismissed with the reason) — with the
+  recorded host key TYPE pinned: the types on record lead ssh2's `algorithms.serverHostKey`
+  (OpenSSH's order_hostkeyalgs, `hostKeyAlgorithmsFor`), and a host that HAS a recorded key but
+  presents another type is refused like a changed key, naming both types and `ssh-keygen -R`
+  (stricter than OpenSSH's accept-new, which records the new type; type-blind, a MITM holding only
+  an ed25519 key against a host recorded under ECDSA was silently recorded and trusted). The
+  list handed to ssh2 is always a reordering of `SSH2_DEFAULT_SERVER_HOST_KEY`, pinned to the
+  package by test, because an exact list naming anything ssh2 lacks makes `connect()` throw; publickey
   only (agent, then key files, passphrase through the existing dialog, never in BatchMode), the
   user's `~/.ssh/config` via `ssh -G` (never a second parser of it), a dropped connection ends
   every channel with 255 (what `SshReconnector` reads).
@@ -135,6 +142,12 @@ unix-socket forward and dev-server `-L` forward over it. POSIX keeps OpenSSH unt
   A killed streaming child must never write to its ended pipes (an uncaught
   `ERR_STREAM_WRITE_AFTER_END` in main). A stream nobody reads never emits `close` — tests must
   `resume()` the channels they hold.
+- **ssh2 is loaded on first use, never at module scope** (`ssh2()` in `native-mux.ts`; every other
+  shipped import of it is `import type`). native-runtime → native-mux is on main's module-scope
+  graph, which runs before Chromium's `ready`; a top-level import cost every launch 14–25 ms warm
+  (~680 ms in one cold-cache sample) on machines that never open an SSH project.
+  Pinned by `native-mux.lazy.test.ts` (import does not evaluate ssh2) and
+  `src/main/lazy-deps.source.test.ts` (no shipped value import).
 - **Tests run on every OS** against ssh2's own in-process `Server` (loopback, no sshd); the
   directory is in the `windows-latest` CI job. Live numbers (macOS, `NODETERM_NATIVE_SSH=1`,
   89-terminal project): 89/89 attached, 0 ssh processes, ~1 login per connect, main CPU 3–5% idle.

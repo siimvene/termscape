@@ -172,7 +172,7 @@ jobs:
     # is minutes spent on artifacts nobody downloads (and, until the heap cap below, a failure
     # mail per tag). With every job opted out a tag push is a no-op run, not a red one.
     if: vars.TERMSCAPE_HOSTED_BUILDS == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # glibc floor for the AppImage/deb/rpm: raise it on purpose
     env:
       # electron-vite's renderer bundle (Monaco + xterm + React Flow) blows Node's default old-space
       # ceiling on the hosted runner: both hosted jobs died with "JavaScript heap out of memory"

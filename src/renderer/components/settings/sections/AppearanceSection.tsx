@@ -90,7 +90,7 @@ const ROWS = {
   accent: { title: 'Accent', keywords: ['accent', 'color', 'theme', 'appearance'] },
   wallpaper: {
     title: 'Desktop wallpaper',
-    keywords: ['wallpaper', 'background', 'desktop', 'image', 'picture', 'gradient', 'sonoma', 'canvas']
+    keywords: ['wallpaper', 'background', 'desktop', 'image', 'picture', 'gradient', 'sonoma', 'canvas', 'aerial', 'aerials', 'video', 'shuffle', 'moving']
   },
   windowTitle: {
     title: 'Window title',
@@ -393,6 +393,7 @@ function WallpaperPicker(): React.JSX.Element {
   const yourImageBg = useWallpaperBackgroundFor(yourImage)
   const update = useSettings((s) => s.update)
   const [stills, setStills] = useState<WallpaperStill[] | null>(null)
+  const [aerials, setAerials] = useState<WallpaperStill[]>([])
   const [error, setError] = useState<string | null>(null)
   useEffect(() => {
     let live = true
@@ -400,6 +401,11 @@ function WallpaperPicker(): React.JSX.Element {
       .listStills()
       .then((list) => live && setStills(list))
       .catch(() => live && setStills([]))
+    // Empty off macOS, in the Server Edition and on a relay tab: the group then does not render.
+    window.nodeTerminal.wallpaper
+      .listAerials()
+      .then((list) => live && setAerials(list))
+      .catch(() => {})
     return () => {
       live = false
     }
@@ -469,6 +475,25 @@ function WallpaperPicker(): React.JSX.Element {
         )}
       </div>
       {error && <p className="mt-2 text-[12px] text-danger">{error}</p>}
+      {aerials.length > 0 && (
+        <>
+          <h4 className="mt-4 text-[13px] font-medium text-text">Aerials</h4>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {aerials.map((a) => (
+              <WallpaperTile
+                key={a.id}
+                label={a.label}
+                selected={is({ kind: 'preset', id: a.id })}
+                background={a.thumb ? `center / cover no-repeat url("${a.thumb}")` : undefined}
+                onClick={() => pick({ kind: 'preset', id: a.id })}
+              >
+                {a.thumb ? null : a.label}
+              </WallpaperTile>
+            ))}
+          </div>
+          <p className="mt-2 text-[12px] text-muted">Download more aerials in System Settings → Wallpaper.</p>
+        </>
+      )}
     </div>
   )
 }
@@ -544,7 +569,7 @@ export function AppearanceSection({ isActive }: { isActive: boolean }): React.JS
                 : glassA11y.moreContrast
                 ? 'Increase Contrast is on in your system settings, so glass stays at Tinted with stronger edges.'
                 : glassSlider < GLASS_READABLE_TICK
-                ? 'Clearer than Readable: text can fade over bright parts of the wallpaper.'
+                ? 'Clearer than Readable: more of the wallpaper shows through, and terminal text stays readable.'
                 : 'Regular text keeps 4.5:1 contrast over any wallpaper.'
             }
             control={

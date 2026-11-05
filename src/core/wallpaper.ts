@@ -1,11 +1,16 @@
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { copyFile, mkdir, open, readdir, stat, unlink } from 'node:fs/promises'
+import { copyFile, mkdir, open, readdir, readFile, stat, unlink } from 'node:fs/promises'
+import { homedir } from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
 import { IPC } from '../shared/ipc'
 import {
+  AERIAL_SHUFFLE_PREFIX,
+  AERIAL_PREFIX,
+  isAerialUuid,
   normalizeWallpaper,
+  parseAerialId,
   wallpapersToKeep,
   type DesktopWallpaper,
   type WallpaperStill
@@ -81,7 +86,10 @@ export interface WallpaperHost {
   env: Record<string, string | undefined>
   /** Tests only: the Windows stills root, bypassing `windowsWallpaperRoot(env)`. */
   windowsStillsRoot?: string
+  /** Tests only: the macOS Aerials root, bypassing the real `~/Library/...` one. */
+  aerialsRoot?: string
 }
+let mediaUrl: ((absPath: string) => string) | null = null
 let host: () => WallpaperHost = () => ({ platform: process.platform, env: process.env })
 let registeredOps: WallpaperImageOps | null = null
 
@@ -91,16 +99,27 @@ export function setWallpaperImageOps(ops: WallpaperImageOps | null): void {
   stillScan = null
 }
 
+/**
+ * The shell's way to hand the page a local file by URL: Electron's `allowMediaPath` (nt-media://,
+ * streamed with Range so a 400 MB clip is never read whole). Core may not import electron. With
+ * none (the Server Edition) there are no aerials — the viewer's browser could not reach the files.
+ */
+export function setWallpaperMediaUrl(fn: ((absPath: string) => string) | null): void {
+  mediaUrl = fn
+}
+
 /** Tests only: pretend to be another OS / environment, and forget the memoized scan. */
 export function setWallpaperHostForTests(next: Partial<WallpaperHost> | null): void {
   host = next
     ? () => ({
         platform: next.platform ?? process.platform,
         env: next.env ?? process.env,
-        windowsStillsRoot: next.windowsStillsRoot
+        windowsStillsRoot: next.windowsStillsRoot,
+        aerialsRoot: next.aerialsRoot
       })
     : () => ({ platform: process.platform, env: process.env })
   registeredOps = null
+  mediaUrl = null
   stillScan = null
 }
 
@@ -324,6 +343,7 @@ export async function loadWallpaper(value: unknown): Promise<string | null> {
       .then(toDataUrl)
       .catch(() => null)
   }
+  if (w.kind === 'preset' && parseAerialId(w.id)) return aerialStill(w.id)
   return null
 }
 
@@ -417,6 +437,174 @@ export async function pruneWallpaperCache(keep: unknown[], dir = wallpaperCacheD
   }
 }
 
+/*
+ * macOS Aerials (the moving wallpapers). macOS 26 keeps them under one root:
+ * `manifest/entries.json` (every asset and category Apple offers), `videos/<asset UUID>.mov` (ONLY
+ * what macOS has downloaded — the user downloads more in System Settings → Wallpaper) and
+ * `thumbnails/<asset UUID>.png` (small stills, present for all). We never download anything.
+ *
+ * The jail is the same shape as the stills': the page names an aerial by `aerial:` /
+ * `aerial-shuffle:` + UUID, core re-resolves it against a FRESH manifest scan, and the only paths
+ * ever allowlisted are `<root>/videos/<id>.mov` and `<root>/thumbnails/<id>.png` built from a
+ * UUID-shaped manifest id and found as a regular file by `readdir` (a symlink is not a file there,
+ * and nt-media refuses one at serve time anyway). The pre-Sonoma `idleassetsd` layout has no
+ * thumbnails, so it is not read (ponytail: add it as a second root if anyone runs an older macOS).
+ */
+
+export function aerialsRoot(): string {
+  return host().aerialsRoot ?? path.join(homedir(), 'Library', 'Application Support', 'com.apple.wallpaper', 'aerials')
+}
+
+export interface AerialAsset {
+  id: string
+  label: string
+  categories: string[]
+  includeInShuffle: boolean
+  order: number
+}
+
+export interface AerialCategory {
+  id: string
+  /** `AerialCategoryLandscapes` → `Landscapes`. */
+  label: string
+  order: number
+}
+
+export interface AerialScan {
+  categories: AerialCategory[]
+  assets: AerialAsset[]
+  /** Asset ids with a `videos/<id>.mov` on disk. */
+  downloaded: Set<string>
+  /** Asset ids with a `thumbnails/<id>.png` on disk. */
+  thumbs: Set<string>
+}
+
+const orderOf = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : Number.MAX_SAFE_INTEGER)
+
+/** The parts of `entries.json` we use, both lists sorted by `preferredOrder`. Malformed rows drop. */
+export function parseAerialManifest(json: unknown): Pick<AerialScan, 'categories' | 'assets'> {
+  const o = (json && typeof json === 'object' ? json : {}) as Record<string, unknown>
+  const rows = (v: unknown): Record<string, unknown>[] =>
+    Array.isArray(v) ? v.filter((r): r is Record<string, unknown> => !!r && typeof r === 'object') : []
+  const categories = rows(o.categories)
+    .filter((c) => typeof c.id === 'string' && isAerialUuid(c.id) && typeof c.localizedNameKey === 'string')
+    .map((c) => ({
+      id: c.id as string,
+      label: (c.localizedNameKey as string).replace(/^AerialCategory/, ''),
+      order: orderOf(c.preferredOrder)
+    }))
+    .filter((c) => c.label.length > 0)
+    .sort((a, b) => a.order - b.order)
+  const assets = rows(o.assets)
+    .filter((a) => typeof a.id === 'string' && isAerialUuid(a.id))
+    .map((a) => ({
+      id: a.id as string,
+      label: typeof a.accessibilityLabel === 'string' && a.accessibilityLabel ? a.accessibilityLabel : 'Aerial',
+      categories: Array.isArray(a.categories) ? a.categories.filter((c): c is string => typeof c === 'string') : [],
+      includeInShuffle: a.includeInShuffle === true,
+      order: orderOf(a.preferredOrder)
+    }))
+    .sort((a, b) => a.order - b.order)
+  return { categories, assets }
+}
+
+/** The UUIDs of the regular files `<dir>/<UUID><ext>`. A missing dir is an empty set. */
+async function uuidFiles(dir: string, ext: string): Promise<Set<string>> {
+  const out = new Set<string>()
+  try {
+    for (const e of await readdir(dir, { withFileTypes: true })) {
+      const id = e.name.endsWith(ext) ? e.name.slice(0, -ext.length) : ''
+      if (e.isFile() && isAerialUuid(id)) out.add(id)
+    }
+  } catch {
+    // not there: nothing downloaded / no thumbnails
+  }
+  return out
+}
+
+/** A fresh scan, every call: one small JSON read and two readdirs (macOS downloads clips at will). */
+export async function scanAerials(root = aerialsRoot()): Promise<AerialScan | null> {
+  let manifest
+  try {
+    manifest = parseAerialManifest(JSON.parse(await readFile(path.join(root, 'manifest', 'entries.json'), 'utf8')))
+  } catch {
+    return null
+  }
+  const [downloaded, thumbs] = await Promise.all([
+    uuidFiles(path.join(root, 'videos'), '.mov'),
+    uuidFiles(path.join(root, 'thumbnails'), '.png')
+  ])
+  return { ...manifest, downloaded, thumbs }
+}
+
+/** A shuffle's category members (by preferredOrder), or the one asset an `aerial:` id names. */
+function aerialMembers(scan: AerialScan, id: string): AerialAsset[] {
+  const a = parseAerialId(id)
+  if (!a) return []
+  if (!a.shuffle) return scan.assets.filter((x) => x.id === a.uuid)
+  if (!scan.categories.some((c) => c.id === a.uuid)) return []
+  return scan.assets.filter((x) => x.categories.includes(a.uuid))
+}
+
+/** The scan, when this host can serve aerials at all (macOS desktop with a media URL minter). */
+async function aerialScan(): Promise<{ scan: AerialScan; root: string; url: (p: string) => string } | null> {
+  const url = mediaUrl
+  if (host().platform !== 'darwin' || !url) return null
+  const root = aerialsRoot()
+  const scan = await scanAerials(root)
+  return scan ? { scan, root, url } : null
+}
+
+function thumbUrl(s: { scan: AerialScan; root: string; url: (p: string) => string }, id: string | undefined) {
+  return id && s.scan.thumbs.has(id) ? s.url(path.join(s.root, 'thumbnails', `${id}.png`)) : null
+}
+
+/** One "Shuffle <category>" tile per category with any asset, then one tile per downloaded aerial. */
+export async function listAerials(): Promise<WallpaperStill[]> {
+  const s = await aerialScan()
+  if (!s) return []
+  const shuffles: WallpaperStill[] = []
+  const singles: WallpaperStill[] = []
+  for (const c of s.scan.categories) {
+    const members = aerialMembers(s.scan, `${AERIAL_SHUFFLE_PREFIX}${c.id}`)
+    if (!members.length) continue
+    shuffles.push({ id: `${AERIAL_SHUFFLE_PREFIX}${c.id}`, label: `Shuffle ${c.label}`, thumb: thumbUrl(s, members[0].id) })
+    for (const a of members) {
+      if (s.scan.downloaded.has(a.id) && !singles.some((x) => x.id === `${AERIAL_PREFIX}${a.id}`)) {
+        singles.push({ id: `${AERIAL_PREFIX}${a.id}`, label: a.label, thumb: thumbUrl(s, a.id) })
+      }
+    }
+  }
+  return [...shuffles, ...singles]
+}
+
+/**
+ * The clips an aerial wallpaper plays: its own downloaded ones (a shuffle's only if
+ * `includeInShuffle`, else any of the category's downloaded ones). When it has none — a category macOS has not downloaded anything for, or a
+ * single aerial macOS has since deleted — ANY downloaded aerial plays instead: the thumbnail is a
+ * 214×130 PNG, and stretched over the window it reads as a blurry regression, not a wallpaper. Only
+ * with nothing downloaded at all is the list empty (the thumbnail then shows).
+ */
+export async function aerialClips(value: unknown): Promise<string[]> {
+  const w = normalizeWallpaper(value)
+  const s = w.kind === 'preset' && parseAerialId(w.id) ? await aerialScan() : null
+  if (!s || w.kind !== 'preset') return []
+  const shuffle = parseAerialId(w.id)!.shuffle
+  const downloaded = aerialMembers(s.scan, w.id).filter((a) => s.scan.downloaded.has(a.id))
+  const own = shuffle ? downloaded.filter((a) => a.includeInShuffle) : downloaded
+  // A category whose downloaded clips are all left out of macOS's shuffle still plays its own
+  // before anything from another category.
+  const fallback = own.length ? own : downloaded
+  const clips = fallback.length ? fallback : s.scan.assets.filter((a) => s.scan.downloaded.has(a.id))
+  return clips.map((a) => s.url(path.join(s.root, 'videos', `${a.id}.mov`)))
+}
+
+/** The still under (and instead of) the video: the first member's thumbnail, by preferredOrder. */
+async function aerialStill(id: string): Promise<string | null> {
+  const s = await aerialScan()
+  return s ? thumbUrl(s, aerialMembers(s.scan, id)[0]?.id) : null
+}
+
 let currentKeep: () => unknown[] = () => []
 
 /**
@@ -445,4 +633,6 @@ export function registerWallpaperIpc(settings: {
   platform().handle(IPC.wallpaperListStills, () => listStills())
   platform().handle(IPC.wallpaperLoad, (value: unknown) => loadWallpaper(value))
   platform().handle(IPC.wallpaperImport, (sourcePath: unknown) => importWallpaper(sourcePath))
+  platform().handle(IPC.wallpaperListAerials, () => listAerials())
+  platform().handle(IPC.wallpaperAerialClips, (value: unknown) => aerialClips(value))
 }

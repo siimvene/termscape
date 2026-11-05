@@ -13,6 +13,7 @@ import { ClaudeScienceProxy } from './claude-science-proxy'
 let dir: string, upstream: http.Server, server: http.Server, echo: WebSocketServer
 let base: string, cookie: string, upstreamRequest: http.IncomingMessage | undefined
 let sockets: WebSocket[]
+let auth: Auth, token: string
 let enabled: boolean
 
 beforeEach(async () => {
@@ -32,8 +33,9 @@ beforeEach(async () => {
   echo.on('connection', (ws) => ws.on('message', (data) => ws.send(data.toString())))
   await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve))
   const proxy = new ClaudeScienceProxy((upstream.address() as { port: number }).port, () => enabled)
-  const auth = new Auth(dir)
-  cookie = `nt_session=${auth.createSession()}`
+  auth = new Auth(dir)
+  token = auth.createSession()
+  cookie = `nt_session=${token}`
   server = http.createServer(createHttpHandler({ auth, rendererDir: dir, scienceProxy: proxy }))
   attachWsServer(server, { auth, scienceProxy: proxy, platform: new ServerPlatform({ userDataDir: dir, appVersion: 'test' }) })
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
@@ -87,6 +89,18 @@ describe('Science proxy', () => {
     const proxy = new ClaudeScienceProxy(8765)
     expect(proxy.matches('/apps/claude-science-other')).toBe(false)
     expect(proxy.matches('/mcp_apps/preview')).toBe(false)
+  })
+
+  // Sign-in S3 closes a cookie socket when its session is revoked; a Science tunnel is a raw
+  // socket the fork hands to the proxy, so it must be ended by the same revoke, not outlive it.
+  it('closes a tunneled Science WebSocket when its Termscape session is signed out', async () => {
+    const ws = new WebSocket(base.replace('http:', 'ws:') + '/apps/claude-science/ws', { headers: { cookie, origin: base } })
+    sockets.push(ws)
+    await new Promise<void>((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject) })
+    const closed = new Promise((resolve) => ws.once('close', resolve))
+    auth.revokeSession(token)
+    await closed
+    expect(ws.readyState).toBe(WebSocket.CLOSED)
   })
 
   it('tunnels authenticated WebSockets and refuses unauthenticated upgrades', async () => {

@@ -25,10 +25,15 @@ import {
 import { useAppTheme } from './state/useAppTheme'
 import { installWindowActivityOnDocument } from './lib/windowActivity'
 import {
+  glassBackdropFilter,
   glassChromeAlpha,
   glassChromeAlphas,
+  glassChromeBackdropRange,
   glassChromeHighlights,
   glassControlClearAlpha,
+  glassFrostFloor,
+  glassMinRatio,
+  glassSurfaceAlpha,
   parseCssColor,
   resolveGlassSlider
 } from './lib/glassContrast'
@@ -124,6 +129,7 @@ export default function App() {
   // The readable alpha depends only on the resolved theme, and computing it is ~16k contrast
   // evaluations plus a style recalc; it is measured once per theme, never per slider input.
   const [glassChrome, setGlassChrome] = useState<{
+    text: string
     panel: string
     rgb?: readonly number[]
     readable: number | null
@@ -153,6 +159,7 @@ export default function App() {
     // The controls' backdrop dimming (dark) / brightening (light) at Clear lives in styles.css.
     const dim = Number.parseFloat(getComputedStyle(root).getPropertyValue('--glass-control-dim'))
     setGlassChrome({
+      text,
       panel,
       rgb: parseCssColor(panel)?.rgb,
       readable: glassChromeAlpha(text, panel, 4.5, highlights),
@@ -167,15 +174,29 @@ export default function App() {
     if (!glassChrome) {
       root.style.removeProperty('--glass-chrome-bg')
       root.style.removeProperty('--glass-control-bg')
+      root.style.removeProperty('--glass-node-bg')
+      root.style.removeProperty('--glass-node-squeeze')
       root.style.removeProperty('--glass-t')
       return
     }
-    const { panel, rgb, readable, controlClear } = glassChrome
+    const { text, panel, rgb, readable, controlClear } = glassChrome
     // An unparseable token leaves the chrome opaque (`panel` as is).
     const alphas = readable !== null && rgb ? glassChromeAlphas(glassSlider, readable, glassA11y, controlClear) : null
     const fill = (a: number | undefined): string => (a !== undefined && rgb ? `rgba(${rgb.join(', ')}, ${a.toFixed(3)})` : panel)
     root.style.setProperty('--glass-chrome-bg', fill(alphas?.text))
     root.style.setProperty('--glass-control-bg', fill(alphas?.control))
+    // Canvas cards (subagent, files, loop, trigger, dino) follow the slider like terminal nodes, and
+    // a backdrop squeeze keeps their text readable left of the tick (glassChromeBackdropRange: 3:1
+    // at Clear rising to 4.5:1 at the tick, glassMinRatio).
+    const nodeAlpha = readable !== null && rgb ? glassSurfaceAlpha(glassSlider, readable, glassA11y) : undefined
+    root.style.setProperty('--glass-node-bg', fill(nodeAlpha))
+    const range =
+      nodeAlpha !== undefined
+        ? glassChromeBackdropRange(text, panel, nodeAlpha, glassMinRatio(glassT), glassFrostFloor(glassT))
+        : null
+    const squeeze = range && glassBackdropFilter(range)
+    if (squeeze) root.style.setProperty('--glass-node-squeeze', squeeze)
+    else root.style.removeProperty('--glass-node-squeeze')
     root.style.setProperty('--glass-t', glassT.toFixed(3))
   }, [glassChrome, glassSlider, glassA11y, glassT])
 

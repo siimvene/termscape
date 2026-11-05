@@ -28,7 +28,9 @@ vi.mock('../../session/session', () => ({
       ? { id: 'hosted-session', source: 'relay', api: hostedApi }
       : projectId === 'relay'
         ? { id: 'relay-session', source: 'relay', api: hostedApi }
-        : { id: 'local', source: 'local', api: localApi }
+        : { id: 'local', source: 'local', api: localApi },
+  // The card modal's `ProjectSessionScope` provides the lane's session; `useSession` is mocked above.
+  SessionProvider: ({ children }: { children: unknown }) => children
 }))
 vi.mock('../../state/hostedTeams', () => ({
   isHostedReadOnly: (sessionId: string) => sessionId === 'hosted-session'

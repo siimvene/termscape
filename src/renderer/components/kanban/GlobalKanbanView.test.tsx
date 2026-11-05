@@ -13,3 +13,10 @@ describe('global kanban swimlane collapse wiring', () => {
     expect(GLOBAL_KANBAN_SRC).toContain('{!collapsed && (')
   })
 })
+
+describe('global kanban card read state', () => {
+  it('clears the unread dot when a card opens, like the per-project board', () => {
+    expect(GLOBAL_KANBAN_SRC).toContain("import { useAgentStatus } from '../../state/agentStatus'")
+    expect(GLOBAL_KANBAN_SRC).toContain('if (modalNodeId) useAgentStatus.getState().clearUnread(modalNodeId)')
+  })
+})

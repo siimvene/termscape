@@ -366,7 +366,8 @@ describe('RemoteHooks.setup — a hostile remote $HOME', () => {
     const res = await rh.setup('p1', conn, '/s.sock', { port: 51234, token: 'tok', version: '1' })
     expect(res?.endpointPath).toBe(`/Users/Enes K/.nodeterm/hook-endpoint-p1-${owner}.env`)
     const joined = runs.map((r) => r.cmd)
-    expect(joined.some((j) => j.includes(`mkdir -p '/Users/Enes K/.nodeterm'`))).toBe(true)
+    expect(joined.some((j) => j.includes(`mkdir -p -- '/Users/Enes K/.nodeterm' && `))).toBe(true)
+    expect(joined.some((j) => j.includes(`chmod 700 '/Users/Enes K/.nodeterm';`))).toBe(true)
     expect(
       joined.some(
         (j) => j.includes('cat > ') && j.includes(`/Users/Enes K/.nodeterm/hook-endpoint-p1-${owner}.env'`)

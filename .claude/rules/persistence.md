@@ -34,7 +34,7 @@ factories (`createTerminalNode`, `createSshTerminalNode`, `createAgentNode(agent
 group transforms (`groupSelectedNodes`, `ungroupNodes`, `duplicateNode`), and the
 `nodeStatesToFlow` / `flowToNodeStates` serializers. Node kinds (`NodeKind` in
 `src/shared/types.ts`): `terminal | sticky | group | editor | diff | video | web | browser | files |
-subagent | loop | dino | trigger` — `subagent` and `loop` are render-only (ephemeral hook-driven
+subagent | loop | dino | trigger | simulator | whiteboard` — `subagent` and `loop` are render-only (ephemeral hook-driven
 viz) and never persisted. `trigger` (issue #493, all four
 phases landed) is a first-class PERSISTED kind. The whole host-side
 machine is composed ONCE in `core/trigger-service.ts` (`startTriggerService`) and booted
@@ -76,6 +76,60 @@ Persistence has two layers:
   | folder-ref | `<cwd>/.nodeterm/project.json` (git-shared) | `cwd` + header + machine-local half |
   | ssh-ref | the same file on the host | `ssh` + header + `cache` (offline copy, rev-reconciled) |
   | local-data-ref | `userData/inline-projects/<id>.json` | `dataFile` + header + `project` (cache) |
+  | folder-data-ref | `userData/inline-projects/<id>.json` | `cwd` + `dataFile` + header + `project` (cache, stored WITHOUT `cwd`) |
+
+  **The folder-data-ref (issue #1145)** is a folder project whose canvas is kept in app data
+  (`Project.storeInAppData`) so that nothing is written into the folder — for client repos and
+  folders the user does not own. It is a local-data ref with a working directory: the file and the
+  cache hold the project without `cwd` (node cwds stay absolute), so the inline load and write paths
+  serve it unchanged and the entry adds the folder back. Three rules keep the promise:
+  `folderFileCwd(e)`, not `e.cwd`, decides every read or write of `<cwd>/.nodeterm/project.json`
+  (watcher, content authority, the phone writers, settings); a missing data file falls back to the
+  cache and then to a grey placeholder, **never** to the folder branch (that would adopt a stale or
+  a teammate's canvas); and the cache's missing `cwd` is the downgrade contract — an older build
+  opens it as a plain inline canvas instead of writing a fresh file into the folder. Its side files
+  follow it: settings.json and the board log under `userData/project-files/<id>/.nodeterm/`
+  (`appDataProjectRoot`; settings still load as `'shared'`; removed with the project when it is
+  deleted, kept when it moves back into its folder), whiteboards in the same root
+  (`whiteboardLocationForProject`; the folder's boards, drawn before the move, are read after it and
+  never written, and a move back copies the app-data boards over the folder's older files —
+  `carryWhiteboards` in `prepareFolderStorage`; not the shared `userData/whiteboards`, which is
+  keyed by node id, and two folders holding one committed canvas share node ids), canvas images to
+  the existing `userData/canvas-images` fallback (`sideFilesFolderForProject`). `localCwdForProject` still answers
+  the folder, because it means where terminals run and what a relay seat is jailed to. Moving
+  between the two is the tab menu's "Store canvas in app data / in folder"
+  (`lib/projectStorageMove.ts`): into app data = save, then `releaseFolderFiles` (refused until the
+  data file holds the canvas; files git tracks are kept unless the user confirms); into the folder =
+  `prepareFolderStorage` (refuses an occupied folder, like "Set folder…"), then save, then
+  `projectStorage` (where the store has the canvas now). New folder projects follow
+  `settings.newProjectStorage`; a folder that already has a project.json is adopted as it is, in its
+  folder. Rules the moves rest on:
+  - **The data file goes only when THIS save wrote the folder file** (`sweepRemovedDataFiles`'
+    `folderFilesWritten`), never because `lastWritten` remembers one: a file can leave the folder
+    behind the store's back (`git rm`, a branch checkout) while the record stays, an unchanged
+    canvas then skipped the write as "unchanged", and the sweep deleted the only copy. For the same
+    reason the record of a folder file is dropped when its project moves into app data (kept file
+    or not) and when an entry takes a folder over from a data file ("Set folder…", a move back).
+  - **A move into the folder whose folder write fails stays in app data, index included**: the
+    folder leg swallows a failed write, so the save keeps that entry a folder-data-ref for that save
+    (`appDataCanvas`, the one builder of its cache). The menu reads `projectStorage` after the save,
+    puts the flag back and says the move failed; it never reads a landed save as a landed move.
+  - The rev continues across a move (the sweep keeps it for an id that is still live).
+
+  **Known limits:** an older build that opens a folder-data-ref while a folder `project.json` is
+  still there (a tracked file the user kept) keys its watcher, its phone writer and `readLocalRef`
+  on the entry's `cwd`, so until it next saves its index it can adopt that file as the project
+  (after which the entry is a plain folder ref there and the data file is orphaned). Images and a
+  board log stay on the side they were written on when a project moves, in either direction; so do
+  a folder's whiteboard files after a move into app data (read, never removed). A board edited in
+  app data replaces the folder's file on the move back, including a teammate's newer version of a
+  tracked board pulled in the meantime (git still has it).
+  Handoff files from Transfer still write `<node cwd>/.nodeterm/`. The iOS app does not know the
+  kind: over direct SSH it reads the entry's `project` cache, which has no `cwd`, so it shows a
+  project without a folder (it never reads or writes the folder file, and its board and label
+  writers refuse with no write path; the relay verbs are handled here), and its repo scan finds no
+  `project.json` in that folder, so it can offer the folder as a new project and write one there.
+  SSH projects and Server `team bootstrap` cannot use the kind.
 
   In all three the file carries CONTENT and the entry carries the machine-local half — project
   `id`, `viewport`, `defaultAccountId`, `breadcrumbs`, `closedSessions`, `localApprovalId`,

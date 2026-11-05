@@ -88,6 +88,15 @@ const CODEX_APPROVAL_BASELINE: readonly string[] = ['on-request', 'never']
 interface ApprovalDialect {
   modes: Partial<Record<AgentPermissionMode, readonly string[]>>
   /**
+   * Every flag of this CLI's permission axis, for `withPermissionMode`'s "the user already spelled
+   * it" suppression: a launch command carrying ANY of these keeps its own choice, not only one
+   * carrying the exact flag we would append. Upstream expresses this as `[flag, ...standaloneFlags]`
+   * on its flag + value model; the fork's full-argv table states it directly. `undefined` = only the
+   * flag we would append suppresses. codex does not use it — its axes are not one set, see
+   * `codexSuppressors`.
+   */
+  axisFlags?: readonly string[]
+  /**
    * Does this CLI's OWN default already prompt before every action?
    *
    * This is what decides whether `manual` ("Ask each time") is honoured by emitting NOTHING. For
@@ -124,6 +133,16 @@ const GEMINI_MODES: Partial<Record<AgentPermissionMode, readonly string[]>> = {
   // always launched bare (= `default` = prompt for approval), and `modeSupported` would have
   // answered `true`, so the derived copy would not have admitted it either. No flag is the honest
   // answer and reproduces the pre-branch launch exactly. See `unsupportedModesNote`.
+}
+
+const ANTIGRAVITY_MODES: Partial<Record<AgentPermissionMode, readonly string[]>> = {
+  plan: ['--mode', 'plan'],
+  acceptEdits: ['--mode', 'accept-edits'],
+  auto: ['--mode', 'auto'],
+  // `bypassPermissions` is a standalone, value-less switch rather than a `--mode` value, measured on
+  // `agy --help` (1.2.7). The full-argv table states that directly (upstream: `standaloneFlags`).
+  bypassPermissions: ['--dangerously-skip-permissions']
+  // `manual` → agy's own default (no flag).
 }
 
 const CODEX_MODES: Partial<Record<AgentPermissionMode, readonly string[]>> = {
@@ -210,7 +229,12 @@ const CURSOR_MODES: Partial<Record<AgentPermissionMode, readonly string[]>> = {
  * user-typed ids), so a plain-object index answers `'constructor'` with a Function.
  */
 const APPROVAL_DIALECTS: Partial<Record<AgentId, ApprovalDialect>> = {
-  gemini: { modes: GEMINI_MODES, manualIsDefault: true },
+  gemini: { modes: GEMINI_MODES, manualIsDefault: true, axisFlags: ['--approval-mode'] },
+  antigravity: {
+    modes: ANTIGRAVITY_MODES,
+    manualIsDefault: true,
+    axisFlags: ['--mode', '--dangerously-skip-permissions']
+  },
   codex: {
     modes: CODEX_MODES,
     manualIsDefault: false,
@@ -225,7 +249,11 @@ const APPROVAL_DIALECTS: Partial<Record<AgentId, ApprovalDialect>> = {
   },
   cursor: {
     modes: CURSOR_MODES,
-    manualIsDefault: true
+    manualIsDefault: true,
+    // cursor's run modes are three DIFFERENT flags (`--mode X`, a bare `--force`, a bare
+    // `--auto-review`), so any one of them in the launch command is the user's choice: appending
+    // another would hand cursor two competing run modes.
+    axisFlags: ['--mode', '--force', '--auto-review']
   }
 }
 
@@ -270,10 +298,10 @@ export function modeSupported(
   if (!dialect) return hasPermissionMode(agentId)
   // `manual` — "ask each time" — is reached two different ways, which is why the table alone is
   // not its authority: by emitting NO flag on a CLI whose own default already prompts
-  // (`manualIsDefault`: claude, grok, gemini), or by emitting a value that means it (codex's
-  // `untrusted`). An agent that can do NEITHER cannot keep the promise, and this is where that is
-  // admitted — codex >= 0.149.0 is exactly that case, and it is why this early return stopped
-  // being an unconditional `true`.
+  // (`manualIsDefault`: claude, grok, gemini, antigravity), or by emitting a value that means it
+  // (codex's `untrusted`). An agent that can do NEITHER cannot keep the promise, and this is where
+  // that is admitted — codex >= 0.149.0 is exactly that case, and it is why this early return
+  // stopped being an unconditional `true`.
   if (mode === 'manual')
     return dialect.manualIsDefault || emittableFlags(dialect, 'manual', caps) !== undefined
   return emittableFlags(dialect, mode, caps) !== undefined
@@ -350,9 +378,9 @@ function codexSuppressors(appendedFlag: string): readonly string[] {
  * CLI launch path (new node, cold-restore resume, branch, handoff, canvas control).
  *
  * WHERE the flag lands is decided one layer up, by `createAgentNode`: with no `argvPromptSeparator`
- * (claude, gemini, codex) it goes LAST, keeping those command lines byte-identical; with one
- * (grok's `--`, cursor's `agent`) it must go BEFORE the separator: `--` is end-of-options, and
- * cursor's flags are root options that the `agent` subcommand reads (measured, see CURSOR_MODES).
+ * (claude, gemini, codex, antigravity) it goes LAST, keeping those command lines byte-identical;
+ * with one (grok's `--`, cursor's `agent`) it must go BEFORE the separator: `--` is end-of-options,
+ * and cursor's flags are root options that the `agent` subcommand reads (measured, see CURSOR_MODES).
  *
  * **A flag the command already carries is left alone (issue #601).** `cmd` is not always ours:
  * `settings.agentLaunchCommands` lets the user replace the program part with a wrapper, and a
@@ -391,9 +419,12 @@ export function withPermissionMode(
   const flags = approvalFlags(id, mode, caps)
   if (!flags.length) return cmd
   // Suppress the append when the user's command already states the relevant permission flag. For
-  // codex the conflicting/duplicate set depends on WHICH flag we would add (codexSuppressors); every
-  // other agent falls back to the single flag it would emit, byte-identical to before.
-  const suppressors = id === 'codex' ? codexSuppressors(flags[0]) : [flags[0]]
+  // codex the conflicting/duplicate set depends on WHICH flag we would add (codexSuppressors); a
+  // dialect agent also yields to any flag of its permission axis (`axisFlags` — antigravity's
+  // `--mode` and `--dangerously-skip-permissions` are alternatives, so either one in the command
+  // means the user chose); claude/grok fall back to the single flag they would emit.
+  const suppressors =
+    id === 'codex' ? codexSuppressors(flags[0]) : [flags[0], ...(dialectFor(id)?.axisFlags ?? [])]
   if (suppressors.some((f) => argvHasFlag(cmd, f))) return cmd
   return `${cmd} ${flags.join(' ')}`
 }

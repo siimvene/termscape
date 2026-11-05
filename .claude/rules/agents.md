@@ -908,6 +908,25 @@ when their display titles match. Answering either resolves only that question or
     reconnecting terminals. These changes share the core listener in Desktop and Server Edition;
     the mobile wire protocol and node-identity rules are unchanged.
 
+  - **A browser is refused before the bearer is looked at** (`core/agents/hook-browser-guard.ts`).
+    The bearer stays the real gate; this is the belt beside it, against the one caller that can
+    reach a loopback port without being a process of ours. A request carrying ANY `Origin` header,
+    or a `Host` that is not `127.0.0.1` / `localhost` / `[::1]` (any port), gets 403 on both
+    listeners, before the 403-vs-421 bearer distinction, so a DNS-rebound page learns nothing.
+    MEASURED, every shipped client passes: curl over the socket sends `Host: localhost` (the codex
+    launcher's socket URL sends `localhost:0`), curl over TCP `127.0.0.1:<port>` (the SSH TCP
+    fallback arrives with the HOST's port — hence any port), Node's `http` over the socket
+    `localhost`, Node's fetch no Origin (but `sec-fetch-mode: cors` — never refuse on that), Bun's
+    fetch (opencode's runtime) no Origin. The SSH reverse tunnel forwards bytes, so a host-side
+    curl's Host arrives unchanged. A request with no Host is let through (Node already 400s an
+    HTTP/1.1 one; no browser sends one). **A new client must send no Origin and a loopback Host** —
+    `hook-server.browser-guard.test.ts` drives the real transports and goes red otherwise.
+  - **`~/.nodeterm` on an SSH host is 0700** (`privateRemoteDirCommand`, run by `setup()` on every
+    connect and tunnel repair): created under `umask 077` and an existing one tightened, never
+    through a symlink, never a directory the login user does not own (`-O`, which only a root login
+    needs). The secrets inside were already 0600 one by one; the umbrella is so a future file written
+    there without a mode is not born world-readable in a traversable directory.
+
   - **No keyring is not "no identity" (#1088).** Electron 42 on a Linux session without Secret
     Service/kwallet picks `basic_text` and `safeStorage.encryptString` THROWS (measured under xvfb).
     The desktop secret load used to reject on every boot ⇒ no node token was ever written ⇒ `send` /
@@ -959,12 +978,16 @@ when their display titles match. Answering either resolves only that question or
   Settings (`notifyOnClaudeDone`). Selecting, focusing, dwelling into, or opening a session card
   clears `unread` and ACKs the finish across phone/notch surfaces — existing read-on-view behavior.
   This NEVER changes the workflow bucket: read state is independent from agent state.
-  The unread COUNT is the macOS Dock badge, and on **Windows** a taskbar overlay icon (pure
-  `planBadge` + BGRA rasterizer `rasterizeBadge`, "9+" above nine, `main/taskbar-badge.ts`) plus a
-  `flashFrame` when the count RISES while unfocused (cleared on focus); Linux shows nothing. Windows
-  toasts need `app.setAppUserModelId` set before ready to the package.json `build.appId` the NSIS
-  shortcut carries (`main/app-identity.ts`, pinned by test; `execPath` in dev) — without it toasts
-  are dropped or mis-attributed silently (Windows never emits Notification `failed`).
+  The unread COUNT is the macOS Dock badge (counted over nodes some project HOLDS, closed ones
+  included — never over the raw status table, which outlives nodes deleted by paths that skip
+  `remove`; an orphaned entry is swept at load once its 90-day `lastSeen` clock ages out, and the
+  sweep is skipped whenever the load is incomplete, `lib/unreadBadge.ts`), and on **Windows** a
+  taskbar overlay icon (pure `planBadge` + BGRA rasterizer `rasterizeBadge`, "9+" above nine,
+  `main/taskbar-badge.ts`) plus a `flashFrame` when the count RISES while unfocused (cleared on
+  focus); Linux shows nothing. Windows toasts need `app.setAppUserModelId` set before ready to the
+  package.json `build.appId` the NSIS shortcut carries (`main/app-identity.ts`, pinned by test;
+  `execPath` in dev) — without it toasts are dropped or mis-attributed silently (Windows never
+  emits Notification `failed`).
 - **Sound alerts + custom sounds** (issue #289) — the `done` / `needsYou` alert (`SfxKind`) is a
   synthesized WebAudio chime (`renderer/lib/sfx.ts`, fired from Canvas's `alert` closure, gated by
   `soundEffects`, 5 s/node cooldown). Settings → Notifications lets the user replace either with their
@@ -1245,8 +1268,9 @@ when their display titles match. Answering either resolves only that question or
   A send therefore goes through `pty.sendChatPrompt`, where core captures the pane first and
   refuses (`ChatPromptBlocked`, nothing written, the draft kept) when the bottom of the screen is a
   dialog footer or has no input box; an empty or unreadable capture is NOT evidence and sends as
-  before. A LOCAL pane is also polled every 2 s while the view is visible, to disable the composer
-  and show the dialog's lines; SSH and relay panes are not polled (a round trip per read) and rely
+  before. A LOCAL pane is also polled every 2 s while the view is visible AND the window focused
+  (an unfocused window skips ticks — ~30 tmux spawns a minute per view otherwise — and `focus`
+  re-reads at once; unknown focus polls), to disable the composer and show the dialog's lines; SSH and relay panes are not polled (a round trip per read) and rely
   on the send-time check. Another CLI's layout would read as a permanent dialog, so an agent joins
   the list only with its own measured reader.
   **Live progress (2026-09).** While the agent works, a `role=status` row closes the thread (the ONE

@@ -127,6 +127,18 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
     while subscribed. It cannot double-fire on desktop (only `buildStubApi` reaches it; the relay
     tab takes `onMarkdownToggle` from the local preload). macOS Chrome reserves ⌘M for minimize,
     so the default chord only reaches a Mac browser tab after a remap (docs/SERVER.md).
+  - **A status-reading command builds its answer PER KEYPRESS, never from a subscription.**
+    `node.nextNeedingYou` (ships unbound, mirrored in ⌘K as "Go to next agent needing you") builds
+    `needsYouQueue` (`lib/nextNeedingYou.ts`) from `useProjects`/`useAgentStatus` `getState()` on
+    each press: the status-mode sidebar's "Need attention" rows (`buildStatusList` over the
+    non-closed projects), re-sorted OLDEST wait first, minus rows `nodeTravel` reports `blocked`.
+    Canvas must never subscribe to the status store's `byId` for it (every flip would re-render the
+    canvas). Travel is `travelToNodeRef` (keeps the hosted-team reopen guard), the cycle cursor is a
+    ref (memory only), the node the user is already in is skipped when another waits, and an empty
+    queue is CLAIMED with an info notice — xterm has already withheld the chord, so declining would
+    only make a deliberately bound chord silent. After a restart the notice counts agents whose
+    restored `lastSeen` last said waiting/blocked (`waitingBeforeRestart`). Its handler entry is
+    pinned by `keybindings-handler-parity.test.ts`, which checks only the ids in its `checkedIds`.
   - **ShortcutsPanel is DERIVED from the registry, never a hand-written list.**
     `buildShortcutSections` iterates `COMMAND_DEFINITIONS` — one section per `CommandGroup` in
     registry source order, the label from `def.title`, and EVERY one of the command's EFFECTIVE

@@ -24,13 +24,13 @@ import { buildManagedHookCommand, normalizeHookCommand, writeManagedHookFileAtom
 import { buildManagedScript } from './managed-script'
 import { updateSettingsFile } from './settings-file'
 import { findExecutableSync } from '../../exec-path'
+import { isRecord } from '../../../shared/is-record'
 
 export const CURSOR_SCRIPT_FILE = 'cursor.sh'
 /** Seconds Cursor waits for one handler (its default is 60). */
 export const CURSOR_HOOK_TIMEOUT = 5
 
 type Json = Record<string, unknown>
-const isRecord = (v: unknown): v is Json => typeof v === 'object' && v !== null && !Array.isArray(v)
 
 // `os.homedir()` through the DEFAULT import so a test that spies it redirects the whole install.
 export function cursorHooksJsonPath(home: string = os.homedir()): string {

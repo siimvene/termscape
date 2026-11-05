@@ -97,6 +97,79 @@ project's nodes only.** The contract:
   `liveCanvasHolds` (tag AND active id; otherwise the store) and queues a FUNCTIONAL update
   (`rebaseOnLatest`). Consequence for readers: code pairing the tag with the RENDERED `nodes`
   (a render-time publish, an effect keyed on `nodes`) reads `renderedProjectId`, never the ref.
+- **The node subtree's session follows the project whose nodes React Flow's STORE holds**
+  (`useFlowStoreOwner`, `canvas/flowStoreOwner.ts`), never `activeProjectId`. xyflow copies the
+  `nodes` prop into its store in a PASSIVE effect and `ReactFlowProvider` sits above the keyed
+  `SessionProvider`, so a key that flipped with the active id remounted the OUTGOING project's
+  nodes under the INCOMING session for a commit: a team tab's terminals were created on this
+  desktop's own core, and a local terminal on the relay host. Each array handed to
+  `<ReactFlow nodes>` is recorded against `renderedProjectId` and the store's array is looked up
+  (unknown ⇒ the last known owner); the same id feeds `OwningProjectContext`. A local → local
+  switch keeps the key `'local'` (no remount). A session-changing remount now lands one commit
+  AFTER the load applied the project's camera and builds a fresh pan/zoom, so `<ReactFlow>` gets
+  `defaultViewport={viewportRef.current}`, or the switch resets the camera to the origin. For the
+  same reason the load's settle timer must not frame or read the incoming nodes itself: the
+  pending focus / "Open recent" resume / `nodeterm://` link it finishes run through
+  `useFlowLanding` (`canvas/flowLanding.ts`) once the owner IS that project — React may run the
+  store copy's passive effect after a due timer, which then framed the pan/zoom the remount
+  destroys and read the outgoing copy of a shared node id. The rule holds for a local → local
+  switch too (no remount, but the owner still flips). A caller that would create and frame AT ONCE
+  (`resumeWhenLanded`, `runLinkOpen`) must also ask `flowLanding.holds(projectId)`, never the epoch
+  tag alone: after "Open folder & resume" or a link that opens a new folder, the switch is the
+  folder open's last synchronous step, so the `.then` runs after the load effect installed the tag
+  and before the store copy — every time, not by chance. Otherwise it leaves the work in
+  `pendingResumeRef` / `pendingLinkRef` for the landing. A throw inside a landing is logged, never
+  rethrown: it runs in a passive effect and `<Canvas />` has no error boundary.
+  `flowStoreOwner.test.tsx` replays the switches through real React Flow, the timer firing inside
+  that window and the folder-open continuation included.
+- **A remote project's node never starts on this core, whatever it is mounted under** (bug F: a
+  team tab's terminals were created as LOCAL tmux sessions here). The node itself cannot say so: a
+  project shared from SSH with a team is ADOPTED by the host (`localizeAdoptedNode` drops
+  `sshRemoteTmux`/`ssh`/`sshFs`), so its nodes reach the tab as plain terminals. Do NOT re-stamp
+  `sshRemoteTmux` onto them — the host's core would then refuse its own sessions (`requireRemote`
+  with no master of its own: `held-elsewhere` for a live one, a refused spawn otherwise). Three
+  layers besides the keying above:
+  (1) `sessionForProject` resolves a REMOTE project (`remote` in the store; once the store no longer
+  holds it, bound while remote in this run) with no live binding to the OFFLINE relay session
+  (`OFFLINE_RELAY_SESSION_ID`, `session/offline-relay-session.ts`: `source 'relay'`, `status
+  'offline'`), never the local one.
+  Its core-bound calls (pty, fs, git, workspace, …) reject, so no terminal can be created here; it
+  is not a wall around this machine, since its api spreads `...local` like a live relay tab's (the
+  local namespaces — contextLink, transcripts, handoff, media — still act here, and its `boardLog`
+  read answers `unsupported`). "Is this project remote?" is ONE predicate, `isRemoteProjectId`
+  (session.ts), shared by this resolution and the spawn refusal in (3). Lifecycle code asking "which
+  session is bound to this tab?" (dispose it, reconnect it) asks `boundSessionForProject`, which
+  never answers the sentinel.
+  (2) A surface that mounts a project's node OUTSIDE Canvas's node subtree runs under that project's
+  session. Both kanban boards render under App's LOCAL provider, so each mounts its card modal
+  through `ProjectSessionScope` (`session/owning-project.ts`: `sessionForProject(<card's project>)`,
+  keyed by session id, plus `OwningProjectContext`). Before it, opening a team tab's terminal card
+  created the host's node id on this desktop every time. The terminal, the comments, the metadata
+  strip and the pull-request panel now act on the card's project (`useOwningProjectId() ??
+  activeProjectId`): the terminal runs under the card project's session, the comments panel reads
+  and writes that project's board log, the metadata strip's member pool reads it, and the
+  pull-request panel reads that project's pull requests, SSH flag and auto-move target. On the Omni
+  board a lane is not the active project: pairing the lane's api with the active id blanked a relay
+  lane's comments and saved new ones nowhere, and on a local lane filed them into the ACTIVE
+  project's board log. A relay card's file links are switched off (`cardFileLinkRoute`) and its ⌘M
+  chat is refused (`stub.chat`, `E_UNSUPPORTED`). **Known exceptions (pre-existing, follow-up):** the
+  icon picker (`NodeIconPicker.chooseImage` resolves the ACTIVE project, so a team lane's card
+  opened while a local project is active copies the picked image into the local project's
+  `.nodeterm/images/`), and dictation and file-drop uploads in a relay card, which act on this
+  machine. The session is resolved at render, so a reconnect while a modal is open takes effect at
+  the board's next render.
+  (3) TerminalNode and ModalTerminal ask `spawnBelongsElsewhere(isRemoteProjectId(owner),
+  session.source)` (`owner` from `OwningProjectContext`; the predicate is the one (1) uses, so a tab
+  the store deleted still counts) before any SSH resolve or create: a remote project under a
+  non-relay session starts nothing and writes a gray "belongs to a remote project that is not
+  connected here" line. ModalTerminal mirrors TerminalNode's `dialsSsh` (a relay card's SSH-project
+  node is joined by the HOST with `requireRemote`; this machine dials, refuses and reports nothing
+  for it), and a non-dialing node's `ownerProjectId` is the owning project, else the active one.
+  `components/kanban/cardModalSession.test.tsx` renders both boards with real sessions and a probe
+  in place of CardModal, asserting which session and owning project each modal mount gets, plus
+  source pins for the two terminals; `components/kanban/boardLogPanelSession.test.tsx` and
+  `cardOwnerProject.test.tsx` render the real comments panel, metadata strip and pull-request panel
+  under a lane's `ProjectSessionScope`; `session/offline-relay-session.test.ts` replays the switches.
 - Switching away unmounts the old project's `TerminalNode`s → their tmux clients detach but
   the sessions keep running; switching back reattaches. tmux session names are per-node-id
   (globally unique), so projects never collide.

@@ -72,6 +72,27 @@ about which machine they describe. Reading + parsing is `core/session-memory.ts`
   re-exports it. The reaper's watermark and the pill must never disagree about how much RAM is free,
   and a second copy is exactly the drift these rule files warn about elsewhere. `null` = could not read,
   never zero.
+- **The pill's swap figure and kernel-pressure tint live in `MemInfo.display`, and nothing but the
+  pill reads it.** darwin: `sysctl vm.swapusage` and
+  `kern.memorystatus_vm_pressure_level` (1/2/4 → normal/warn/critical), both in ONE
+  `/usr/sbin/sysctl` run inside `darwinMemInfo`, each field optional on its own; Linux: copied from the same `/proc/meminfo` text. **Never fill
+  `swapTotalMb`/`swapFreeMb` on darwin** — `hostUnderMemoryPressure` reads them, and a Mac can keep
+  most of its swap in use for hours (the measured one: 7.7 of 9 GB, its kernel level moving between
+  normal and warn), so the reaper's swap term would fire all day. The level only RAISES the used-% tint, never lowers it;
+  a failed read omits its field (no "0 GB swap"). Not an input to the reaper, the pressure monitor
+  or any lever — that is a separate, measured change.
+- **"nodeterm itself" is a separate group, never a session row and never in the header total**
+  (`SessionMemoryReport.app`). The GPU helper's footprint was 1557-1845 MB while
+  `ps` rss said 96-153 MB, and no surface attributed it. The desktop shell injects
+  `appProcesses` from `app.getAppMetrics()` for **pid, type and `cumulativeCPUUsage` only**: on
+  macOS `memory.workingSetSize` is resident size (blind to IOSurfaces, like rss) and
+  `privateBytes` is Windows-only, so memory comes from the sweep's OWN table — `top`'s footprint
+  on darwin (`ProcEntry.footprint`; a pid `top` missed is "not measured", never its rss), VmRSS on
+  Linux, working set on Windows. No second `top` (~0.5 s each). CPU is lifetime CPU TIME, not a
+  rate: `percentCPUUsage` answers 0 on its first call. Local scope only; absent = not available
+  (Server Edition, SSH, relay); `ok:false` = tried and could not, rendered as such. Measured on
+  macOS only: the Linux (VmRSS) and Windows (working set) legs have unit tests but have not been
+  checked against a real machine.
 - **The local reader reads `/proc/<pid>/status`, never `statm`.** `status` carries `PPid` and `VmRSS`
   in one file, already in kB; `statm` reports RSS in **pages**, forcing a page-size assumption — a
   hard-coded 4096 under-reports **4×** on a 16 KiB-page arm64 kernel and **16×** on the 64 KiB-page
@@ -201,3 +222,19 @@ watermark was permanently tripped, so those sessions were culled on the next swe
 detaching + an always-true pressure signal is why the symptom read as "my sessions keep
 disappearing" rather than as an occasional cull. The `vm_stat` reader is what makes the pool safe
 again; the grace window was never the thing that was wrong.
+
+**macOS memory pressure is the KERNEL's level, on its own leg, fired on escalations only.** The
+byte leg (`hostMemReader`) stays `null` on darwin and main's RSS never nears the 4 GB self leg, so
+until this leg the renderer's reclaim levers never ran on a visible Mac window — the safety net #179
+counted on was dead. `core/memory-pressure.ts` now samples `kern.memorystatus_vm_pressure_level`
+(1 normal / 2 warn / 4 critical; async `sysctl` per 30 s tick, last landed value) and calls
+`onKernelPressure` on an ESCALATION (normal→warn, →critical). Measured lever effect (dev, 12
+hidden warm terminals): GPU footprint 331 → 152 MB, IOSurface 235 → 91 MB, all 12 re-granted on
+pan-back. Three rules: never re-fire a HELD kernel level (the 60 s floor at a held WARN is #179's
+timed release and its pan-back flicker again), and never let a FLAPPING one do the same: each fall
+to normal re-arms the leg, so a run at the same or a lower severity than the last one waits out
+`KERNEL_LEVER_GAP_MS` (10 min) and only an escalation above it (warning → critical) fires inside the
+gap; never feed the level through `hostMemReader` /
+`MemInfo` (`planReap` shares it — that would be a new reaper trigger); a kernel CRITICAL runs the
+levers only, no reaper sweep, until that step is measured on its own (#211). A failed read is no
+information: it neither fires nor resets the held level.

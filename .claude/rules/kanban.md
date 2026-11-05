@@ -408,8 +408,10 @@ paths:
   node shows its column as a **half-pill flush on the node's TOP edge** — see the pill sentence
   below. A card's ↗ / double-click opens the **card modal** (`components/kanban/CardModal.tsx`, body
   portal on the dialog-stack, scrim z 55, scrim/Esc close — Esc in CAPTURE phase, and an Esc
-  during a header rename only cancels the edit). Terminal cards get a LIVE second view of the
-  tmux session (`ModalTerminal.tsx`): the pty subscriber ledger is keyed by the composite
+  during a header rename only cancels the edit). The modal runs under the CARD project's session
+  (`ProjectSessionScope` — the boards themselves sit under App's local provider; see "A remote
+  project's node never starts on this core" under Projects). Terminal cards get a LIVE second
+  view of the tmux session (`ModalTerminal.tsx`): the pty subscriber ledger is keyed by the composite
   `(ClientId, viewerId ?? PRIMARY)` (`core/pty-manager.ts` — **viewer identity**; viewerId is an
   optional TRAILING arg through preload/ws-bridge/LocalTransport, absent = bit-for-bit legacy, and
   a client's per-connection socket pause survives a single view's departure). The modal viewer

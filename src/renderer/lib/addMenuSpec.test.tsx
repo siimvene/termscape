@@ -35,6 +35,7 @@ const handlers = (overrides: Partial<AddHandlers> = {}): AddHandlers => ({
   run: noop,
   simulator: noop,
   dino: noop,
+  whiteboard: noop,
   trigger: noop,
   openFile: noop,
   newFile: noop,
@@ -48,6 +49,7 @@ const allKinds: AddItem['kind'][] = [
   'remote',
   'run',
   'simulator',
+  'whiteboard',
   'browser',
   'science',
   'web',
@@ -125,6 +127,7 @@ describe('contentAddItemsToMenuItems', () => {
       'New remote…',
       'New run configuration',
       'New simulator',
+      'New whiteboard',
       'New browser',
       'New Claude Science',
       'New web view…',
@@ -205,6 +208,7 @@ describe('contentAddItemsToMenuItems', () => {
       web: () => calls.push('web'),
       sticky: () => calls.push('sticky'),
       dino: () => calls.push('dino'),
+      whiteboard: () => calls.push('whiteboard'),
       spawnTeam: () => calls.push('spawnTeam'),
       worktree: () => calls.push('worktree')
     })
@@ -215,7 +219,7 @@ describe('contentAddItemsToMenuItems', () => {
     for (const item of items) {
       if ('onClick' in item) item.onClick()
     }
-    expect(calls.sort()).toEqual(['browser', 'dino', 'science', 'spawnTeam', 'sticky', 'terminal', 'web', 'worktree'])
+    expect(calls.sort()).toEqual(['browser', 'dino', 'science', 'spawnTeam', 'sticky', 'terminal', 'web', 'whiteboard', 'worktree'])
   })
 })
 
@@ -230,6 +234,7 @@ describe('contentAddItemsToDockRows', () => {
     expect(rows.map((r) => r.kind)).toEqual([
       'run',
       'simulator',
+      'whiteboard',
       'browser',
       'science',
       'web',
@@ -366,6 +371,7 @@ describe('buildGroupedAddMenu', () => {
     expect(children(ADD_GROUP_LABEL.view)).toEqual([
       'New run configuration',
       'New simulator',
+      'New whiteboard',
       'New browser',
       'New web view…',
       'New sticky note',
@@ -517,6 +523,7 @@ describe('buildGroupedAddMenu', () => {
       sticky: () => calls.push('sticky'),
       files: () => calls.push('files'),
       dino: () => calls.push('dino'),
+      whiteboard: () => calls.push('whiteboard'),
       trigger: () => calls.push('trigger'),
       openFile: () => calls.push('openFile'),
       newFile: () => calls.push('newFile'),
@@ -543,7 +550,8 @@ describe('buildGroupedAddMenu', () => {
       'sticky',
       'terminal',
       'trigger',
-      'web'
+      'web',
+      'whiteboard'
     ])
   })
 })

@@ -4,6 +4,7 @@ import { createPortal } from 'react-dom'
 import { useProjects } from '../state/projects'
 import { isOmniKanbanEnabled, toggleBoardView, useViewMode, viewFor } from '../state/viewMode'
 import { useAgentStatus } from '../state/agentStatus'
+import { unreadIdSet, unreadIdsSig } from '../lib/unreadBadge'
 import { usePauseCounts } from '../state/pauseCounts'
 import { useSettings } from '../state/settings'
 import { accountsForProject, sshAccountsHint, systemAccountDisplay } from '../state/workspace'
@@ -45,6 +46,8 @@ interface TabBarProps {
   onOpenWelcome: () => void
   onRename: (id: string, name: string) => void
   onSetFolder: (id: string) => void
+  /** Issue #1145: move a local folder project's canvas into app data, or back into its folder. */
+  onMoveStorage?: (id: string, to: 'appData' | 'folder') => void
   /** Close (hide) the project without destroying it, reopenable from the start screen. */
   onCloseProject: (id: string) => void
   /** Open the Remote access dialog (host/share + connect). Shown for every project. */
@@ -99,6 +102,7 @@ export function TabBar({
   onOpenWelcome,
   onRename,
   onSetFolder,
+  onMoveStorage,
   onCloseProject,
   onRemoteAccess,
   onSetDefaultAccount,
@@ -124,12 +128,8 @@ export function TabBar({
   const highlightedId = useViewMode((s) => s.highlightedSwimlaneId)
   // Unread dots need only the unread id set — subscribing to the whole status map re-rendered
   // the TabBar on every working/waiting flip of any agent. Primitive signature → rare updates.
-  const unreadIds = useAgentStatus((s) => {
-    let ids = ''
-    for (const [id, st] of Object.entries(s.byId)) if (st?.unread) ids += `${id}|`
-    return ids
-  })
-  const unreadSet = useMemo(() => new Set(unreadIds.split('|').filter(Boolean)), [unreadIds])
+  const unreadIds = useAgentStatus((s) => unreadIdsSig(s.byId))
+  const unreadSet = useMemo(() => unreadIdSet(unreadIds), [unreadIds])
   // ⏸ badge + the "Cancel pending pauses" row. Computed HERE, not in Canvas: this component
   // already holds the projects array, and Canvas subscribing to it would re-render the whole canvas
   // on every node serialization.
@@ -310,9 +310,11 @@ export function TabBar({
             title={
               pendingUpdate.kind === 'downloaded'
                 ? `nodeterm v${pendingUpdate.version} is ready, restart to update`
-                : pendingUpdate.kind === 'manual'
-                  ? `nodeterm v${pendingUpdate.version} is available, download it to update`
-                  : 'This version is no longer supported, update to continue'
+                : pendingUpdate.kind === 'available'
+                  ? `nodeterm v${pendingUpdate.version} is available, click to download it`
+                  : pendingUpdate.kind === 'manual'
+                    ? `nodeterm v${pendingUpdate.version} is available, download it to update`
+                    : 'This version is no longer supported, update to continue'
             }
             onClick={() => runPendingUpdate(pendingUpdate)}
           >
@@ -551,6 +553,20 @@ export function TabBar({
             >
               Set folder…
             </button>
+            {onMoveStorage &&
+              menuProject.cwd &&
+              !menuProject.ssh &&
+              !menuProject.remote &&
+              !menuProject.unavailable && (
+                <button
+                  onClick={() => {
+                    onMoveStorage(menuProject.id, menuProject.storeInAppData ? 'folder' : 'appData')
+                    closeMenu()
+                  }}
+                >
+                  {menuProject.storeInAppData ? 'Store canvas in folder' : 'Store canvas in app data'}
+                </button>
+              )}
             <button
               onClick={() => {
                 onRemoteAccess()

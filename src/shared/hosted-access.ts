@@ -24,6 +24,7 @@ export const HOSTED_VIEW_METHODS: readonly string[] = Object.freeze([
   IPC.fsList,
   IPC.fsRead,
   IPC.fsReadBinary,
+  IPC.filesReadWhiteboard,
   IPC.fsExists,
   IPC.gitStatus,
   IPC.gitRepoRoot,

@@ -204,6 +204,50 @@ paths:
   pane menu, nothing re-implemented. `grid`/`row`/`column` are refused there by name: `--nodes`
   already says them, and a top-level grid that ignores lineage is what Tidy no longer is. Same
   Server Edition refusal, same off-screen path.
+  **Geometry verbs (issue #1288, 2026-10): `arrange --gap`, `resize`, `place`, `list --geometry`** —
+  so an agent can rebuild an exact layout (the report: 8 sessions in two tight columns on a
+  vertical monitor, rebuilt every time a session is replaced) instead of a human dragging. Every
+  packing always took `opts.gap`; the verb simply never handed it the flag. The shape gate is ONE
+  pure module, `@shared/geometry-verbs` (`geometryArgsRefusal`; `--gap` lives with the rest of
+  `arrange` in `arrangeArgsRefusal`), called in the same THREE places as the arrange gate — desktop
+  main before the forward, `parseControlRequest`, and Canvas's belt (once, BEFORE the routing, so
+  the live AND the stored `list` read a well-formed call). Every flag takes a value (the SSH
+  shim-loop rule) and the new verbs refuse an unknown flag by name (#539). The rules a refactor
+  must keep: **(1) `--gap`** is a whole number 0–`ARRANGE_GAP_MAX` (400, ten times the default 40)
+  for all three forms; above it the call is REFUSED, never clamped. Snapping cannot undo it:
+  `arrangeNodes` never snaps positions, and with snapping on the `--group` form snaps only the
+  frame's PADDING and the frame fit (which keeps root positions). Frame padding is not the gap.
+  **(2) `resize`** (`resizeNodes`) CLAMPS each named axis to the kind's resizer minimum
+  (`NODE_MIN_SIZES`) and `NODE_SIZE_MAX` (the default-size setting's ceiling) and reports what it
+  applied; it applies exactly (no grid snap); a group frame refuses the WHOLE call (a frame is
+  sized by what it holds); a **collapsed** node keeps drawing header-only — the width applies now,
+  the height becomes `expandedHeight` (what the expand gives back and what `flowToNodeStates`
+  persists); a **maximized** node is restored first (left holding `premaxRect`, the next panel-pin
+  refit would put it back over the viewport); `measured` is dropped in the same tick (the
+  serializer prefers it); the ancestor frames re-fit. Terminal cols/rows follow through the node's
+  own ResizeObserver — there is no second path to tmux. **(3) `place`** (`placeNodes`) is a NEW
+  verb, NOT `--x` on `move`: `move` without `--group` means "to the top level", so `move --nodes a
+  --x 10` would pull a framed node out of its frame and ignore the `--x` — `move` now REFUSES
+  `--x/--y/--dx/--dy/--width/--height` by name, naming `place`/`resize`. Coordinates are ROOT space
+  (what `list` reports); a framed node keeps its parent (the root delta is applied to its relative
+  position, then `fitAncestorChain`, which keeps root positions, so it lands exactly). Several ids
+  with `--x/--y` move as ONE block (bounding-box top-left lands on the point — not stacked: every
+  node on one point is not a layout); `--dx/--dy` shift each; the two forms are refused together; a
+  listed descendant of a listed frame is carried, not moved twice; |coord| ≤ `PLACE_COORD_MAX`
+  (100 000, a typo bound, refused not clamped). **(4) `list`**: the JSON rows ALWAYS carry `x`,
+  `y` (root, whole px), `width`, `height`, `parent` (+ `collapsed`/`expandedHeight`); the text form
+  only behind `--geometry on`. The live canvas reports React Flow's MEASURED size
+  (`liveNodeGeometry`), persisted only before the first measure; an off-screen project reports the
+  persisted size (`storedNodeGeometry`). **(5) Off screen** `resize`/`place` are stored-node verbs
+  like `arrange` (`commitCtlNodes` → `geometryMutations`), which is also the shared-canvas path; for
+  that, `premaxRect` joined the stored geometry fields — before, an off-screen `arrange` restored a
+  maximized node in memory and left its restore rect on disk. **Surfaces:** desktop only for the
+  verbs. The Server Edition never reaches the renderer dispatch (its bridge's `onAgentControl` is a
+  noop and `createServerEditionControlHandler` serves no layout verb, `list` included), so all four
+  take the named permanent `control-unsupported-on-this-edition` refusal. Relay tabs: an agent's
+  call is answered by the HOST desktop's canvas, and the guest sees the result through canvas sync.
+  Mobile N/A. Follow-up: `--width/--height` on the open verbs (today they ignore an unknown flag).
+  Pure rules in `state/workspace.geometry.test.ts`; wiring pins in `canvas/geometry-verbs.source.test.ts`.
   **Fan-in (`link`, 2026-07):** a spawned fan-out was previously write-only — nodes an agent
   opened were joined to it by a **rope** (`project.ropes`, explicitly *"Display-only — never
   context links"*), so an orchestrator could not read back what its own team produced and the

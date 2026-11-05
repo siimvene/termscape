@@ -11,6 +11,13 @@ import path from 'path'
 import { build, type Plugin } from 'esbuild'
 import { LineFramer, encodeFrame, type SessionHostFrame, type SessionHostResponse } from './protocol'
 import { sessionHostPaths, type SessionHostState } from './paths'
+import { WINDOWS_PANE_PROBE_TIMEOUT_MS } from '../core/agents/pane-probe'
+
+/** On win32 `terminateOwnerV1` runs the real PowerShell owner probe: a cold worker may take its
+ *  whole first-request deadline (6 s) and then the one-shot fallback (4 s). A 6 s wait here gave
+ *  up exactly when the worker did, so the CI runner failed whenever PowerShell started slowly.
+ *  Wait as long as the core does for the same probe. */
+const CALL_TIMEOUT_MS = WINDOWS_PANE_PROBE_TIMEOUT_MS
 
 /** A fake shell that exits by itself (see fakePtyPlugin). */
 const EXITING_SHELL = 'fake-exiting-shell'
@@ -128,7 +135,7 @@ function connect(endpoint: string): Promise<Conn> {
         call: (body) => {
           const id = nextId++
           return new Promise<SessionHostResponse>((res, rej) => {
-            const timer = setTimeout(() => rej(new Error(`no response to ${String(body.cmd)}`)), 6_000)
+            const timer = setTimeout(() => rej(new Error(`no response to ${String(body.cmd)}`)), CALL_TIMEOUT_MS)
             waiters.set(id, (frame) => {
               clearTimeout(timer)
               res(frame)
@@ -199,5 +206,5 @@ describe('session-host agent-operation verbs', () => {
     // The session survived and nothing was typed into it.
     await expect(conn.call({ cmd: 'hasSession', name: 'nt-c' })).resolves.toMatchObject({ result: { exists: true } })
     expect(host.writes()).toEqual([])
-  }, 30_000)
+  }, 45_000) // two probe-bound calls, each up to CALL_TIMEOUT_MS on a cold win32 runner
 })

@@ -196,7 +196,14 @@ paths:
     **login node** that runs `claude /login` under the account dir. Core polls the dir's
     `.claude.json` (`LOGIN_POLL_MS` 2 s, up to `LOGIN_TIMEOUT_MS` 5 min) for `oauthAccount.email`;
     on capture the account flips out of `pending` with its email as the default label. Account
-    removal cancels any pending wait + `markDirty`. **Codex accounts have the same two halves** —
+    removal cancels any pending wait + `markDirty`. **A removal that deletes the dir first MOVES the
+    account's Claude sessions to the system account** (`renderer/lib/accountRemoval.ts`): a running
+    `claude` keeps the account's `CLAUDE_CONFIG_DIR` in its tmux env, so deleting the dir under it
+    left the CLI logged out and repainting half-blank. Active canvas → the ordinary switch
+    (`runClaudeAccountSwitch` to system), or copy + recycle for an idle node the switch cannot drive;
+    other projects → `copySession` + tmux kill (they cold-resume on next open). Any busy session, or
+    one that could not be moved, refuses the removal and keeps the account. Linked accounts and a
+    disconnected host's account delete nothing, so they skip the move. **Codex accounts have the same two halves** —
     `createCodexAccountLoginNode` (`codex login`, title "Codex login") behind the
     `nodeterm:add-codex-account-login` listener, with `codexAccounts.waitLogin` polling the managed
     home's `auth.json`. **A Codex identity (managed or system) is read from that `auth.json`'s

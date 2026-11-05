@@ -28,6 +28,7 @@
  * `envFile`'s secrets) therefore never land in the user's shell history or scrollback.
  */
 import { shellSingleQuote, shellSplit } from './shell-quote'
+import { isRecord } from './is-record'
 
 // ─── The node's persisted choice ─────────────────────────────────────────────────────────────
 
@@ -196,10 +197,6 @@ export interface LaunchCompound {
 export interface LaunchFile {
   configs: LaunchConfig[]
   compounds: LaunchCompound[]
-}
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return !!v && typeof v === 'object' && !Array.isArray(v)
 }
 
 function withOsOverride(raw: Record<string, unknown>, os: OsKey): Record<string, unknown> {

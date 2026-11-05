@@ -13,7 +13,7 @@ import { ClaudeScienceService, registerClaudeScience } from '../core/claude-scie
 import { SCIENCE_BASE_PATH } from '../shared/claude-science'
 import { ClaudeScienceProxy } from './claude-science-proxy'
 import { attachWsServer } from './ws'
-import { describeTrustedNets } from './proxy-trust'
+import { authBootMessages } from './auth-boot-messages'
 import type { ServerConfig } from './config'
 
 import { initPlatform } from '../core/platform'
@@ -101,7 +101,8 @@ import {
   setNodeHibernated,
   seedNodeIdentities,
   sessionNameSweepEntries,
-  nodeSessionName
+  nodeSessionName,
+  nodesForAgentSession
 } from '../core/agent-status-mirror'
 import { mirrorCustomAgents } from '../core/mirror-custom-agents'
 import { createPushNotify, createLiveUpdatePush } from '../core/push-notify'
@@ -251,15 +252,13 @@ export async function startServer(
 
   const auth = new Auth(config.dataDir)
   if (config.passwordSeed && !auth.isConfigured()) auth.setPassword(config.passwordSeed)
-  if (config.trustProxy) {
-    // Loud on purpose: this line is the operator's one chance to notice a trust
-    // misconfiguration (wrong header name, or nets wider than the proxy's own subnet).
-    console.log(
-      `⚠️  Proxy header trust ENABLED: requests from [${describeTrustedNets(config.trustProxy.nets)}] ` +
-        `carrying a non-empty "${config.trustProxy.header}" header are authenticated WITHOUT a ` +
-        `password. Ensure ONLY your SSO reverse proxy can reach this server from those networks, ` +
-        `and that it strips/overwrites this header on client requests.`
-    )
+  // Loud on purpose: these lines are the operator's one chance to notice a sign-in
+  // misconfiguration (header trust refused for want of a secret, nets wider than the proxy's own
+  // subnet, a short seeded password). See auth-boot-messages.ts.
+  {
+    const { errors, notices } = authBootMessages(config)
+    for (const line of errors) console.error(line)
+    for (const line of notices) console.log(line)
   }
   if (!config.headless && !auth.isConfigured()) {
     // No password set yet: print the one-time setup URL so the operator can bootstrap.
@@ -400,7 +399,8 @@ export async function startServer(
     settingsStore,
     onSettingsChange: (cb) => settingsStore.onChange(cb),
     downloadTickets,
-    localProjectCwd: (projectId: string) => workspaceStore.localCwdForProject(projectId)
+    localProjectCwd: (projectId: string) => workspaceStore.sideFilesFolderForProject(projectId),
+    whiteboardLocation: (projectId: string) => workspaceStore.whiteboardLocationForProject(projectId)
   })
   // Project setup/archive runner — same construction as src/main/index.ts, and the SAME
   // `registerProjectSetupHandlers` trust boundary (project-setup-handlers.ts): it derives rootPath/
@@ -468,7 +468,7 @@ export async function startServer(
   // an SSH-ref project answers `{ entries: [], unsupported: true }` (v1: no remote board log here).
   const boardLog = registerBoardLogHandlers(platform, {
     route: (projectId: string): BoardLogRoute => {
-      const cwd = workspaceStore.localCwdForProject(projectId)
+      const cwd = workspaceStore.boardLogRootForProject(projectId)
       return cwd ? { kind: 'local', cwd } : { kind: 'unsupported' }
     }
   })
@@ -584,7 +584,14 @@ export async function startServer(
   // rather than an unknown channel when canvas control is off.
   registerStationOutcomeIpc(platform, () => canvasControl?.stationOutcomes ?? null)
   registerStationHandoverIpc(platform, () => canvasControl?.stationHandovers ?? null)
-  const { contextTail, geminiContextTail, codexContextTail, cursorContextTail, piSessions } = wireAgentStatus(platform, {
+  const {
+    contextTail,
+    geminiContextTail,
+    codexContextTail,
+    cursorContextTail,
+    antigravityContextTail,
+    piSessions
+  } = wireAgentStatus(platform, {
     onEvent: (event) => canvasControl?.onAgentEvent(event)
   })
   // Self-host fork: surface a peer instance's (the desktop app's) agent states — see
@@ -664,6 +671,8 @@ export async function startServer(
           return geminiContextTail
         case 'cursor':
           return cursorContextTail
+        case 'antigravity':
+          return antigravityContextTail
         default:
           return undefined
       }
@@ -1073,6 +1082,9 @@ export async function startServer(
     // stop a stream the viewer already joined). One map lookup.
     nodeOfSession: (sessionId) => ptyManager.nodeOfSession(sessionId),
     projectCwd: (projectId) => workspaceStore.localCwdForProject(projectId),
+    // A `context:update` names an agent session, not a node: the mirror attributes it, so a
+    // non-editor receives a meter only for a session of a shared project.
+    nodesOfAgentSession: (sessionId) => nodesForAgentSession(sessionId),
     // A share or unshare: the authority adopts what joined and writes + releases what left, then every
     // client hears the new governed set (a client alone on a newly shared canvas must start publishing).
     // RESIDUAL, the share-time window (docs/hosted-team-relay.md): an edit a client made just before
@@ -1287,6 +1299,7 @@ export async function startServer(
       rendererDir: config.rendererDir,
       scienceProxy,
       trustProxy: config.trustProxy,
+      publicOrigin: config.publicOrigin,
       downloadTickets
     })
   )
@@ -1297,7 +1310,8 @@ export async function startServer(
     auth,
     scienceProxy,
     onClientGone: dropUiClient,
-    trustProxy: config.trustProxy
+    trustProxy: config.trustProxy,
+    publicOrigin: config.publicOrigin
   })
 
   await new Promise<void>((resolve, reject) => {

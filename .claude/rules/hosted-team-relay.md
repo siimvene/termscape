@@ -353,12 +353,20 @@ under one `$HOME`, with different bytes; the last writer wins.
   (and when a session's endpoint is dead, the script's failover can deliver its event to the other
   core's endpoint).
 
-**Known limitations** (full list in the doc): non-editors still receive cross-project presence and
-`context:update` metadata (deploy one core per team); a viewer's socket backlog over 1 MB still
+**Outbound to non-editors, since security audit (a)/(d)/F3/F4:** presence is rewritten per peer
+(`createPresenceFilter`: only peers on a shared project, node references outside nulled, joins and
+leaves synthesised as a peer moves), `context:update` needs a shared node behind its session (the
+payload's `nodeId`, else the mirror's `nodesForAgentSession`; unattributable = dropped), a
+Commenter's board comment is reduced to a comment's fields and rate-bounded per peer key
+(`append-budget.ts`), and a shared folder that is the disk root, the home directory or an ancestor of
+either or of the data dir is not a root at all (`share-root.ts`).
+
+**Known limitations** (full list in the doc): a viewer's socket backlog over 1 MB still
 pauses the shared pty through Stage 2 backpressure; the canvas authority's own limits (a project's
 non-content fields stay last writer wins between tabs, the share-time window, oversized nodes, board
-edits to another core, load-time repairs that are never cast, the card modal's comments on a relay
-tab) are under "Known limits" in the doc.
+edits to another core, load-time repairs that are never cast) are under "Known limits" in the doc;
+the GitHub issue summary modal reading its "Agent runs" log from this machine on a relay tab is under
+"Limitations (v1)".
 
 **Surfaces:** Desktop is full (joiner, plus approval and invite code in an owner's hosted tab, plus
 Share with team from any desktop OS onto a Linux host). Server Edition is the host (the `team` CLI,

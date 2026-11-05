@@ -17,6 +17,7 @@ import { useViewMode } from '../../state/viewMode'
 import { useProjects } from '../../state/projects'
 import { useSettings } from '../../state/settings'
 import { useBoardWallpaperStyle } from '../../state/wallpaper'
+import { AerialWallpaper } from '../AerialWallpaper'
 import {
   AT_COLUMN_END, addColumn, assignNode, assignedTo, boardLabels, cardAssignees, cardMatchesLabelFilter, cardMeta, columnForNode,
   deleteColumn, labelsForCard, moveColumn,
@@ -45,6 +46,7 @@ import { NO_ISSUE_RUNS, boundRunsByIssue, type IssueRun } from '../../lib/issueR
 import { useGitHubIssues } from '../../state/githubIssues'
 import { useAgentStatus } from '../../state/agentStatus'
 import { useSession } from '../../session/session'
+import { ProjectSessionScope } from '../../session/owning-project'
 import { KanbanSourceFilter, type KanbanSource } from './KanbanSourceFilter'
 import { GitHubIssueSummaryModal } from './GitHubIssueSummaryModal'
 import { ConfirmDialog } from '../ConfirmDialog'
@@ -1052,6 +1054,7 @@ export const KanbanView = memo(function KanbanView({
 
   return (
     <div className="kanban-overlay" style={boardStyle}>
+      {boardStyle && <AerialWallpaper board />}
       {/* Title strip: names the board's project AND pushes the columns below the top-right
           controls cluster, so column headers never sit under its icons. */}
       <div className="kanban-header">
@@ -1280,6 +1283,9 @@ export const KanbanView = memo(function KanbanView({
         />
       )}
       {modalNodeId && byId.has(modalNodeId) && (
+        // The board renders under App's LOCAL provider, outside Canvas's node subtree: the modal
+        // runs under ITS project's session, so a team tab's terminal attaches to the host's core.
+        <ProjectSessionScope projectId={projectId}>
         <CardModal
           projectName={projectName}
           projectColor={projectColor}
@@ -1317,6 +1323,7 @@ export const KanbanView = memo(function KanbanView({
             onOpenNode(nodeId)
           }}
         />
+        </ProjectSessionScope>
       )}
       {modalIssue && (
         <GitHubIssueSummaryModal

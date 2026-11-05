@@ -1,9 +1,11 @@
 import type { ChatPromptResult, EmptyPromptResult, TextDeliveryResult } from './text-delivery'
 import type { PushWebhookMinted, PushWebhookResult, PushWebhookTokenInfo } from './push-webhook'
 import type { IdentitySeedEntry } from './agent-identity-seed'
+import type { WhiteboardFile, WhiteboardSaveResult } from './whiteboard'
 import type { PrWaitHold } from './pr-wait'
 import type { SessionBackend } from './session-backend'
 import type { AgentIntegrationsSettings } from './agent-integrations'
+import type { NodeSize, SizableNodeKind } from './default-node-size'
 // Types shared across the main, preload, and renderer processes.
 
 import { TABBAR_HEIGHT_PX } from './window-chrome-metrics'
@@ -254,6 +256,15 @@ export interface PtyCreateOptions {
    */
   joinOnly?: boolean
   /**
+   * The opposite of `joinOnly`: this create may only SPAWN a brand-new session. A co-attach join, a
+   * reattach to a live tmux / session-host / Zellij session under this node's name, and a create
+   * whose existence probe cannot answer are all refused (`unavailable: 'new-only'`), so the caller's
+   * `fresh: true` means "this create made the session". Set only by the relay scoped-guest policy
+   * (src/core/relay/scoped-guest-policy.ts) for a node id the guest introduced itself: naming a node
+   * id must never be a way to take over a session somebody else is running under it.
+   */
+  newOnly?: boolean
+  /**
    * `false`: this view never constrains the shared pty's size (a viewer's small window must not
    * shrink everyone's terminal). It is still a subscriber and is told the authoritative size.
    */
@@ -438,9 +449,15 @@ export interface PtyCreateResult {
    * `PtyCreateOptions.requireRemote` for what used to happen instead. The renderer shows the
    * "not connected" overlay and re-spawns the node once the project's master is back.
    *
-   * Only ever set for a create that would have SPAWNED: a co-attach to a live session for this
-   * node id still joins (the session is already running wherever it runs), so a second view of a
-   * healthy remote terminal is unaffected.
+   * `'ssh'` is only ever set for a create that would have SPAWNED: a co-attach to a live session
+   * for this node id on the requested remote still joins, so a second view of a healthy remote
+   * terminal is unaffected.
+   *
+   * `'held-elsewhere'`: a `requireRemote` create found a live session for this node id held by this
+   * process, but NOT on the requested remote — it is local, or its endpoint (host, user, port)
+   * differs from the create's `sshRemote`. The join is refused and nothing was started; the held
+   * session is left untouched. A create with no `sshRemote` (master down) still joins a held
+   * remote session. Not a lost connection: retrying would refuse again.
    *
    * `'codex-account'` is the S6 fail-closed twin: a LOCAL Codex node that explicitly selected a
    * managed account whose home is missing refuses rather than spawning against the system login
@@ -450,8 +467,12 @@ export interface PtyCreateResult {
    * `'join-only'`: `PtyCreateOptions.joinOnly` was set (a hosted-relay viewer) and no running
    * session could be confirmed to join or reattach to — either it is gone, or its existence could
    * not be checked — so nothing was started. Not a lost connection.
+   *
+   * `'new-only'`: `PtyCreateOptions.newOnly` was set (a relay guest's create for a node it
+   * introduced) and a session already exists under this node's name, or its existence could not be
+   * checked. Nothing was joined or started, and the existing session was left untouched.
    */
-  unavailable?: 'ssh' | 'codex-account' | 'join-only'
+  unavailable?: 'ssh' | 'codex-account' | 'join-only' | 'held-elsewhere' | 'new-only'
 }
 
 /** Payload of `pty:recycled` — see IPC.ptyRecycled and `recycleAction` in the renderer. */
@@ -464,7 +485,7 @@ export interface RecycledInfo {
 // 'subagent' and 'loop' are render-only (ephemeral hook-driven viz) and never persisted.
 // 'trigger' is a first-class PERSISTED kind (issue #493) — the canvas-owned schedule node; its
 // spec rides `CanvasNodeState.trigger` and is sanitized on every load path (@shared/trigger).
-export type NodeKind = 'terminal' | 'sticky' | 'group' | 'editor' | 'diff' | 'video' | 'web' | 'browser' | 'files' | 'subagent' | 'loop' | 'dino' | 'trigger' | 'simulator'
+export type NodeKind = 'terminal' | 'sticky' | 'group' | 'editor' | 'diff' | 'video' | 'web' | 'browser' | 'files' | 'subagent' | 'loop' | 'dino' | 'trigger' | 'simulator' | 'whiteboard'
 
 /** Persisted state of a single canvas node (terminal, sticky note, group frame, or editor). */
 /**
@@ -658,6 +679,15 @@ export interface CanvasNodeState {
    */
   textUpdatedAt?: number
   textUpdatedBy?: string
+  /**
+   * whiteboard-only: the board this node shows until it saves its own — set on a duplicate or a
+   * reopen (which get a NEW id) so the copy needs no file copy and no board file is ever deleted.
+   * A node id, never a path: the core resolves it inside this project (core/whiteboards.ts).
+   */
+  whiteboardSource?: string
+  /** whiteboard-only: epoch ms of the last editing session that changed the board. Written once
+   *  per session (never per stroke) — what a linked agent's "the board changed" keys on. */
+  boardRev?: number
   // dino-only: best score reached in the T-Rex Runner game.
   highScore?: number
   // editor / diff
@@ -1150,6 +1180,13 @@ export interface Project {
   icon?: ProjectIcon
   /** Default working directory for new terminals created in this project. */
   cwd?: string
+  /**
+   * MACHINE-LOCAL: this folder project's canvas lives in app data (`userData/inline-projects/<id>.json`),
+   * not in `<cwd>/.nodeterm/project.json`, and nothing is written into the folder (issue #1145).
+   * Only meaningful beside a local `cwd`; never written to any shared file. See the
+   * folder-data-ref kind in core/workspace-files.ts (`IndexEntryV3.dataFile`).
+   */
+  storeInAppData?: boolean
   /** When set, this is an SSH project: its terminals run on `server` in `remoteCwd` (remote tmux). */
   ssh?: { server: import('./ssh').SshConnection; remoteCwd: string }
   viewport: Viewport
@@ -1526,6 +1563,16 @@ export interface WorkspaceApi {
   /** Whether <folder>/.nodeterm/project.json is `present`, definitely `absent`, or `unreadable`
    *  (any non-ENOENT error). Never guesses absence from a failed read — see issue #385. */
   projectFileState(folder: string): Promise<'present' | 'absent' | 'unreadable'>
+  /** "Store in app data", second half (issue #1145): once the move's save has landed, carry the
+   *  folder's settings into app data and remove its `.nodeterm` files (git-tracked ones only with
+   *  `removeTracked`). See `WorkspaceStore.releaseFolderFiles`. */
+  releaseFolderFiles(projectId: string, removeTracked: boolean): Promise<import('./project-storage').ReleaseFolderFilesResult>
+  /** "Store in folder", first half (issue #1145): refuse a folder that already holds a canvas or
+   *  settings, else carry this project's settings in. See `WorkspaceStore.prepareFolderStorage`. */
+  prepareFolderStorage(projectId: string): Promise<import('./project-storage').PrepareFolderStorageResult>
+  /** Where the store has this project's canvas right now (issue #1145): asked after a move's save,
+   *  which can land while the folder write in it did not. See `WorkspaceStore.projectStorage`. */
+  projectStorage(projectId: string): Promise<import('./project-storage').ProjectStorageKind>
   /** Fired once after an on-disk migration: `v2` = a v2→v3 migration wrote .nodeterm/ dirs into the
    *  project folders; `exec` = the custom shell / advanced ssh args of already-open projects moved
    *  out of the shared project file into this machine's own workspace index (@shared/node-exec). */
@@ -1704,6 +1751,23 @@ export interface FilesApi {
    * Resolves null when it could not be written; callers drop that file like a failed drop.
    */
   saveCanvasImage(projectId: string, name: string, dataBase64: string): Promise<string | null>
+  /**
+   * Save a whiteboard node's scene (Excalidraw JSON) and the picture it shows at rest. The core
+   * derives the file from (projectId, nodeId) — beside project.json, or its own data dir. Resolves
+   * `{ok: true, path, rev}`, a conflict when the board on disk is no longer `expectedRev` (nothing
+   * written), or null when it could not be written. A core on an older build answers the bare path
+   * string and ignores `expectedRev`. See core/whiteboards.ts.
+   */
+  saveWhiteboard(
+    projectId: string,
+    nodeId: string,
+    scene: string,
+    thumbnailBase64?: string,
+    expectedRev?: string | null
+  ): Promise<WhiteboardSaveResult | string | null>
+  /** Read a whiteboard back; `sourceId` is the board a copied node falls back to until it saves.
+   *  `withScene: false` reads only the picture and revision (a board at rest). */
+  readWhiteboard(projectId: string, nodeId: string, sourceId?: string, withScene?: boolean): Promise<WhiteboardFile | null>
   /**
    * Store a custom sound for an agent alert (issue #289). The core validates kind, extension,
    * size and magic bytes, then writes a FIXED per-kind file under its own data dir — the picked
@@ -1991,6 +2055,10 @@ export interface Settings {
    *  whatever size they were saved with; other node kinds keep their own defaults. */
   defaultNodeWidth: number
   defaultNodeHeight: number
+  /** Default size (px) for NEW nodes of every other kind the add menus create, keyed by kind; a
+   *  kind with no entry opens at its built-in size. Read through `defaultNodeSize` (renderer) /
+   *  `resolveDefaultNodeSize` (@shared/default-node-size), which clamp hand edits. Machine-local. */
+  defaultNodeSizes: Partial<Record<SizableNodeKind, NodeSize>>
   /** Sessions sidebar: the DEFAULT for a project row the user never toggled — on (historical)
    *  keeps the active project expanded and collapses the others, off leaves everything expanded.
    *  Explicit toggles live in `sidebarCollapsedItems` and always win. */
@@ -2020,6 +2088,11 @@ export interface Settings {
    *  (`$reponame` and `$defaultFolderName` aliases) plus `$branch`; both `$x` and `${x}` forms.
    *  A missing branch token is appended automatically. */
   worktreePathTemplate: string
+  /** Issue #1145. Where a folder project created from now on keeps its canvas: `'folder'` (the
+   *  default — `<cwd>/.nodeterm/project.json`, git-shareable) or `'appData'` (nothing written into
+   *  the folder; see `Project.storeInAppData`). A folder that already has a project.json is adopted
+   *  as it is, in its folder, whatever this says. Existing projects move from the tab menu. */
+  newProjectStorage: import('./project-storage').NewProjectStorage
   /** ms to dwell over a terminal before it takes pointer focus (pan-across guard). */
   panHoverDelay: number
   /** Issue #757. Whether a terminal node's keyboard focus follows the POINTER (the long-standing
@@ -2526,6 +2599,7 @@ export const DEFAULT_SETTINGS: Settings = {
   markdownFontSize: DEFAULT_MARKDOWN_FONT_SIZE,
   defaultNodeWidth: 640,
   defaultNodeHeight: 440,
+  defaultNodeSizes: {},
   sidebarAutoCollapse: true,
   sidebarCollapsedItems: {},
   sidebarGrouping: 'project',
@@ -2533,6 +2607,7 @@ export const DEFAULT_SETTINGS: Settings = {
   omniKanbanEnabled: false,
   omniKanbanAsDefault: false,
   worktreePathTemplate: DEFAULT_WORKTREE_PATH_TEMPLATE,
+  newProjectStorage: 'folder',
   panHoverDelay: 600,
   terminalFocusFollowsPointer: true,
   doubleClickFocus: true,
@@ -3251,6 +3326,28 @@ export interface MemInfo {
   psiSomeAvg60?: number
   /** `/proc/pressure/memory` `full avg60` — % of the last minute EVERY task was stalled. Thrash. */
   psiFullAvg60?: number
+  /**
+   * What the RAM pill SHOWS beyond used/total. **Display only: never an input to the reaper, the
+   * memory-pressure monitor or a reclaim lever**. It is a separate object,
+   * rather than more top-level fields, so that rule is structural: `hostUnderMemoryPressure` reads
+   * `swapTotalMb`/`swapFreeMb`, and filling THOSE on darwin would fire the reaper's swap term all
+   * day on a Mac that can keep most of its swap in use for hours (16% swap free on the measured
+   * one). Absent field = not measured, never zero.
+   */
+  display?: MemDisplay
+}
+
+/** See `MemInfo.display`. Every field is optional and independent: one failed read omits one fact. */
+export interface MemDisplay {
+  /** Swap in use, MB. darwin: `sysctl vm.swapusage`; Linux: `SwapTotal - SwapFree`. */
+  swapUsedMb?: number
+  /** Swap currently provisioned, MB. On darwin this GROWS on demand (dynamic swap files), so it is
+   *  a size, not a ceiling. */
+  swapTotalMb?: number
+  /** The kernel's own verdict (`kern.memorystatus_vm_pressure_level`: 1/2/4), darwin only — the
+   *  colour Activity Monitor's pressure graph shows. Linux has no equivalent level and PSI has no
+   *  measured threshold here, so it is never invented there. */
+  pressureLevel?: 'normal' | 'warn' | 'critical'
 }
 
 /** One nt- session's memory, as the panel renders it. */
@@ -3298,6 +3395,41 @@ export interface SessionMemoryReport {
    * could not be measured: never a fake zero. The tmux leg never sets it.
    */
   host?: SessionHostOverhead
+  /**
+   * nodeterm's OWN processes (main, renderer(s), GPU, helpers) — the "nodeterm itself" group.
+   * Display only, LOCAL scope only. Absent = this shell cannot enumerate its processes (Server
+   * Edition, a relay stub, every SSH scope): not available. `ok:false` = it tried and could not
+   * measure. Never part of the session total — see AppSelfMemory.
+   */
+  app?: AppSelfMemory
+}
+
+/** Which of nodeterm's own processes a group is (Electron `ProcessMetric.type`, folded). */
+export type AppProcessKind = 'main' | 'renderer' | 'gpu' | 'helper'
+
+/** One kind of nodeterm process, summed over every pid of that kind (the HUD is a 2nd renderer). */
+export interface AppSelfGroup {
+  kind: AppProcessKind
+  count: number
+  /** Summed memory in MB, in the SAME accounting as the session rows (darwin: phys_footprint from
+   *  the panel's own `top` read; Linux: VmRSS; Windows: working set). Absent when any pid of the
+   *  group was missing from the table: a partial sum would understate, which is a wrong number. */
+  mb?: number
+  /** Summed CPU time since each process started, seconds (Electron `cumulativeCPUUsage`). Absent =
+   *  not reported. A lifetime total, deliberately not a percentage. */
+  cpuSeconds?: number
+}
+
+/**
+ * The GPU helper's real footprint (1557-1845 MB live, mostly IOSurfaces)
+ * was invisible because `ps` RSS says 96-153 MB and nothing attributed it. `ok:false` (no groups)
+ * when the process list or the table could not be read, or no pid of ours was in it.
+ */
+export interface AppSelfMemory {
+  ok: boolean
+  groups: AppSelfGroup[]
+  /** Sum of every group, only when every group was measured. */
+  totalMb?: number
 }
 
 /** See `SessionMemoryReport.host`. All MB figures are MEASURED working sets, not estimates. */
@@ -4323,6 +4455,13 @@ export interface RelayHostApi {
   invite(opts?: { projectId?: string; email?: string }): Promise<{ offer: string; id: string }>
   /** Leave host mode: close every bridged peer in the pool. */
   stop(): Promise<void>
+  /**
+   * Which of these projects may NOT be shared, with the reason (a folder that is the disk root, the
+   * home directory or an ancestor of either — every file under it would be readable). The invite
+   * UI disables those projects; `start`/`invite` refuse them host-side too. Projects absent from the
+   * answer may be shared.
+   */
+  scopeProblems(projectIds: string[]): Promise<Record<string, string>>
   /**
    * Team Access: per-peer revoke — cut ONE bridged peer's live session immediately (by its id) and
    * free its seat. Distinct from `stop()` (which drops all).

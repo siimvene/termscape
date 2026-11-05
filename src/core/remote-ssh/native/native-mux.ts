@@ -36,13 +36,28 @@ import net from 'net'
 import os from 'os'
 import type { Duplex } from 'stream'
 import fs from 'fs'
-import { Client, createAgent, utils, type Channel, type ClientChannel, type ConnectConfig, type UNIXConnectionDetails, type ParsedKey, type SFTPWrapper } from 'ssh2'
+// Type-only: ssh2 itself is required on first use (`ssh2()` below), never at module scope.
+import type { Client, Channel, ClientChannel, ConnectConfig, UNIXConnectionDetails, ParsedKey, SFTPWrapper, createAgent } from 'ssh2'
 import type { LocalForward, ParsedSsh, ReverseForward, SshOptions, SshTarget } from './ssh-argv'
 import { parseProxyJump, resolveForwardAgent, type HostQuery, type JumpSpec, type ResolvedHost } from './ssh-config'
 import { WINDOWS_OPENSSH_AGENT_PIPE, resolveWindowsIdentityAgent } from './windows-agent-discovery'
 import { expandProxyTokens, proxyCommandSocket, type ProxySpawn } from './proxy-command'
-import { acceptNewHostKey } from './known-hosts'
+import { acceptNewHostKey, hostKeyAlgorithmsFor, hostKeyMismatchMessage } from './known-hosts'
 import { addKeyToAgent, type AgentAddResult } from './agent-add'
+
+/**
+ * ssh2, loaded on first use. This module sits on main's module-scope import graph (via
+ * native-runtime / native-invoke), so a top-level `import { Client } from 'ssh2'` evaluated ssh2 on
+ * every launch, before Chromium's `ready`: 14–25 ms warm, ~680 ms in one cold-cache sample — for a
+ * transport that only runs on Windows or with `NODETERM_NATIVE_SSH=1`. A plain
+ * `require` stays a runtime require in both bundles: electron-vite externalises dependencies, and
+ * `server:build` passes `--external:ssh2` (server-build.test.ts). Pinned by native-mux.lazy.test.ts.
+ */
+let ssh2Module: typeof import('ssh2') | undefined
+function ssh2(): typeof import('ssh2') {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  return (ssh2Module ??= require('ssh2') as typeof import('ssh2'))
+}
 
 /** Result of one remote command, in the shape execFile callers already handle. */
 export interface ExecResult {
@@ -637,6 +652,7 @@ export class NativeMux {
     mode: { interactive: boolean },
     via?: Conn
   ): Conn {
+    const { Client } = ssh2()
     const client = new Client()
     let resolveClosed!: (why: string) => void
     const closed = new Promise<string>((r) => (resolveClosed = r))
@@ -731,7 +747,7 @@ export class NativeMux {
           : await connectSocket(hops[0].host.hostname, hops[0].host.port, firstTimeoutMs)
         for (let i = 0; i < hops.length; i++) {
           const hop = hops[i]
-          const jump = new Client()
+          const jump = new (ssh2().Client)()
           built.push(jump)
           // A jump client with no 'error' listener would throw from its emitter after the handshake.
           jump.on('error', (e: Error) => this.deps.log?.(`[native-ssh] jump ${hop.query.host}: ${e.message}`))
@@ -826,27 +842,28 @@ export class NativeMux {
     let hostKeyRefusal = ''
     const cancelled = { value: false }
     const auth = this.authPlan(target, host, options, mode, cancelled)
+    const keyPolicy = { userFiles: host.userKnownHostsFiles, globalFiles: host.globalKnownHostsFiles }
+    // OpenSSH's order_hostkeyalgs: offer the key types on record for this host first, so a host
+    // that still holds its recorded key presents it — and any other type it presents is refused as
+    // a changed key (known-hosts.ts), never recorded as a new one. Undefined = ssh2's default order.
+    const serverHostKey = hostKeyAlgorithmsFor(keyPolicy, knownAs, host.port)
     const cfg: ConnectConfig = {
       sock,
       username: host.user,
       readyTimeout: AUTH_WAIT_MS,
       keepaliveInterval: (options.serverAliveInterval ?? 0) * 1000,
       keepaliveCountMax: options.serverAliveCountMax ?? 3,
+      ...(serverHostKey ? { algorithms: { serverHostKey } } : {}),
       hostVerifier: (key: Buffer): boolean => {
         // accept-new is the only policy the builders ask for; `ask`/`yes` from the user's config
         // are overridden by the command line exactly as they are for OpenSSH.
-        const v = acceptNewHostKey(
-          { userFiles: host.userKnownHostsFiles, globalFiles: host.globalKnownHostsFiles },
-          knownAs,
-          host.port,
-          key
-        )
+        const v = acceptNewHostKey(keyPolicy, knownAs, host.port, key)
         if (!v.accept) {
           hostKeyRefusal =
             prefix +
             (v.verdict === 'revoked'
               ? `@@@ WARNING: REVOKED HOST KEY DETECTED FOR ${knownAs} @@@`
-              : `@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@ Host key verification failed for ${knownAs}.`)
+              : hostKeyMismatchMessage(knownAs, host.port, v))
         }
         return v.accept
       },
@@ -954,6 +971,7 @@ export class NativeMux {
         if (cachedKey) return { type: 'publickey', username, key: cachedKey }
         const data = read(file)
         if (!data) return null
+        const { utils } = ssh2()
         let key = utils.parseKey(data)
         let prompted = false
         if (key instanceof Error && /encrypted|passphrase/i.test(key.message)) {
@@ -1016,6 +1034,7 @@ export function resolveAgentPath(configured: string | undefined, fallback: strin
 
 /** An agent that only offers keys whose public blob is in `pubs` (IdentitiesOnly). */
 function filteredAgent(agentPath: string, pubFiles: Buffer[]): ReturnType<typeof createAgent> {
+  const { createAgent, utils } = ssh2()
   const base = createAgent(agentPath)
   const wanted = pubFiles
     .map((b) => {

@@ -102,7 +102,9 @@ vi.mock('child_process', () => {
     execCalls.push({ file, args })
     const ok = (stdout: string): void => cb?.(null, { stdout, stderr: '' })
     if (args.includes('has-session')) {
-      const target = args[args.indexOf('-t') + 1]
+      // Production asks with the EXACT form (`=nt-…` / `=nt-…:`); tmux matches it against the name.
+      const raw = args[args.indexOf('-t') + 1]
+      const target = raw.startsWith('=') ? raw.slice(1).replace(/:$/, '') : raw
       if (liveTmuxSessions.has(target)) ok('')
       // Real execFile carries tmux's exit status on err.code — 1 is what probeSaysAbsent
       // reads as genuine absence (vs a spawn failure, which has a string/no code).
@@ -796,7 +798,8 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
     kill(sessionId)
     const captures = tmuxCalls('capture-pane')
     expect(captures).toHaveLength(1)
-    expect(captures[0].args[captures[0].args.indexOf('-t') + 1]).toBe(sessionName('solo-1'))
+    // Exact (`=name:`): a bare target prefix-matches a longer session (tmux-naming `exactPaneTarget`).
+    expect(captures[0].args[captures[0].args.indexOf('-t') + 1]).toBe(`=${sessionName('solo-1')}:`)
   })
 
   it('killAll (app quit) detaches the client but never kills the tmux session', async () => {

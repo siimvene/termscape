@@ -16,7 +16,13 @@ import { formatBytes } from '@shared/fsLimits'
 import { useAgentStatus } from '../state/agentStatus'
 import { useProjects } from '../state/projects'
 import { useSessionMemory } from '../state/sessionMemory'
-import { hostOverheadLabel, resolveSessionRows, totalMb } from '../lib/sessionMemoryRows'
+import {
+  appGroupLabel,
+  formatCpuTime,
+  hostOverheadLabel,
+  resolveSessionRows,
+  totalMb
+} from '../lib/sessionMemoryRows'
 import { usageScopeKey } from '../lib/usageScope'
 import type { SessionPauseOffer } from '../lib/sessionPause'
 import { unmeasuredNote } from '../lib/sessionMemoryNote'
@@ -81,6 +87,7 @@ export function SessionMemoryPanel({
   const unmeasured = useSessionMemory((s) => s.unmeasured)
   const unmeasuredBackend = useSessionMemory((s) => s.unmeasuredBackend)
   const hostCost = useSessionMemory((s) => s.host)
+  const appSelf = useSessionMemory((s) => s.app)
   const loading = useSessionMemory((s) => s.loading)
   const loadedScope = useSessionMemory((s) => s.loadedScope)
   const refreshFull = useSessionMemory((s) => s.refreshFull)
@@ -283,6 +290,40 @@ export function SessionMemoryPanel({
         Memory held by each session's own processes — the agent CLI and what it spawned, not
         nodeterm itself.
       </div>
+
+      {/* nodeterm's OWN processes, below the attribution line on purpose: they
+          are not a session and are NOT in the header total. The GPU helper is the reason this
+          exists — `ps` said 96-153 MB while its footprint was 1557-1845 MB, mostly IOSurfaces (the
+          window's swap chain and raster tiles, and the terminals' WebGL buffers), and no surface
+          attributed it. LOCAL scope only (`scopeKey === ''`): never beside an SSH host's numbers.
+          Absent = this surface cannot enumerate its processes (Server Edition) → nothing drawn;
+          `ok:false` = it tried and could not, which is said, never printed as 0 B. */}
+      {measured && !relay && scopeKey === '' && appSelf && (
+        <div
+          className="sessmem-app"
+          title="nodeterm's own processes, in the same accounting as the rows above (on macOS: physical footprint, which includes graphics memory that ps does not show). CPU is time used since each process started."
+        >
+          <div className="sessmem-host">
+            <span className="sessmem-host__label">nodeterm itself</span>
+            <span className="sessmem-host__mb">
+              {appSelf.ok ? (appSelf.totalMb !== undefined ? formatMb(appSelf.totalMb) : '—') : ''}
+            </span>
+          </div>
+          {appSelf.ok ? (
+            appSelf.groups.map((g) => (
+              <div key={g.kind} className="sessmem-row__kids sessmem-app__group">
+                └ {appGroupLabel(g)}
+                {g.cpuSeconds !== undefined && (
+                  <span className="sessmem-app__cpu"> · CPU {formatCpuTime(g.cpuSeconds)}</span>
+                )}{' '}
+                <span>{g.mb !== undefined ? formatMb(g.mb) : 'not measured'}</span>
+              </div>
+            ))
+          ) : (
+            <div className="sessmem-panel__note">Could not measure nodeterm&apos;s own processes.</div>
+          )}
+        </div>
+      )}
 
       <div className="sessmem-panel__foot">
         <span className="sessmem-panel__count">
