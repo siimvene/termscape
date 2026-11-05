@@ -223,6 +223,15 @@ describe('approvalFlags — codex REFUSES what it cannot express', () => {
  * (`--mode plan`, bare `--force`), and its bare launch is `approvalMode: allowlist`, which prompts.
  * Measured in a real run, see CURSOR_MODES.
  */
+describe('withPermissionMode: cursor yields to any run-mode flag already in the command', () => {
+  it('never appends a second, competing run mode', () => {
+    expect(withPermissionMode('cursor-agent --auto-review', 'cursor', 'bypassPermissions')).toBe('cursor-agent --auto-review')
+    expect(withPermissionMode('cursor-agent --force', 'cursor', 'auto')).toBe('cursor-agent --force')
+    expect(withPermissionMode('cursor-agent --mode plan', 'cursor', 'bypassPermissions')).toBe('cursor-agent --mode plan')
+    expect(withPermissionMode('cursor-agent', 'cursor', 'bypassPermissions')).toBe('cursor-agent --force')
+  })
+})
+
 describe('approvalFlags: cursor', () => {
   it('maps auto to --auto-review, plan to --mode plan and bypass to --force, and nothing else', () => {
     expect(approvalFlags('cursor', 'auto')).toEqual(['--auto-review'])

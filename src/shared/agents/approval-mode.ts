@@ -250,8 +250,10 @@ const APPROVAL_DIALECTS: Partial<Record<AgentId, ApprovalDialect>> = {
   cursor: {
     modes: CURSOR_MODES,
     manualIsDefault: true,
-    // upstream's `dialect.flag` for cursor; `--force`/`--auto-review` suppress only themselves
-    axisFlags: ['--mode']
+    // cursor's run modes are three DIFFERENT flags (`--mode X`, a bare `--force`, a bare
+    // `--auto-review`), so any one of them in the launch command is the user's choice: appending
+    // another would hand cursor two competing run modes.
+    axisFlags: ['--mode', '--force', '--auto-review']
   }
 }
 
