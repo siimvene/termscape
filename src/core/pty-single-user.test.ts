@@ -31,6 +31,7 @@ interface FakePty {
   resizes: Array<{ cols: number; rows: number }>
   paused: boolean
   killed: boolean
+  signals: Array<string | undefined>
 }
 const spawned: FakePty[] = []
 const spawnArgs: Array<{
@@ -56,7 +57,7 @@ vi.mock('node-pty', () => ({
     args: string[],
     opts: { cols: number; rows: number; cwd: string; env: Record<string, string> }
   ) => {
-    const p: FakePty = { writes: [], resizes: [], paused: false, killed: false }
+    const p: FakePty = { writes: [], resizes: [], paused: false, killed: false, signals: [] }
     spawned.push(p)
     spawnArgs.push({ file, args, cols: opts.cols, rows: opts.rows, cwd: opts.cwd, env: opts.env })
     return {
@@ -76,8 +77,9 @@ vi.mock('node-pty', () => ({
       resume: () => {
         p.paused = false
       },
-      kill: () => {
+      kill: (signal?: string) => {
         p.killed = true
+        p.signals.push(signal)
       },
       pid: 1
     }
@@ -750,6 +752,7 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
     const { sessionId } = await create(80, 24)
     kill(sessionId)
     expect(spawned[0].killed).toBe(true) // the pty (tmux client) is released
+    expect(spawned[0].signals).toContain('SIGKILL')
     expect(tmuxCalls('kill-session')).toEqual([]) // the session keeps running
   })
 
@@ -809,6 +812,7 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
     vi.advanceTimersByTime(20)
     await m.killAll()
     expect(spawned[0].killed).toBe(true)
+    expect(spawned[0].signals).toContain('SIGKILL')
     expect(tmuxCalls('kill-session')).toEqual([])
   })
 
@@ -956,6 +960,7 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
       m.releaseHeadless('n1')
       await drainRealIo()
       expect(spawned[0].killed).toBe(true) // the tmux CLIENT pty is released
+      expect(spawned[0].signals).toContain('SIGKILL')
       expect(tmuxCalls('kill-session')).toEqual([]) // the tmux session keeps running
       expect(m.writeHeadless('n1', 'x')).toBe(false) // client 0 no longer holds anything
       expect(spawned[0].writes).toEqual(['echo hi\r'])
@@ -981,6 +986,7 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
       m.releaseHeadless('n1')
       await drainRealIo()
       expect(spawned[0].killed).toBe(false) // the viewer still holds the tmux client
+      expect(spawned[0].signals).toEqual([])
       expect(tmuxCalls('kill-session')).toEqual([])
       expect(m.writeHeadless('n1', 'x')).toBe(false) // client 0 is gone …
       expect(spawned[0].writes).toEqual([])
@@ -997,6 +1003,7 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
       // touching the tmux session.
       kill(viewer.sessionId)
       expect(spawned[0].killed).toBe(true)
+      expect(spawned[0].signals).toContain('SIGKILL')
       expect(tmuxCalls('kill-session')).toEqual([])
     })
   })

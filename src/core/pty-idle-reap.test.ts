@@ -23,6 +23,7 @@ interface FakePty {
   onDataCb?: (d: string) => void
   onExitCb?: (e: { exitCode: number }) => void
   killed: boolean
+  signals: Array<string | undefined>
   paused: boolean
 }
 const spawned: FakePty[] = []
@@ -38,7 +39,7 @@ vi.mock('./session-host-backend', async () =>
 
 vi.mock('node-pty', () => ({
   spawn: (file: string, args: string[]) => {
-    const p: FakePty = { killed: false, paused: false }
+    const p: FakePty = { killed: false, signals: [], paused: false }
     spawned.push(p)
     spawnArgs.push({ file, args })
     return {
@@ -56,8 +57,9 @@ vi.mock('node-pty', () => ({
       resume: () => {
         p.paused = false
       },
-      kill: () => {
+      kill: (signal?: string) => {
         p.killed = true
+        p.signals.push(signal)
       },
       pid: 1
     }
@@ -165,6 +167,7 @@ describe('idle reap of unwatched client PTYs', () => {
     idle()
 
     expect(spawned[0].killed).toBe(true)
+    expect(spawned[0].signals).toContain('SIGKILL')
     // The tmux session is the WORK. Detaching its client is the whole point; killing it is the one
     // thing this sweep may never do.
     expect(execCalls.some((c) => c.args.includes('kill-session'))).toBe(false)
