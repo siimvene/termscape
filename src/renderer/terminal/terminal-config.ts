@@ -8,6 +8,7 @@ import type {
 } from '@shared/types'
 import { isWindowsPlatform } from '@shared/platform-utils'
 import { xtermScrollback } from '@shared/scrollback'
+import { toXtermText } from '@shared/capture-paint'
 import { isKnownTerminalThemeId, resolveTerminalTheme } from './themes'
 
 /**
@@ -156,6 +157,8 @@ export function shouldApplyResync(screen: string | null | undefined): screen is 
  * cold-restore snapshot replay needs. It follows `settings.tmuxScrollback`, floored and capped.
  */
 export { XTERM_SCROLLBACK_MAX, XTERM_SCROLLBACK_MIN, xtermScrollback } from '@shared/scrollback'
+// The capture → emulator transforms live in @shared so main's relay repaint uses the same rules.
+export { stripTrailingNewline, toXtermText } from '@shared/capture-paint'
 
 /* ------------------------------------------------------------------------------------------- *
  * Terminal appearance — ONE source for both xterm call sites.
@@ -632,14 +635,6 @@ export function cursorPlacementSeq(cursor: PaneCursor | undefined): string {
   return `\x1b[${cursor.y + 1};${cursor.x + 1}H` + (cursor.visible ? '\x1b[?25h' : '\x1b[?25l')
 }
 
-/**
- * Make text captured from tmux (`capture-pane`, LF-separated lines) safe to `term.write()`.
- * xterm runs with `convertEol: false` — a bare LF moves down but keeps the column, so raw capture
- * output would render as a staircase. Lone LFs become CRLF; existing CRLFs are left alone.
- */
-export function toXtermText(text: string): string {
-  return text.replace(/\r?\n/g, '\r\n')
-}
 
 /**
  * Who closed this node, for the "closed by …" overlay. `by` is null when the destroy was not
@@ -652,18 +647,6 @@ export function closedByLabel(
 ): string {
   if (by === null) return 'another user'
   return peers[by]?.name || 'another user'
-}
-
-/**
- * Drop exactly ONE trailing newline from a tmux capture.
- * `capture-pane -p -e -S -<n>` emits a trailing LF after its last line. Writing it would leave the
- * cursor one row BELOW the last captured row: xterm scrolls, the topmost row of the captured
- * visible screen is pushed into scrollback, and tmux's attach redraw (`\x1b[H\x1b[2J`) then
- * repaints that same screen — so on every warm reattach the first visible row would appear twice.
- * Strip on the RAW capture (LF-separated), before `toXtermText` turns the LFs into CRLFs.
- */
-export function stripTrailingNewline(text: string): string {
-  return text.replace(/\r?\n$/, '')
 }
 
 /**

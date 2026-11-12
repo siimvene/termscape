@@ -40,8 +40,7 @@ vi.mock('electron', () => ({
   autoUpdater: { on: () => {} }
 }))
 
-// `vi.mock` factories are hoisted above every const, so the double the factory returns has to be
-// hoisted with them.
+// The electron-updater double, handed to `initUpdater` through its loader seam (below).
 const { updaterEvents, autoUpdater } = vi.hoisted(() => {
   const events: Record<string, (...a: unknown[]) => void> = {}
   return {
@@ -58,14 +57,18 @@ const { updaterEvents, autoUpdater } = vi.hoisted(() => {
     }
   }
 })
-vi.mock('electron-updater', () => ({ autoUpdater }))
 vi.mock('./main-window', () => ({
   getMainWindow: () => null,
   sendToMain: (channel: string, payload?: unknown) => sent.push({ channel, payload })
 }))
 vi.mock('./notifications', () => ({ retainUntilDismissed: () => {} }))
 
-import { describeCheckFailure, initUpdater, lastUpdateCheck } from './updater'
+import { describeCheckFailure, initUpdater as initUpdaterReal, lastUpdateCheck, type UpdaterHooks } from './updater'
+
+// electron-updater is loaded lazily with `require`, which `vi.mock` does not reach, so
+// the double goes in through the loader seam instead of a module mock.
+const initUpdater = (hooks?: UpdaterHooks) =>
+  initUpdaterReal(hooks, { loadUpdater: () => autoUpdater as unknown as import('electron-updater').AppUpdater })
 
 const realReadFileSync = fs.readFileSync
 
@@ -329,6 +332,65 @@ describe('restart-to-update elsewhere', () => {
     initUpdater()
     restart()
     expect(autoUpdater.quitAndInstall).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * electron-updater is no longer required at main's module scope
+ * (32–47 ms warm, before Chromium's `ready`, on every launch). It is loaded only on a path that uses
+ * it, and the IPC handlers stay registered first whatever the build: the renderer invokes them on
+ * mount, and an invoke with no handler rejects.
+ */
+describe('electron-updater is loaded lazily, after the IPC handlers', () => {
+  const EAGER = [IPC.appGetVersion, IPC.appGetStagedUpdate, IPC.appRestartToUpdate, IPC.appCheckForUpdates]
+  const registered = (): string[] => [...Object.keys(ipcHandle), ...Object.keys(ipcOn)]
+
+  it('a dev build never loads it at init, and still answers every eager handler', () => {
+    appMock.isPackaged = false
+    packageWith(undefined)
+    const loadUpdater = vi.fn(() => autoUpdater as unknown as import('electron-updater').AppUpdater)
+    initUpdaterReal({}, { loadUpdater })
+    expect(loadUpdater).not.toHaveBeenCalled()
+    expect(registered()).toEqual(expect.arrayContaining(EAGER))
+  })
+
+  it('a no-channel build never loads it, not even on a check or a restart click', () => {
+    setPlatform('win32')
+    packageWith('disabled')
+    const loadUpdater = vi.fn(() => autoUpdater as unknown as import('electron-updater').AppUpdater)
+    initUpdaterReal({}, { loadUpdater })
+    check()
+    restart()
+    expect(loadUpdater).not.toHaveBeenCalled()
+    expect(registered()).toEqual(expect.arrayContaining(EAGER))
+  })
+
+  it('dev loads it only when restart-to-update is clicked (the historical no-op quitAndInstall)', () => {
+    appMock.isPackaged = false
+    packageWith(undefined)
+    const loadUpdater = vi.fn(() => autoUpdater as unknown as import('electron-updater').AppUpdater)
+    initUpdaterReal({}, { loadUpdater })
+    restart()
+    restart()
+    expect(loadUpdater).toHaveBeenCalledTimes(1)
+    expect(autoUpdater.quitAndInstall).toHaveBeenCalledTimes(2)
+  })
+
+  it('a release with a feed loads it once at init — after the version/staged/restart handlers exist', () => {
+    setPlatform('darwin')
+    packageWith(undefined)
+    let registeredAtLoad: string[] = []
+    const loadUpdater = vi.fn(() => {
+      registeredAtLoad = registered()
+      return autoUpdater as unknown as import('electron-updater').AppUpdater
+    })
+    initUpdaterReal({}, { loadUpdater })
+    expect(loadUpdater).toHaveBeenCalledTimes(1)
+    expect(registeredAtLoad).toEqual(expect.arrayContaining([IPC.appGetVersion, IPC.appGetStagedUpdate, IPC.appRestartToUpdate]))
+    // The manual-check handler is registered once the module is in hand, still synchronously
+    // inside initUpdater, so it exists before the renderer can send anything.
+    expect(registered()).toEqual(expect.arrayContaining(EAGER))
+    expect(autoUpdater.checkForUpdates).toHaveBeenCalledTimes(1)
   })
 })
 

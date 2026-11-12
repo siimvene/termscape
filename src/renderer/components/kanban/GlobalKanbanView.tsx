@@ -3,7 +3,9 @@ import type { BridgeLink, CanvasNodeState, ProjectKanban } from '@shared/types'
 import { AGENT_CONFIG, BUILTIN_AGENT_IDS, type AgentId } from '@shared/agents/config'
 import { useProjects } from '../../state/projects'
 import { useSettings } from '../../state/settings'
+import { useAgentStatus } from '../../state/agentStatus'
 import { useBoardWallpaperStyle } from '../../state/wallpaper'
+import { AerialWallpaper } from '../AerialWallpaper'
 import {
   addColumn, assignNode, assignedTo, boardLabels, cardMatchesLabelFilter, cardMeta, columnForNode,
   deleteColumn, labelsForCard, moveColumn,
@@ -18,6 +20,7 @@ import { markCanvasCovered } from '../../lib/canvasCovered'
 import { showCanvas, useViewMode } from '../../state/viewMode'
 import { KanbanScopeSwitch } from './KanbanScopeSwitch'
 import { sessionForProject } from '../../session/session'
+import { ProjectSessionScope } from '../../session/owning-project'
 import { isHostedReadOnly } from '../../state/hostedTeams'
 import { activePermissionMode } from '../../state/permissionMode'
 import { CardModal } from './CardModal'
@@ -348,6 +351,9 @@ const Swimlane = memo(function Swimlane({
         <ContextMenu x={cardMenu.x} y={cardMenu.y} zIndex={60} items={cardMenuItems(cardMenu.nodeId)} onClose={() => setCardMenu(null)} />
       )}
       {modalNodeId && byId.has(modalNodeId) && (
+        // The overview renders under App's LOCAL provider: the modal runs under THIS lane's
+        // project's session, so a team lane's terminal attaches to the host's core.
+        <ProjectSessionScope projectId={projectId}>
         <CardModal
           projectName={projectName}
           projectColor={projectColor}
@@ -372,6 +378,7 @@ const Swimlane = memo(function Swimlane({
           team={teams.get(modalNodeId) ?? NO_STATIONS}
           onTravel={(nodeId) => { setModalNodeId(null); travel(nodeId) }}
         />
+        </ProjectSessionScope>
       )}
     </div>
   )
@@ -424,7 +431,11 @@ export const GlobalKanbanView = memo(function GlobalKanbanView({ live = null, on
     setModal(nodeId ? { projectId, nodeId, view } : null)
   }, [])
   const modalNodeId = modal?.nodeId ?? null
-  useEffect(() => { onModalNodeChange?.(modalNodeId) }, [modalNodeId, onModalNodeChange])
+  // Same rule as the per-project board: opening a card marks its completion read.
+  useEffect(() => {
+    onModalNodeChange?.(modalNodeId)
+    if (modalNodeId) useAgentStatus.getState().clearUnread(modalNodeId)
+  }, [modalNodeId, onModalNodeChange])
   // Closing the overview with a card open must not leave the node "watched" forever.
   const onModalNodeChangeRef = useRef(onModalNodeChange)
   onModalNodeChangeRef.current = onModalNodeChange
@@ -519,6 +530,7 @@ export const GlobalKanbanView = memo(function GlobalKanbanView({ live = null, on
   if (projects.length === 0) {
     return (
       <div className="kanban-overlay global-kanban" style={boardStyle}>
+        {boardStyle && <AerialWallpaper board />}
         <div className="kanban-header"><span className="kanban-header__name">All Projects</span><KanbanScopeSwitch scope="all" /></div>
         <div className="kanban-empty">No projects yet. Create a project to see its swimlane.</div>
       </div>
@@ -527,6 +539,7 @@ export const GlobalKanbanView = memo(function GlobalKanbanView({ live = null, on
 
   return (
     <div className="kanban-overlay global-kanban" ref={containerRef} style={boardStyle}>
+      {boardStyle && <AerialWallpaper board />}
       <div className="kanban-header">
         <span className="kanban-header__name">All Projects</span>
         <KanbanScopeSwitch scope="all" />

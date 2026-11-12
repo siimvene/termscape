@@ -385,8 +385,13 @@ self-correcting on the next render; guarding it would mean threading ownership t
   Control stays a modal.
 
 - **Settings** (`SettingsPage.tsx`, ⚙ / ⌘,): font/cursor (live to xterm + Monaco), default
-  shell, grid + snap, **default node size** (`defaultNodeWidth`/`defaultNodeHeight` — new
-  terminal/agent nodes only, clamped in `terminalNodeSize()` in `state/workspace.ts`),
+  shell, grid + snap, **default node size** (one row with a kind picker: terminal/agent is the
+  `defaultNodeWidth`/`defaultNodeHeight` pair, clamped in `terminalNodeSize()`; every other kind
+  the add menus create is an optional entry in `defaultNodeSizes`, resolved by `defaultNodeSize(kind)`
+  in `state/workspace.ts` through `@shared/default-node-size`, which clamps hand edits to the kind's
+  `NODE_MIN_SIZES` and 2400×1600 — new factories must place through `placeSized`, not a literal
+  `*_SIZE`, or the setting silently stops applying to that kind; the agent `settings` verb exposes
+  only the terminal pair),
   pan-hover delay, double-click focus, accent, tmux on/scrollback, commit agent,
   `seenShortcuts`. **Every section is MOUNTED whenever Settings is open** — an inactive one
   returns null from `SettingsSection`, but its hooks and the whole render body above that return

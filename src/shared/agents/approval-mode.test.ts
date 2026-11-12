@@ -223,6 +223,15 @@ describe('approvalFlags — codex REFUSES what it cannot express', () => {
  * (`--mode plan`, bare `--force`), and its bare launch is `approvalMode: allowlist`, which prompts.
  * Measured in a real run, see CURSOR_MODES.
  */
+describe('withPermissionMode: cursor yields to any run-mode flag already in the command', () => {
+  it('never appends a second, competing run mode', () => {
+    expect(withPermissionMode('cursor-agent --auto-review', 'cursor', 'bypassPermissions')).toBe('cursor-agent --auto-review')
+    expect(withPermissionMode('cursor-agent --force', 'cursor', 'auto')).toBe('cursor-agent --force')
+    expect(withPermissionMode('cursor-agent --mode plan', 'cursor', 'bypassPermissions')).toBe('cursor-agent --mode plan')
+    expect(withPermissionMode('cursor-agent', 'cursor', 'bypassPermissions')).toBe('cursor-agent --force')
+  })
+})
+
 describe('approvalFlags: cursor', () => {
   it('maps auto to --auto-review, plan to --mode plan and bypass to --force, and nothing else', () => {
     expect(approvalFlags('cursor', 'auto')).toEqual(['--auto-review'])
@@ -273,6 +282,14 @@ describe('approvalFlags: cursor', () => {
 })
 
 describe('approvalFlags — an agent with no permission mode', () => {
+  it('maps antigravity modes onto --mode and --dangerously-skip-permissions', () => {
+    expect(approvalFlags('antigravity', 'manual')).toEqual([])
+    expect(approvalFlags('antigravity', 'plan')).toEqual(['--mode', 'plan'])
+    expect(approvalFlags('antigravity', 'acceptEdits')).toEqual(['--mode', 'accept-edits'])
+    expect(approvalFlags('antigravity', 'auto')).toEqual(['--mode', 'auto'])
+    expect(approvalFlags('antigravity', 'bypassPermissions')).toEqual(['--dangerously-skip-permissions'])
+  })
+
   it('emits nothing for opencode and for a custom agent', () => {
     for (const id of ['opencode', 'custom:abc']) {
       for (const m of ALL_PERMISSION_MODES)
@@ -288,7 +305,7 @@ describe('approvalFlags — an agent with no permission mode', () => {
 describe('UI copy derived from the mapping', () => {
   it('names every agent whose start-up mode we can set', () => {
     const label = permissionModeAgentsLabel()
-    for (const name of ['Claude Code', 'Grok', 'Gemini', 'Codex', 'Cursor'])
+    for (const name of ['Claude Code', 'Grok', 'Gemini', 'Codex', 'Cursor', 'Antigravity'])
       expect(label).toContain(name)
     expect(label).not.toContain('opencode')
   })
@@ -298,7 +315,7 @@ describe('UI copy derived from the mapping', () => {
     // the same drift the label helper exists to prevent, one level down. The ids are exported so the
     // caller can agree with them; this pins that they describe the SAME set the label does.
     const ids = permissionModeAgentIds({ exclude: ['claude'] })
-    expect(ids).toEqual(['grok', 'gemini', 'codex', 'cursor'])
+    expect(ids).toEqual(['grok', 'gemini', 'codex', 'cursor', 'antigravity'])
     const label = permissionModeAgentsLabel({ exclude: ['claude'] })
     for (const id of ids) expect(label.toLowerCase()).toContain(id)
     expect(label).not.toContain('Claude')

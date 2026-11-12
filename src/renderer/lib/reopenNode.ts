@@ -15,6 +15,7 @@ import {
   createFilesNode,
   createRunNode,
   createSimulatorNode,
+  createWhiteboardNode,
   isAccountLoginNode
 } from '@renderer/state/workspace'
 import { normalizeRunConfig } from '@shared/run-config'
@@ -48,6 +49,8 @@ export interface ReopenNodeSnapshot {
 }
 
 type SnapshotSource = {
+  /** The node's id — only a whiteboard reads it (its rebuilt copy reads the board by this id). */
+  id?: string
   type?: string
   position: { x: number; y: number }
   parentId?: string
@@ -87,7 +90,8 @@ export function snapshotNode(
     ...(node.parentId ? { parentId: node.parentId } : {}),
     ...(node.extent === 'parent' ? { extent: 'parent' as const } : {}),
     ...(size ? { size } : {}),
-    data: node.data
+    // A whiteboard is rebuilt under a NEW id; it reads the deleted board's file by this one.
+    data: type === 'whiteboard' ? { ...node.data, whiteboardSource: node.data.whiteboardSource ?? node.id } : node.data
   }
 }
 
@@ -197,6 +201,13 @@ function buildBase(snapshot: ReopenNodeSnapshot, ctx: RecreateContext): CanvasNo
       return createBrowserNode(0, d.url ?? '', undefined, d.partition)
     case 'dino':
       return createDinoNode(0, undefined, d.highScore ?? 0)
+    case 'whiteboard': {
+      const wb = createWhiteboardNode(0)
+      // A reopen restores a board; it does not jump into drawing on it.
+      wb.data.autoEdit = undefined
+      if (d.whiteboardSource) wb.data.whiteboardSource = d.whiteboardSource
+      return wb
+    }
     // A Simulator node's whole state is which device it shows.
     case 'simulator':
       return createSimulatorNode(0, normalizeSimulatorConfig(d.simulator))

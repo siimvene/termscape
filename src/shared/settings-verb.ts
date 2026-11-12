@@ -38,6 +38,7 @@ import {
   type CapabilityAckMap
 } from './project-capability-consent'
 import type { Project, Settings } from './types'
+import { NODE_SIZE_MAX, TERMINAL_NODE_SIZE_MIN } from './default-node-size'
 
 /** Where a setting lives. `project` = a per-project capability (the project's file + this
  *  machine's answer); `machine` = settings.json on this machine, every project. */
@@ -99,13 +100,13 @@ export const SETTINGS_VERB_KEYS: Readonly<Record<SettingsVerbKey, SettingsVerbKe
   },
   defaultNodeWidth: {
     scope: 'machine',
-    type: { kind: 'integer', min: 280, max: 2400 },
+    type: { kind: 'integer', min: TERMINAL_NODE_SIZE_MIN.width, max: NODE_SIZE_MAX.width },
     label: 'Default width of new terminal and agent nodes (px)',
     why: 'Canvas layout only. Bounds are terminalNodeSize’s clamp, so nothing out of range persists.'
   },
   defaultNodeHeight: {
     scope: 'machine',
-    type: { kind: 'integer', min: 160, max: 1600 },
+    type: { kind: 'integer', min: TERMINAL_NODE_SIZE_MIN.height, max: NODE_SIZE_MAX.height },
     label: 'Default height of new terminal and agent nodes (px)',
     why: 'Canvas layout only. Bounds are terminalNodeSize’s clamp, so nothing out of range persists.'
   }

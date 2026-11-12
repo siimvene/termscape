@@ -6,7 +6,7 @@ import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { UpdateCard, POLICY_REFRESH_MS, POLICY_RETRY_MS } from './UpdateCard'
-import { usePendingUpdate } from '../state/pendingUpdate'
+import { runPendingUpdate, usePendingUpdate } from '../state/pendingUpdate'
 import { LAST_SEEN_VERSION_KEY } from '../lib/releaseNotes'
 import type { UpdatePolicy } from '@shared/types'
 
@@ -92,10 +92,28 @@ const flush = async (): Promise<void> => {
 describe('automatic downloads are quiet', () => {
   beforeEach(mount)
 
-  it('an automatic available renders nothing — no card, no pill', () => {
+  it('an automatic available renders no card and no minimized card pill', () => {
     act(() => fire.available({ version: '0.6.0', notes: '', manual: false }))
     act(() => fire.progress({ percent: 40 }))
     expect(text()).toBe('')
+  })
+
+  it('a new version fills the title-bar button at once, before the download finishes', () => {
+    act(() => fire.available({ version: '0.6.0', notes: '', manual: false }))
+    expect(usePendingUpdate.getState().pending).toEqual({ kind: 'available', version: '0.6.0' })
+    act(() => fire.progress({ percent: 40 }))
+    expect(usePendingUpdate.getState().pending).toEqual({ kind: 'available', version: '0.6.0' })
+    act(() => fire.downloaded({ version: '0.6.0' }))
+    expect(usePendingUpdate.getState().pending).toEqual({ kind: 'downloaded', version: '0.6.0' })
+  })
+
+  it('clicking the button on an available update shows the download', () => {
+    act(() => fire.available({ version: '0.6.0', notes: '', manual: false }))
+    act(() => fire.progress({ percent: 40 }))
+    act(() => runPendingUpdate(usePendingUpdate.getState().pending!))
+    expect(check).toHaveBeenCalledTimes(1)
+    expect(restart).not.toHaveBeenCalled()
+    expect(text()).toContain('Downloading… 40%')
   })
 
   it('the finished download opens the ready card and fills the title-bar button', () => {

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { readFileSync } from 'fs'
 import path from 'path'
 import {
@@ -63,7 +63,14 @@ describe('mapCursorLimits', () => {
 })
 
 describe('fetchCursorUsage', () => {
-  beforeEach(() => resetCursorUsageHold())
+  // The hold reads the wall clock, and BODY's billing cycle is fixed: pin the clock inside the cycle,
+  // or every test that holds last-good numbers turns red once END is in the past (2026-10-21).
+  beforeEach(() => {
+    resetCursorUsageHold()
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(START + 1000)
+  })
+  afterEach(() => vi.useRealTimers())
 
   it('is unavailable when not signed in, and asks nothing', async () => {
     let called = false

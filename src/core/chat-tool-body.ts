@@ -1,3 +1,4 @@
+import { isRecord } from '../shared/is-record'
 // The readable body of a tool call in the ⌘M chat view. Most tool calls are plumbing — a one-line
 // chip (`Bash ls`) says all there is to say. Two are not: `ExitPlanMode` carries the full plan the
 // user is being asked to approve, and `AskUserQuestion` carries the question and its options. The
@@ -37,7 +38,6 @@ const oneLine = (s: string): string => s.replace(/\s*[\r\n]+\s*/g, ' ').trim()
 const escapeEmphasis = (s: string): string => s.replace(/[\\*_]/g, (c) => `\\${c}`)
 const bold = (s: string): string => `**${escapeEmphasis(oneLine(s))}**`
 
-const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v)
 const nonBlank = (v: unknown): v is string => typeof v === 'string' && v.trim() !== ''
 
 function planBody(input: Record<string, unknown>): string | undefined {
@@ -48,14 +48,14 @@ function questionsBody(input: Record<string, unknown>): string | undefined {
   if (!Array.isArray(input.questions)) return undefined
   const blocks: string[] = []
   for (const q of input.questions) {
-    if (!isObj(q) || !nonBlank(q.question)) continue
+    if (!isRecord(q) || !nonBlank(q.question)) continue
     const lines: string[] = []
     if (nonBlank(q.header)) lines.push(bold(q.header), '')
     // The question keeps its own paragraphs: it is a block of its own, not a one-line slot.
     lines.push(q.multiSelect === true ? `${q.question} _(select all that apply)_` : q.question)
     const options = Array.isArray(q.options)
       ? q.options
-          .filter((o): o is Record<string, unknown> => isObj(o) && nonBlank(o.label))
+          .filter((o): o is Record<string, unknown> => isRecord(o) && nonBlank(o.label))
           .map((o) => `- ${bold(o.label as string)}${nonBlank(o.description) ? ` — ${oneLine(o.description)}` : ''}`)
       : []
     if (options.length) lines.push('', ...options)
@@ -66,7 +66,7 @@ function questionsBody(input: Record<string, unknown>): string | undefined {
 
 /** Markdown body for a tool call worth reading in full, or undefined (render the plain chip). */
 export function toolBody(name: string, input: unknown): string | undefined {
-  if (!isObj(input)) return undefined
+  if (!isRecord(input)) return undefined
   const body =
     name === 'ExitPlanMode' ? planBody(input) : name === 'AskUserQuestion' ? questionsBody(input) : undefined
   return body === undefined ? undefined : capBody(body)

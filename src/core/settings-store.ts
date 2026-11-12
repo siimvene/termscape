@@ -3,6 +3,7 @@ import path from "path";
 import { writeFileAtomic } from "./fs-atomic";
 import { withFileLock } from "./file-lock";
 import { IPC } from "../shared/ipc";
+import { isNewProjectStorage } from "../shared/project-storage";
 import { platform } from "./platform";
 import {
   DEFAULT_SETTINGS,
@@ -99,6 +100,9 @@ function mergeSettings(saved: Partial<Settings> | null | undefined): Settings {
   }
   // Keep the mirror in lockstep with the resolved mode so an older build still honors the choice.
   merged.vanillaLaunchDefault = merged.agentLaunchMode === "subscription";
+  // Same rule for where new folder projects keep their canvas (issue #1145).
+  if (!isNewProjectStorage(merged.newProjectStorage as unknown))
+    merged.newProjectStorage = DEFAULT_SETTINGS.newProjectStorage;
   // Background mode is hand-editable too: anything but the three known values is the default.
   const bg = merged.runInBackgroundOnClose as unknown;
   if (bg !== "auto" && bg !== "on" && bg !== "off")

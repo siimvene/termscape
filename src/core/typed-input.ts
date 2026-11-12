@@ -1,5 +1,5 @@
 import type { TextDeliveryResult } from '../shared/text-delivery'
-import { assertPasteTarget } from './tmux-naming'
+import { assertPasteTarget, exactPaneTarget } from './tmux-naming'
 import { ENVELOPE_SETTLE_POLLS, ENVELOPE_SETTLE_POLL_MS, type SettleOptions } from './settled-submit'
 
 /**
@@ -58,15 +58,21 @@ export function typedInputScript(tmux: string, socket: string, target: string, b
   assertPasteTarget(target, buffer)
   if (!/^[A-Za-z0-9._-]+$/.test(socket)) throw new Error(`unsafe tmux socket: ${JSON.stringify(socket)}`)
   const t = `${tmux} -L ${socket}`
+  // The EXACT target (tmux-naming.ts `exactPaneTarget`): a bare name prefix-matches a longer session
+  // on a miss. Single-quoted for the shell (`sh -c` here, and the same text runs on an SSH host): a
+  // word starting with `=` is a command lookup under zsh's EQUALS option. Inside the `if-shell` body
+  // (already single-quoted for the shell) tmux's own lexer reads it unquoted.
+  const pane = exactPaneTarget(target)
+  const q = `'${pane}'`
   return [
     // Leave copy mode first, like the paste path: keys typed into copy mode drive IT, not the app.
-    `${t} if-shell -F -t ${target} '#{pane_in_mode}' 'send-keys -t ${target} -X cancel' || exit 1`,
+    `${t} if-shell -F -t ${q} '#{pane_in_mode}' 'send-keys -t ${pane} -X cancel' || exit 1`,
     'first=1',
     'while IFS= read -r line; do',
-    `  if [ "$first" = 1 ]; then first=0; else ${t} send-keys -t ${target} M-Enter || exit 1; fi`,
+    `  if [ "$first" = 1 ]; then first=0; else ${t} send-keys -t ${q} M-Enter || exit 1; fi`,
     '  if [ -n "$line" ]; then',
     `    printf '%s' "$line" | ${t} load-buffer -b ${buffer} - || exit 1`,
-    `    ${t} paste-buffer -d -r -b ${buffer} -t ${target} || { ${t} delete-buffer -b ${buffer} 2>/dev/null; exit 1; }`,
+    `    ${t} paste-buffer -d -r -b ${buffer} -t ${q} || { ${t} delete-buffer -b ${buffer} 2>/dev/null; exit 1; }`,
     '  fi',
     'done'
   ].join('\n')

@@ -66,6 +66,35 @@ export function shouldPollScreen(s: {
   return s.readable && !s.readOnly && !s.remote && (s.refusal === null || s.refusal === 'working')
 }
 
+/**
+ * Does THIS tick of the screen poll run? Not while the page is hidden (the original gate), and not
+ * while the window is unfocused: a nodeterm window left visible on a second monitor is not hidden
+ * by Chromium's definition, so the hidden gate alone kept every chat view spawning a `tmux
+ * capture-pane` every 2 s — ~30 spawns a minute per open chat view — for a composer nobody could
+ * type into. The panel re-ticks on `focus`, so the
+ * screen is re-read the moment someone can act on it, and a send re-checks the screen in core
+ * (`pty.sendChatPrompt`) regardless, so skipping a tick never weakens dialog safety.
+ *
+ * `focused: null` is "could not tell" and polls: a hint must fail toward the old behaviour.
+ */
+export function screenPollTickAllowed(s: { hidden: boolean; focused: boolean | null }): boolean {
+  if (s.hidden) return false
+  return s.focused !== false
+}
+
+/**
+ * Window focus as a hint for `screenPollTickAllowed`: `null` when the document cannot answer (no
+ * `hasFocus` — a test DOM, an exotic embedder — or it throws), never a guessed `false`.
+ */
+export function windowFocusHint(doc: { hasFocus?: () => boolean } | undefined): boolean | null {
+  if (doc === undefined || typeof doc.hasFocus !== 'function') return null
+  try {
+    return doc.hasFocus()
+  } catch {
+    return null
+  }
+}
+
 /** What the row at the end of the thread says; `null` = no row. */
 export type ChatActivity = 'working' | 'dialog' | null
 

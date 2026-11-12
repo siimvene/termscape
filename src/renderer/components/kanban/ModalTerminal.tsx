@@ -5,6 +5,7 @@ import { isLocalOnSshCanvas } from '../../lib/localOnSshCanvas'
 import { ptyRefusal } from '@shared/pty-refusal'
 
 import { patchImeModeSwitch } from '../../terminal/ime-mode-switch'
+import { patchShrinkTrim } from '../../terminal/shrink-trim'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
@@ -20,7 +21,8 @@ import { focusXtermUnlessCovered, useMdModeFocus } from '../../terminal/useMdMod
 import { FindBar } from '../FindBar'
 import { useAgentStatus } from '../../state/agentStatus'
 import { useProjects } from '../../state/projects'
-import { useSession } from '../../session/session'
+import { isRemoteProjectId, useSession } from '../../session/session'
+import { REMOTE_PROJECT_SPAWN_REFUSAL, spawnBelongsElsewhere, useOwningProjectId } from '../../session/owning-project'
 import { isHostedReadOnly } from '../../state/hostedTeams'
 import { useSettings } from '../../state/settings'
 import { isMacPlatform, isWindowsPlatform } from '@shared/platform-utils'
@@ -162,6 +164,11 @@ export function ModalTerminal({
   // Read at click time from the lifecycle effect, which runs once per mount.
   const projectIdRef = useRef(projectId)
   projectIdRef.current = projectId
+  // MIRROR TerminalNode: the project this viewer's node belongs to, as the board's
+  // `ProjectSessionScope` provides it — read by the create path below, which runs once per mount.
+  const owningProject = useOwningProjectId()
+  const owningProjectRef = useRef(owningProject)
+  owningProjectRef.current = owningProject
   const onOpenFileRef = useRef(onOpenFile)
   onOpenFileRef.current = onOpenFile
   // MIRROR TerminalNode: the path dialect belongs to the core that owns the filesystem, never this
@@ -224,7 +231,7 @@ export function ModalTerminal({
   visualRef.current = visual
   // Liquid Glass: the same glass as the canvas node (a second view of one session must look like
   // it). The DOM renderer keeps app-painted cell backgrounds opaque (see CLAUDE.md).
-  const { glass, vars: glassVars } = useTerminalGlass(visual.terminalTheme)
+  const { glass, vars: glassVars } = useTerminalGlass(visual.terminalTheme, true)
   const glassRef = useRef(glass)
   glassRef.current = glass
   const [uploading, setUploading] = useState(false)
@@ -309,6 +316,8 @@ export function ModalTerminal({
     // Renderer-parity with the canvas terminals (see char-size-quantize): the modal co-views
     // the same session, so its column math must match what the canvas draws.
     quantizeCharSize(term)
+    // The card's find bar crashes on an untrimmed alternate buffer, same as the canvas node.
+    patchShrinkTrim(term)
     fit.fit()
 
     let sessionId: string | null = null
@@ -491,18 +500,35 @@ export function ModalTerminal({
       return false
     })
 
+    // MIRROR TerminalNode's `dialsSsh`: a RELAY card's SSH-project node lives on the HOST's side,
+    // so this machine never dials for it (session/relay-ssh.ts). Its create goes to the host's
+    // core with `requireRemote`, which joins the session when the host holds it live and refuses
+    // otherwise. This machine has no master to resolve for it and must not refuse it for lacking one.
+    const dialsSsh = !!spawn.sshRemoteTmux && session.source !== 'relay'
     void (async () => {
-      // Read here, not at click time: a modal only ever opens over the ACTIVE project, and the
-      // reconnect coordinator is keyed by CONNECTION SCOPE (same choice resolveSshRemote makes) —
-      // the project's own id, or the host attachment when this card's session is on a machine the
-      // project isn't.
+      // MIRROR TerminalNode: a node of a REMOTE project (a relay / hosted team tab) under a session
+      // that is not a relay session would create the host's node id on THIS desktop's core. The
+      // board mounts the modal under the card's project session (`ProjectSessionScope`), so this
+      // is the defensive half: start nothing, before any SSH resolve. `isRemoteProjectId` is
+      // sessionForProject's own rule, so a tab the store deleted still counts.
+      const owner = owningProjectRef.current
+      if (spawnBelongsElsewhere(isRemoteProjectId(owner ?? ''), session.source)) {
+        term.write(
+          `\r\n\x1b[90m${REMOTE_PROJECT_SPAWN_REFUSAL}\x1b[0m\r\n`
+        )
+        return
+      }
+      // Read here, not at click time. A dialing node's reconnect coordinator is keyed by CONNECTION
+      // SCOPE (same choice resolveSshRemote makes) — the project's own id, or the host attachment
+      // when this card's session is on a machine the project isn't. Any other node's pane is owned
+      // by the CARD's project (the Omni board opens cards of every project), else the active one.
       const projectId =
-        spawn.sshRemoteTmux && spawn.ssh
+        dialsSsh && spawn.ssh
           ? sshConnectionScope(spawn.ssh)
-          : useProjects.getState().activeProjectId
+          : (owner ?? useProjects.getState().activeProjectId)
       // SSH-project node: resolve the live ControlMaster (may not be up yet on a cold load).
       const sshRemote =
-        spawn.sshRemoteTmux && spawn.ssh
+        dialsSsh && spawn.ssh
           ? await resolveSshRemote(spawn.ssh, spawn.cwd, { nodeId, pty: api.pty })
           : undefined
       if (dead) return
@@ -510,7 +536,7 @@ export function ModalTerminal({
       // core's LOCAL tmux branch, and opening a card for a remote session would silently start a
       // local shell under that node's id — see PtyCreateOptions.requireRemote. The card says so
       // and the node is queued for the reconnect coordinator, exactly like the canvas node.
-      if (spawn.sshRemoteTmux && !sshRemote) {
+      if (dialsSsh && !sshRemote) {
         term.write(
           `\r\n\x1b[90m[not connected — this session lives on ${spawn.ssh ? `${spawn.ssh.user}@${spawn.ssh.host}` : 'the remote host'}; nothing was started locally]\x1b[0m\r\n`
         )
@@ -539,12 +565,24 @@ export function ModalTerminal({
         requireRemote: spawn.sshRemoteTmux,
         // Same local-login exemption as the canvas node (issue #1186).
         ...(isLocalOnSshCanvas(nodeId) ? { localOnSshCanvas: true } : {})
-      })
+      }).catch((err: unknown): Error => (err instanceof Error ? err : new Error(String(err))))
+      // A create that REJECTS started nothing — the core could not be asked (a relay tab whose
+      // connection is gone, e.g. the offline relay session, answers every call with E_DISCONNECTED).
+      // Say so, like TerminalNode's spawn-error overlay, instead of a blank viewer and an unhandled
+      // rejection out of this effect.
+      if (res instanceof Error) {
+        if (!dead) {
+          // eslint-disable-next-line no-control-regex -- the message is written INTO the terminal
+          const why = res.message.replace(/[\x00-\x1f\x7f]/g, ' ')
+          term.write(`\r\n\x1b[90m[this terminal could not be started: ${why}]\x1b[0m\r\n`)
+        }
+        return
+      }
       // Refused core-side (the master died inside our round-trip, or `ssh` is missing).
       if (res.unavailable) {
         const refusal = ptyRefusal(res.unavailable)
         term.write(`\r\n\x1b[90m[${refusal.message}]\x1b[0m\r\n`)
-        if (refusal.connectionLost && projectId) reportSshDrop(projectId, nodeId)
+        if (refusal.connectionLost && projectId && dialsSsh) reportSshDrop(projectId, nodeId)
         return
       }
       // Another client permanently deleted this node's session — never resurrect it (no live session

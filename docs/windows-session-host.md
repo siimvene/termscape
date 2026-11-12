@@ -276,6 +276,51 @@ Because all of this rides inside the `screen` string itself (as real escape sequ
 renderer writes verbatim), **`PtyCreateResult.coAttachMouse` is never set for a session-host
 session** — there is nothing left for that separate flag to carry.
 
+### Which ConPTY: node-pty's bundled one, inbox as the fallback
+
+The restoration above only has something to restore if the modes ever reach an emulator. On
+**Windows 10** (the 19041 servicing line, 22H2 = build 19045 included) the OS inbox ConPTY does not
+pass the DEC private mouse-tracking modes (`?1000h`/`?1002h`/`?1006h`) or the alternate screen
+(`?1049h`) through to the terminal on its far side: it consumes them and repaints the screen in
+place. So neither the host's headless emulator nor the renderer's xterm ever enters mouse-tracking
+mode, xterm never forwards a wheel event to the pty, and — because ConPTY repaints rather than
+scrolls — xterm's own scrollback stays empty. In a full-screen TUI (Claude Code with
+`/tui fullscreen`) the wheel and the trackpad do nothing and earlier conversation is unreachable.
+The canvas is not involved: the terminal container is already `nodrag nowheel`.
+
+node-pty 1.1.0 ships a newer ConPTY (`conpty.dll` + `OpenConsole.exe`, from the Windows Terminal
+project) and uses it instead of the OS one when spawned with `useConptyDll: true`. Both spawn sites
+— the session host (`src/session-host/session.ts`) and the PtyManager's direct `pty.spawn`
+(`src/core/pty-manager.ts`) — spread ONE helper, `windowsConptySpawnOptions()`
+(`src/core/windows-conpty-dll.ts`):
+
+- **Where node-pty looks, exactly.** Not `third_party/`: the native `LoadConptyDll`
+  (`src/win/conpty.cc`) loads `<directory of the loaded conpty.node>\conpty\conpty.dll`, and
+  `conpty.node` is the first one `loadNativeModule` (`lib/utils.js`) finds among `build/Release`,
+  `build/Debug`, `prebuilds/<platform>-<arch>`, each tried relative to `lib/..` then `lib/.`. The
+  helper walks the same list, stops at the first `conpty.node`, and answers `{ useConptyDll: true }`
+  only when BOTH files sit in its `conpty\` subfolder. A DLL missing there is a THROWN spawn in
+  node-pty ("Cannot find conpty.dll at …"), not a fallback, which is why the helper checks first.
+- **Fail-open.** Any other platform, a missing file, a resolve or fs error ⇒ `{}` — the inbox
+  ConPTY, and spawn options byte-identical to before. It never throws. Off Windows it touches no
+  file at all.
+- **The files must be STAGED, because our build deletes them.** node-pty's own post-install copies
+  `third_party/conpty/<version>/win10-<arch>/` into `build/Release/conpty/`, but our postinstall then
+  runs `electron-rebuild -f`, i.e. `node-gyp rebuild`, whose `clean` removes `build/`. The rebuilt
+  `build/Release/conpty.node` is the one node-pty loads, so `scripts/stage-conpty-dll.mjs` runs after
+  electron-rebuild (postinstall and `npm run rebuild`) and copies the two files back beside it
+  (Windows only; x64 and arm64 — the arches node-pty bundles). Without it every Windows build would
+  quietly run on the inbox ConPTY.
+- **Packaging.** The main process gets them through `asarUnpack` (`**/node_modules/node-pty/**`).
+  The session host's own node-pty copy (`build.win.extraResources`) is an allowlist, and now names
+  `build/Release/conpty/conpty.dll` and `build/Release/conpty/OpenConsole.exe`; the staged host
+  runtime copies `resources/session-host/**` recursively, so they reach it unchanged.
+- The native close path already handles both values: the Windows leg of
+  `scripts/patch-node-pty.mjs` patches the `useConptyDll` branches, and
+  `src/session-host/windows-conpty.ts` reads `_useConptyDll` instead of assuming one.
+
+Unverified on a device (no Windows machine here): see "ConPTY selection — device checklist" below.
+
 ### Output ordering, flow ownership, and geometry
 
 `@xterm/headless` applies `Terminal.write()` asynchronously. A PTY data callback therefore does
@@ -1050,6 +1095,34 @@ P5. **Eco on Windows**, with pwsh and with cmd as the default shell: idle → `/
     wake → `claude --resume <id>` typed once; the session-memory panel shows the tree drop to the
     shell alone. Repeat with a native `claude.exe` and an npm `claude.cmd`; a node with an MCP child
     (`node` → `cmd /c` → `node`) is not misread as a shell; a `blocked` node is never exited.
+
+### ConPTY selection (bundled `conpty.dll`) — device checklist
+
+Written and unit-tested on Linux; nothing below has run on Windows yet. Run each on **Windows 10
+22H2 (19045)** and on **Windows 11**, packaged build:
+
+C1. **Which ConPTY ran.** Task Manager → Details while a terminal is open: an `OpenConsole.exe`
+    whose path is under the install (main process) or `%LOCALAPPDATA%\nodeterm\session-host\…`
+    (session host), and no inbox `conhost.exe` for that terminal.
+C2. **Fullscreen Claude wheel scroll, in a canvas node.** Claude Code with `/tui fullscreen`, a long
+    conversation: mouse wheel and trackpad scroll the conversation; earlier turns are reachable.
+C3. **The same in the kanban card modal** (its co-attached viewer), including right after opening
+    the modal without pressing a key.
+C4. **vim / htop mouse.** Click to place the cursor in vim with `:set mouse=a`; click a process in
+    htop (or another mouse-aware TUI); wheel scrolls inside them.
+C5. **Plain shell scrollback still works.** In pwsh and cmd, run something that prints a few
+    hundred lines: the wheel scrolls xterm's own history as before, and Shift-drag selection copies.
+C6. **Warm reattach after an app restart.** Quit and relaunch with a fullscreen Claude and a vim
+    open: both reattach warm (`attach (warm)` in `session-host.log`) and the wheel still works
+    without a keystroke (mouse modes restored from the host's serialized screen).
+C7. **Teardown leaves no `OpenConsole.exe`.** Close a node with ×, End session, an Eco exit cycle,
+    and quitting the session host for an update: after each, no orphan `OpenConsole.exe` remains in
+    Task Manager, and `conpty.kill` still reports positive proof (no `could not safely close` line).
+C8. **Fallback.** Delete `build\Release\conpty\conpty.dll` from a packaged install's session-host
+    copy: terminals still open (inbox ConPTY), they just lose C2.
+C9. **P4 with `useConptyDll`.** The per-session session-host cost of P4 above, measured again with
+    the bundled ConPTY — `OpenConsole.exe` replaces `conhost.exe`, and the memory panel's host line
+    must still count it (P3's parentage check, for `OpenConsole.exe`).
 
 ### Earlier items
 

@@ -483,6 +483,26 @@ describe('the enabled Server Edition handler parses and dispatches the v1 surfac
       expect(reply.message).toContain('do not retry')
     }
   })
+
+  // They run in the DESKTOP renderer's dispatch. This edition's browser bridge never subscribes to
+  // `onAgentControl`, and its headless handler serves no layout verb (`arrange`, `move`, `align`,
+  // `list` included), so they take the same named permanent refusal — never "Unknown verb", which
+  // reads like a typo to retry, and never a dropped flag answered ok.
+  it('refuses the geometry verbs by name, permanently (issue #1288)', async () => {
+    const handler = createServerEditionControlHandler(actions())
+    const calls: Array<[string, Record<string, string>]> = [
+      ['resize', { nodes: 'a', width: '540' }],
+      ['place', { nodes: 'a', x: '0', y: '0' }],
+      ['list', { geometry: 'on' }],
+      ['arrange', { nodes: 'a,b', gap: '0' }]
+    ]
+    for (const [verb, args] of calls) {
+      const reply = await handler({ verb, nodeId: 'term-source', args, verified: true })
+      expect(reply, verb).toMatchObject({ ok: false, error: CONTROL_UNSUPPORTED_ERROR })
+      expect(reply.message, verb).toContain(`"${verb}"`)
+      expect(reply.message, verb).toContain('do not retry')
+    }
+  })
 })
 
 /**

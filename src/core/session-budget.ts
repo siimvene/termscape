@@ -408,8 +408,11 @@ export function parseSessionList(stdout: string): SessionInfo[] {
  * critical one sweeps the reaper: we would cull sessions on a machine macOS says is fine. That is
  * the same class of mistake as the bug this started with, reached from the other direction.
  *
- * Follow-up (unchanged in shape, sharper in target): give this leg macOS's REAL pressure signal —
- * `kern.memorystatus_vm_pressure_level`, or the `memory_pressure` tool — rather than a byte count.
+ * That follow-up is now a SEPARATE leg, not this one: memory-pressure.ts reads macOS's real signal,
+ * `kern.memorystatus_vm_pressure_level`, through its own reader and its own callback, and fires the
+ * renderer's reclaim levers on escalations only. It deliberately does not come back through here:
+ * `planReap` shares this reader, so a kernel level fed in as a MemInfo would hand the reaper a new
+ * cull trigger. Keep this `null` on darwin.
  */
 export function hostMemReader(platform: NodeJS.Platform = process.platform): () => MemInfo | null {
   return platform === 'darwin' ? (): null => null : readMemInfo

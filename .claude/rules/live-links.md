@@ -32,8 +32,9 @@ one is Pro and the backend is the gate. Reference: **`docs/live-links.md`**. Inv
   host-only channels before any policy, so it could never arrive (`src/shared/host-control.test.ts`,
   `src/core/relay/scoped-guest-policy.test.ts`).
 - A watcher never goes through `decideAccess` (it would get the VIEW table): `watcher-policy.ts` refuses
-  every request and every cast but `watch:chat` (Commenter and Control links) and, on a Control link
-  only, the three controller casts `watch:unlock` / `watch:input` / `watch:release`; it passes out only
+  every request and every cast but `watch:history` (every link), `watch:chat` (Commenter and Control
+  links) and, on a Control link only, the three controller casts `watch:unlock` / `watch:input` /
+  `watch:release`; it passes out only
   `watch:*`, its own pty frames and `pty:size`, and takes no `interceptReq` (`watcher-policy.test.ts`,
   `chat-cast.guard.test.ts`). The policy knows only the ROLE: "controlling" is the link host's state
   per CONNECTION (a right password; a reconnect unlocks again, a session restart keeps it). Input from
@@ -53,7 +54,17 @@ one is Pro and the backend is the gate. Reference: **`docs/live-links.md`**. Inv
 - The Control password is a scrypt hash only (no plaintext kept or logged anywhere; every scrypt run in
   one FIFO gate of 2; `timingSafeEqual`). Host throttles: 1 attempt per 2 s per viewer, 3 wrong end the
   connection, 10 wrong across the link lock it (lock AND count persisted in the record, so a restart
-  resets neither; only Allow control again clears the lock; it and a new password reset the count).
+  resets neither; it and a new password reset the count). The lock LIFTS BY ITSELF (L2: any link
+  holder could otherwise lock control for everyone for good): 15 min for the first since the owner last
+  allowed control, doubling per lock, capped at 24 h; `lockedUntil` and `lockStep` are persisted (a
+  restart neither lifts it early nor makes it permanent; a lapsed one is lifted at launch BEFORE the host
+  is built; a lock written without `lockedUntil` still waits for the owner). Allow control again lifts
+  it at once and resets the count AND the backoff. Viewers are told `lockedForMs`; the owner's notice
+  names who tipped it (a claim). The unlock is SEALED to a per-connection X25519 key pair offered in that
+  connection's meta (`unlockKey`, `shared/watch-link/unlock-seal.ts`, L3), because every link holder can
+  derive the tunnel's keys; the client seals by itself and never sends the password in the clear on a
+  connection that offered a key; a plain unlock (an older page) is still accepted, except on a
+  connection that already sealed one. Typed input is NOT sealed (residual, docs).
   Owner changes go by direction: narrowing (typing off, a new password) applies at once and is NEVER
   undone by a failed or hung write — the brake must not fail open; the owner is told `'unsaved'` (holds
   until a restart unless a later write lands; Stop ends it for good) — widening (typing on, allow again)
@@ -68,6 +79,12 @@ one is Pro and the backend is the gate. Reference: **`docs/live-links.md`**. Inv
 - Watchers are QUIET (no broadcast, not in `clientIds()`) and SELF-PACED (never paused, dropped or
   resynced by the registry); the reaper reads `quietClientIds()` too, or it releases a session only a
   viewer holds (`ui-sink-registry.watcher.test.ts`, `pty-reap.test.ts`).
+- Read-back (`watch:history`, `core/watch-link/history.ts`) is the agent's CONVERSATION, never the
+  terminal's history: a viewer's stream is a tmux client on the alternate screen and has nothing to
+  scroll, and copy-mode would scroll the owner's pane. The host cuts every page at `record.createdAt`
+  (a message with no time is never sent) and `readHistoryPage` cuts again on both ends; tool results and
+  thinking never travel. The read is host-chat's `page`, bound to the link's node (a viewer sends only a
+  cursor), one at a time per viewer, ≥ 500 ms apart.
 - The stream filter sees every byte, has NO length cap (a cap leaked a measured clipboard), and every
   join resets it `midStream`, never to text mode and never on a keyframe. `captureVisible` never returns
   history (exact `=nt-<id>:`, no `-S`; the session host answers its negotiated `captureVisible`, the
@@ -82,7 +99,12 @@ one is Pro and the backend is the gate. Reference: **`docs/live-links.md`**. Inv
   `unsupported` until it has a license layer (`src/main/watch-link-wiring.test.ts`).
 - `src/shared/watch-link/` is vendored byte for byte into nodeterm-web: siblings and `tweetnacl` only,
   no Node API, type imports spelled `import type` (`isomorphism.guard.test.ts`); a change there owes the
-  web repo a re-vendor. Chat text is stripped of controls AND bidi controls there, capped by code point.
+  web repo a re-vendor. Chat text is stripped of controls AND bidi controls there, capped by code point;
+  a NAME also loses every format character (`\p{Cf}`) and the blank letters, so look-alike names are
+  equal (L4); chat TEXT keeps only ZWJ and ZWNJ of the format characters (emoji, Persian/Indic).
+- The viewer page strips the secret fragment from the address bar after reading it (L1): kept in the
+  tab's `sessionStorage` (`nodeterm.watchLink.<linkId>`) for a reload, a Copy link button rebuilds it;
+  where storage cannot be written the fragment stays. A full link's status poll is 60 s (L6).
 - Never silent about what a viewer gets. The session host's read-only client is a negotiated
   `watch-attach` attachment (no claim, no pause ticket, host refuses its writes, never spawns, never
   indexed as the node's session; an older host means refused, never an ordinary attach). Where local

@@ -34,6 +34,7 @@ import {
   type AgentLaunchExecutableResolution,
   type PreparedAgentLaunch
 } from './agent-launch'
+import { isRecord } from '../shared/is-record'
 
 /** The Windows-native dialects this channel encodes for. POSIX shells keep their legacy line. */
 export type WindowsLaunchDialect = Exclude<SessionHostShellDialect, 'posix'>
@@ -172,10 +173,6 @@ const MESSAGES: Record<LaunchIntentFailureReason, string> = {
 
 function refuse(reason: LaunchIntentFailureReason): LaunchIntentExecutionResult {
   return { ok: false, reason, message: MESSAGES[reason] }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 /**

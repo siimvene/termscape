@@ -221,7 +221,8 @@ describe('PtyManager.paneOwner', () => {
     expect(calls).toHaveLength(2)
     expect(calls[0]).toEqual({
       file: '/usr/bin/tmux',
-      args: ['-L', TMUX_SOCKET, 'display-message', '-p', '-t', TARGET, PANE_OWNER_FMT]
+      // Exact (`=name:`): a bare target prefix-matches a longer session on a miss.
+      args: ['-L', TMUX_SOCKET, 'display-message', '-p', '-t', `=${TARGET}:`, PANE_OWNER_FMT]
     })
     expect(calls[1]).toEqual({
       file: 'ps',
@@ -285,7 +286,7 @@ describe('PtyManager.paneOwner', () => {
     }
     const mgr = await manager()
     expect(await mgr.paneOwner('some-other-node')).toBeNull()
-    expect(calls[0].args).toContain(sessionName('some-other-node'))
+    expect(calls[0].args).toContain(`=${sessionName('some-other-node')}:`)
   })
 
   it('answers null — not a partial owner — when tmux is unavailable', async () => {

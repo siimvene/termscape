@@ -8,9 +8,11 @@
 import { app, autoUpdater as nativeUpdater, ipcMain, Notification } from 'electron'
 import fs from 'fs'
 import path from 'path'
-// Named import — the default-import + destructure pattern returns undefined under
-// electron-vite v5's CJS interop.
-import { autoUpdater } from 'electron-updater'
+// electron-updater is NOT imported at module scope: main's module
+// scope runs before Chromium's `ready`, and requiring electron-updater there measured 32–47 ms warm
+// on every launch — including dev and `no-channel` builds that never touch it. It is loaded by
+// `initUpdater` (after createWindow) only on a path that uses it; see `UpdaterDeps`. Type-only here.
+import type { AppUpdater } from 'electron-updater'
 import { IPC } from '../shared/ipc'
 import {
   installReadiness,
@@ -118,6 +120,26 @@ export interface UpdaterHooks {
   flushRenderer?: () => Promise<unknown>
 }
 
+export interface UpdaterDeps {
+  /**
+   * Returns electron-updater's `autoUpdater`. Called at most once per `initUpdater`, and only on a
+   * path that uses it: at init for a build with a feed, on a restart click in dev, never for a
+   * `no-channel` build. Injectable because vitest's `vi.mock` does not reach a `require()` — the
+   * tests pass their double here. The default is a plain `require`, which electron-vite leaves
+   * verbatim in the CJS main bundle (electron-updater is an externalised dependency), as it does
+   * for `require('ws')` in relay-socket.ts.
+   */
+  loadUpdater?: () => AppUpdater
+}
+
+/** The production loader. A property read, not a default-import + destructure (that returned
+ *  undefined under electron-vite v5's CJS interop); the `autoUpdater` getter constructs the
+ *  platform updater (MacUpdater, NsisUpdater…) on first access, so that cost moves here too. */
+function requireAutoUpdater(): AppUpdater {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  return (require('electron-updater') as typeof import('electron-updater')).autoUpdater
+}
+
 export interface UpdaterHandle {
   /** The one guarded restart-to-update path, shared by the card (IPC) and the tray item. */
   restartToUpdate(): void
@@ -130,7 +152,9 @@ export interface UpdaterHandle {
  * shipped — an update finishing downloading after a close→dock-reopen crashed the main process on
  * `win.isFocused()`.
  */
-export function initUpdater(hooks: UpdaterHooks = {}): UpdaterHandle {
+export function initUpdater(hooks: UpdaterHooks = {}, deps: UpdaterDeps = {}): UpdaterHandle {
+  let loaded: AppUpdater | undefined
+  const updater = (): AppUpdater => (loaded ??= (deps.loadUpdater ?? requireAutoUpdater)())
   const send = (channel: string, payload?: unknown) => sendToMain(channel, payload)
   const flushRenderer =
     hooks.flushRenderer ?? (() => requestRendererFlush(getMainWindow()?.webContents, ipcMain))
@@ -201,7 +225,7 @@ export function initUpdater(hooks: UpdaterHooks = {}): UpdaterHandle {
     restart.beforeRestartRan = true
     hooks.onBeforeRestart?.()
     try {
-      autoUpdater.quitAndInstall()
+      updater().quitAndInstall()
     } catch (err) {
       console.error('[updater] quitAndInstall failed:', err)
       abortRestart(err instanceof Error ? err.message : String(err))
@@ -220,7 +244,7 @@ export function initUpdater(hooks: UpdaterHooks = {}): UpdaterHandle {
     if (delivery === 'dev') {
       // Historical dev behaviour: nothing is ever staged, the call is a logged no-op.
       hooks.onBeforeRestart?.()
-      autoUpdater.quitAndInstall()
+      updater().quitAndInstall()
       return
     }
     if (restart.requested) return
@@ -253,7 +277,9 @@ export function initUpdater(hooks: UpdaterHooks = {}): UpdaterHandle {
     )
   }
 
-  // Always available, even in dev: current version, manual check, restart.
+  // Always available, even in dev: current version, manual check, restart. Registered BEFORE
+  // electron-updater is loaded and whatever the build: the renderer invokes these on mount, and an
+  // invoke with no handler rejects — the lazy load must never delay or skip them.
   ipcMain.handle(IPC.appGetVersion, () => app.getVersion())
   ipcMain.on(IPC.appRestartToUpdate, () => restartToUpdate())
   // A renderer that (re)loads after the one-time announcement — ⌘R, a window recreated after a
@@ -278,6 +304,10 @@ export function initUpdater(hooks: UpdaterHooks = {}): UpdaterHandle {
     )
     return handle
   }
+
+  // From here on the build has a feed: load electron-updater now (the one place it is loaded on
+  // these builds), after every IPC handler above is registered.
+  const autoUpdater = updater()
 
   // A Linux .deb/.rpm install (no APPIMAGE env) cannot self-install and would re-download the
   // full AppImage every 6h only to throw on install; the unsigned Windows beta must not

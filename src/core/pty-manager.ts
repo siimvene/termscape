@@ -69,6 +69,7 @@ import {
 import { RemoteSessionIndex, type SessionVerdict } from './remote-ssh/remote-session-index'
 import { isSshProgram, nativeExecFileAsync, nativeMux, resolveSshProgram, useNativeSsh } from './remote-ssh/native/native-runtime'
 import { NativeSshPty } from './remote-ssh/native/native-pty'
+import { windowsConptySpawnOptions } from './windows-conpty-dll'
 import { remotePtySpawnGate, type SpawnSlot } from './remote-ssh/pty-spawn-gate'
 import type { SshConnection } from '../shared/ssh'
 import { recordPendingRemoteKill, type PendingRemoteKill } from './pending-remote-kills'
@@ -120,6 +121,8 @@ import {
   TMUX_SOCKET,
   sessionName,
   isSessionName,
+  exactPaneTarget,
+  exactSessionTarget,
   localPasteDelivery,
   localTmuxEnterArgs,
   pasteBufferName,
@@ -311,6 +314,31 @@ const PROBE_TIMEOUT_MS = 6_000
  * `#{pane_current_command}` as a bare command name; a login shell can carry a leading `-`.
  */
 const HEAL_SHELL_COMMANDS = new Set(['zsh', 'bash', 'sh', 'dash', 'fish', 'ksh', 'tcsh', 'csh'])
+
+/**
+ * Ceiling for the SYNCHRONOUS tmux calls on the boot/spawn path (`ensureTmux`'s `source-file`,
+ * `ensureUpdateEnvKeys`' `show-options` / `set-option`). They block the main thread, and one runs
+ * before `createWindow`: against a tmux server that accepts the connection but never answers
+ * (stuck on a blocked client write, or SIGSTOPped) an unbounded call froze main with no window
+ * and no error — a 2026-10 repro held a client 4.05 s, exactly the wedged
+ * listener's lifetime, i.e. forever against a server that never recovers. A healthy server
+ * answers these in milliseconds, so 2 s only ever fires on a wedge. `vm_stat` already has 5 s.
+ */
+export const TMUX_BOOT_CMD_TIMEOUT_MS = 2_000
+
+/**
+ * After a `show-options` / `set-option` in `ensureUpdateEnvKeys` times out, how long it runs no
+ * synchronous tmux call at all. Every spawn passes the account-scope names, so without it each
+ * later spawn on a slow-but-alive server would block main for up to TMUX_BOOT_CMD_TIMEOUT_MS
+ * again (a 20-terminal restore: about 40 s of stalls). Once it ends the next spawn probes again,
+ * so a server that recovered is still learned.
+ */
+export const TMUX_UPDATE_ENV_COOLDOWN_MS = 60_000
+
+/** Outcome of one bounded synchronous tmux call. `timeout` is a wedged server and is LOGGED;
+ *  `failed` is the ordinary "no server running yet" exit and stays silent, as it always was.
+ *  Callers fail open on both — neither is `ok: true` with empty output. */
+type TmuxSyncResult = { ok: true; stdout: string } | { ok: false; reason: 'timeout' | 'failed' }
 
 /**
  * `execFile`, bounded. Wrapped HERE rather than at the call sites so a new one cannot forget: the
@@ -816,6 +844,16 @@ function normalizeSize(cols: number, rows: number): PtySize {
 }
 
 /**
+ * The same machine, as far as a `requireRemote` join is concerned: host, user (`''` when unset) and
+ * port (22 when unset). The ControlMaster path is deliberately not compared — two views of one host
+ * may hold different masters for it — and neither are identity file or extra args, which change how
+ * we log in, not where the session runs.
+ */
+function sameSshEndpoint(a: SshConnection, b: SshConnection): boolean {
+  return a.host === b.host && (a.user ?? '') === (b.user ?? '') && (a.port ?? 22) === (b.port ?? 22)
+}
+
+/**
  * Hand a remote spawn's gate slot back the moment its pty produces its first byte — the cheapest
  * signal that the ssh channel is up and the host has answered.
  *
@@ -969,6 +1007,11 @@ interface Session {
   /** True when this node had an `accountId` but its config dir was gone at spawn, so we fell back
    *  to the system account. `create()` surfaces it to the renderer (warning chip). */
   accountFallback?: boolean
+  /** Set once `join` has warned that this session holds a remote-only node's id somewhere other
+   *  than that node's host (`held-elsewhere`). A watcher retries its join every 2/4/8/15 s for as
+   *  long as the link lives, and every retry is refused the same way, so the warning is logged once
+   *  for the life of this held session; a later session under the same id warns again. */
+  heldElsewhereWarned?: boolean
   /**
    * This session is backed by the session-host process (docs/windows-session-host.md), not a
    * local tmux — selected only when no local tmux was found (primarily Windows). `session.proc`
@@ -2141,12 +2184,39 @@ export class PtyManager {
     // The tmux server outlives the app, so it won't re-read `-f` on relaunch. Push the
     // (possibly updated) config into a running server now so new bindings apply immediately;
     // a no-op error when no server exists yet (the next session loads it fresh via `-f`).
+    // Bounded: this runs before the first window exists. A timeout keeps tmux
+    // resolved — only the config push is skipped, and runTmuxSync has already logged it.
+    this.runTmuxSync(['source-file', this.confPath], false)
+  }
+
+  /** Per-instance so a test can prove the bound in milliseconds; production never changes it. */
+  tmuxBootCmdTimeoutMs = TMUX_BOOT_CMD_TIMEOUT_MS
+
+  /**
+   * One synchronous tmux call on our socket, bounded by `tmuxBootCmdTimeoutMs`. SIGKILL, not the
+   * default SIGTERM: a wedged client that ignores or never services SIGTERM would keep
+   * `execFileSync` waiting on its exit, which is the very hang this bound exists to end. The
+   * signal goes to the short-lived tmux CLIENT we just spawned — never to the server, which holds
+   * every session and is not touched.
+   */
+  private runTmuxSync(args: string[], capture: boolean): TmuxSyncResult {
+    if (!this.tmuxPath) return { ok: false, reason: 'failed' }
     try {
-      execFileSync(this.tmuxPath, ['-L', TMUX_SOCKET, 'source-file', this.confPath], {
-        stdio: 'ignore'
+      const out = execFileSync(this.tmuxPath, ['-L', TMUX_SOCKET, ...args], {
+        stdio: capture ? ['ignore', 'pipe', 'ignore'] : 'ignore',
+        timeout: this.tmuxBootCmdTimeoutMs,
+        killSignal: 'SIGKILL'
       })
-    } catch {
-      // no server running yet — ignore
+      return { ok: true, stdout: out ? out.toString() : '' }
+    } catch (error) {
+      if ((error as { code?: unknown } | null)?.code === 'ETIMEDOUT') {
+        console.warn(
+          `[pty] tmux ${args[0]} on -L ${TMUX_SOCKET} timed out after ${this.tmuxBootCmdTimeoutMs}ms` +
+            ' — the tmux server is not answering; continuing without it'
+        )
+        return { ok: false, reason: 'timeout' }
+      }
+      return { ok: false, reason: 'failed' }
     }
   }
 
@@ -2158,6 +2228,8 @@ export class PtyManager {
   /** `update-environment` names already pushed to the running server this app-run (plus the
    *  conf-baked set), so a custom agent's spawn costs at most one `set-option` per NEW key. */
   private updateEnvKeys: Set<string> | null = null
+  /** Epoch ms until which `ensureUpdateEnvKeys` makes no tmux call (a recent timeout). */
+  private updateEnvCooldownUntil = 0
 
   /** Make the shared tmux server copy these client-env names into new sessions. The conf bakes
    *  the fixed gateway list; a CUSTOM agent's env keys are user-defined and can only be appended
@@ -2172,33 +2244,34 @@ export class PtyManager {
       (n) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(n) && n !== 'PATH' && n !== 'LANG'
     )
     if (!wanted.length) return
+    if (Date.now() < this.updateEnvCooldownUntil) return
     if (!this.updateEnvKeys) {
+      const shown = this.runTmuxSync(['show-options', '-g', 'update-environment'], true)
+      // A wedged server: stop here. Every `set-option` below would wait out the same bound — one
+      // stall per new name on the spawn path — and leaving the cache unset lets a spawn after the
+      // cooldown probe a recovered server properly. The spawn itself goes ahead.
+      if (!shown.ok && shown.reason === 'timeout') {
+        this.updateEnvCooldownUntil = Date.now() + TMUX_UPDATE_ENV_COOLDOWN_MS
+        return
+      }
       this.updateEnvKeys = new Set(MODEL_GATEWAY_ENV_KEYS)
-      try {
-        const out = execFileSync(
-          this.tmuxPath,
-          ['-L', TMUX_SOCKET, 'show-options', '-g', 'update-environment'],
-          { stdio: ['ignore', 'pipe', 'ignore'] }
-        ).toString()
-        for (const m of out.matchAll(/update-environment\[\d+\]\s+(\S+)/g)) {
+      // `failed` is "no server yet" — the conf list is what a fresh server will have.
+      if (shown.ok) {
+        for (const m of shown.stdout.matchAll(/update-environment\[\d+\]\s+(\S+)/g)) {
           this.updateEnvKeys.add(m[1])
         }
-      } catch {
-        /* no server yet — the conf list is what a fresh server will have */
       }
     }
     for (const name of wanted) {
       if (this.updateEnvKeys.has(name)) continue
-      try {
-        execFileSync(
-          this.tmuxPath,
-          ['-L', TMUX_SOCKET, 'set-option', '-ga', 'update-environment', name],
-          { stdio: 'ignore' }
-        )
-        this.updateEnvKeys.add(name)
-      } catch {
-        /* no server yet — fresh-server sessions inherit the client env directly */
+      const set = this.runTmuxSync(['set-option', '-ga', 'update-environment', name], false)
+      if (set.ok) this.updateEnvKeys.add(name)
+      // One timeout per call, not per name: the rest would only wait out the same wedge.
+      else if (set.reason === 'timeout') {
+        this.updateEnvCooldownUntil = Date.now() + TMUX_UPDATE_ENV_COOLDOWN_MS
+        break
       }
+      /* `failed`: no server yet — fresh-server sessions inherit the client env directly */
     }
   }
 
@@ -2221,20 +2294,28 @@ export class PtyManager {
    * Does NOT reach back into panes that already exist: a shell spawned before the upgrade keeps
    * its own process environment until that node is recreated. Recreating the node (× then reopen,
    * or "Refresh terminal") is the migration.
+   *
+   * Bounded like its sibling (`runTmuxSync`, TMUX_BOOT_CMD_TIMEOUT_MS): it runs synchronously on
+   * the spawn path, and an unbounded call here would be the one wedge the boot-path bound missed.
+   * It honours the same cooldown, so a server `ensureUpdateEnvKeys` just found wedged costs no
+   * second stall. A timeout leaves the scrub UNDONE (and starts the cooldown), so a server that
+   * recovers is still scrubbed by a later spawn; any other outcome marks it done for this run.
    */
   private scrubServerEnv(): void {
     if (this.serverEnvScrubbed || !this.tmuxPath) return
-    this.serverEnvScrubbed = true
-    const args = ['-L', TMUX_SOCKET]
+    if (Date.now() < this.updateEnvCooldownUntil) return
+    const args: string[] = []
     LAUNCHER_SESSION_ENV_STRIP.forEach((name, i) => {
       if (i > 0) args.push(';')
       args.push('set-environment', '-gu', name)
     })
-    try {
-      execFileSync(this.tmuxPath, args, { stdio: 'ignore' })
-    } catch {
-      /* no server yet, or an old tmux that dislikes the chain — nothing to scrub either way */
+    const res = this.runTmuxSync(args, false)
+    if (!res.ok && res.reason === 'timeout') {
+      this.updateEnvCooldownUntil = Date.now() + TMUX_UPDATE_ENV_COOLDOWN_MS
+      return
     }
+    // `failed`: no server yet, or an old tmux that dislikes the chain — nothing to scrub either way.
+    this.serverEnvScrubbed = true
   }
 
   registerIpc(): void {
@@ -2721,6 +2802,12 @@ export class PtyManager {
         pendingRecycle.waiters.push({ clientId, options, resolve, reject })
       })
     }
+    // A NEW-ONLY create (a relay guest's node it introduced, `PtyCreateOptions.newOnly`) may only
+    // spawn: a spawn already in flight for this name, or a session this process already holds for it
+    // (the co-attach `join` below, a plain shell that carries the id as `nodeId`), is somebody's
+    // terminal, and joining it is exactly what this option exists to refuse.
+    if (options.newOnly && (this.inflight.get(key) || this.liveSessionForNode(key)))
+      return { sessionId: '', fresh: false, unavailable: 'new-only' }
     // Same-tick race: spawnNew() awaits a `tmux has-session` SUBPROCESS (tens of ms, not a
     // microtask) before spawnSession registers the session in `byPersistKey`, so two clients
     // opening the same node in that window would BOTH miss the index and both spawn — and the
@@ -2822,6 +2909,27 @@ export class PtyManager {
       existing = existingId ? this.sessions.get(existingId) : undefined
     }
     if (!existingId || !existing) return undefined
+    // A node that lives on a remote host never joins a session that is not on THAT host. The match
+    // above is by node id alone, and a LOCAL session can carry a remote node's id (a hosted team
+    // tab's node mounted under it, a pre-`requireRemote` orphan), so joining it would put the remote
+    // node on this machine's shell — the outcome `spawnRefusal` refuses for a spawn. Refused when
+    // the held session is local, or when the create names its master and that master reaches a
+    // different endpoint. A create with no `sshRemote` (its master momentarily down) still joins a
+    // held REMOTE session: it runs on a host, and nothing says it is the wrong one. The held session
+    // is never touched — it may hold work someone typed into it (same rule as prepareRelayAttach).
+    if (
+      options.requireRemote &&
+      (!existing.sshRemote ||
+        (options.sshRemote && !sameSshEndpoint(options.sshRemote.conn, existing.sshRemote.conn)))
+    ) {
+      if (!existing.heldElsewhereWarned) {
+        existing.heldElsewhereWarned = true
+        console.warn(
+          `[pty] ${sessionName(persistKey)} is held ${existing.sshRemote ? 'on another host' : 'on this machine'} but node ${persistKey} must run on its remote host; not joined, and the held session was left untouched`
+        )
+      }
+      return Promise.resolve({ sessionId: '', fresh: false, unavailable: 'held-elsewhere' })
+    }
     // The joining VIEW's composite key: a second client, OR the SAME client's second view (the
     // kanban card modal). Either way it is a distinct subscriber of the one shared session/pty.
     const sub = subKey(clientId, options.viewerId ?? PRIMARY_VIEWER)
@@ -2917,10 +3025,11 @@ export class PtyManager {
     // node's identity, which is the one outcome a remote node must never have (see
     // `PtyCreateOptions.requireRemote`). Refuse instead; the renderer waits for the master.
     //
-    // Deliberately on the SPAWN path (`spawnNew`, and the relay host's `prepareRelayAttach`) and
-    // not in `create`: a co-attach JOIN to a live session for
-    // this node id is still correct (that session already runs wherever it runs), so only the
-    // branch that would have created a new local session is refused. `findSsh()` is checked for
+    // Deliberately on the SPAWN path (`spawnNew`, and the relay host's `prepareRelayAttach`). A
+    // co-attach JOIN never reaches it: `join` answers first and has its own rule
+    // (`'held-elsewhere'`) — it refuses when the held session for this node id is local or on
+    // another host, and still attaches to a live session on the requested remote (or on any remote
+    // while the create's master is down). `findSsh()` is checked for
     // the same reason `spawnSession` checks it — without the executable the remote branch there
     // is skipped and the local one runs.
     if (options.requireRemote && !(options.sshRemote && options.persistKey && findSsh())) {
@@ -3041,7 +3150,7 @@ export class PtyManager {
     // the create on to `new-session -A`, which CREATES the session if it was really gone, and the
     // owner's next open then reads `fresh:false` and skips its cold restore.
     const joinOnlyLocalVerdict =
-      options.joinOnly && !options.sshRemote && !warmWindowsBackend && tmuxBacked
+      (options.joinOnly || options.newOnly) && !options.sshRemote && !warmWindowsBackend && tmuxBacked
         ? await this.strictTmuxVerdict(options.persistKey as string)
         : undefined
     // The same strict question for a node whose terminals live in the SESSION HOST (Windows, or no
@@ -3107,6 +3216,24 @@ export class PtyManager {
         zellijChoice?.state === 'unknown'
     if (options.joinOnly && joinRefused)
       return { sessionId: '', fresh: false, unavailable: 'join-only' }
+    // A NEW-ONLY create spawns only where nothing runs under this name: a session we positively saw
+    // ABSENT (the strict local probe, the remote listing, Zellij's own answer). A live session, and a
+    // probe that could not answer, are both refused — never `new-session -A`, which would attach to
+    // (and `-D` detach the other clients of) whatever holds the name. The session host's own
+    // attach-or-create IS its probe, so it is asked first, strictly, and re-checked after `ready`.
+    if (options.newOnly) {
+      const newRefused = options.sshRemote
+        ? remoteVerdict !== 'absent'
+        : zellijChoice?.use
+          ? !zellijChoice.fresh
+          : zellijChoice?.state === 'unknown' ||
+            (tmuxBacked && joinOnlyLocalVerdict !== 'absent') ||
+            (!tmuxBacked &&
+              !!options.persistKey &&
+              this.hostBackendEligible() &&
+              (await sessionHostHasSession(sessionName(options.persistKey)).catch(() => true)))
+      if (newRefused) return { sessionId: '', fresh: false, unavailable: 'new-only' }
+    }
     // A watcher's own client is a read-only TMUX client (`attach-session -E -f ignore-size,read-only`),
     // and a Zellij session has no such client to spawn: refused, never a Zellij attach (which would be
     // a full, typing client). A watcher still co-attaches to a Zellij session this process holds (the
@@ -3335,6 +3462,13 @@ export class PtyManager {
     // (`persisted` in spawnSession) — i.e. exactly "this session survives losing its client",
     // which is what the renderer's cache-dispose levers must not assume. See PtyCreateResult.
     const persistent = !!spawned?.persistKey
+    // A NEW-ONLY create that turned out to land on an existing session (the session host answers
+    // `fresh` only from its own attach, and a name can appear between our probe and the spawn): drop
+    // this client's view of it — the session itself keeps running untouched — and refuse.
+    if (options.newOnly && !fresh) {
+      this.kill(clientId, sessionId, options.viewerId)
+      return { sessionId: '', fresh: false, unavailable: 'new-only' }
+    }
     // Stale-cwd probe (issue #464), WARM local-tmux reattach only: `new-session -A` reattached a
     // session whose shell may sit on a DELETED directory inode (a re-created same-named folder is
     // a different inode, so the getcwd errors never self-heal). A fresh spawn already validated
@@ -3974,7 +4108,10 @@ export class PtyManager {
   private async tmuxSessionExists(persistKey: string): Promise<boolean> {
     if (!this.tmuxPath) return false
     try {
-      await runAsync(this.tmuxPath, ['-L', TMUX_SOCKET, 'has-session', '-t', sessionName(persistKey)], {
+      // Exact (`=name`): a bare target prefix-matches a LONGER live session when this one is gone,
+      // which read as "warm" and skipped this node's cold restore (and, for a relay peer's prefix
+      // id, admitted a session it does not own). See `exactSessionTarget`.
+      await runAsync(this.tmuxPath, ['-L', TMUX_SOCKET, 'has-session', '-t', exactSessionTarget(sessionName(persistKey))], {
         timeout: PROBE_TIMEOUT_MS
       })
       return true
@@ -3989,8 +4126,7 @@ export class PtyManager {
   /**
    * Is the tmux session for `persistKey` running, by the EXACT target (`=nt-<id>`)? Public for
    * `team resume`, which must never start a second agent on a conversation whose session exists.
-   * `sessionExists` cannot answer this: its tmux leg prefix-matches, and it folds "could not tell"
-   * into "exists". No tmux at all answers 'absent' (nothing can be running there).
+   * `sessionExists` cannot answer this: it folds "could not tell" into "exists". No tmux at all answers 'absent' (nothing can be running there).
    */
   sessionVerdict(persistKey: string): Promise<'present' | 'absent' | 'unknown'> {
     return this.strictTmuxVerdict(persistKey)
@@ -4012,7 +4148,7 @@ export class PtyManager {
     try {
       await this.confirmedProcessRun(
         this.tmuxPath,
-        ['-L', TMUX_SOCKET, 'has-session', '-t', `=${sessionName(persistKey)}`],
+        ['-L', TMUX_SOCKET, 'has-session', '-t', exactSessionTarget(sessionName(persistKey))],
         { timeout: PROBE_TIMEOUT_MS }
       )
       return 'present'
@@ -4030,7 +4166,7 @@ export class PtyManager {
     try {
       await this.confirmedProcessRun(
         this.tmuxPath,
-        ['-L', TMUX_SOCKET, 'has-session', '-t', sessionName(persistKey)],
+        ['-L', TMUX_SOCKET, 'has-session', '-t', exactSessionTarget(sessionName(persistKey))],
         { timeout: PROBE_TIMEOUT_MS }
       )
       return true
@@ -4436,7 +4572,7 @@ export class PtyManager {
               if (!(await sessionHostWriteDetached(target, rawKeyBytes(key)))) return false
             }
           } else {
-            await runAsync(this.tmuxPath, ['-L', TMUX_SOCKET, 'send-keys', '-t', target, ...tmuxKeyArgs(key)])
+            await runAsync(this.tmuxPath, ['-L', TMUX_SOCKET, 'send-keys', '-t', exactPaneTarget(target), ...tmuxKeyArgs(key)])
           }
         } catch {
           return false
@@ -4478,7 +4614,7 @@ export class PtyManager {
     try {
       const { stdout } = await runAsync(
         this.tmuxPath,
-        ['-L', TMUX_SOCKET, 'capture-pane', '-p', '-e', '-t', sessionName(persistKey)],
+        ['-L', TMUX_SOCKET, 'capture-pane', '-p', '-e', '-t', exactPaneTarget(sessionName(persistKey))],
         { encoding: 'utf-8', maxBuffer: 50 * 1024 * 1024 }
       )
       return stdout
@@ -5246,7 +5382,9 @@ export class PtyManager {
           // `-d` detaches other clients, so it follows `tmuxAttachFlags`' mirror rule.
           ...(sinks || options.joinOnly ? [] : ['-d']),
           '-t',
-          sessionName(options.persistKey)
+          // Exact: an attach-only reattach must reach THIS node's proven session, never a longer
+          // one its name prefixes (`exactSessionTarget`).
+          exactSessionTarget(sessionName(options.persistKey))
         ]
       } else if (isWatcherCreate(options)) {
         // A live link watcher's own client: attach-only, `-E`, `ignore-size,read-only`, exact target
@@ -5405,7 +5543,10 @@ export class PtyManager {
                 cols: options.cols,
                 rows: options.rows,
                 cwd: spawnCwd,
-                env
+                env,
+                // Win32 only: node-pty's bundled ConPTY when present (see windows-conpty-dll.ts);
+                // `{}` on every other platform, so the options are byte-identical there.
+                ...windowsConptySpawnOptions()
               })
       } catch (err) {
         // node-pty surfaces the underlying failure as a bare "posix_spawnp failed." with no errno.
@@ -6207,7 +6348,7 @@ export class PtyManager {
     try {
       const { stdout } = await runAsync(
         this.tmuxPath,
-        ['-L', TMUX_SOCKET, 'capture-pane', '-p', '-t', sessionName(persistKey), '-S', full ? '-' : '-200'],
+        ['-L', TMUX_SOCKET, 'capture-pane', '-p', '-t', exactPaneTarget(sessionName(persistKey)), '-S', full ? '-' : '-200'],
         { encoding: 'utf-8', maxBuffer: 50 * 1024 * 1024 }
       )
       return stdout
@@ -6728,7 +6869,7 @@ export class PtyManager {
         'display-message',
         '-p',
         '-t',
-        target,
+        exactPaneTarget(target),
         '#{cursor_x} #{cursor_y} #{cursor_flag}'
       ])
       return parsePaneCursor(stdout)
@@ -6805,7 +6946,7 @@ export class PtyManager {
     try {
       const { stdout } = await runAsync(
         this.tmuxPath,
-        ['-L', TMUX_SOCKET, 'capture-pane', '-p', '-e', '-t', sessionName(persistKey), '-S', '-1500'],
+        ['-L', TMUX_SOCKET, 'capture-pane', '-p', '-e', '-t', exactPaneTarget(sessionName(persistKey)), '-S', '-1500'],
         { encoding: 'utf-8', maxBuffer: 50 * 1024 * 1024 }
       )
       return stdout ? await this.writeScrollbackIfChanged(persistKey, stdout) : true
@@ -7228,7 +7369,7 @@ export class PtyManager {
         'display-message',
         '-p',
         '-t',
-        target,
+        exactPaneTarget(target),
         '#{pane_current_command}'
       ])
       return stdout.trim() || null
@@ -7279,7 +7420,7 @@ export class PtyManager {
         'display-message',
         '-p',
         '-t',
-        target,
+        exactPaneTarget(target),
         '#{pane_current_path}'
       ])
       return stdout.trim() || null
@@ -7419,7 +7560,7 @@ export class PtyManager {
         'display-message',
         '-p',
         '-t',
-        target,
+        exactPaneTarget(target),
         '#{pane_pid}|#{pane_current_command}'
       ])
       const pane = parsePaneProcess(stdout)
@@ -7531,7 +7672,7 @@ export class PtyManager {
         'display-message',
         '-p',
         '-t',
-        target,
+        exactPaneTarget(target),
         PANE_OWNER_FMT
       ])
       const identity = parsePaneOwner(first.stdout)

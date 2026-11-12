@@ -45,3 +45,44 @@ Voice-to-text input captured via microphone, turned into terminal text via on-de
   the default is still `auto`. **Mobile** keeps its own list, tracked separately as issue #591.
 - **Browser constraints** — `getUserMedia` requires HTTPS or `localhost`; mic permission prompt is the browser's own (not handled by nodeterm). Model downloads land on the **server's data dir** (accessible across sessions).
 - **Electron + native dep** — smart-whisper is externalized + `asarUnpack`'d (not bundled); `postinstall` rebuilds it against Electron's ABI. Device verification of the ABI rebuild is not yet exercised on a dev machine — test paths exist but have not been run in CI.
+- **Linux x64 ships TWO whisper binaries, picked per CPU (issue #1267).** smart-whisper's
+  binding.gyp passes no `-m` flags, so on x86-64 ggml compiles at the SSE2 baseline and every
+  AVX/AVX2/FMA/F16C kernel drops out (`objdump -d smart-whisper.node | grep -c ymm` = **0** on the
+  shipped build). Measured, base model, 3 s of audio, 12-thread AVX2 box: **18.8 s** as shipped vs
+  **1.9 s** with `-mavx -mavx2 -mfma -mf16c`, and the same 11.2 s → 1.5 s under Electron's ABI; the
+  report was large-v3-turbo taking ~7 min for one sentence. `scripts/patch-smart-whisper.mjs` (run
+  before `electron-rebuild` in `postinstall`/`rebuild`, beside the node-pty patch) adds a
+  `smart-whisper-avx2` target behind a gyp `OS=="linux" and target_arch=="x64"` condition — mac and
+  Windows builds are unchanged — and makes smart-whisper's loader read
+  `globalThis.__NODETERM_WHISPER_BINARY__`. `pickWhisperBinary` sets it from `/proc/cpuinfo`.
+  **Never ship a single `-mavx2` build**: on a CPU without AVX2 that is a SIGILL that takes the
+  whole app down on the first dictation, which is why the baseline stays and why every failure
+  (flags unreadable, variant file absent, variant fails to load) falls back to it rather than to
+  "unavailable". `WHISPER_SIMD_FLAGS` and the script's `SIMD_FLAGS` must name the same set (pinned
+  by `smart-whisper-patch.test.ts`, which also fails on an unpatched install). Threads:
+  `whisperThreads` replaces whisper.cpp's `min(4, cpus)` with about half the logical CPUs plus two,
+  capped at 8 — **not** every CPU: ggml's workers spin-wait, and 12 threads on 12 busy logical CPUs
+  measured 12.8 s against 8 threads' 1.4 s. Not covered yet: macOS x64 (Accelerate, same missing
+  SIMD flags in ggml), a GPU backend (this smart-whisper has no Vulkan build option), cancelling a
+  running transcription, and the Server Edition (installed with `--ignore-scripts`, so it keeps the
+  baseline; the startup log line `[speech] whisper binary: …` says which binary loaded).
+- **macOS: smart-whisper's Metal shader path is patched to the unpacked copy** (second patch in
+  `scripts/patch-smart-whisper.mjs`, marker `NODETERM-PATCH(smart-whisper-metal-asar)`). smart-whisper
+  sets `GGML_METAL_PATH_RESOURCES` from its own `__dirname`, which in the packaged app is inside
+  `app.asar`; native code cannot read inside an asar ("Not a directory"), so Metal init failed and
+  whisper.cpp ran on the CPU with no error shown. The shader file is already unpacked (asarUnpack), so
+  the patch rewrites `app.asar` to `app.asar.unpacked` in that path. MEASURED with the app's own binary
+  on an M5 Pro, large-v3-turbo, 2.7 s clip: 5.97 s on the CPU, 0.64 s on Metal; in the app, dictation
+  went from several seconds to under one. A dev install and an explicit `GGML_METAL_PATH_RESOURCES`
+  are unchanged.
+- **smart-whisper's model params are patched to start from whisper.cpp's defaults** (third patch in
+  `scripts/patch-smart-whisper.mjs`, marker `NODETERM-PATCH(smart-whisper-ctx-params)`, every
+  platform). Its `LoadModel` declared `whisper_context_params params;` and set only `use_gpu`, so DTW,
+  `gpu_device`, `flash_attn` and the rest were uninitialized stack memory and the result depended on
+  what was there. MEASURED on an M5 Pro, Electron 42, large-v3-turbo: the shipped binary crashed in 4
+  of 4 runs outside the app (`aheads_masks_init` then a crash in `whisper_free_state`, because garbage
+  switched DTW on with large-v3's alignment heads); with the defaults it ran without a crash, 0.56 s
+  for a 2.7 s clip and 0.93 s for 21 s on Metal. The slow dictation inside the packaged app is a
+  separate bug: Metal cannot read its shaders inside app.asar. A newer whisper.cpp is
+  faster again (0.22 s / 0.43 s, measured the same way) but needs a build change on every platform;
+  that is a separate follow-up.

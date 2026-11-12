@@ -70,14 +70,26 @@ describe('makeLocalSetupRunner', () => {
   })
 
   it('caps combined output at SETUP_OUTPUT_CAP and appends exactly one truncation note', async () => {
-    const { promise, chunks } = run('yes 0123456789abcdef0123456789abcdef 2>&1', { timeoutMs: 500 })
+    // Twice the cap, then the script exits by itself. It used to be an endless `yes` cut by a
+    // 500 ms timeout, which raced the login shell's startup: on a loaded CI runner the kill landed
+    // before 512KB were written, so there was nothing to truncate.
+    const { promise, chunks } = run(
+      `yes 0123456789abcdef0123456789abcdef | head -c ${SETUP_OUTPUT_CAP * 2}`
+    )
     const result = await promise
     const combined = chunks.join('')
     // A generous margin over the cap: the last chunk that crosses the budget can carry a partial
     // line plus the truncation note, but nothing appended AFTER truncation.
     expect(Buffer.byteLength(combined, 'utf-8')).toBeLessThan(SETUP_OUTPUT_CAP + 200)
     expect(combined.match(/truncated/g)?.length).toBe(1)
-    // Killed by the timeout's SIGKILL (yes never exits on its own).
+    expect(result.exitCode).toBe(0)
+  }, 10_000)
+
+  it('the timeout kills a script that never exits', async () => {
+    const { promise } = run('sleep 30', { timeoutMs: 200 })
+    const start = Date.now()
+    const result = await promise
+    expect(Date.now() - start).toBeLessThan(5000)
     expect(result.exitCode).not.toBe(0)
   }, 10_000)
 

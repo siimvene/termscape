@@ -150,6 +150,13 @@ means — and what you may assume when writing a feature — is three tiers, not
   `gateEntriesForPlatform` marks those entries unsupported with `RUN_WINDOWS_REASON` (browser
   configs and browser-only compounds still run), and the add menu / Dock disable the row (the palette hides it)
   from the core's own platform (`useCoreIsWindows`). A pwsh launcher is the follow-up.
+- **Windows terminals run on node-pty's BUNDLED ConPTY when it is installed**
+  (`windowsConptySpawnOptions`, `src/core/windows-conpty-dll.ts`, spread into both `pty.spawn`
+  sites). Windows 10's inbox ConPTY swallows mouse-tracking and alternate-screen modes, so a
+  fullscreen TUI could not be scrolled. The DLL is looked up exactly where node-pty's native loader
+  looks (beside the loaded `conpty.node`), restaged after `electron-rebuild` wipes `build/`
+  (`scripts/stage-conpty-dll.mjs`), and missing ⇒ the inbox ConPTY. Details + device checklist:
+  docs/windows-session-host.md, "Which ConPTY".
 - **New code is platform-neutral by default.** Do not hardcode POSIX assumptions. Publish files
   through `renameAtomic`/`writeFileAtomic` (`src/core/fs-atomic.ts`), not a bare `fs.rename` — the
   guard test (`fs-atomic.guard.test.ts`) enforces this. Resolve path separators / absolute-path
@@ -286,7 +293,8 @@ The codebase is split by Electron process boundary — keep code on the correct 
   (`src/shared/rpc.ts`) that a browser-side `window.nodeTerminal` shim
   (`src/renderer/bridge/`) consumes. Boots the same core services via
   `ServerPlatform` (`src/server/platform-server.ts`). Single-user auth
-  (scrypt + httpOnly cookie + Origin check). `npm run server:dev` to try;
+  (scrypt + httpOnly cookie + Origin check; the rules a refactor must keep are under
+  **Server Edition sign-in** below). `npm run server:dev` to try;
   docs/SERVER.md for details. `src/server` must not import electron or
   `src/main` (enforced by `src/server/no-electron.test.ts`). **Phase 3a** also
   serves fs/git/commit handlers (editor/diff/source-control now work in the
@@ -328,6 +336,56 @@ The codebase is split by Electron process boundary — keep code on the correct 
 PTY output flows main → renderer over per-session channels (`pty:data:<sessionId>`),
 input flows renderer → main over `pty:write`. node-pty is kept **external** in the bundle
 (`externalizeDepsPlugin` in `electron.vite.config.ts`) because it's a native module.
+
+**Process death and hangs are telemetry, never NEW triggers.** Until then the only handler was
+`render-process-gone`, and it logged nothing, so a GPU-process crash or a renderer hang left no
+trace. Now app `child-process-gone` (`{type, reason, exitCode, name}`, per-type session count;
+`clean-exit` at info, every other reason at warn), the main window's `unresponsive` / `responsive`
+pair (two lines per hang: one when it is declared, one when it ends with the duration, measured
+from Electron's own hang timeout so it is a lower bound) and `render-process-gone` each write
+`[process]` lines to the debug log ring (`main/process-health-log.ts`, wired in `index.ts`).
+`child-process-gone` is registered before `ready` because the GPU process can die during boot.
+The logging adds no action: `render-process-gone` keeps the crash reload it already had
+(`createCrashReloadPolicy`, and it now also closes an open hang), while `child-process-gone` and a
+hang reload, relaunch or kill nothing. Chromium respawns the GPU process itself, and repeated GPU
+deaths can trip its per-domain 3D-API block "until restart", so provoking more of them degrades
+the session. In the renderer, `webgl-budget.ts` counts EXTERNAL WebGL losses by
+kind through `handle.contextLost(kind)` — `lost` (the addon's `onContextLoss`: still lost after
+its 3s window) and `restored` (a GPU reset the browser recovered, which `TerminalNode` rebuilds on
+a fresh addon) — and writes one `[webgl]` warn per loss carrying the session totals, which main's
+`console-message` mirror puts in the ring. Our own `loseWebglContexts` releases are counted as
+`released` and never logged per event (routine churn on every pan). A Server Edition tab has no
+main, so its `[webgl]` lines stay in the browser console.
+
+### Server Edition sign-in (security audit 2026-10)
+
+The browser edition is reachable by anyone who can reach its login page, so its auth layer carries
+rules that look like over-engineering and are not. Each was a measured finding; tests pin each
+(`src/server/http-auth.test.ts`, `auth.test.ts`, `ws.test.ts`, `proxy-trust.test.ts`).
+- **A login attempt reserves its rate-limit slot BEFORE the body is read** (`Auth.beginLoginAttempt`,
+  settled exactly once as success / failure / abandoned), and the budget counts attempts in flight.
+  Checked-before-body + charged-after-verify let 60 of 60 held-body guesses through. The lock is per
+  CLIENT (5 → 1 min, doubling to 1 h) with a global ceiling (50 per 5 min, in-flight included) as the
+  backstop; one global counter let a stranger lock the owner out. The client key is
+  `client-address.ts`: the TCP peer, or — only when the peer is loopback/private/CGNAT/ULA or in the
+  trust nets — the LAST `X-Forwarded-For` entry, never an earlier one (the caller wrote those).
+- **Password verification is the async `crypto.scrypt` behind a 2-slot FIFO gate.** There is no
+  synchronous verify on purpose: a `scryptSync` per guess froze every terminal's WebSocket.
+- **Every `POST /auth/*` and the WS upgrade pass ONE same-origin rule** (`src/server/origin.ts`).
+  A new auth POST route goes under `/auth/` or it skips the check.
+- **Sign-out is server-side.** `/auth/logout` deletes the presented session, `/auth/logout-all`
+  deletes all (signed-in callers only), and `ws.ts` closes a cookie socket (4401) when its session is
+  revoked (`Auth.onSessionsRevoked`) or found expired on a heartbeat. The browser UI is
+  Settings → Sign-in, Server Edition only (`nav.ts` `browserOnly`).
+- **Header trust from loopback needs the proxy secret.** On loopback every local process is "the
+  proxy", so `resolveConfig` turns header trust OFF (and the boot says what to set) when the nets
+  cover loopback and `NODETERM_TRUST_PROXY_SECRET` is unset, and `proxyAuthDecision` refuses a
+  loopback peer without a secret whatever the config. The secret is env-only (argv is world-readable)
+  and never logged.
+- **`NODETERM_PUBLIC_ORIGIN`** forces `Secure` + HSTS; without it `Secure` follows
+  `X-Forwarded-Proto` and the first non-loopback `Host` logs a warning. Every response refuses framing
+  by HTTP header (the app CSP is a `<meta>`, where `frame-ancestors` is ignored), and the served
+  `connect-src` is `'self'` (same-origin ws/wss, CSP3; Chrome-verified).
 
 ## Key abstraction: TerminalTransport
 

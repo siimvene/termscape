@@ -2413,6 +2413,19 @@ export function statusSnapshotEvents(now = Date.now()): NormalizedAgentEvent[] {
 }
 
 /**
+ * Every node whose CURRENT agent session is `sessionId` (usually one; a session resumed in two nodes
+ * is two). Read-only peek: the relay access policies attribute a `context:update` — keyed by the
+ * agent session, not the node — to the nodes it describes, so a peer limited to some projects
+ * receives a meter only for a session that runs in one of them.
+ */
+export function nodesForAgentSession(sessionId: string): string[] {
+  const out: string[] = []
+  if (typeof sessionId !== 'string' || !sessionId) return out
+  for (const [nodeId, e] of state) if (e.sessionId === sessionId) out.push(nodeId)
+  return out
+}
+
+/**
  * The nodes the mirror currently believes are `working`, with the identity a synthetic event needs.
  * Read-only peek for the shells — the reconnect resync asks the host about exactly these, because
  * `working` is the only state a lost hook event can strand (see remote-ssh/agent-resync-decide.ts).

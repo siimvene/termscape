@@ -7,7 +7,13 @@
 import { IPC } from '../shared/ipc'
 import { platform } from './platform'
 import type { MemInfo, SessionMemoryQuery, SessionMemoryReport } from '../shared/types'
-import { collectSessionHostMemory, collectSessionMemory, readMemInfo, type ProcEntry } from './session-memory'
+import {
+  collectSessionHostMemory,
+  collectSessionMemory,
+  readMemInfo,
+  type AppProcessReader,
+  type ProcEntry
+} from './session-memory'
 import type { SessionHostListing } from './session-host-client'
 import { fetchRemoteSessionMemory, type RemoteSessionMemoryRunner } from './session-memory-remote'
 
@@ -27,6 +33,13 @@ export interface SessionMemoryServiceOptions {
   sessionHostTable?: () => Promise<ProcEntry[] | null>
   /** Host RAM reader, injectable for tests. Defaults to the real `/proc/meminfo` read. */
   readMem?: () => MemInfo | null
+  /**
+   * nodeterm's own processes, for the panel's "nodeterm itself" group. Only the
+   * desktop shell has them (`app.getAppMetrics()`); the Server Edition omits it, and its reports
+   * then carry no `app` — "not available", which is not "could not measure". Consulted for LOCAL
+   * sweeps only: an SSH host's report must never include this machine's processes.
+   */
+  appProcesses?: AppProcessReader
   /**
    * The two remote facts, in a deliberately ASYMMETRIC pair: knowing which projects are somebody
    * else's machine is required, being able to read them is not.
@@ -95,6 +108,10 @@ export function mergeLocalLegs(a: SessionMemoryReport, b: SessionMemoryReport): 
   // Only the session-host leg ever carries it; a failed leg's is never adopted.
   const host = answered.find((r) => r.host)?.host
   if (host) out.host = host
+  // Prefer a leg that measured it; either leg's table describes this same machine.
+  const apps = answered.flatMap((r) => (r.app ? [r.app] : []))
+  const app = apps.find((x) => x.ok) ?? apps[0]
+  if (app) out.app = app
   return out
 }
 
@@ -142,11 +159,12 @@ export function startSessionMemoryService(opts: SessionMemoryServiceOptions): { 
     const hostLeg = collectSessionHostMemory({
       list: () => listing,
       readMem: opts.readMem,
-      ...(opts.sessionHostTable ? { readTable: opts.sessionHostTable } : {})
+      ...(opts.sessionHostTable ? { readTable: opts.sessionHostTable } : {}),
+      ...(opts.appProcesses ? { appProcesses: opts.appProcesses } : {})
     })
     if (!opts.tmuxBin()) return hostLeg
     const [tmuxLeg, host] = await Promise.all([
-      collectSessionMemory({ tmuxBin: opts.tmuxBin, readMem: opts.readMem }),
+      collectSessionMemory({ tmuxBin: opts.tmuxBin, readMem: opts.readMem, appProcesses: opts.appProcesses }),
       hostLeg
     ])
     return mergeLocalLegs(tmuxLeg, host)
@@ -166,7 +184,7 @@ export function startSessionMemoryService(opts: SessionMemoryServiceOptions): { 
       const hostListing = opts.sessionHost?.()
       const [report, unmeasured] = await Promise.all([
         hostListing === undefined
-          ? collectSessionMemory({ tmuxBin: opts.tmuxBin, readMem: opts.readMem })
+          ? collectSessionMemory({ tmuxBin: opts.tmuxBin, readMem: opts.readMem, appProcesses: opts.appProcesses })
           : collectLocalWithSessionHost(hostListing),
         opts.unmeasuredSessions ? opts.unmeasuredSessions().catch(() => null) : Promise.resolve(0)
       ])

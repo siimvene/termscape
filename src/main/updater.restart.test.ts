@@ -67,14 +67,18 @@ const { autoUpdater } = vi.hoisted(() => {
     })
   }
 })
-vi.mock('electron-updater', () => ({ autoUpdater }))
 vi.mock('./main-window', () => ({
   getMainWindow: () => null,
   sendToMain: (channel: string, payload?: unknown) => sent.push({ channel, payload })
 }))
 vi.mock('./notifications', () => ({ retainUntilDismissed: () => {} }))
 
-import { initUpdater, PREPARE_TIMEOUT_MS } from './updater'
+import { initUpdater as initUpdaterReal, PREPARE_TIMEOUT_MS, type UpdaterHooks } from './updater'
+
+// electron-updater is loaded lazily with `require`, which `vi.mock` does not reach, so
+// the double goes in through the loader seam instead of a module mock.
+const initUpdater = (hooks?: UpdaterHooks) =>
+  initUpdaterReal(hooks, { loadUpdater: () => autoUpdater as unknown as import('electron-updater').AppUpdater })
 
 const realReadFileSync = fs.readFileSync
 const realPlatform = process.platform

@@ -51,6 +51,20 @@ with no board — and one attribute with two owners races):
   (which RESETS `animation-play-state`), so every gate must name them explicitly. Verify the COMPUTED
   `animation-play-state` on a real element, never the presence of the declaration.
 
+**The board gate does not stop xterm; `terminal/board-render-pause.ts` does.** CSS reaches the glows,
+not the terminals: xterm pauses only on its own GEOMETRIC IntersectionObserver, and a node under
+the board still intersects. MEASURED BEFORE the pause (dev, 12 streaming terminals): board open
+36.5 % GPU vs 0.0 % over silent terminals, and `visibility: hidden` on the canvas 35.5 % — no help.
+The number WITH the pause has not been measured. Each
+TerminalNode wraps its RenderService's `_handleIntersectionChange` so xterm is told "not
+intersecting" while `boardOpen` (Omni included) is up and the node is not the focus-mode node (the
+focus surface, z 40, sits above the board, z 25); uncovering replays the real entry through xterm's
+own resume and then `fullRepaint`. Parsing never stops, so nothing is lost. Two rules: never fold
+the board into `reportVisible` / the WebGL budget's visibility (that verdict drives hibernation and
+the offscreen teardown — the board would put the very sessions it shows to sleep), and any other
+"is the board up" predicate must OR in `isGlobalKanbanOpen()` (`boardCoversCanvas` missed the Omni
+board until this change, the same omission 12564a20 fixed for focus restore).
+
 **The working and unread glows are BOUNDED; the attention glow is not.** The idle gate only helps an
 unfocused window, and an agent mid-turn in a FOCUSED one kept `nt-working-glow` looping for the
 whole turn — MEASURED (production build, M2, focused): one visible working node cost **+3 points
@@ -67,11 +81,26 @@ infinite): an unread node stays unread until someone looks, and a wait can last 
 canvas those three kept the frame loop open indefinitely. MEASURED (46-node SSH canvas, 14 unread
 nodes, 8 waiting ropes, FOCUSED window, dev build): idle renderer+GPU **~120% → ~25%**, and pausing
 every remaining animation no longer moves it. Pausing any ONE family alone saved far less (85–104%),
-which is the first-animation step above again. Only the attention glow (and its minimap beat) stays
-infinite — needs-you is the one state that must keep pulling the eye — and the idle gate covers the
-unfocused case. The driven-browser rope still flows (it lasts only while an agent drives the page).
+which is the first-animation step above again. Only the attention glow (and its minimap beat) and
+React Flow's animated edges (working subagent and loop edges, the driven-browser rope — see the
+`dashdraw` paragraph below) stay infinite — needs-you is the one state that must keep pulling the
+eye, and an edge animates only while its work runs — and the idle and covered gates pause all of
+them when nobody is looking. The driven-browser rope still flows (it lasts only while an agent
+drives the page).
 `styles.animation-gate.test.ts` pins the bounded shorthands, the resting values and the keyframe
 endpoints.
+
+**React Flow's `dashdraw` is gated in `styles.css`, not by xyflow.** Every `animated` edge (working
+subagent and loop edges, the driven-browser rope) and an animated connection line run xyflow's own
+`dashdraw 0.5s linear infinite`, from a vendor sheet that never reads `--nt-anim-state` — so until
+this rule it escaped BOTH the idle and the covered gate. MEASURED (dev build, one synthetic edge with
+React Flow's real classes, idle gate set, 3 alternating 30 s rounds): Liquid Glass 79 % GPU + 36 %
+renderer and +340 MB GPU footprint; dark 31.5 % + 29 %. With the play-state rule injected over CDP
+(not the shipped stylesheet) the edge fell to the no-edge baseline of that run, 0.5 % / 3.3 %; the
+shipped build has not been measured. The rule repeats xyflow's selectors verbatim (same specificity, wins on order after the
+`@import`), and `styles.animation-gate.test.ts` scans the vendor sheet for infinite animations, so an
+xyflow upgrade that adds one fails there. A FOCUSED window still pays the full per-edge cost while an
+edge works; a cheaper working-edge style is an open design call (the driven rope keeps flowing).
 
 **The viewport is never promoted — not even while the camera moves.** A `will-change: transform`
 on `.react-flow__viewport` during pan/zoom was tried (00c9c5fc, measured 41–48% → 30–36% CPU on
@@ -125,3 +154,12 @@ script (`fetch('http://localhost:9333/json')`, then a WebSocket to the page):
   ones went from painting LAST (1.5–2.1 s) to first (0.55–1.1 s), 0 extra logins (#1057).
 - **A hint must fail toward the old behavior.** `onScreen` absent/unknown = on screen = the old
   FIFO; a coalesced read is never a cache (a spawn after it settles reads again).
+- **Search a large in-memory text set with one case-insensitive RegExp per query, never by
+  lower-casing each entry.** The transcript index (`core/transcript-index-core.ts`, `queryRegExp`)
+  lowered every entry per keystroke: 20-52 ms and 7-15 MB garbage per search on a 16 MB index,
+  vs 2-13 ms and 0 MB as one `RegExp(escaped, 'iu')`. A stored lowered copy would retain +32 MB.
+  `iu`, not `i`: `i` loses hits `toLowerCase` found (Kelvin K, Å, ẞ); escape only SyntaxCharacters
+  and `/` (`\-` is a SyntaxError in `u` mode). Even `iu` loses Turkish İ (it lowers to `i` +
+  U+0307, so `türki` matched `TÜRKİYE`), so each i/I of the escaped query is widened to `[iİ]`.
+  The snippet uses the same matcher. The index file
+  persists through `writeFileAtomic` (0600), only when a `dirty` flag says the file is behind.
